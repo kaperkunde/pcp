@@ -58,7 +58,8 @@ import {
   type AddressVerdict,
   type BrowserProxy,
 } from "./proxy"
-import { bounded, inLane, newLane, type Lane } from "./queue"
+import { bounded, inLane, newLane, type Lane, type LaneOptions } from "./queue"
+import type { TabRun } from "./sweep"
 import type { TabControl, TabView } from "./types"
 
 /**
@@ -192,6 +193,18 @@ export type Tab = {
    */
   running: { runId: string | null } | null
   /**
+   * The run_code or wrapper run whose call opened the tab (null for a call
+   * outside any run, or the owner; a popup has its opener's): what tabs list
+   * says opened it.
+   */
+  openedIn: TabRun | null
+  /**
+   * The run whose call used it last, and when that ended; null once a
+   * call outside any run used it. A tab whose run ended is closed
+   * (sweep.ts).
+   */
+  run: TabRun | null
+  /**
    * Its page stopped responding (a call passed its deadline) or crashed:
    * it is reopened at its address, at once or on the next call.
    */
@@ -315,13 +328,20 @@ export function browserHeld(vaultId: string): boolean {
  * Runs what changes the set of tabs (opening or closing one, taking a
  * popup in, closing the browser) one at a time for the vault, for at most
  * BROWSER_LOCK_DEADLINE_MS. The calls on a tab wait in its own lane, not
- * here.
+ * here. `wait` bounds how long a call waits for it (queue.ts): an
+ * assistant's tab to open leaves when its timeout runs out, and is refused
+ * as busy rather than queued behind more than it would wait for.
  */
 export function withVault<T>(
   vault: VaultBrowser,
   run: () => Promise<T>,
+  wait: Pick<
+    LaneOptions<T>,
+    "giveUp" | "maxWaitMs" | "maxQueue" | "turnMs"
+  > = {},
 ): Promise<T> {
   return inLane(vault.lock, run, {
+    ...wait,
     deadlineMs: BROWSER_LOCK_DEADLINE_MS,
     onDeadline: async () => {
       throw new PcpError(
@@ -1210,6 +1230,7 @@ async function attach(
   meta: Pick<Tab, "openedBy" | "tokenId" | "rules" | "privateAllowed"> & {
     allowedHosts?: Iterable<string>
     exit?: TabExit | null
+    run?: TabRun | null
   },
 ): Promise<Tab> {
   const now = Date.now()
@@ -1231,6 +1252,8 @@ async function attach(
     offeredFile: null,
     lane: newLane(),
     running: null,
+    openedIn: meta.run ?? null,
+    run: meta.run ?? null,
     unresponsive: false,
     reopening: null,
     popups: [],
@@ -1276,6 +1299,7 @@ async function adoptPopup(vault: VaultBrowser, page: Page): Promise<void> {
     privateAllowed: parent.privateAllowed,
     allowedHosts: parent.allowedHosts,
     exit: parent.exit,
+    run: parent.run,
   })
   tab.control = parent.control
   parent.popups.push(tab.id)
@@ -1287,7 +1311,9 @@ async function adoptPopup(vault: VaultBrowser, page: Page): Promise<void> {
  */
 export async function openTab(
   vault: VaultBrowser,
-  meta: Pick<Tab, "openedBy" | "tokenId" | "rules" | "privateAllowed">,
+  meta: Pick<Tab, "openedBy" | "tokenId" | "rules" | "privateAllowed"> & {
+    run?: TabRun | null
+  },
   exit?: TabExit & { dialer: ExitDialer },
 ): Promise<Tab> {
   if (vault.tabs.size >= MAX_TABS) {

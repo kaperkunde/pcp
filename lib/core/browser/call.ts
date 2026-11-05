@@ -37,6 +37,7 @@ import { parseSecretPlaceholder, scrubResult } from "../wrappers/placeholders"
 import { consoleLog, networkLog } from "./devtools"
 import { catchDownload, offeredName, tabOwnsFrame } from "./downloads"
 import { evaluateInTab } from "./evaluate"
+import { atStep, callClock, timeoutMessage, type CallClock } from "./clock"
 import { coveringElement, coveringLine, failureReason } from "./failures"
 import { heldSecret, heldValues, holdSecret, maskTypedResult } from "./held"
 import { clickAt, dragBetween, wheelAt, type MouseButton } from "./input"
@@ -48,7 +49,11 @@ import {
   DOWNLOAD_DEADLINE_MS,
   DOWNLOAD_START_MS,
   DOWNLOAD_TIMEOUT_MS,
+  DEFAULT_CALL_TIMEOUT_MS,
+  EXPECTED_TURN_MS,
   MAX_FAILURE_SNAPSHOT_CHARS,
+  MAX_LANE_QUEUE,
+  MAX_QUEUE_WAIT_MS,
   MAX_TABS,
   MAX_UPLOAD_BYTES,
   MAX_URL_LENGTH,
@@ -56,8 +61,10 @@ import {
   MIN_READ_PAGE_TEXT_CHARS,
   NAVIGATION_TIMEOUT_MS,
   TAB_DEADLINE_MS,
+  TAB_IDLE_TTL_MS,
 } from "./limits"
-import { bounded, inLane, pause } from "./queue"
+import { bounded, inLane, LaneBusy, LaneGaveUp, pause } from "./queue"
+import { ocrHint, ocrToolFor } from "./ocr"
 import { leftOutNote, readableMarkdown } from "./read-page"
 import { missingRefMessage, resolveTabRef, tabSnapshot } from "./refs"
 import {
@@ -82,6 +89,15 @@ import {
 } from "./runtime"
 import { takePicture } from "./screenshot"
 import { signInHint } from "./sign-in-hint"
+import { callRun, runName, spanWords, tabsToSweep, type Swept } from "./sweep"
+import {
+  formLike,
+  NOTHING_UNSEEN,
+  unseenInHtml,
+  unseenInSnapshot,
+  unseenLine,
+  type Unseen,
+} from "./unseen"
 import {
   allNodes,
   findInSnapshot,
@@ -161,6 +177,12 @@ export type BrowserScope = {
   deadline?: number
   /** The run_code or wrapper run the call is made for. */
   runId?: string
+  /**
+   * The call's own time limit (timeout_ms, or its tool's default), when it
+   * has one: its steps are noted on it, and waits for a turn leave when it
+   * runs out.
+   */
+  clock?: CallClock
   /**
    * The exits the token may name, and opening one for a tab
    * (exits/use.ts browserExits, built where the key is: upstream.ts and
@@ -312,13 +334,30 @@ function ownerHolds(tab: Tab): CallToolResult {
   )
 }
 
-const NO_TABS =
-  "This token has no tab open. Open one with tabs (action open, with the url): its answer names the new tab's id, which every other browser tool takes as tab."
+/**
+ * How full the browser is, as every tabs answer says it: "5 of 8 tabs
+ * open, 2 of them this token's". Only how many: the other tabs' pages are
+ * not this token's to see.
+ */
+function tabUsage(
+  vault: VaultBrowser | null | undefined,
+  tokenId: string,
+): string {
+  const open = [...(vault?.tabs.values() ?? [])]
+  const mine = open.filter((tab) => tab.tokenId === tokenId).length
+
+  return `${open.length} of ${MAX_TABS} tabs open in the browser, ${mine} of them this token's`
+}
+
+function noTabs(vault: VaultBrowser | null | undefined, tokenId: string) {
+  return `This token has no tab open (${tabUsage(vault, tokenId)}). Open one with tabs (action open, with the url): its answer names the new tab's id, which every other browser tool takes as tab.`
+}
 
 /**
  * The token's open tabs, newest first (the one it used last, then the one
- * it opened last), a line each: its id, title, address and the link where
- * the owner can watch it. Never another token's.
+ * it opened last), a line each: its id, title, address, the run that
+ * opened it, how long it has been idle and the link where the owner can
+ * watch it. Never another token's.
  */
 async function tabLines(
   scope: Pick<BrowserScope, "tokenId" | "publicUrl">,
@@ -331,9 +370,11 @@ async function tabLines(
       .map(async (tab) => ({ view: await tabView(tab), tab })),
   )
 
+  const now = Date.now()
+
   return open.map(
     ({ view, tab }) =>
-      `- ${view.id}: ${view.title || "(no title)"} · ${view.url}${view.control === "owner" ? " · the owner has it" : ""}${tab.unresponsive ? " · not responding" : ""} · ${markdownLink(`Watch tab ${view.id}`, tabLink(scope.publicUrl, view.id))}`,
+      `- ${view.id}: ${view.title || "(no title)"} · ${view.url}${view.control === "owner" ? " · the owner has it" : ""}${tab.unresponsive ? " · not responding" : ""}${tab.openedIn ? ` · opened by ${runName(tab.openedIn)}` : ""}${tab.run?.endedAt != null ? " · its run has ended" : ""} · ${tab.running ? "in use now" : `idle ${spanWords(now - tab.lastUsedAt)}`} · ${markdownLink(`Watch tab ${view.id}`, tabLink(scope.publicUrl, view.id))}`,
   )
 }
 
@@ -348,15 +389,13 @@ export async function tabHint(
   tokenId: string,
   publicUrl: string,
 ): Promise<string> {
-  const lines = await tabLines(
-    { tokenId, publicUrl },
-    runningBrowser(ctx.vaultId),
-  )
+  const vault = runningBrowser(ctx.vaultId)
+  const lines = await tabLines({ tokenId, publicUrl }, vault)
 
   return lines.length === 0
-    ? NO_TABS
+    ? noTabs(vault, tokenId)
     : [
-        "This token's open tabs, the one used last first:",
+        `This token's open tabs, the one used last first (${tabUsage(vault, tokenId)}):`,
         ...lines,
         "Name the one you opened in this conversation, or open a new one with tabs (action open).",
       ].join("\n")
@@ -372,7 +411,7 @@ async function noTab(
   tabId: string,
 ): Promise<CallToolResult> {
   return text(
-    `There is no tab ${tabId}: it was closed, or the browser has closed since (it closes after a while with nothing to do). ${await tabHint(scope.ctx, scope.tokenId, scope.publicUrl)}`,
+    `There is no tab ${tabId}: it was closed (by tabs close, after ${spanWords(TAB_IDLE_TTL_MS)} unused, or once the run that used it ended), or the browser has closed since (it closes after a while with nothing to do). ${await tabHint(scope.ctx, scope.tokenId, scope.publicUrl)}`,
     true,
   )
 }
@@ -527,11 +566,46 @@ function dialogOpen(tab: Tab, toolName: string): CallToolResult {
   return text(`${dialogNote(tab)} ${toolName} was not done.`, true)
 }
 
-/** Gives a check the tab shows the time most take to pass on their own. */
-async function passCheck(tab: Tab): Promise<void> {
+/**
+ * Gives a check the tab shows the time most take to pass on their own; a
+ * call's default time limit is lengthened for it (clock.ts allowCheck).
+ */
+async function passCheck(tab: Tab, clock?: CallClock): Promise<void> {
   if (tab.documents.challenged()) {
+    atStep(clock, "waiting for the site's check of its visitors to pass")
+    clock?.allowCheck(CHALLENGE_WAIT_MS)
     await tab.documents.pass(CHALLENGE_WAIT_MS)
   }
+}
+
+/** How the token reads the text in a picture (ocr.ts): its OCR tool, if any. */
+async function ocrWords(scope: BrowserScope): Promise<string> {
+  return ocrHint(await ocrToolFor(scope.ctx, scope.tokenId).catch(() => null))
+}
+
+/** The line for what a page holds that its tree leaves out, or null. */
+async function unseenWords(
+  scope: BrowserScope,
+  unseen: Unseen,
+): Promise<string | null> {
+  return unseenLine(unseen, await ocrWords(scope))
+}
+
+/**
+ * What the tab's snapshot (its parsed `nodes`) leaves out, in a line: its
+ * empty iframes, closed shadow roots and canvases (unseen.ts). Null when
+ * it leaves nothing out.
+ */
+async function unseenNote(
+  scope: BrowserScope,
+  tab: Tab,
+  nodes: SnapshotNode[],
+): Promise<string | null> {
+  const unseen = await unseenInSnapshot(tab, nodes, (ref) =>
+    resolveTabRef(tab, ref),
+  ).catch(() => NOTHING_UNSEEN)
+
+  return unseenWords(scope, unseen)
 }
 
 /** The tab as an answer: where it is, how to watch it, and its snapshot. */
@@ -545,6 +619,7 @@ async function report(
     maxSnapshot,
     tree: taken,
     signIns = false,
+    unseen = false,
   }: {
     snapshot?: boolean
     lead?: string[]
@@ -555,8 +630,11 @@ async function report(
     tree?: string
     /** Name the owner's sign-ins at the page's site (sign-in-hint.ts). */
     signIns?: boolean
+    /** Say what the snapshot leaves out (unseen.ts). */
+    unseen?: boolean
   } = {},
 ): Promise<CallToolResult> {
+  atStep(scope.clock, `reading tab ${tab.id} for the answer`)
   const title = await tabTitle(tab)
   const hint = signIns ? await signInHint(scope.ctx, tab.page) : null
   const lines = [
@@ -586,7 +664,10 @@ async function report(
         maxSnapshot && tree.length > maxSnapshot
           ? `${tree.slice(0, maxSnapshot)}\n… (cut short: take a snapshot for all of it)`
           : tree
-      lines.push("", "Snapshot:", shown)
+      const missing = unseen
+        ? await unseenNote(scope, tab, parseSnapshot(tree))
+        : null
+      lines.push(...(missing ? [missing] : []), "", "Snapshot:", shown)
     } catch (error) {
       lines.push("", `The snapshot could not be taken: ${failureReason(error)}`)
     }
@@ -635,12 +716,92 @@ function navigationFailure(
   return `${host} could not be opened: ${firstLine(error)}`
 }
 
-/** A new, blank tab of the token's, if the browser has room for one. */
+/** Tabs a sweep closed, each with why. */
+type Closed = Swept & { tab: Tab }
+
+/**
+ * Closes the tabs that are done with (sweep.ts tabsToSweep): idle past the
+ * TTL, or used last by a run that has ended. Call it under withVault.
+ */
+async function sweepUnder(
+  vault: VaultBrowser,
+  options: { keep?: string | null; needRoom?: boolean },
+): Promise<Closed[]> {
+  const closed: Closed[] = []
+
+  for (const picked of tabsToSweep(vault.tabs.values(), options)) {
+    const tab = vault.tabs.get(picked.id)
+
+    if (tab) {
+      await closeTab(vault, tab)
+      closed.push({ ...picked, tab })
+    }
+  }
+
+  return closed
+}
+
+/** What the token is told of its own tabs a sweep closed. */
+function sweptLines(scope: BrowserScope, closed: Closed[]): string[] {
+  const now = Date.now()
+
+  return closed
+    .filter(({ tab }) => tab.tokenId === scope.tokenId)
+    .map(({ tab, why }) =>
+      why === "run"
+        ? `Closed tab ${tab.id}: the run that used it${tab.run ? `, ${runName(tab.run)},` : ""} has ended.`
+        : `Closed tab ${tab.id}, which nothing used for ${spanWords(now - tab.lastUsedAt)}.`,
+    )
+}
+
+/**
+ * At each browser call, inside its request: the tabs that are done with are
+ * closed and the profile saved (this call holds the key). Never the tab
+ * the call names. The lines are about the token's own tabs.
+ */
+async function sweepTabs(
+  scope: BrowserScope,
+  keep: string | null,
+): Promise<string[]> {
+  const vault = runningBrowser(scope.ctx.vaultId)
+
+  if (
+    !vault ||
+    browserHeld(vault.vaultId) ||
+    tabsToSweep(vault.tabs.values(), { keep }).length === 0
+  ) {
+    return []
+  }
+
+  const closed = await withVault(vault, () =>
+    sweepUnder(vault, { keep }),
+  ).catch(() => [] as Closed[])
+
+  if (closed.length > 0) {
+    await saveVaultProfile(scope.ctx, vault, { force: true }).catch(() => {})
+  }
+
+  return sweptLines(scope, closed)
+}
+
+/**
+ * A new, blank tab of the token's, if the browser has room for one: when
+ * it is full, the tabs whose run has ended go first, without their grace
+ * (sweep.ts), and `notes` is told of the token's own. Call it under
+ * withVault.
+ */
 async function newTab(
   scope: BrowserScope,
   vault: VaultBrowser,
   exit?: Awaited<ReturnType<BrowserExits["open"]>>,
+  notes: string[] = [],
 ): Promise<Tab | CallToolResult> {
+  if (vault.tabs.size >= MAX_TABS) {
+    notes.push(
+      ...sweptLines(scope, await sweepUnder(vault, { needRoom: true })),
+    )
+  }
+
   if (vault.tabs.size >= MAX_TABS) {
     // Only how many: the other tabs' pages are not this token's to see.
     const mine = [...vault.tabs.values()].filter(
@@ -649,8 +810,8 @@ async function newTab(
 
     return text(
       mine > 0
-        ? `The browser has ${MAX_TABS} tabs open, as many as it keeps. Close one of this token's first (tabs with action close), or open the page in one of them.`
-        : `The browser has ${MAX_TABS} tabs open, as many as it keeps, and none is this token's. The owner can close one on PCP's Browser page.`,
+        ? `The browser has ${MAX_TABS} tabs open, as many as it keeps (${mine} of them this token's). Close one of this token's first (tabs with action close), or open the page in one of them.`
+        : `The browser has ${MAX_TABS} tabs open, as many as it keeps, and none is this token's. The owner can close one on PCP's Browser page; a tab nobody uses closes after ${spanWords(TAB_IDLE_TTL_MS)}.`,
       true,
     )
   }
@@ -662,6 +823,7 @@ async function newTab(
       tokenId: scope.tokenId,
       rules: null,
       privateAllowed: false,
+      run: callRun(scope.runId, scope.signal),
     },
     exit,
   )
@@ -739,12 +901,47 @@ function reopenedResult(
 }
 
 /**
+ * How long a call waits for a turn (queue.ts): no longer than its own time
+ * limit leaves it, else MAX_QUEUE_WAIT_MS, behind at most MAX_LANE_QUEUE
+ * others; it leaves the queue when its time runs out.
+ */
+function waitBounds(scope: BrowserScope) {
+  return {
+    giveUp: scope.clock?.expired,
+    maxWaitMs: scope.clock ? scope.clock.left() : MAX_QUEUE_WAIT_MS,
+    maxQueue: MAX_LANE_QUEUE,
+    turnMs: EXPECTED_TURN_MS,
+  }
+}
+
+/**
+ * A call refused rather than queued: what it would wait behind, and when
+ * to try again, as a `browser_busy` tool error with retryAfterMs.
+ */
+function busyResult(tab: Tab | null, busy: LaneBusy): CallToolResult {
+  const wait = Math.max(1, Math.ceil(busy.retryAfterMs / 1000))
+  const calls = `${busy.ahead} ${busy.ahead === 1 ? "call" : "calls"}`
+
+  return familyError(
+    tab
+      ? `Tab ${tab.id} is busy: ${calls} on it before this one would take about ${wait} seconds, longer than this call waits. Nothing was done: try again in about ${wait} seconds, give a longer timeout_ms, or use another tab.`
+      : `The browser is busy opening and closing tabs: ${calls} before this one would take about ${wait} seconds, longer than this call waits. Nothing was done: try again in about ${wait} seconds.`,
+    "browser_busy",
+    { retryAfterMs: busy.retryAfterMs },
+  )
+}
+
+/**
  * Runs a call's work in its tab's turn (queue.ts): after the calls on the
  * tab before it, for at most `deadlineMs`. A tab that passes it is
  * reopened at its address, and the call is told so; one whose page
  * crashed is reopened first. A tab closed meanwhile is answered as gone.
+ * A call that would wait longer than it means to is refused as busy; one
+ * whose time runs out while it waits leaves the queue (LaneGaveUp, which
+ * the call's timeout answers). The tab is the run's the call is made in
+ * (sweep.ts), or nobody's run once a call outside any run uses it.
  */
-function onLane(
+async function onLane(
   scope: BrowserScope,
   vault: VaultBrowser,
   tab: Tab,
@@ -754,10 +951,17 @@ function onLane(
   const gone = () => vault.tabs.get(tab.id) !== tab
   const holder = { runId: scope.runId ?? null }
 
+  if (scope.clock) {
+    scope.clock.tabId = tab.id
+  }
+
+  atStep(scope.clock, `waiting for its turn on tab ${tab.id}`)
+
   return inLane(
     tab.lane,
     async () => {
       tab.running = holder
+      tab.run = callRun(scope.runId, scope.signal)
 
       try {
         return await turn()
@@ -766,6 +970,7 @@ function onLane(
       }
     },
     {
+      ...waitBounds(scope),
       deadlineMs,
       signal: scope.signal,
       onDeadline: async () => {
@@ -780,7 +985,10 @@ function onLane(
         )
       },
     },
-  )
+  ).catch((error: unknown) => {
+    if (error instanceof LaneBusy) return busyResult(tab, error)
+    throw error
+  })
 
   async function turn(): Promise<CallToolResult> {
     if (browserHeld(vault.vaultId)) {
@@ -898,6 +1106,8 @@ export async function performNavigate(
   }
 
   const vault = await ensureBrowser(scope.ctx, { publicUrl: scope.publicUrl })
+  // Starting Chromium does not count against the call's time limit.
+  scope.clock?.start()
   let tab = ownTab(vault, scope.tokenId, ask.tabId)
   const first: string[] = []
 
@@ -940,19 +1150,42 @@ export async function performNavigate(
       }
     }
 
-    const opened = await withVault(vault, () => newTab(scope, vault, exit))
+    atStep(scope.clock, "waiting to open a new tab")
+    const swept: string[] = []
+    let opened: Tab | CallToolResult
 
-    if (!isTab(opened)) {
-      return opened
+    try {
+      opened = await withVault(
+        vault,
+        () => newTab(scope, vault, exit, swept),
+        waitBounds(scope),
+      )
+    } catch (error) {
+      if (error instanceof LaneBusy) return busyResult(null, error)
+      throw error
     }
 
-    tab = opened
+    if (!isTab(opened)) {
+      return withLead(opened, swept.join("\n") || null)
+    }
+
+    const fresh = opened
+    tab = fresh
+
+    // Its caller was answered while the tab opened: nobody will use it.
+    if (scope.clock?.expired.aborted) {
+      await withVault(vault, () => closeTab(vault, fresh)).catch(() => {})
+      throw new LaneGaveUp()
+    }
+
+    const usage = tabUsage(vault, scope.tokenId)
     first.push(
+      ...swept,
       ask.tabId
-        ? `There is no tab ${ask.tabId} (it was closed, or the browser has closed since), so the page opened in a new tab: ${tab.id}. Name ${tab.id} as tab in the calls that follow.`
+        ? `There is no tab ${ask.tabId} (it was closed, or the browser has closed since), so the page opened in a new tab: ${tab.id} (${usage}). Name ${tab.id} as tab in the calls that follow.`
         : exit
-          ? `Opened a new tab through the exit ${exit.name}: ${tab.id}. It is signed in to nothing, and every page of it comes from the exit. Name ${tab.id} as tab in the calls that follow.`
-          : `Opened a new tab: ${tab.id}. Name ${tab.id} as tab in the calls that follow.`,
+          ? `Opened a new tab through the exit ${exit.name}: ${tab.id} (${usage}). It is signed in to nothing, and every page of it comes from the exit. Name ${tab.id} as tab in the calls that follow.`
+          : `Opened a new tab: ${tab.id} (${usage}). Name ${tab.id} as tab in the calls that follow.`,
     )
   }
 
@@ -971,6 +1204,7 @@ export async function performNavigate(
 
     current.lastBlocked = null
     const since = Date.now()
+    atStep(scope.clock, `loading ${siteKey(url)} in tab ${current.id}`, true)
     const go = () =>
       current.page.goto(url.href, {
         waitUntil: "domcontentloaded",
@@ -1009,9 +1243,9 @@ export async function performNavigate(
       )
     }
 
-    await passCheck(current)
+    await passCheck(current, scope.clock)
     await saveVaultProfile(scope.ctx, vault, { force: true })
-    return report(scope, current, { first, signIns: true })
+    return report(scope, current, { first, signIns: true, unseen: true })
   })
 
   return withLead(await answer, note)
@@ -1111,8 +1345,11 @@ async function tabs(
 
     return text(
       lines.length === 0
-        ? NO_TABS
-        : ["This token's open tabs:", ...lines].join("\n"),
+        ? noTabs(vault, scope.tokenId)
+        : [
+            `This token's open tabs (${tabUsage(vault, scope.tokenId)}):`,
+            ...lines,
+          ].join("\n"),
     )
   }
 
@@ -1131,15 +1368,40 @@ async function tabs(
   if (args.action === "close") {
     await withVault(vault!, () => closeTab(vault!, picked))
     await saveVaultProfile(scope.ctx, vault!, { force: true })
-    return text(`Closed tab ${picked.id}.`)
+    return text(
+      `Closed tab ${picked.id}. ${upper(tabUsage(vault, scope.tokenId))}.`,
+    )
   }
 
   await driveAs(vault!, picked, scope)
-  return reopenedResult(
-    picked,
-    await reopenTab(vault!, picked).catch(() => null),
-    "reset",
+  atStep(scope.clock, `reopening tab ${picked.id}`, true)
+  return withTail(
+    reopenedResult(
+      picked,
+      await reopenTab(vault!, picked).catch(() => null),
+      "reset",
+    ),
+    `${upper(tabUsage(vault, scope.tokenId))}.`,
   )
+}
+
+function upper(line: string): string {
+  return line.charAt(0).toUpperCase() + line.slice(1)
+}
+
+/** The answer with one line after everything its first text says. */
+function withTail(result: CallToolResult, line: string): CallToolResult {
+  const first = result.content[0]
+
+  return first?.type === "text"
+    ? {
+        ...result,
+        content: [
+          { ...first, text: `${first.text}\n${line}` },
+          ...result.content.slice(1),
+        ],
+      }
+    : result
 }
 
 /** The tools that need the page itself, refused while a dialog is open. */
@@ -1221,6 +1483,11 @@ async function onTab(
         return dialogOpen(picked, spec.name)
       }
 
+      atStep(
+        scope.clock,
+        `running ${spec.name} on tab ${picked.id}`,
+        !spec.annotations.readOnlyHint,
+      )
       let result: CallToolResult
 
       try {
@@ -1836,6 +2103,7 @@ const FROM_SNAPSHOT =
  * instead (refs.ts, so no ref changes for it), and the answer says so.
  */
 async function readPage(
+  scope: BrowserScope,
   tab: Tab,
   args: Record<string, unknown>,
 ): Promise<CallToolResult> {
@@ -1880,14 +2148,34 @@ async function readPage(
   const { markdown, left } = readableMarkdown(html, tab.page.url())
   const note = leftOutNote(left)
   let body = markdown
+  /** The snapshot the text came from, when it did. */
+  let fromSnapshot: SnapshotNode[] | null = null
 
   if (visibleChars(markdown) < MIN_READ_PAGE_TEXT_CHARS) {
-    const part = partOf(parseSnapshot(await tabSnapshot(tab).catch(() => "")))
+    const nodes = parseSnapshot(await tabSnapshot(tab).catch(() => ""))
+    const part = partOf(nodes)
     const words = part ? snapshotText(part) : ""
 
     if (visibleChars(words) > visibleChars(markdown)) {
       body = words
+      fromSnapshot = nodes
       lead.push(FROM_SNAPSHOT)
+    }
+  }
+
+  // The whole page's text leaves out what its frames, closed shadow roots
+  // and canvases show; one element's or the main part's says nothing of
+  // them.
+  if (!args.ref && !args.target && !args.main_only) {
+    const unseen = fromSnapshot
+      ? await unseenNote(scope, tab, fromSnapshot)
+      : await unseenWords(
+          scope,
+          await unseenInHtml(tab).catch(() => NOTHING_UNSEEN),
+        )
+
+    if (unseen) {
+      lead.push(unseen)
     }
   }
 
@@ -1941,6 +2229,7 @@ async function readPage(
 
 /** find: the snapshot's elements that mention a text, as JSON. */
 async function findOnPage(
+  scope: BrowserScope,
   tab: Tab,
   args: { text: string; within?: string },
 ): Promise<CallToolResult> {
@@ -1959,6 +2248,12 @@ async function findOnPage(
   }
 
   const { matches, total } = findInSnapshot(nodes, args.text)
+  // Nothing found on a page that shows more than its tree: say so, so the
+  // page is not taken for one without it.
+  const unseen =
+    total === 0
+      ? await unseenNote(scope, tab, args.within ? nodes : tree)
+      : null
 
   return text(
     JSON.stringify(
@@ -1970,6 +2265,13 @@ async function findOnPage(
         ...(total > matches.length
           ? {
               note: `Only the first ${matches.length} of ${total}: give within (the ref of a part of the page) or a longer text for the rest.`,
+            }
+          : {}),
+        ...(unseen
+          ? {
+              unseen: formLike(args.text)
+                ? `${unseen} The form or field you looked for may be in one of them.`
+                : unseen,
             }
           : {}),
       },
@@ -2135,23 +2437,118 @@ export function tabProblem(problems: string[]): boolean {
   return problems.some((problem) => /\btab\b/.test(problem))
 }
 
-/** A browser tool on arguments checked against its schema. */
+type ToolExtras = {
+  open: ResultOpener | undefined
+  keep?: ResultKeeper
+  keepBytes: BytesKeeper | undefined
+  secret: SecretTyper | undefined
+}
+
+/** The tools that wait DEFAULT_CALL_TIMEOUT_MS unless timeout_ms says otherwise. */
+function defaultTimeout(
+  name: BrowserToolName,
+  args: Record<string, unknown>,
+): boolean {
+  return (
+    name === "navigate" ||
+    name === "snapshot" ||
+    (name === "tabs" && args.action === "open")
+  )
+}
+
+/**
+ * The call's time limit: timeout_ms, or its tool's default; null for none
+ * (the tab's deadline alone). tabs list and close wait for nothing.
+ */
+function clockFor(
+  spec: BrowserToolSpec,
+  args: Record<string, unknown>,
+): CallClock | null {
+  if (
+    spec.name === "tabs" &&
+    (args.action === "list" || args.action === "close")
+  ) {
+    return null
+  }
+
+  const given = args.timeout_ms as number | undefined
+
+  if (given !== undefined) {
+    return callClock(given, true)
+  }
+
+  return defaultTimeout(spec.name, args)
+    ? callClock(DEFAULT_CALL_TIMEOUT_MS, false)
+    : null
+}
+
+/**
+ * A browser tool on arguments checked against its schema: first the tabs
+ * that are done with are closed (sweep.ts; never the one it names), then
+ * the tool runs, within its time limit when it has one. When the limit
+ * runs out the call is answered at once with a `timeout` tool error naming
+ * the step it was at (clock.ts); what it had begun finishes alone.
+ */
 async function runCheckedTool(
   scope: BrowserScope,
   server: Pick<McpServer, "id" | "name">,
   spec: BrowserToolSpec,
   args: Record<string, unknown>,
-  {
-    open,
-    keep,
-    keepBytes,
-    secret,
-  }: {
-    open: ResultOpener | undefined
-    keep?: ResultKeeper
-    keepBytes: BytesKeeper | undefined
-    secret: SecretTyper | undefined
-  },
+  extras: ToolExtras,
+): Promise<CallToolResult> {
+  const swept = await sweepTabs(scope, (args.tab as string | undefined) ?? null)
+  const lead = swept.length > 0 ? swept.join("\n") : null
+  const clock = clockFor(spec, args)
+
+  if (!clock) {
+    return withLead(await runTool(scope, server, spec, args, extras), lead)
+  }
+
+  const timed: BrowserScope = {
+    ...scope,
+    clock,
+    deadline: Math.min(scope.deadline ?? Infinity, Date.now() + clock.ms),
+  }
+
+  // tabs open and navigate start it once the browser runs (performNavigate).
+  if (!(spec.name === "navigate" || args.action === "open")) {
+    clock.start()
+  }
+
+  const work = runTool(timed, server, spec, args, extras)
+  const first = await Promise.race([
+    work.then(
+      (result) => ({ result }),
+      (error: unknown) => ({ error }),
+    ),
+    clock.ended.then(() => null),
+  ])
+  clock.stop()
+
+  if (first && "result" in first) {
+    return withLead(first.result, lead)
+  }
+
+  if (first && !(first.error instanceof LaneGaveUp)) {
+    throw first.error
+  }
+
+  // The work goes on alone; what it comes to is nobody's answer.
+  void work.catch(() => {})
+
+  return withLead(
+    familyError(timeoutMessage(`browser/${spec.name}`, clock), "timeout"),
+    lead,
+  )
+}
+
+/** One browser tool, its time limit (if any) on the scope. */
+async function runTool(
+  scope: BrowserScope,
+  server: Pick<McpServer, "id" | "name">,
+  spec: BrowserToolSpec,
+  args: Record<string, unknown>,
+  { open, keep, keepBytes, secret }: ToolExtras,
 ): Promise<CallToolResult> {
   const { ctx, tokenId, publicUrl, signal } = scope
 
@@ -2189,13 +2586,15 @@ async function runCheckedTool(
       })
     case "snapshot":
       return onTab(scope, tab, spec, (current) =>
-        report(scope, current, { signIns: true }),
+        report(scope, current, { signIns: true, unseen: true }),
       )
     case "read_page":
-      return onTab(scope, tab, spec, (current) => readPage(current, args))
+      return onTab(scope, tab, spec, (current) =>
+        readPage(scope, current, args),
+      )
     case "find":
       return onTab(scope, tab, spec, (current) =>
-        findOnPage(current, args as { text: string; within?: string }),
+        findOnPage(scope, current, args as { text: string; within?: string }),
       )
     case "click":
       return onTab(scope, tab, spec, async (current) => {
@@ -2443,6 +2842,7 @@ async function runCheckedTool(
               text: [
                 `Tab ${current.id}: ${current.page.url()} (${label ? `${label}, ` : ""}${picture.width} by ${picture.height}${picture.scale < 1 ? ", made smaller to pass on" : ""}, JPEG quality ${picture.quality}; the owner can watch the tab: ${markdownLink(`Watch tab ${current.id}`, tabLink(publicUrl, current.id))})`,
                 pictureScale(picture),
+                `To read the text in this picture, ${await ocrWords(scope)}; read_result does not show an image.`,
               ].join("\n"),
             },
             {

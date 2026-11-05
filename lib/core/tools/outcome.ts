@@ -34,6 +34,17 @@ export type ToolErrorCode =
   | "invalid_arguments"
   /** Too many calls of this kind in a short time; nothing ran. */
   | "rate_limited"
+  /**
+   * The call took longer than its timeout and was answered without waiting
+   * further (the browser's timeout_ms); the message names the step and
+   * whether what it was asked may have happened.
+   */
+  | "timeout"
+  /**
+   * The browser's tab (or the browser) has more work waiting than the call
+   * would wait for; nothing ran. `retryAfterMs` says when to try again.
+   */
+  | "browser_busy"
   /** A fault in PCP itself. */
   | "internal"
 
@@ -115,6 +126,8 @@ export type Outcome =
       hint?: string
       /** What the request log keeps instead of the message. */
       logAs?: string
+      /** When trying again may go through, in milliseconds (browser_busy). */
+      retryAfterMs?: number
     }
   | { type: "needs_owner"; owner: NeedsOwner; text: string }
   | { type: "result"; result: CallToolResult }
@@ -134,7 +147,13 @@ export function toolError(
     code = "validation",
     hint,
     logAs,
-  }: { code?: ToolErrorCode; hint?: string; logAs?: string } = {},
+    retryAfterMs,
+  }: {
+    code?: ToolErrorCode
+    hint?: string
+    logAs?: string
+    retryAfterMs?: number
+  } = {},
 ): Outcome {
   return {
     type: "error",
@@ -142,6 +161,9 @@ export function toolError(
     code,
     ...(hint ? { hint } : {}),
     ...(logAs ? { logAs } : {}),
+    ...(retryAfterMs !== undefined
+      ? { retryAfterMs: Math.max(0, Math.round(retryAfterMs)) }
+      : {}),
   }
 }
 
@@ -235,6 +257,9 @@ export function toCallToolResult(
           [ERROR_META_KEY]: {
             code: outcome.code,
             ...(outcome.hint ? { hint: outcome.hint } : {}),
+            ...(outcome.retryAfterMs !== undefined
+              ? { retryAfterMs: outcome.retryAfterMs }
+              : {}),
           },
         },
       }

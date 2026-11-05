@@ -12,6 +12,8 @@ import {
 import type { McpServer } from "@/lib/generated/prisma/client"
 
 import { createApiToken, resolveApiToken } from "../api-tokens"
+import { labelRun } from "../code/runs"
+import { ERROR_META_KEY } from "../tools/outcome"
 import type { VaultContext } from "../context"
 import { db } from "../db"
 import { startTestApi, type TestApi } from "../openapi/test-api"
@@ -34,6 +36,8 @@ import { createBrowserServer } from "./server"
 vi.mock("./limits", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./limits")>()),
   TAB_DEADLINE_MS: 3_000,
+  MAX_LANE_QUEUE: 1,
+  RUN_TAB_GRACE_MS: 300,
 }))
 
 const executable = await chromiumExecutable()
@@ -61,7 +65,10 @@ beforeEach(async () => {
   })
   api = await startTestApi((request, res) => {
     res.setHeader("content-type", "text/html; charset=utf-8")
-    res.end(`<title>Page ${request.url}</title><h1>Page ${request.url}</h1>`)
+    const page = `<title>Page ${request.url}</title><h1>Page ${request.url}</h1>`
+    // A page that takes its time to answer.
+    if (request.url === "/slow") setTimeout(() => res.end(page), 2_500)
+    else res.end(page)
   })
   await setFetchSite(ctx, tokenId, new URL(api.origin).host, "allowed")
   await setFetchPrivate(ctx, tokenId, "allowed")
@@ -174,7 +181,7 @@ describe.skipIf(!executable)("a tab's lane", { timeout: 60_000 }, () => {
 
     const started = Date.now()
     expect(textOf(await call("tabs", { action: "close", tab }))).toBe(
-      `Closed tab ${tab}.`,
+      `Closed tab ${tab}. 0 of 8 tabs open in the browser, 0 of them this token's.`,
     )
     expect(Date.now() - started).toBeLessThan(1_500)
     expect(runningBrowser(ctx.vaultId)!.tabs.has(tab)).toBe(false)
@@ -293,3 +300,131 @@ describe.skipIf(!executable)("pacing a tab", { timeout: 60_000 }, () => {
     expect(waits).toEqual([1_500, 1_500])
   })
 })
+
+describe.skipIf(!executable)(
+  "a call's time limit and a busy tab",
+  { timeout: 60_000 },
+  () => {
+    function meta(result: CallToolResult) {
+      return result._meta?.[ERROR_META_KEY] as
+        { code: string; retryAfterMs?: number } | undefined
+    }
+
+    it("answers a page that takes longer than timeout_ms with a timeout naming the step, and the tab goes on", async () => {
+      const tab = await openTab("/a")
+      const started = Date.now()
+      const slow = await call("navigate", {
+        tab,
+        url: `${api.origin}/slow`,
+        timeout_ms: 1_000,
+      })
+
+      expect(Date.now() - started).toBeLessThan(2_000)
+      expect(slow.isError).toBe(true)
+      expect(meta(slow)?.code).toBe("timeout")
+      expect(textOf(slow)).toBe(
+        `browser/navigate did not finish within 1 second, so it was answered without waiting further, while loading ${new URL(api.origin).host} in tab ${tab}. What it was asked to do may or may not have happened, and finishes in tab ${tab} on its own: take a snapshot to see the page before you try again.`,
+      )
+
+      // The load finishes alone in its turn; the next call waits for it.
+      const after = await call("snapshot", { tab })
+      expect(textOf(after)).toContain("Page /slow")
+    })
+
+    it("leaves the queue when its time runs out while it waits, having done nothing", async () => {
+      const tab = await openTab("/a")
+      const holding = call("wait_for", { tab, ms: 2_000 })
+      await new Promise((resolve) => setTimeout(resolve, 200))
+
+      const waited = await call("snapshot", { tab, timeout_ms: 1_000 })
+      expect(meta(waited)?.code).toBe("timeout")
+      expect(textOf(waited)).toContain(
+        `while waiting for its turn on tab ${tab}. Nothing was done on the page.`,
+      )
+      expect(textOf(waited)).not.toContain("Give timeout_ms")
+      await holding
+    })
+
+    it("refuses a call behind more than the lane takes as browser_busy, with when to try again", async () => {
+      const tab = await openTab("/a")
+      const holding = call("wait_for", { tab, ms: 1_500 })
+      await new Promise((resolve) => setTimeout(resolve, 100))
+      const queued = call("snapshot", { tab })
+      await new Promise((resolve) => setTimeout(resolve, 50))
+
+      const busy = await call("snapshot", { tab })
+      expect(busy.isError).toBe(true)
+      expect(meta(busy)?.code).toBe("browser_busy")
+      expect(meta(busy)?.retryAfterMs).toBeGreaterThan(0)
+      expect(textOf(busy)).toContain(`Tab ${tab} is busy: 2 calls on it`)
+
+      await holding
+      expect(textOf(await queued)).toContain("Page /a")
+    })
+  },
+)
+
+describe.skipIf(!executable)(
+  "the browser's tabs, counted",
+  { timeout: 60_000 },
+  () => {
+    it("says how many tabs are open, which run opened each and how long it has been idle", async () => {
+      const run = new AbortController()
+      labelRun("run_shop", "shop/order")
+      const opened = await callBrowserTool(
+        ctx,
+        server,
+        "tabs",
+        { action: "open", url: `${api.origin}/a` },
+        {
+          tokenId,
+          publicUrl: PUBLIC_URL,
+          runId: "run_shop",
+          signal: run.signal,
+        },
+      )
+      const tab = textOf(opened).match(/^Tab (\S+):/m)![1]!
+      expect(textOf(opened)).toContain(
+        `Opened a new tab: ${tab} (1 of 8 tabs open in the browser, 1 of them this token's).`,
+      )
+
+      const listed = textOf(await call("tabs", { action: "list" }))
+      expect(listed).toContain(
+        "This token's open tabs (1 of 8 tabs open in the browser, 1 of them this token's):",
+      )
+      expect(listed).toMatch(
+        new RegExp(
+          `- ${tab}: .* · opened by run run_shop \\(wrapper shop/order\\) · idle \\d+ seconds? · `,
+        ),
+      )
+
+      // The run ends: past its grace, the next call closes the tab, and says so.
+      run.abort("The run is over.")
+      await new Promise((resolve) => setTimeout(resolve, 400))
+      const after = textOf(await call("tabs", { action: "list" }))
+      expect(after.split("\n")[0]).toBe(
+        `Closed tab ${tab}: the run that used it, run run_shop (wrapper shop/order), has ended.`,
+      )
+      expect(runningBrowser(ctx.vaultId)!.tabs.has(tab)).toBe(false)
+      expect(after).toContain("This token has no tab open (0 of 8 tabs open")
+    })
+
+    it("keeps a tab a call outside the run used since, as the token's own", async () => {
+      const run = new AbortController()
+      const opened = await callBrowserTool(
+        ctx,
+        server,
+        "tabs",
+        { action: "open", url: `${api.origin}/a` },
+        { tokenId, publicUrl: PUBLIC_URL, runId: "run_x", signal: run.signal },
+      )
+      const tab = textOf(opened).match(/^Tab (\S+):/m)![1]!
+      await call("snapshot", { tab })
+      run.abort("The run is over.")
+      await new Promise((resolve) => setTimeout(resolve, 400))
+
+      await call("tabs", { action: "list" })
+      expect(runningBrowser(ctx.vaultId)!.tabs.has(tab)).toBe(true)
+    })
+  },
+)

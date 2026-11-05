@@ -525,7 +525,7 @@ describe("the browser's tools", () => {
           }
         ).properties,
       ),
-    ).toEqual(["tab", "text", "within"])
+    ).toEqual(["tab", "text", "within", "timeout_ms"])
     // Another tool takes no query.
     expect(() =>
       parseBrowserArgs(browserToolSpec("snapshot")!, {

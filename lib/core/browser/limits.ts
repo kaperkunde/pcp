@@ -207,6 +207,43 @@ export const DOWNLOAD_TIMEOUT_MS = 120_000
 export const TAB_DEADLINE_MS =
   2 * NAVIGATION_TIMEOUT_MS + CHALLENGE_WAIT_MS + 2 * ACTION_TIMEOUT_MS
 /**
+ * timeout_ms (call.ts): how long a browser call waits, in all, before it is
+ * answered with a `timeout` tool error naming the step it was at. tabs
+ * open, navigate and snapshot wait DEFAULT_CALL_TIMEOUT_MS unless the call
+ * says otherwise; the other tools wait for their tab's deadline alone
+ * unless timeout_ms is given. A default wait is lengthened by
+ * CHALLENGE_WAIT_MS while a site's check is up, so it does not cut short
+ * a check that passes on its own; one the call gave is kept to.
+ */
+export const DEFAULT_CALL_TIMEOUT_MS = 10_000
+export const MIN_CALL_TIMEOUT_MS = 1_000
+export const MAX_CALL_TIMEOUT_MS = 120_000
+/**
+ * A lane (queue.ts) refuses a call with `browser_busy` rather than queue it
+ * when this many calls already wait behind the one running, or when the
+ * wait it can expect is longer than the call would wait (its timeout_ms,
+ * else MAX_QUEUE_WAIT_MS). The wait is reckoned from the turns the lane
+ * took lately, a turn it has no history for counting EXPECTED_TURN_MS.
+ */
+export const MAX_LANE_QUEUE = 6
+export const MAX_QUEUE_WAIT_MS = 60_000
+export const EXPECTED_TURN_MS = 2_000
+/**
+ * A tab nobody used for this long is closed at the next browser call
+ * (sweep.ts, from call.ts), as is one whose run (run_code's, or a
+ * wrapper's) has ended and that nothing used for RUN_TAB_GRACE_MS since:
+ * at once when a tab is wanted and the browser is full.
+ */
+export const TAB_IDLE_TTL_MS = 30 * 60_000
+export const RUN_TAB_GRACE_MS = 2 * 60_000
+/**
+ * What snapshot, find and read_page look for that their tree leaves out
+ * (unseen.ts): iframes, at most this many looked at, and canvases at least
+ * this wide and high in CSS pixels (smaller ones are icons and the like).
+ */
+export const MAX_UNSEEN_FRAMES = 10
+export const MIN_UNSEEN_SIZE_PX = 40
+/**
  * A download's call holds its tab longer: the address opened or the
  * element clicked, the download's start, and the download itself.
  */

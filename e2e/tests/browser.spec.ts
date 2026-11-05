@@ -155,7 +155,7 @@ test("the first page at a site asks the owner, and the assistant then reads and 
   )
   const tab = (await page
     .getByTestId("permission-outcome")
-    .textContent())!.match(/Opened a new tab: (\S+)\./)![1]!
+    .textContent())!.match(/Opened a new tab: ([^\s.]+)[ .]/)![1]!
 
   const opened = await browse(baseURL!, "snapshot", { tab })
   const text = toolText(opened)
@@ -238,7 +238,8 @@ test("the tabs view: a hand-over answered on its tab, old links led there, a sta
       url: `${upstream.browserUrl}/form`,
     }),
   )
-  const tab = opened.match(/Opened a new tab: (\S+)\./)?.[1] ?? tabOf(opened)
+  const tab =
+    opened.match(/Opened a new tab: ([^\s.]+)[ .]/)?.[1] ?? tabOf(opened)
   const row = page.locator(`[data-tab-id="${tab}"]`)
   const inView = new RegExp(`/browser\\?tab=${tab}$`)
 
