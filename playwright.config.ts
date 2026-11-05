@@ -195,6 +195,15 @@ export default defineConfig({
       use: signedIn("ssh"),
     },
     {
+      // A storage folder on an SSH server: added on its page, browsed and
+      // changed in its file browser, and an assistant's save shown to the
+      // owner first and kept inside the folder.
+      name: "storage",
+      testMatch: /storage\.spec\.ts/,
+      dependencies: ["setup"],
+      use: signedIn("storage"),
+    },
+    {
       // A service on an SSH server: launched from its page with a secret
       // for its variable, its API endpoint registered in the same step,
       // stopped and started again. The engine is a fake docker run by a

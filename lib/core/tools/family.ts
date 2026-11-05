@@ -144,12 +144,15 @@ function valueAt(root: unknown, path: readonly PropertyKey[]): unknown {
   return node
 }
 
-/** {"$secret": name}: a secret's placeholder. */
+/** {"$secret": name}, with "part" if it says which: a secret's placeholder. */
 function isSecret(value: unknown): boolean {
   return (
     isRecord(value) &&
     typeof value.$secret === "string" &&
-    Object.keys(value).length === 1
+    Object.keys(value).every((key) => key === "$secret" || key === "part") &&
+    (value.part === undefined ||
+      value.part === "password" ||
+      value.part === "username")
   )
 }
 
@@ -332,9 +335,15 @@ export function textAnswer(text: string): CallToolResult {
 export function familyError(
   message: string,
   code: ToolErrorCode,
-  { hint, notes = [] }: { hint?: string; notes?: string[] } = {},
+  {
+    hint,
+    notes = [],
+    retryAfterMs,
+  }: { hint?: string; notes?: string[]; retryAfterMs?: number } = {},
 ): CallToolResult {
-  return toCallToolResult(toolError(message, { code, hint }), { notes })
+  return toCallToolResult(toolError(message, { code, hint, retryAfterMs }), {
+    notes,
+  })
 }
 
 /** Arguments that do not fit: every problem, and that nothing was done. */

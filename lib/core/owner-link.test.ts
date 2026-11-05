@@ -59,4 +59,13 @@ describe("linkLastText", () => {
     )
     expect(text.split("\n")).toHaveLength(2)
   })
+
+  it("lets an assistant gather several links, all at the end with no tool after them", () => {
+    expect(OWNER_LINK_RULE).toMatch(/keep working/)
+    expect(OWNER_LINK_RULE).toMatch(/several links/)
+    expect(OWNER_LINK_RULE).toMatch(/each as a markdown link/)
+    expect(OWNER_LINK_RULE).toMatch(/on a line of its own/)
+    expect(OWNER_LINK_RULE).toMatch(/call no tool after them/)
+    expect(OWNER_LINK_RULE).toMatch(/hide the text written before a tool call/)
+  })
 })

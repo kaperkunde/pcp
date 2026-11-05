@@ -21,6 +21,7 @@ import type {
   ServerAuthHeader,
   ServerDefinition,
   ServiceSpec,
+  StorageRoot,
   Exit,
   Setting,
   Skill,
@@ -289,6 +290,8 @@ const SecretRow = z.strictObject({
 const SecretBrowserOriginRow = z.strictObject({
   secretId: id,
   origin: str,
+  // "This domain and its subdomains": absent from older files.
+  includeSubdomains: z.boolean().default(false),
   createdAt: date,
 })
 
@@ -436,6 +439,17 @@ const ServiceSpecRow = z.strictObject({
   updatedAt: date,
 })
 
+// Storage roots, added with the storage kind: absent from older files.
+const StorageRootRow = z.strictObject({
+  serverId: id,
+  hostId: id.nullable(),
+  path: str,
+  writeAs: str.default(""),
+  umask: z.number().int().min(0).max(0o777).default(2),
+  createdAt: date,
+  updatedAt: date,
+})
+
 // Exits, added with exits: absent from older files.
 const ExitRow = z.strictObject({
   id,
@@ -566,6 +580,7 @@ export const PayloadSchema = z.strictObject({
     openApiSpecs: z.array(OpenApiSpecRow),
     wrapperSpecs: z.array(WrapperSpecRow).default([]),
     serviceSpecs: z.array(ServiceSpecRow).default([]),
+    storageRoots: z.array(StorageRootRow).default([]),
     exits: z.array(ExitRow).default([]),
     repos: z.array(RepoRow).default([]),
     repoItems: z.array(RepoItemRow).default([]),
@@ -834,6 +849,11 @@ export function checkReferences(payload: ExportPayload): void {
     pointsAt(spec.registeredId, servers, "the server a service registered")
   }
 
+  for (const root of tables.storageRoots) {
+    pointsAt(root.serverId, servers, "a server")
+    pointsAt(root.hostId, servers, "a storage root's SSH server")
+  }
+
   for (const exit of tables.exits) {
     pointsAt(exit.serverId, servers, "an exit's SSH server")
     pointsAt(exit.serviceId, servers, "an exit's service")
@@ -1013,6 +1033,7 @@ export const FORMAT_COVERS_SCHEMA: {
   openApiSpec: Covers<OpenApiSpec, z.output<typeof OpenApiSpecRow>>
   wrapperSpec: Covers<WrapperSpec, z.output<typeof WrapperSpecRow>>
   serviceSpec: Covers<ServiceSpec, z.output<typeof ServiceSpecRow>>
+  storageRoot: Covers<StorageRoot, z.output<typeof StorageRootRow>>
   exit: Covers<Exit, z.output<typeof ExitRow>>
   repo: Covers<Repo, z.output<typeof RepoRow>>
   repoItem: Covers<RepoItem, z.output<typeof RepoItemRow>>
@@ -1042,6 +1063,7 @@ export const FORMAT_COVERS_SCHEMA: {
   openApiSpec: true,
   wrapperSpec: true,
   serviceSpec: true,
+  storageRoot: true,
   exit: true,
   repo: true,
   repoItem: true,

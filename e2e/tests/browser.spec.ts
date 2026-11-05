@@ -17,7 +17,9 @@ import {
 // owner; the assistant reads and acts on the page by refs; a link to
 // another site stops; the sign-ins outlast the browser and are forgotten
 // on request; the tabs view settles a hand-over on its tab, takes the old
-// links there and closes a tab nobody needs. The fake upstream is on
+// links there and closes a tab nobody needs; a secret for the browser is
+// asked for with its login name and a password PCP makes, and its sites
+// changed on request. The fake upstream is on
 // 127.0.0.1, so the token is allowed private addresses first. The owner's
 // input in the live view and Cloudflare checks are covered by
 // lib/core/browser's unit tests.
@@ -155,7 +157,7 @@ test("the first page at a site asks the owner, and the assistant then reads and 
   )
   const tab = (await page
     .getByTestId("permission-outcome")
-    .textContent())!.match(/Opened a new tab: (\S+)\./)![1]!
+    .textContent())!.match(/Opened a new tab: ([^\s.]+)[ .]/)![1]!
 
   const opened = await browse(baseURL!, "snapshot", { tab })
   const text = toolText(opened)
@@ -223,6 +225,27 @@ test("the sign-ins outlast the browser, and are gone once forgotten", async ({
     url: `${upstream.browserUrl}/cookie`,
   })
   expect(toolText(forgotten)).toContain("Cookie: none")
+
+  // A sign-in made elsewhere, imported by the owner: previewed, then kept.
+  await page.reload()
+  await page.getByText("Import a sign-in").click()
+  await page
+    .getByLabel("Cookie export", { exact: true })
+    .fill(
+      `.example.com\tTRUE\t/\tTRUE\t${Math.floor(Date.now() / 1000) + 86_400}\tsid\tabc\n127.0.0.1\tFALSE\t/\tFALSE\t0\tlocal\t1`,
+    )
+  await page.getByRole("button", { name: "Preview" }).click()
+  const preview = page.getByTestId("browser-import-preview")
+  await expect(preview).toContainText("a cookies.txt file: 1 cookie")
+  await expect(preview).toContainText("example.com")
+  await expect(preview).toContainText(
+    "Left out: 1 for an IP address rather than a site's name.",
+  )
+  await page.getByRole("button", { name: "Import", exact: true }).click()
+  await expect(page.getByText("Imported 1 cookie for 1 site.")).toBeVisible()
+  await expect(page.getByTestId("browser-profile")).toContainText(
+    "Kept for 1 site (1 cookie)",
+  )
 })
 
 test("the tabs view: a hand-over answered on its tab, old links led there, a stale tab closed", async ({
@@ -238,7 +261,8 @@ test("the tabs view: a hand-over answered on its tab, old links led there, a sta
       url: `${upstream.browserUrl}/form`,
     }),
   )
-  const tab = opened.match(/Opened a new tab: (\S+)\./)?.[1] ?? tabOf(opened)
+  const tab =
+    opened.match(/Opened a new tab: ([^\s.]+)[ .]/)?.[1] ?? tabOf(opened)
   const row = page.locator(`[data-tab-id="${tab}"]`)
   const inView = new RegExp(`/browser\\?tab=${tab}$`)
 
@@ -295,4 +319,92 @@ test("the tabs view: a hand-over answered on its tab, old links led there, a sta
   await expect(
     page.getByRole("region", { name: "Live tab" }).getByRole("alert"),
   ).toContainText("This tab is closed")
+})
+
+test("a secret for the browser: its login name, a password PCP makes, and its sites changed on request", async ({
+  page,
+  baseURL,
+}) => {
+  await answerEverythingWaiting(page)
+  const name = `Energy ${RUN}`
+  const asked = toolText(
+    await browse(baseURL!, "request_secret", {
+      name,
+      purpose: "To sign up at the energy company.",
+      origins: ["https://www.frankenergie.nl"],
+      username: "ada@example.com",
+      generate: { length: 20, symbols: false },
+    }),
+  )
+  expect(asked).toContain("Not done yet")
+  const id = asked.match(/\/permissions\/([\w-]+)/)?.[1]
+  expect(id, asked).toBeTruthy()
+
+  // Marked up for password managers: the login name and a new password
+  // together, the sites as boxes out of their reach.
+  await page.goto(`/permissions/${id}`)
+  const login = page.getByLabel("Login name")
+  await expect(login).toHaveValue("ada@example.com")
+  await expect(login).toHaveAttribute("autocomplete", "username")
+  const generate = page.getByRole("switch", {
+    name: /Have PCP make a new password/,
+  })
+  await expect(generate).toBeChecked()
+  await expect(page.getByLabel("Length")).toHaveValue("20")
+  await expect(
+    page.getByRole("checkbox", { name: "https://www.frankenergie.nl" }),
+  ).toBeChecked()
+  await expect(page.getByLabel("More sites (optional)")).toHaveAttribute(
+    "data-lpignore",
+    "true",
+  )
+  await clickHydrated(generate)
+  await expect(
+    page.getByLabel(`Value of the secret "${name}"`),
+  ).toHaveAttribute("autocomplete", "new-password")
+  await clickHydrated(generate)
+
+  await clickHydrated(page.getByRole("button", { name: "Save, allow one use" }))
+  await expect(page.getByTestId("permission-outcome")).toContainText(
+    "PCP made its value itself",
+  )
+  expect(
+    toolText(await callTool(baseURL!, token, "check_permission", { id })),
+  ).toContain('"part": "username"')
+
+  // Its sites, on the assistant's proposal: a lookalike is flagged and left
+  // unticked, the rest made as ticked.
+  const proposed = toolText(
+    await browse(baseURL!, "update_secret_sites", {
+      name,
+      reason: "The site signs in at mijn.frankenergie.nl too.",
+      add: [
+        { origin: "https://frankenergie.nl", subdomains: true },
+        { origin: "https://www.frankenergy.nl" },
+      ],
+    }),
+  )
+  expect(proposed).toContain("Not done yet")
+  const sitesId = proposed.match(/\/permissions\/([\w-]+)/)?.[1]
+  expect(sitesId, proposed).toBeTruthy()
+
+  await page.goto(`/permissions/${sitesId}`)
+  await expect(page.getByText(/letter or two away/).first()).toBeVisible()
+  await expect(
+    page.getByRole("checkbox", { name: /www\.frankenergy\.nl/ }),
+  ).not.toBeChecked()
+  await expect(
+    page.getByRole("checkbox", {
+      name: /frankenergie\.nl and its subdomains/,
+    }),
+  ).toBeChecked()
+  await clickHydrated(
+    page.getByRole("button", { name: "Apply ticked changes" }),
+  )
+  await expect(page.getByTestId("permission-outcome")).toContainText(
+    "Added: https://frankenergie.nl and its subdomains.",
+  )
+  await expect(page.getByTestId("permission-outcome")).toContainText(
+    "Not done: adding https://www.frankenergy.nl.",
+  )
 })

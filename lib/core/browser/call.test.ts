@@ -278,6 +278,26 @@ setTimeout(() => window.open("/page"), 300)
       return res.end(DRAWN)
     }
 
+    // A page with what its tree cannot read: a form in a closed shadow root
+    // in a frame from another site, a closed shadow root of its own, and a
+    // canvas.
+    if (request.url.startsWith("/hidden-form")) {
+      return res.end(`<!doctype html><title>Wake-up call</title><h1>Wake-up call</h1>
+<p>Leave your details and we call you.</p>
+<iframe src="http://localhost:${port}/closed-form" style="width: 400px; height: 200px"></iframe>
+<div id="mine"></div>
+<canvas width="300" height="150"></canvas>
+<script>
+document.getElementById("mine").attachShadow({ mode: "closed" }).innerHTML = "<button>Hidden button</button>"
+</script>`)
+    }
+
+    if (request.url.startsWith("/closed-form")) {
+      return res.end(`<!doctype html><div id="c"></div><script>
+document.getElementById("c").attachShadow({ mode: "closed" }).innerHTML = "<form><label>Email <input name=email></label><button>Call me</button></form>"
+</script>`)
+    }
+
     if (request.url.startsWith("/empty")) {
       return res.end("<!doctype html><title>Empty</title>")
     }
@@ -390,7 +410,7 @@ describe.skipIf(!executable)("the browser's tools", { timeout: 90_000 }, () => {
     // The tab opened all the same, and its id comes first.
     const tab = tabOf(refused)
     expect(textOf(refused).split("\n")[0]).toBe(
-      `Opened a new tab: ${tab}. Name ${tab} as tab in the calls that follow.`,
+      `Opened a new tab: ${tab} (1 of 8 tabs open in the browser, 1 of them this token's). Name ${tab} as tab in the calls that follow.`,
     )
 
     await setFetchPrivate(ctx, tokenId, "allowed")
@@ -1272,7 +1292,7 @@ describe.skipIf(!executable)(
       expect(unknown.isError).toBe(true)
       expect(textOf(unknown)).toContain("There is no tab nosuchtab")
       expect(textOf(unknown)).toContain(
-        "This token's open tabs, the one used last first:",
+        "This token's open tabs, the one used last first (2 of 8 tabs open in the browser, 2 of them this token's):",
       )
       expect(order(textOf(unknown))).toEqual([first, second])
 
@@ -1311,6 +1331,93 @@ describe.skipIf(!executable)(
       expect(Number(size[1])).toBeLessThan(1280)
       expect(Number(size[2])).toBeLessThan(800)
       expect(textOf(thread)).toContain('the region "Thread"')
+    })
+  },
+)
+
+describe.skipIf(!executable)(
+  "what the tree cannot see, and addresses as given",
+  { timeout: 90_000 },
+  () => {
+    beforeEach(async () => {
+      await allowApi()
+    })
+
+    it("names cross-origin iframes, closed shadow roots and canvases the snapshot leaves out, in snapshot, find and read_page", async () => {
+      const opened = await call("tabs", {
+        action: "open",
+        url: `${api.origin}/hidden-form`,
+      })
+      const tab = tabOf(opened)
+      const frame = refOf(opened, /- iframe/)
+      const line = `1 cross-origin iframe (ref ${frame}), 1 closed shadow root and 1 canvas not included: the page shows more than this. Take a screenshot and OCR it to see them (pass its handle to an OCR tool, if the owner has added one (search for "ocr")); click with a point (x, y) from the screenshot reaches into them.`
+
+      expect(textOf(opened)).toContain(line)
+      expect(textOf(await call("snapshot", { tab }))).toContain(line)
+
+      // A find for part of the form that matches nothing says where it may be.
+      const found = JSON.parse(
+        textOf(await call("find", { tab, text: "email" })),
+      ) as { total: number; unseen?: string }
+      expect(found.total).toBe(0)
+      expect(found.unseen).toBe(
+        `${line} The form or field you looked for may be in one of them.`,
+      )
+      // One that finds something says nothing of it.
+      expect(
+        JSON.parse(textOf(await call("find", { tab, text: "details" }))),
+      ).not.toHaveProperty("unseen")
+
+      // read_page's text is the page's own HTML: the frame is left out too.
+      expect(textOf(await call("read_page", { tab }))).toContain(
+        "1 cross-origin iframe, 1 closed shadow root and 1 canvas not included",
+      )
+    })
+
+    it("says nothing of a page that holds nothing the tree misses", async () => {
+      const opened = await call("tabs", {
+        action: "open",
+        url: `${api.origin}/inbox`,
+      })
+      expect(textOf(opened)).not.toContain("not included")
+      expect(
+        JSON.parse(
+          textOf(await call("find", { tab: tabOf(opened), text: "nowhere" })),
+        ),
+      ).not.toHaveProperty("unseen")
+    })
+
+    it("tells how to read the text in a screenshot", async () => {
+      const opened = await call("tabs", {
+        action: "open",
+        url: `${api.origin}/page`,
+      })
+      const picture = await call("screenshot", { tab: tabOf(opened) })
+      expect(textOf(picture)).toContain(
+        'To read the text in this picture, pass its handle to an OCR tool, if the owner has added one (search for "ocr"); read_result does not show an image.',
+      )
+    })
+
+    // #83: a site's own script double-encoded its fragment; PCP keeps an
+    // address's fragment exactly as given, query-like or encoded already.
+    it("opens an address with its fragment exactly as given", async () => {
+      for (const fragment of ["#route?x=1&y=2", "#a%3Fb"]) {
+        const address = `${api.origin}/page${fragment}`
+        const opened = await call("tabs", { action: "open", url: address })
+        expect(textOf(opened), fragment).toContain(`Address: ${address}\n`)
+        const tab = tabOf(opened)
+        expect(runningBrowser(ctx.vaultId)!.tabs.get(tab)!.page.url()).toBe(
+          address,
+        )
+
+        const went = await call("navigate", {
+          tab,
+          url: `${api.origin}/inbox${fragment}`,
+        })
+        expect(textOf(went), fragment).toContain(
+          `Address: ${api.origin}/inbox${fragment}\n`,
+        )
+      }
     })
   },
 )

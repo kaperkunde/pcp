@@ -117,6 +117,23 @@
    Changing a secret it uses restarts it with the new value. Its tools
    (`status`, `logs`, `start`, `stop`, `restart`) follow your levels; a tool
    of the server it serves, called while it is stopped, says so.
+   **Storage folders** are on them too: **Add a folder** on the SSH server's
+   page takes the folder's path (a Samba share, a scans folder), whose files
+   it should be, a umask (002 by default, so a group share sees ordinary
+   files) and **Read-only**. Assistants then list, find, get, save, move and
+   delete files there over SFTP, on the same SSH connection: `list_folder`,
+   `find_files`, `get_file` (the file comes back as a kept result's handle),
+   `save_file` (takes a handle, so a mail attachment, a scan or a converted
+   document goes into the folder in one call), `make_folder`, `move` and
+   `delete` (for good, Destructive). Every path stays inside the folder: PCP
+   refuses `..` and checks each path's real path on the server, so a link to
+   somewhere else is not followed. A file is written under a temporary
+   `.pcp-part` name and renamed into place when whole, and one already there
+   is replaced only when the call says `overwrite`. SFTP writes as PCP's
+   login: when you want the files to be another user's, the page says so
+   (sign PCP in as that user, or give the login the folder's group). The
+   folder's page has a file browser of its own: folders, sizes and dates,
+   download, upload, new folder, rename and delete.
 7. **API tokens.** Create a token per assistant or machine; PCP asks for your
    password (or Touch ID in the Mac app) to make one. A token can reach every
    server and endpoint or only the ones you pick, and can expire. Revoking it
@@ -217,13 +234,16 @@ first place a text appears.
 
 Files and long values move between tools without passing through the
 assistant. A file in an answer (an attachment, an image, base64 that decodes
-to a PDF) and any part named in `keep` come back as a handle,
+to a PDF, a PDF or image an API endpoint answers with) and any part named in
+`keep` come back as a handle,
 `{"$result": "<id>", …}`, with its type and size. Put that handle in any later
 call's arguments and PCP puts the value there: a text as text, a file as
 base64. `get_attachment` reads any attachment that way, and `send_email` and
 `create_draft` take handles as attachments, so an attachment from one mail
 account can be sent from another, or handed to an API. The permission page
-shows what each handle is, never its content. A `call_tool_<tier>` answer also links
+shows each handle as a file (its name, type, size, the tool that kept it and
+until when), which you can open (a PDF, a picture, the first lines of a
+text) or download while the request waits. A `call_tool_<tier>` answer also links
 its handles as MCP resources (`pcp://results/<id>`), so a client that reads
 resources can open a kept file itself.
 
@@ -385,13 +405,20 @@ another, and only what it prints and returns goes back to the assistant.
 Files move as handles, as they do between calls (above); `pcp.keep` keeps a
 text it made (a CSV, a report), or bytes, as a handle to pass on, and
 `pcp.read(handle, { as: "base64" })` reads a file's bytes when the program
-has to build something from them (a MIME message with an attachment). With
+has to build something from them (a MIME message with an attachment);
+`{ offset, length }` reads only a part (bytes of a file, characters of a
+text), so a large file is read a piece at a time. With
 `keep`, a value one tool makes, such as a password a server generates, goes
 into another tool's arguments as a handle, never read by the program or the
 assistant. `pcp.tools()` lists the token's servers and tools, as `list_tools`
 does, and `pcp.describe(server, tool)` gives one tool's arguments and what
 it returns, as `describe` does. The program also has `atob`, `btoa`, `TextEncoder`, `TextDecoder` and
-`crypto.getRandomValues`, so it can make a strong secret itself.
+`crypto.getRandomValues`, so it can make a strong secret itself. It has no
+timers of its own: `await pcp.sleep(ms)` waits (a minute at most at once),
+and `pcp.withTimeout(ms, fn)` gives up on a slow part with an error coded
+`timeout`, both on PCP's clock and within the run's three minutes. What it
+gave up on is not taken back, so a call it was waiting for may still have
+gone through.
 
 A large picture costs an assistant far more to look at than a small one, so
 `pcp.image.compress(handle, { maxWidth, maxHeight, crop, grayscale, format,
@@ -508,7 +535,9 @@ allow** (which also adds the site to the secret's sites). Only a field of the
 page's own site takes it, not one in a frame from another site. Afterwards the
 field reads as `[secret: name]` in every answer, any password field's value is
 hidden, and screenshots of the tab are refused until the field changes or the
-page moves on. A secret an API endpoint uses is not allowed in the browser by
+page moves on. Wherever a page of that tab repeats the secret later, even
+written its own way (an IBAN in groups of four, in capitals, on the next
+page), it reads as `[secret: name]` too, for as long as the tab is open. A secret an API endpoint uses is not allowed in the browser by
 that. Under **Secrets**, add one as **One-time codes (TOTP)** with the seed or
 `otpauth://` link a site shows when you set up its codes: PCP types the code
 of the moment, and **Code** shows it to you. **Browser** on a secret's row

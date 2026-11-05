@@ -15,10 +15,20 @@ import { MAX_PLACEHOLDER_DEPTH, MAX_PLACEHOLDER_NODES } from "./limits"
  * This file reads no secret and touches no database.
  */
 
-export type SecretPlaceholder = { $secret: string }
+export type SecretPlaceholder = { $secret: string; part?: SecretPart }
+
+/**
+ * Which part of the secret a placeholder stands for: its value, or (typed
+ * into a page by the browser only) the login name the owner keeps with it.
+ */
+export type SecretPart = "password" | "username"
 
 /** Where a placeholder sits in a call's arguments, and what it names. */
-export type FoundPlaceholder = { pointer: string; name: string }
+export type FoundPlaceholder = {
+  pointer: string
+  name: string
+  part: SecretPart
+}
 
 /**
  * What a call may carry: for each argument the owner allowed, the secret
@@ -40,23 +50,42 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value)
 }
 
-/** The secret's name a value stands for, or null when it is no placeholder. */
-export function parseSecretPlaceholder(value: unknown): string | null {
+/**
+ * The secret a value stands for, {"$secret": name} with "part" if it says
+ * one, or null when it is no placeholder.
+ */
+export function parseSecretRef(
+  value: unknown,
+): { name: string; part: SecretPart } | null {
   if (!isRecord(value)) {
     return null
   }
 
   const keys = Object.keys(value)
 
-  if (keys.length !== 1 || keys[0] !== "$secret") {
+  if (
+    !keys.includes("$secret") ||
+    !keys.every((key) => key === "$secret" || key === "part") ||
+    (value.part !== undefined &&
+      value.part !== "password" &&
+      value.part !== "username")
+  ) {
     return null
   }
 
   return typeof value.$secret === "string" &&
     value.$secret.length > 0 &&
     value.$secret.length <= 200
-    ? value.$secret
+    ? {
+        name: value.$secret,
+        part: value.part === "username" ? "username" : "password",
+      }
     : null
+}
+
+/** The secret's name a value stands for, or null when it is no placeholder. */
+export function parseSecretPlaceholder(value: unknown): string | null {
+  return parseSecretRef(value)?.name ?? null
 }
 
 function escapeToken(token: string): string {
@@ -93,15 +122,15 @@ export function findPlaceholders(args: unknown): FoundPlaceholder[] {
     }
 
     if (Object.hasOwn(value, "$secret")) {
-      const name = parseSecretPlaceholder(value)
+      const ref = parseSecretRef(value)
 
-      if (name === null) {
+      if (ref === null) {
         throw invalid(
-          `A secret goes in a call as {"$secret": "<its name>"} and nothing else (at ${pointer || "/"}).`,
+          `A secret goes in a call as {"$secret": "<its name>"}, with "part": "username" for its login name, and nothing else (at ${pointer || "/"}).`,
         )
       }
 
-      found.push({ pointer, name })
+      found.push({ pointer, ...ref })
       return
     }
 

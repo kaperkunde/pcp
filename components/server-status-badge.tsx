@@ -105,7 +105,7 @@ export function serverStatus({
   // An SSH server is checked by signing in with PCP's key: the server can
   // refuse the key (not added yet), or show another host key than the one
   // PCP pinned.
-  if (kind === "ssh") {
+  if (kind === "ssh" || kind === "storage") {
     switch (status) {
       case "ok":
         return ok("Ready")

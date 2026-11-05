@@ -1,7 +1,8 @@
 import { timingSafeEqual } from "node:crypto"
+import fs from "node:fs"
 import net from "node:net"
 
-import { Server, utils, type Connection } from "ssh2"
+import { Server, utils, type Connection, type SFTPWrapper } from "ssh2"
 
 import { generateOwnKey, hostKeyLine } from "./keys"
 
@@ -51,6 +52,12 @@ export type FakeSshOptions = {
     host: string,
     port: number,
   ) => { host: string; port: number } | null
+  /**
+   * Answer the SFTP subsystem, on this machine's own file system with paths
+   * as they are (a test hands PCP a folder under its temporary directory).
+   * Off unless set: the server refuses the subsystem.
+   */
+  sftp?: boolean
 }
 
 export type FakeSsh = {
@@ -72,6 +79,8 @@ export type FakeSsh = {
    * shell, subsystem).
    */
   requests: string[]
+  /** SFTP requests the server answered, by name ("OPEN /tmp/x/a"). */
+  sftpRequests: string[]
   /** Connections that signed in, counting each one once. */
   connections: () => number
   close: () => Promise<void>
@@ -98,6 +107,7 @@ export async function startFakeSsh(options: FakeSshOptions): Promise<FakeSsh> {
   const signals: string[] = []
   const forwards: string[] = []
   const requests: string[] = []
+  const sftpRequests: string[] = []
   const clients = new Set<Connection>()
   let connections = 0
   let forwardsAsked = 0
@@ -135,6 +145,8 @@ export async function startFakeSsh(options: FakeSshOptions): Promise<FakeSsh> {
     },
     (client) => {
       clients.add(client)
+      // As OpenSSH's sshd: small packets go at once.
+      ;(client as unknown as { setNoDelay(on: boolean): void }).setNoDelay(true)
       client.on("close", () => clients.delete(client))
       client.on("error", () => {})
 
@@ -212,6 +224,12 @@ export async function startFakeSsh(options: FakeSshOptions): Promise<FakeSsh> {
         client.on("session", (acceptSession) => {
           const session = acceptSession()
 
+          if (options.sftp) {
+            session.on("sftp", (accept) => {
+              serveSftp(accept(), sftpRequests)
+            })
+          }
+
           session.on("exec", (accept, _reject, info) => {
             const stream = accept()
             commands.push(info.command)
@@ -275,6 +293,7 @@ export async function startFakeSsh(options: FakeSshOptions): Promise<FakeSsh> {
     forwards,
     forwardsAsked: () => forwardsAsked,
     requests,
+    sftpRequests,
     connections: () => connections,
     close: async () => {
       for (const client of clients) {
@@ -282,5 +301,213 @@ export async function startFakeSsh(options: FakeSshOptions): Promise<FakeSsh> {
       }
       await new Promise<void>((resolve) => server.close(() => resolve()))
     },
+  }
+}
+
+// ---- SFTP, for storage roots' tests ---------------------------------------
+
+const { STATUS_CODE, OPEN_MODE } = utils.sftp
+
+function statusOf(error: unknown): number {
+  const code = (error as NodeJS.ErrnoException | null)?.code
+  return code === "ENOENT" || code === "ENOTDIR"
+    ? STATUS_CODE.NO_SUCH_FILE
+    : code === "EACCES" || code === "EPERM"
+      ? STATUS_CODE.PERMISSION_DENIED
+      : STATUS_CODE.FAILURE
+}
+
+function attrsOf(stat: fs.Stats) {
+  return {
+    mode: stat.mode,
+    uid: stat.uid,
+    gid: stat.gid,
+    size: stat.size,
+    atime: Math.floor(stat.atimeMs / 1000),
+    mtime: Math.floor(stat.mtimeMs / 1000),
+  }
+}
+
+function openFlags(flags: number): number {
+  const { constants } = fs
+  const read = (flags & OPEN_MODE.READ) !== 0
+  const write = (flags & OPEN_MODE.WRITE) !== 0
+  let out =
+    read && write
+      ? constants.O_RDWR
+      : write
+        ? constants.O_WRONLY
+        : constants.O_RDONLY
+  if (flags & OPEN_MODE.APPEND) out |= constants.O_APPEND
+  if (flags & OPEN_MODE.CREAT) out |= constants.O_CREAT
+  if (flags & OPEN_MODE.TRUNC) out |= constants.O_TRUNC
+  if (flags & OPEN_MODE.EXCL) out |= constants.O_EXCL
+  return out
+}
+
+/**
+ * An SFTP server over the local file system, as OpenSSH's sftp-server
+ * behaves where PCP cares: RENAME fails when the new name is taken (it links
+ * and unlinks), READDIR answers in batches and then EOF, an open with EXCL
+ * fails on a name that is there. No extensions, so no posix-rename.
+ */
+function serveSftp(sftp: SFTPWrapper, log: string[]): void {
+  const handles = new Map<
+    string,
+    { fd?: number; dir?: string[]; path: string }
+  >()
+  let next = 0
+  const handle = (entry: { fd?: number; dir?: string[]; path: string }) => {
+    const id = Buffer.from(String(next++))
+    handles.set(id.toString(), entry)
+    return id
+  }
+  const fail = (reqid: number, error: unknown) =>
+    sftp.status(reqid, statusOf(error))
+  const ok = (reqid: number) => sftp.status(reqid, STATUS_CODE.OK)
+
+  sftp.on("REALPATH", (reqid, path) => {
+    log.push(`REALPATH ${path}`)
+    try {
+      const real = fs.realpathSync(path === "" ? "." : path)
+      sftp.name(reqid, [{ filename: real, longname: real, attrs: {} as never }])
+    } catch (error) {
+      fail(reqid, error)
+    }
+  })
+
+  for (const [event, read] of [
+    ["STAT", fs.statSync],
+    ["LSTAT", fs.lstatSync],
+  ] as const) {
+    sftp.on(event, (reqid: number, path: string) => {
+      log.push(`${event} ${path}`)
+      try {
+        sftp.attrs(reqid, attrsOf(read(path)))
+      } catch (error) {
+        fail(reqid, error)
+      }
+    })
+  }
+
+  sftp.on("OPENDIR", (reqid, path) => {
+    log.push(`OPENDIR ${path}`)
+    try {
+      const names = fs.readdirSync(path)
+      sftp.handle(reqid, handle({ dir: names, path }))
+    } catch (error) {
+      fail(reqid, error)
+    }
+  })
+
+  sftp.on("READDIR", (reqid, id) => {
+    const entry = handles.get(id.toString())
+    if (!entry?.dir) return sftp.status(reqid, STATUS_CODE.FAILURE)
+    if (entry.dir.length === 0) return sftp.status(reqid, STATUS_CODE.EOF)
+    // Small batches, so a reader's limit is tested across them.
+    const batch = entry.dir.splice(0, 3)
+    sftp.name(
+      reqid,
+      batch.map((name) => {
+        const stat = fs.lstatSync(`${entry.path}/${name}`)
+        return { filename: name, longname: name, attrs: attrsOf(stat) as never }
+      }),
+    )
+  })
+
+  sftp.on("OPEN", (reqid, filename, flags, attrs) => {
+    log.push(`OPEN ${filename}`)
+    try {
+      const fd = fs.openSync(filename, openFlags(flags), attrs?.mode ?? 0o644)
+      sftp.handle(reqid, handle({ fd, path: filename }))
+    } catch (error) {
+      fail(reqid, error)
+    }
+  })
+
+  sftp.on("READ", (reqid, id, offset, length) => {
+    const entry = handles.get(id.toString())
+    if (entry?.fd === undefined) return sftp.status(reqid, STATUS_CODE.FAILURE)
+    const buffer = Buffer.alloc(length)
+    const read = fs.readSync(entry.fd, buffer, 0, length, offset)
+    if (read === 0) return sftp.status(reqid, STATUS_CODE.EOF)
+    sftp.data(reqid, buffer.subarray(0, read))
+  })
+
+  sftp.on("WRITE", (reqid, id, offset, data) => {
+    const entry = handles.get(id.toString())
+    if (entry?.fd === undefined) return sftp.status(reqid, STATUS_CODE.FAILURE)
+    fs.writeSync(entry.fd, data, 0, data.length, offset)
+    ok(reqid)
+  })
+
+  sftp.on("CLOSE", (reqid, id) => {
+    const entry = handles.get(id.toString())
+    handles.delete(id.toString())
+    if (entry?.fd !== undefined) fs.closeSync(entry.fd)
+    ok(reqid)
+  })
+
+  sftp.on("SETSTAT", (reqid, path, attrs) => {
+    log.push(`SETSTAT ${path}`)
+    try {
+      if (typeof attrs.mode === "number")
+        fs.chmodSync(path, attrs.mode & 0o7777)
+      ok(reqid)
+    } catch (error) {
+      fail(reqid, error)
+    }
+  })
+
+  sftp.on("MKDIR", (reqid, path, attrs) => {
+    log.push(`MKDIR ${path}`)
+    try {
+      fs.mkdirSync(path, { mode: attrs?.mode ?? 0o755 })
+      ok(reqid)
+    } catch (error) {
+      fail(reqid, error)
+    }
+  })
+
+  sftp.on("RMDIR", (reqid, path) => {
+    log.push(`RMDIR ${path}`)
+    try {
+      fs.rmdirSync(path)
+      ok(reqid)
+    } catch (error) {
+      fail(reqid, error)
+    }
+  })
+
+  sftp.on("REMOVE", (reqid, path) => {
+    log.push(`REMOVE ${path}`)
+    try {
+      fs.unlinkSync(path)
+      ok(reqid)
+    } catch (error) {
+      fail(reqid, error)
+    }
+  })
+
+  sftp.on("RENAME", (reqid, from, to) => {
+    log.push(`RENAME ${from} ${to}`)
+    try {
+      // As OpenSSH's sftp-server: never over a name that is taken.
+      if (fs.existsSync(to) || isLink(to)) {
+        return sftp.status(reqid, STATUS_CODE.FAILURE)
+      }
+      fs.renameSync(from, to)
+      ok(reqid)
+    } catch (error) {
+      fail(reqid, error)
+    }
+  })
+}
+
+function isLink(path: string): boolean {
+  try {
+    return fs.lstatSync(path).isSymbolicLink()
+  } catch {
+    return false
   }
 }

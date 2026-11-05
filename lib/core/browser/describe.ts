@@ -1,11 +1,14 @@
+import type { SecretSitesShown } from "../browser-secrets"
 import { siteKey } from "../fetch/rules"
+import { describeRecipe } from "../generate-password"
 import { visible, type ShownText } from "../permission-rules"
-import { EVALUATE_TIMEOUT_MS } from "./limits"
+import { EVALUATE_TIMEOUT_MS, SECRET_SIGN_IN_WINDOW_MS } from "./limits"
 import type {
   BrowseAsk,
   HandoverAsk,
   ScriptUseAsk,
   SecretRequestAsk,
+  SecretSitesChangeAsk,
   SecretUseAsk,
 } from "./types"
 
@@ -79,8 +82,15 @@ export function describeSecretUseAsk(
   const plain = ask.origin.startsWith("http:")
 
   return {
-    title: `Type the secret "${ask.secretName}" at ${hostOf(ask.origin)}?`,
+    title:
+      ask.part === "username"
+        ? `Type the login name of "${ask.secretName}" at ${hostOf(ask.origin)}?`
+        : `Type the secret "${ask.secretName}" at ${hostOf(ask.origin)}?`,
     lines: [
+      ...(ask.part === "username"
+        ? ["The login name you keep with the secret, not its password."]
+        : []),
+      `Allow once is for one sign-in: this, then its other part (the login name or the password) in this tab within ${SECRET_SIGN_IN_WINDOW_MS / 60_000} minutes.`,
       `Site: ${ask.origin}`,
       `Into: ${ask.field}`,
       `Page: ${ask.title || "(no title)"}`,
@@ -119,10 +129,51 @@ export function describeSecretRequestAsk(ask: SecretRequestAsk): {
       ask.kind === "totp"
         ? "One-time codes (TOTP): the seed the site showed when you set them up, base32 or an otpauth:// link. PCP types the code of the moment."
         : "A password or other text, typed as it is.",
+      ...(ask.username ? [`Login name: ${ask.username}`] : []),
+      ...(ask.generate
+        ? [
+            `It asks PCP to make a new password: ${describeRecipe(ask.generate)}. Nobody sees it but you, on the Secrets page.`,
+          ]
+        : []),
       `Sites: ${ask.origins.join(", ")}`,
     ],
     warning:
       "Type the value here, on PCP's page, never in the conversation. The assistant gets the secret's name only, and PCP types it only at the sites you leave in.",
+  }
+}
+
+/**
+ * An assistant proposing to change where one of the owner's secrets is
+ * typed: the sites it has now, each change, and a warning for a site that
+ * looks like one it has without being it.
+ */
+export function describeSecretSitesChangeAsk(
+  ask: SecretSitesChangeAsk,
+  shown: SecretSitesShown,
+): { title: string; lines: string[]; warning: string | null } {
+  const lookalikes = shown.changes.flatMap((change) =>
+    change.lookalike ? [change.lookalike] : [],
+  )
+  const fresh = shown.changes.filter((change) => change.newDomain)
+
+  return {
+    title: `Change where "${ask.secretName}" is typed?`,
+    lines: [
+      `It says: ${ask.reason}`,
+      shown.exists
+        ? `Sites now: ${shown.current.map((site) => (site.subdomains ? `${site.origin} and its subdomains` : site.origin)).join(", ") || "none"}`
+        : `The secret "${ask.secretName}" is no longer in PCP.`,
+      ...shown.changes.map(
+        (change) =>
+          `${change.action === "add" ? "Add" : "Take away"}: ${change.label}${change.noop ? " (already so)" : ""}`,
+      ),
+    ],
+    warning:
+      lookalikes.length > 0
+        ? `Check these: ${lookalikes.join(" ")} They are left unticked; tick one only if it is the site you mean.`
+        : fresh.length > 0
+          ? `${fresh.map((change) => change.origin).join(", ")} ${fresh.length === 1 ? "is" : "are"} under another domain than the secret's sites: make sure it belongs to the same sign-in.`
+          : null,
   }
 }
 

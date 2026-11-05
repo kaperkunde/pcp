@@ -16,7 +16,13 @@ import {
 } from "../permissions"
 import { markedReadOnly } from "../read-only"
 import { resourceLimits } from "../resources/state"
-import { effectLines, newRunId, reasonLabel, stateLabel } from "../code/runs"
+import {
+  effectLines,
+  labelRun,
+  newRunId,
+  reasonLabel,
+  stateLabel,
+} from "../code/runs"
 import type { CallOptions } from "../upstream"
 
 import {
@@ -196,6 +202,8 @@ async function callWrapperTool(
   // called it is told its id for its trace, and this run's answer names
   // that one back.
   const runId = newRunId()
+  // Named for the browser's list of tabs: the run that opened each.
+  labelRun(runId, label)
   /** What the run's calls noted: an old argument name a program used. */
   const notes: string[] = []
   onRun?.(runId)

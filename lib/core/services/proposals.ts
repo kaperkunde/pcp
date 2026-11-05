@@ -1,7 +1,7 @@
 import type { VaultContext } from "../context"
 import { db } from "../db"
 import { definitionBasis } from "../definitions"
-import { invalid, PcpError } from "../errors"
+import { invalid, isPcpError, PcpError } from "../errors"
 import type { ShownText } from "../permission-rules"
 import { checkPersonalNote, setPersonalNote } from "../personal-notes"
 import {
@@ -13,7 +13,6 @@ import {
 } from "../proposed-access"
 import {
   createSecretNamedAfter,
-  deleteSecret,
   findTextSecretByName,
   validateSecretName,
 } from "../secrets"
@@ -133,6 +132,14 @@ export async function prepareServiceProposal(
 
     definition = parseServiceDefinition(value)
     description = args.description ?? ""
+  }
+
+  // A build from a repository is the owner's alone: what it runs is made
+  // on their SSH server from code, not an image anyone pinned.
+  if (definition.build) {
+    throw invalid(
+      "This service is built from a repository on the SSH server, which only the owner sets up, on PCP's launch page (Servers, Add, Service). Propose an image pinned by digest instead, or ask them to launch it.",
+    )
   }
 
   // An exit is the owner's alone to add (lib/core/exits/): an assistant
@@ -362,8 +369,9 @@ export type ServiceLauncher = (
 
 /**
  * The owner said yes: launches exactly what they were shown, with the
- * secret they typed in (saved under the name shown, and removed again when
- * the launch fails), and gives the token that asked what it launched.
+ * secret they typed in (saved under the name shown, and kept when the
+ * launch fails, which the error says), and gives the token that asked what
+ * it launched.
  */
 export async function applyServiceChange(
   ctx: VaultContext,
@@ -437,9 +445,12 @@ export async function applyServiceChange(
       note: ask.note,
     })
   } catch (error) {
-    // The secret was typed in for this service alone.
+    // What the owner typed stays theirs: said so, never dropped unseen.
     if (saved) {
-      await deleteSecret(ctx, saved.id).catch(() => {})
+      throw new PcpError(
+        isPcpError(error) ? error.code : "upstream",
+        `${isPcpError(error) ? error.message : "Something went wrong inside PCP while launching it."}\nThe secret you entered is kept in PCP as "${saved.name}": an assistant that asks again can name it, and you can choose it when you launch the service yourself, or delete it on the Secrets page.`,
+      )
     }
 
     throw error

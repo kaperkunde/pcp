@@ -195,7 +195,9 @@ export async function refreshToolsAction(
             ? "PCP signed in."
             : server.kind === "service"
               ? "It is running."
-              : `Found ${toolCount(sync.toolCount)}.`,
+              : server.kind === "storage"
+                ? "PCP reached the folder."
+                : `Found ${toolCount(sync.toolCount)}.`,
     }
   })
 

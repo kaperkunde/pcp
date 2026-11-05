@@ -576,6 +576,10 @@ model SecretBrowserOrigin {
   secret    Secret   @relation(fields: [secretId], references: [id], onDelete: Cascade)
   /// https://host[:port], as URL.origin writes it.
   origin    String
+  /// The site and its subdomains: an origin at the same scheme and port
+  /// whose host ends in this one's, within the same registrable domain
+  /// (the public suffix list, browser-secrets.ts). Never another domain.
+  includeSubdomains Boolean @default(false) @map("include_subdomains")
   createdAt DateTime @default(now()) @map("created_at")
 
   @@id([secretId, origin])
@@ -603,7 +607,8 @@ model McpServer {
   /// ssh://host:port. caldav: the CalDAV server PCP finds the calendars
   /// from (https://caldav.icloud.com/). browser: the fixed "pcp:browser", which no request is
   /// ever sent to. wrapper: the fixed "pcp:wrapper", likewise. service: the
-  /// fixed "pcp:service": where it runs is in service_spec.
+  /// fixed "pcp:service": where it runs is in service_spec. storage: the
+  /// fixed "pcp:storage": the folder and its SSH server are in storage_root.
   url         String
   enabled     Boolean @default(true)
 
@@ -654,7 +659,7 @@ model McpServer {
   updatedAt     DateTime  @updatedAt @map("updated_at")
 
   /// mcp | openapi | jmap | imap | ssh | caldav | browser | wrapper |
-  /// service. An openapi
+  /// service | storage. An openapi
   /// server is an HTTP API described by an OpenAPI schema; its tools are the
   /// schema's operations and PCP calls them directly (lib/core/endpoints.ts).
   /// jmap and imap are mail accounts with a fixed set of mail tools
@@ -665,7 +670,9 @@ model McpServer {
   /// (lib/core/browser/). A wrapper's tools are programs the owner approved
   /// that call the vault's other tools (lib/core/wrappers/). A service is a
   /// container PCP runs with the owner's Docker or Podman on one of their
-  /// SSH servers (lib/core/services/), with tools to see and run it.
+  /// SSH servers (lib/core/services/), with tools to see and run it. A
+  /// storage root is a folder on one of their SSH servers that assistants
+  /// read and write files in over SFTP, confined to it (lib/core/storage/).
   kind       String  @default("mcp")
   /// openapi: where the schema came from, url | upload.
   specSource String? @map("spec_source")
@@ -673,6 +680,7 @@ model McpServer {
   specUrl    String? @map("spec_url")
   /// openapi: offer GET operations only. jmap/imap: offer the tools that
   /// read mail only. caldav: the tools that read calendars and reminders.
+  /// storage: the tools that read files only.
   readOnly   Boolean @default(false) @map("read_only")
   /// openapi: refuse private, loopback and link-local addresses, for the
   /// schema download and for every call. Set on endpoints an assistant
@@ -764,6 +772,8 @@ model McpServer {
   serviceSpec        ServiceSpec?        @relation("ServiceOwn")
   servicesHosted     ServiceSpec[]       @relation("ServiceHost")
   registeredBy       ServiceSpec?        @relation("ServiceRegistered")
+  storageRoot        StorageRoot?        @relation("StorageOwn")
+  storageHosted      StorageRoot[]       @relation("StorageHost")
   authHeaders        ServerAuthHeader[]
   toolResults        ToolResult[]
   repoItems          RepoItem[]
@@ -987,6 +997,36 @@ model ServiceSpec {
 
   @@index([hostId])
   @@map("service_spec")
+}
+
+/// storage: a folder on one of the owner's SSH servers that assistants read
+/// and write files in, over SFTP on PCP's own SSH connection, every path
+/// checked to stay inside it (lib/core/storage/). Its own server row (kind
+/// "storage") carries the file tools, so levels, tiers and read-only work
+/// as for any server. Only the owner adds or changes one, on the SSH
+/// server's page. Kept apart from the server row like a service's spec.
+model StorageRoot {
+  serverId  String     @id @map("server_id")
+  server    McpServer  @relation("StorageOwn", fields: [serverId], references: [id], onDelete: Cascade)
+  /// The SSH server the folder is on. Null once that server is deleted:
+  /// the folder stays there, and PCP no longer reaches it.
+  hostId    String?    @map("host_id")
+  host      McpServer? @relation("StorageHost", fields: [hostId], references: [id], onDelete: SetNull)
+  /// The folder, an absolute path on the SSH server. Every path a tool
+  /// names is resolved under it, and refused when its real path is not.
+  path      String
+  /// Whose files the owner wants these to be (a Samba share's user). SFTP
+  /// writes as the SSH login: when this differs, the page says so. Empty is
+  /// the login.
+  writeAs   String     @default("") @map("write_as")
+  /// The umask new files and folders get, as a number (2 is 002): PCP sets
+  /// their mode itself, whatever the server's own umask is.
+  umask     Int        @default(2)
+  createdAt DateTime   @default(now()) @map("created_at")
+  updatedAt DateTime   @updatedAt @map("updated_at")
+
+  @@index([hostId])
+  @@map("storage_root")
 }
 
 /// An OAuth authorization in flight: the state parameter sent to the

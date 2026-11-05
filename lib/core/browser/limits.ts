@@ -1,4 +1,4 @@
-import { BROWSER_VIEWPORT } from "../constants"
+import { BROWSER_VIEWPORT, MAX_SIGN_IN_IMPORT_BYTES } from "../constants"
 
 /**
  * Bounds on what the browser makes PCP do. Addresses, text to type and
@@ -38,6 +38,14 @@ export const FAVICON_BUFFER_BYTES = 512 * 1024
 export const MAX_WAIT_MS = 30_000
 /** The profile (the sign-ins) as JSON, before encryption. */
 export const MAX_PROFILE_BYTES = 8 * 1024 * 1024
+/**
+ * An owner's import of sign-ins made elsewhere (sign-in-import.ts): the
+ * text pasted or uploaded, the cookies in it (Chromium keeps about 3,300 in
+ * all) and the origins whose local storage it carries.
+ */
+export const MAX_IMPORT_BYTES = MAX_SIGN_IN_IMPORT_BYTES
+export const MAX_IMPORT_COOKIES = 3_000
+export const MAX_IMPORT_ORIGINS = 500
 /** A profile is saved at most this often while input streams in. */
 export const PROFILE_SAVE_INTERVAL_MS = 2_000
 /** read_page's text per call, unless the assistant asks for another length. */
@@ -207,6 +215,43 @@ export const DOWNLOAD_TIMEOUT_MS = 120_000
 export const TAB_DEADLINE_MS =
   2 * NAVIGATION_TIMEOUT_MS + CHALLENGE_WAIT_MS + 2 * ACTION_TIMEOUT_MS
 /**
+ * timeout_ms (call.ts): how long a browser call waits, in all, before it is
+ * answered with a `timeout` tool error naming the step it was at. tabs
+ * open, navigate and snapshot wait DEFAULT_CALL_TIMEOUT_MS unless the call
+ * says otherwise; the other tools wait for their tab's deadline alone
+ * unless timeout_ms is given. A default wait is lengthened by
+ * CHALLENGE_WAIT_MS while a site's check is up, so it does not cut short
+ * a check that passes on its own; one the call gave is kept to.
+ */
+export const DEFAULT_CALL_TIMEOUT_MS = 10_000
+export const MIN_CALL_TIMEOUT_MS = 1_000
+export const MAX_CALL_TIMEOUT_MS = 120_000
+/**
+ * A lane (queue.ts) refuses a call with `browser_busy` rather than queue it
+ * when this many calls already wait behind the one running, or when the
+ * wait it can expect is longer than the call would wait (its timeout_ms,
+ * else MAX_QUEUE_WAIT_MS). The wait is reckoned from the turns the lane
+ * took lately, a turn it has no history for counting EXPECTED_TURN_MS.
+ */
+export const MAX_LANE_QUEUE = 6
+export const MAX_QUEUE_WAIT_MS = 60_000
+export const EXPECTED_TURN_MS = 2_000
+/**
+ * A tab nobody used for this long is closed at the next browser call
+ * (sweep.ts, from call.ts), as is one whose run (run_code's, or a
+ * wrapper's) has ended and that nothing used for RUN_TAB_GRACE_MS since:
+ * at once when a tab is wanted and the browser is full.
+ */
+export const TAB_IDLE_TTL_MS = 30 * 60_000
+export const RUN_TAB_GRACE_MS = 2 * 60_000
+/**
+ * What snapshot, find and read_page look for that their tree leaves out
+ * (unseen.ts): iframes, at most this many looked at, and canvases at least
+ * this wide and high in CSS pixels (smaller ones are icons and the like).
+ */
+export const MAX_UNSEEN_FRAMES = 10
+export const MIN_UNSEEN_SIZE_PX = 40
+/**
  * A download's call holds its tab longer: the address opened or the
  * element clicked, the download's start, and the download itself.
  */
@@ -226,6 +271,13 @@ export const BROWSER_LOCK_DEADLINE_MS = 30_000
  */
 export const MAX_MASKED_FRAMES = 50
 /**
+ * A secret PCP typed is also looked for in every answer as the page may
+ * write it back reformatted (held.ts): white space and separators taken
+ * out, upper case. A value shorter than this, read that way, is masked as
+ * a whole word only: shorter ones would mask ordinary text.
+ */
+export const MIN_NORMALISED_MASK_CHARS = 6
+/**
  * The most of the owner's sign-ins at a page's site that navigate, snapshot
  * and tabs open name (sign-in-hint.ts).
  */
@@ -234,6 +286,14 @@ export const MAX_SIGN_IN_HINTS = 5
 export const MAX_SECRET_REQUEST_ORIGINS = 10
 /** How long request_secret's purpose may be. */
 export const MAX_SECRET_PURPOSE_CHARS = 500
+/**
+ * One sign-in on a once allowance (browser-secrets.ts): after one part of a
+ * secret (its login name or its password) is typed on it, the other part
+ * may follow once, in the same tab at the same site, within this long.
+ */
+export const SECRET_SIGN_IN_WINDOW_MS = 2 * 60_000
+/** The most open sign-in windows kept in memory, oldest dropped first. */
+export const MAX_SECRET_SIGN_IN_WINDOWS = 1_000
 /**
  * An assistant's mouse (input.ts clickAt, wheelAt, dragBetween): the moves
  * a drag is made of between its two points, and the pause between them, so

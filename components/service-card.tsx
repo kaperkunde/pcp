@@ -6,10 +6,11 @@ import { FormError, FormNote } from "@/components/form-status"
 import { LocalDate } from "@/components/local-date"
 import { SubmitButton } from "@/components/submit-button"
 import { Button } from "@/components/ui/button"
-import { Checkbox } from "@/components/ui/input"
+import { Checkbox, Input } from "@/components/ui/input"
 import { List, ListRow, ListSection, RowValue } from "@/components/ui/list"
 import type { ServerActionResult } from "@/lib/actions/servers"
 import {
+  checkServiceImageAction,
   removeServiceAction,
   runServiceActionAction,
   serviceLogsAction,
@@ -17,6 +18,7 @@ import {
   updateServiceAction,
 } from "@/lib/actions/services"
 import type { ServiceStatus, ServiceView } from "@/lib/core/services/services"
+import type { NewerImage } from "@/lib/core/services/updates"
 
 /**
  * A service's own section on its page: where it runs, what it runs and
@@ -168,31 +170,7 @@ export function ServiceCard({ view }: { view: ServiceView }) {
             )
           }
         />
-        <ListRow
-          title="Image"
-          description={
-            <span className="block font-mono text-xs break-all">
-              {view.definition.image}
-            </span>
-          }
-          trailing={
-            <Button
-              variant="secondary"
-              size="sm"
-              disabled={pending}
-              onClick={() =>
-                act(
-                  view.definition.source
-                    ? `Update ${view.name}? PCP pulls the newest ${view.definition.source}, pins its digest and makes the container again. Its data stays.`
-                    : `Make ${view.name}'s container again from its image? Its data stays.`,
-                  () => updateServiceAction(view.id),
-                )
-              }
-            >
-              {view.definition.source ? "Update" : "Recreate"}
-            </Button>
-          }
-        />
+        <ImageRow view={view} pending={pending} act={act} />
         {view.engine === "podman" && view.host ? (
           <ListRow
             title="When the SSH server restarts"
@@ -263,12 +241,168 @@ export function ServiceCard({ view }: { view: ServiceView }) {
   )
 }
 
+/**
+ * What it runs, and updating it: for an image it pulls, a look for a newer
+ * one of its source (on your click only, never on a timer) and Update; for
+ * one built from a repository, the commit it was built from and a new one
+ * to build.
+ */
+function ImageRow({
+  view,
+  pending,
+  act,
+}: {
+  view: ServiceView
+  pending: boolean
+  act: (
+    question: string | null,
+    action: () => Promise<ServerActionResult>,
+  ) => void
+}) {
+  const [checking, startChecking] = useTransition()
+  const [newer, setNewer] = useState<NewerImage | null>(null)
+  const [checkError, setCheckError] = useState<string | null>(null)
+  const build = view.definition.build
+  const [commit, setCommit] = useState(build?.commit ?? "")
+  const mono = "block font-mono text-xs break-all"
+
+  function lookForNewer() {
+    startChecking(async () => {
+      const read = await checkServiceImageAction(view.id)
+      if (read.status === "ok") {
+        setNewer(read.image)
+        setCheckError(null)
+      } else if (read.status === "error") {
+        setCheckError(read.error)
+      }
+    })
+  }
+
+  if (build) {
+    return (
+      <div
+        data-slot="list-row"
+        className="flex flex-col gap-2 px-4 py-3"
+        data-testid="service-build"
+      >
+        <span className="text-[15px] leading-snug">Image</span>
+        <span className="text-sm leading-relaxed text-muted-foreground">
+          Built on its SSH server from{" "}
+          <a
+            className="text-primary underline-offset-4 hover:underline"
+            href={`https://github.com/${build.repository}/tree/${build.commit}`}
+            rel="noreferrer"
+            target="_blank"
+          >
+            {build.repository}
+          </a>{" "}
+          at {build.commit.slice(0, 12)}, with {build.containerfile}
+          {build.context !== "." ? ` in ${build.context}` : ""}. It is never
+          pulled: a new commit is built there.
+        </span>
+        {view.definition.image ? (
+          <span className={mono}>{view.definition.image}</span>
+        ) : null}
+        <form
+          className="flex flex-wrap items-center gap-2"
+          onSubmit={(event) => {
+            event.preventDefault()
+            act(
+              commit.trim() === build.commit
+                ? `Make ${view.name}'s container again from the image built at ${build.commit.slice(0, 12)}? Its data stays.`
+                : `Build ${build.repository} at ${commit.trim().slice(0, 12)} on its SSH server and make ${view.name}'s container again from it? Its data stays.`,
+              () => updateServiceAction(view.id, commit),
+            )
+          }}
+        >
+          <Input
+            aria-label="Commit to build"
+            value={commit}
+            onChange={(event) => setCommit(event.target.value)}
+            className="min-w-0 flex-1 font-mono text-xs"
+            spellCheck={false}
+            pattern="[a-f0-9]{40}"
+            title="The commit's full id: 40 hex digits."
+          />
+          <Button
+            type="submit"
+            variant="secondary"
+            size="sm"
+            disabled={pending}
+          >
+            {commit.trim() === build.commit ? "Recreate" : "Build and update"}
+          </Button>
+        </form>
+      </div>
+    )
+  }
+
+  return (
+    <ListRow
+      title="Image"
+      description={
+        <>
+          <span className={mono}>{view.definition.image}</span>
+          {checkError ? (
+            <span className="mt-1 block text-destructive">{checkError}</span>
+          ) : newer ? (
+            <span className="mt-1 block" data-testid="newer-image">
+              {newer.newer ? (
+                <>
+                  A newer image of {newer.source}:{" "}
+                  <span className={mono}>{newer.newest}</span>
+                  Update pins it and makes the container again.
+                </>
+              ) : (
+                `It runs the newest ${newer.source}.`
+              )}
+            </span>
+          ) : null}
+        </>
+      }
+      trailing={
+        <div className="flex flex-wrap justify-end gap-2">
+          {view.definition.source ? (
+            <Button
+              variant="ghost"
+              size="sm"
+              disabled={pending || checking}
+              onClick={lookForNewer}
+            >
+              {checking ? "Looking…" : "Check for a newer image"}
+            </Button>
+          ) : null}
+          <Button
+            variant="secondary"
+            size="sm"
+            disabled={pending}
+            onClick={() =>
+              act(
+                view.definition.source
+                  ? `Update ${view.name}? PCP pulls the newest ${view.definition.source}, pins its digest and makes the container again. Its data stays.`
+                  : `Make ${view.name}'s container again from its image? Its data stays.`,
+                async () => {
+                  const done = await updateServiceAction(view.id)
+                  setNewer(null)
+                  return done
+                },
+              )
+            }
+          >
+            {view.definition.source ? "Update" : "Recreate"}
+          </Button>
+        </div>
+      }
+    />
+  )
+}
+
 /** How PCP reaches it, and what it does when it finds it stopped. */
 function reachWords(view: ServiceView): string {
   const how =
     view.reach === "tunnel"
       ? "PCP reaches it through the SSH connection."
-      : `PCP reaches it from its own machine at the published address, and through the SSH connection once you ${view.definition.source ? "update" : "recreate"} it.`
+      : `PCP reaches it from its own machine at the published address, and through the SSH connection once you ${view.definition.source || view.definition.build ? "update" : "recreate"} it.`
   const stopped =
     view.intent === "stopped"
       ? " It was stopped through PCP, so PCP leaves it stopped until it is started again."

@@ -1,5 +1,6 @@
-import type { ToolAccess } from "../constants"
+import type { PasswordRecipe, ToolAccess } from "../constants"
 import type { FetchArgs } from "../fetch/request"
+import type { ServiceUpdateAsk } from "../services/updates"
 
 /**
  * What the rest of PCP knows about the browser without loading it: a tab
@@ -99,12 +100,22 @@ export type SecretUseAsk = {
   /** The field, as the call named it: its ref, or its role and name. */
   field: string
   call: SecretTypeCall
+  /** "username": the secret's login name is typed, not its value. */
+  part?: SecretPart
 }
+
+/**
+ * Which part of one of the owner's secrets type's {"$secret": name, "part"}
+ * types: its value (a password, or a TOTP secret's code of the moment), or
+ * the login name the owner keeps with it.
+ */
+export type SecretPart = "password" | "username"
 
 /**
  * An assistant asking the owner to store a secret for the browser to type
  * (request_secret): its name, what it is for and where it goes. The owner
- * types the value in on PCP's page; nothing of it comes back but the name.
+ * types the value in on PCP's page (or has PCP make one, `generate`);
+ * nothing of it comes back but the name.
  */
 export type SecretRequestAsk = {
   serverId: string
@@ -112,6 +123,27 @@ export type SecretRequestAsk = {
   purpose: string
   origins: string[]
   kind: "text" | "totp"
+  /** The login name it goes with, filled in on the page for the owner to check. */
+  username?: string | null
+  /** The password PCP is asked to make, which the page starts from. */
+  generate?: PasswordRecipe | null
+}
+
+/** A site an assistant proposes for one of the owner's secrets. */
+export type ProposedSecretSite = { origin: string; subdomains: boolean }
+
+/**
+ * An assistant proposing to change where one of the owner's secrets is
+ * typed (update_secret_sites): sites to add or take away, and why. Always
+ * the owner's to answer, whatever the token's levels; the value is never
+ * part of it.
+ */
+export type SecretSitesChangeAsk = {
+  serverId: string
+  secretName: string
+  reason: string
+  add: ProposedSecretSite[]
+  remove: string[]
 }
 
 /**
@@ -134,6 +166,7 @@ export type BrowserAsk =
   | { kind: "browser_handover"; input: HandoverAsk }
   | { kind: "secret_use"; input: SecretUseAsk }
   | { kind: "secret_request"; input: SecretRequestAsk }
+  | { kind: "secret_sites_change"; input: SecretSitesChangeAsk }
   | { kind: "exit_use"; input: ExitUseAsk }
   | { kind: "script_use"; input: ScriptUseAsk }
 
@@ -156,16 +189,25 @@ export type SecretUseContext = {
  */
 export type SecretTyper = {
   name: string
+  /** What is typed: the value (the default), or the login name. */
+  part: SecretPart
   value(use: SecretUseContext): Promise<string>
 }
 
 /**
- * Thrown by a browser tool when the owner has to answer first. The call
- * that ran the tool (permissions.ts runCall) turns it into a permission
- * request, so the browser never imports the permission flow.
+ * What a tool outside the browser asks the owner the same way: a service's
+ * `update`, an image update to agree to (services/updates.ts).
+ */
+export type OwnerAsk =
+  BrowserAsk | { kind: "service_change"; input: ServiceUpdateAsk }
+
+/**
+ * Thrown by a browser tool (or a service's `update`) when the owner has to
+ * answer first. The call that ran the tool (permissions.ts runCall) turns
+ * it into a permission request, so neither imports the permission flow.
  */
 export class OwnerNeeded extends Error {
-  constructor(readonly ask: BrowserAsk) {
+  constructor(readonly ask: OwnerAsk) {
     super("The owner's answer is needed first.")
     this.name = "OwnerNeeded"
   }

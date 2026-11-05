@@ -300,3 +300,33 @@ export function duplicateRun(
 export function forgetRuns(): void {
   registry().clear()
 }
+
+type Labels = Map<string, string>
+
+const LABELS = Symbol.for("pcp.code.runLabels")
+
+function labels(): Labels {
+  const holder = globalThis as unknown as { [LABELS]?: Labels }
+  holder[LABELS] ??= new Map()
+  return holder[LABELS]
+}
+
+/**
+ * Names a wrapper's run by its tool ("server/tool"), for the browser's
+ * list of tabs (which run opened each): the newest MAX_REMEMBERED_RUNS,
+ * nothing else of the run.
+ */
+export function labelRun(id: string, label: string): void {
+  const named = labels()
+  named.set(id, label)
+
+  for (const old of named.keys()) {
+    if (named.size <= MAX_REMEMBERED_RUNS) break
+    named.delete(old)
+  }
+}
+
+/** What a run is of: a wrapper's tool, "run_code", or null when unknown. */
+export function runLabel(id: string): string | null {
+  return labels().get(id) ?? (registry().has(id) ? "run_code" : null)
+}

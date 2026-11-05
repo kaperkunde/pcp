@@ -84,6 +84,16 @@ export async function decidePermissionAction(
    * (PermissionView `proposedAccess`), checked against the request.
    */
   access?: Array<{ pattern: string; access?: string; tier?: string }>,
+  /**
+   * A secret for the browser: the login name left on the page and the
+   * recipe of a password PCP makes (request_secret), or the site changes
+   * ticked and the sites as shown (update_secret_sites).
+   */
+  browserSecret?: {
+    loginName?: string
+    generate?: Record<string, unknown>
+    sites?: { basis?: string; keep?: string[] }
+  },
 ): Promise<DecidePermissionResult> {
   const ctx = await requireContext()
   const publicUrl = await publicUrlFor(ctx)
@@ -116,6 +126,30 @@ export async function decidePermissionAction(
           revision: typeof revision === "string" ? revision : undefined,
           allowPrivate: allowPrivate === true,
           access: Array.isArray(access) ? access : undefined,
+          loginName:
+            typeof browserSecret?.loginName === "string"
+              ? browserSecret.loginName
+              : undefined,
+          // Checked in full by checkPasswordRecipe before anything is made.
+          generate:
+            browserSecret?.generate &&
+            typeof browserSecret.generate === "object"
+              ? browserSecret.generate
+              : undefined,
+          sites:
+            browserSecret?.sites && typeof browserSecret.sites === "object"
+              ? {
+                  basis:
+                    typeof browserSecret.sites.basis === "string"
+                      ? browserSecret.sites.basis
+                      : undefined,
+                  keep: Array.isArray(browserSecret.sites.keep)
+                    ? browserSecret.sites.keep.filter(
+                        (key) => typeof key === "string",
+                      )
+                    : undefined,
+                }
+              : undefined,
         },
       )
       const message = outcome.content

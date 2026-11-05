@@ -246,9 +246,23 @@ send is reported in its status. `executeCall` sends it with a timeout and a
 cap on the answer, **without following redirects** (`fetch` would repeat a
 custom header such as `X-API-Key` on the next host), turns the answer into a
 tool result (JSON pretty-printed and, when small, as `structuredContent`; text
-as it is; other types described, not dumped; an error status as an error
-result), and removes the credential from it before parsing, because an API
-that echoes a key back (in an error, say) must not hand it to the assistant.
+as it is; an error status as an error result), and removes the credential
+from it before parsing, because an API that echoes a key back (in an error,
+say) must not hand it to the assistant. A **file** (a successful answer of
+any other type, a PDF or an image, or of a type the operation declares with a
+schema of `format: binary`, which the plan keeps as `fileAnswers`) is kept
+whole as the token's result (`keepBytes`) and answered as its handle,
+`{file: {"$result", type, size, name}, note}`, the name from
+`Content-Disposition` without a path, so call_tool, a program's `pcp.call`
+and a wrapper pass it on without reading it; describe's `returns` says so.
+It is read up to its own cap, the smaller of `MAX_FILE_RESPONSE_BYTES`
+(`openapi/limits.ts`) and the largest file PCP keeps (`resourceLimits()`),
+and a larger one is refused, never cut (a `Content-Length` past it is refused
+before any of it is read). Its bytes are not text to scrub: a file that holds
+the credential as it was sent is refused, the type is kept only as a plain
+`type/subtype` without it, and the name is scrubbed; text declared as a file
+is scrubbed like any text and kept as UTF-8. Without a keeper (no token), a
+file is described, not dumped, as before.
 
 **Where requests go** is the owner's choice, made once. The base URL is the
 owner's own field when filled, otherwise the schema's first server, resolved
@@ -887,7 +901,8 @@ or local address is flagged to the owner alone, as for IMAP.
 An SSH server is a server row of kind `ssh` (`url` is `ssh://host:port`,
 `auth_username` the login) whose one tool, `run_command`, runs one command per
 call with `exec`: no shell session kept between calls, no terminal, no
-agent, no file transfer, and no forwarding but the outbound channels of an
+agent, no file transfer but a storage folder's SFTP (below, [Storage
+folders](#storage-folders)), and no forwarding but the outbound channels of an
 exit or a service (below, [Exits](#exits) and [Services](#services)). Only the owner adds one, on the
 Servers page; `register_server` has no kind for it, because a shell on a
 machine is more than an assistant should be able to ask for in a sentence.
@@ -958,7 +973,85 @@ browser's exit proxy, between requests) only an open connection is used, so
 nothing reconnects in the background. A server that refuses the channel
 ("administratively prohibited": `AllowTcpForwarding no`, or `restrict` /
 `no-port-forwarding` on PCP's key) is said to, in those words. A changed
-address, login, host key or PCP key closes the server's connection.
+address, login, host key or PCP key closes the server's connection. The
+long-lived connection sets TCP_NODELAY: its traffic is many small requests
+and answers (SFTP's, a proxy's handshake), and Nagle's algorithm held each
+for a delayed acknowledgement.
+
+## Storage folders
+
+A storage folder (a storage root in code, `lib/core/storage/`) is a folder on
+one of the owner's SSH servers that assistants work with files in. It is a
+server row of kind `storage` (`url` the fixed `pcp:storage`) with a
+`storage_root` row beside it: the SSH server (`host_id`, null once that is
+deleted, when the folder says so and PCP no longer reaches it), the folder's
+absolute path, whose files the owner wants these to be (`write_as`) and the
+umask for what PCP makes (`umask`, 002 by default, so a Samba share's group
+sees ordinary files). Being a server, it has levels, tiers, read-only,
+pacing, search and describe as any other; it has no definition, and it is
+never an item in a linked repository. Only the owner adds one, from the SSH
+server's page, and changes it on its own; `register_server` has no kind for
+it, as for the SSH server itself. Its rows are exported and wiped with the
+vault.
+
+**SFTP, confined to the root.** The files travel over SFTP on the SSH
+server's long-lived connection (`ssh/client.ts openSftp`): the subsystem is
+opened only on a host whose key the owner pinned, with PCP's key, which
+`upstream.ts storageConnect` decrypts when a request opens the session and
+hands to the ssh module (a `StorageConnect`, as a service gets a
+`ServiceHost`); nothing connects in the background, and the session closes
+when the call is done. Nothing else in PCP asks for a subsystem. Every path
+a call names is relative to the root and confined by `storage/files.ts`:
+`..` is refused before anything connects (`paths.ts`), the folder a name is
+in is resolved by its real path on the server, which must be the root's real
+path or inside it, and what the name is is looked at without following a
+link (lstat). A link is followed only to read or list through it, and only
+when its real path is inside too; deleting or moving a link acts on the link
+itself. So neither `..` nor a symbolic link leads out. The race between that
+check and the operation is the server's own (someone who can write in the
+folder there could swap a folder for a link); PCP has no `openat` over SFTP.
+
+**Writes are whole or nothing.** `save_file` writes under a part name
+(`<name>.<random>.pcp-part`) with exclusive create, sets its mode from the
+root's umask (after the server's own umask had its say), and renames it into
+place. SFTP's own rename fails when the name is taken (OpenSSH links and
+unlinks), so a file is never replaced unless the call says `overwrite`, which
+uses OpenSSH's `posix-rename` where the server has it and otherwise removes
+the old file first. A failed write removes its part file. SFTP writes as the
+SSH login: "write as" is what the owner wants, and the page says so when
+that is not the login (sign PCP in as that user, or give the login the
+folder's group); PCP adds no sudo and no chown.
+
+**Tools** (`storage/tools.ts`, defined with `defineInnerTool` and checked by
+the one validator before anything connects): `list_folder` (at most 1,000
+entries, folders first, links marked inside, outside or nowhere),
+`find_files` (a name glob with `*`, `?` and `[...]`, matched against names
+only, case ignored by default; at most 500 matches, 2,000 folders and 32
+levels, links never followed), `get_file` (the file kept for the token as
+a kept result, its handle answered with its size, type and date and, for
+text, its start; a file over the largest file PCP keeps,
+`resourceLimits().fileBytes`, is refused), `save_file` (a kept result's
+handle as `file`, read as bytes from the token's own results before
+anything connects, or `text`), `make_folder` (with `parents`), `move`
+(within the folder; never a folder into itself, never over a folder) and
+`delete` (Destructive: a file, a link, an empty folder, or with `recursive`
+a folder and everything in it, at most 10,000 entries, never following a
+link). A read-only folder offers the first three and refuses the rest. SFTP
+failures are tool errors in PCP's words (nothing there, permission
+denied); a key the server turns down or another host key answers with the
+SSH server's page; a server that cannot be reached is an error. Limits are
+in `storage/limits.ts`; the test server answers SFTP on the machine's own
+file system (`ssh/fake-server.ts`, `storage/storage.test.ts`).
+
+**The file browser** (`/servers/<id>/files`) is the owner's: one folder at a
+time, read over SFTP when the page loads, with sizes and dates, upload (a
+Server Action), a new folder, rename or move, and delete with a confirm, all
+through the same confinement, and none of them on a read-only folder.
+Download is a route handler (`app/api/storage/[id]/download`), like the
+export's, because a file needs `Content-Disposition` and may be larger than
+an action's answer: it checks the request came from PCP's own page and the
+owner's session, and streams the file from the SSH server as it is read,
+keeping nothing.
 
 ## Services
 
@@ -967,9 +1060,10 @@ already runs on one of their SSH servers, Coolify-style: by running the
 engine's own command line over SSH `exec` (`lib/core/services/`). PCP never
 installs an engine, never reaches its socket (on the SSH server or its own
 machine), and starts no child process: the commands run on the SSH server,
-through the ssh module's client. Only the owner launches, changes and removes
-one (Servers → Add → Service); an assistant uses its tools at the owner's
-levels, and proposes one as a permission request (below).
+through the ssh module's client. Only the owner launches, changes, updates
+and removes one (Servers → Add → Service), and only the owner has one built
+from a repository; an assistant uses its tools at the owner's levels, and
+proposes one, or an image update, as a permission request (below).
 
 **Rows.** A service is a server row of kind `service` (`url` the fixed
 `pcp:service`), an instance of a definition of kind `service`, with a
@@ -977,7 +1071,8 @@ levels, and proposes one as a permission request (below).
 
 - `definition` (shared, JSON, `services/definition.ts`): the image pinned by
   digest (`repository@sha256:…`) and optionally the `source` tag an update
-  resolves to a new digest; its container `ports`; its variables (`env`: a
+  resolves to a new digest, or, the owner's alone, a `build` (below) and
+  the image id PCP built from it (`localhost/pcp-<repo>@sha256:<id>`); its container `ports`; its variables (`env`: a
   name, a description, whether it is required, whether the owner types its
   value per instance (`plain`: a provider, a country; no secret), and
   optionally a fixed value that is no secret); its `volumes`, named volumes only, made on the host as
@@ -1019,12 +1114,45 @@ after it. The variables' values go over standard input: the script sets
 deletes it on exit, so a value is never on a command line (where `ps` shows
 it) and a value with a line break is refused (an env file cannot carry
 one). State is read with `inspect --format` naming only the state, the
-image and the labels, never the whole inspect (which holds the
+image, its id and the labels, never the whole inspect (which holds the
 environment). Logs are `logs --timestamps --tail N [--since]`, bounded
 (`services/limits.ts`), and every secret value is scrubbed from them and
 from every engine error. Start, stop (with a grace time) and restart are the
 engine's own; a container whose `pcp.service` label is not the service's is
 left alone.
+
+**Built from a repository** (`build`, the owner's alone). Instead of an
+image to pull, the owner's definition can name a public GitHub repository
+(`owner/name`), a commit by its full 40-hex id, the Containerfile's path
+and the build's folder in it (`REPOSITORY_PATH`: relative, no `..`, no
+leading dash) and build arguments (a variable's name and one line, no
+secret: they show in the image). `engine.ts buildScript` is one script over
+`exec`: a folder of its own (`mktemp -d`, removed on exit, hang-up or
+interrupt), the tarball at the commit from
+`https://codeload.github.com/<repo>/tar.gz/<commit>` with curl
+(`--proto =https`, bounded in time and size, no redirect followed) or else
+wget, whichever the login has (neither is said so), its size checked
+against `MAX_BUILD_SOURCE_BYTES`, unpacked with tar (`--no-same-owner`),
+the Containerfile and the build's folder resolved with `pwd -P` and refused
+when they lead out of the unpacked repository (a link to `/` would make the
+SSH server's own files the build's context) or the Containerfile is a link,
+then `<engine> build --file … --iidfile … --tag
+localhost/pcp-<repo>:<commit12> [--build-arg …] <context>`, its output kept
+to a bounded tail for an error, within `BUILD_TIMEOUT_MS`. The image id is
+read back, an image larger than `MAX_BUILT_IMAGE_BYTES` is removed again
+and refused, and the definition pins `localhost/pcp-<repo>@sha256:<id>`:
+`pullImage` refuses it, `run` names it by its id (`runReference`), and the
+status compares the container's image id with it. A launch, a remake or
+another instance on a host without that image builds it again from the
+same commit (`ensureImage`) and pins what it built (every instance's
+definition, `writeServiceDefinition`). Update is a new commit, typed on the
+service's page. An assistant's `register_server` refuses a definition with
+a `build`, its `update` refuses a built service, and a linked repository
+never shares one (`repos/local.ts` lists it as skipped, and a document
+with `build` is refused, so format 3 stays as it was). Private
+repositories and Compose files are not supported yet. The engine pulls
+what the Containerfile's `FROM` names by its own tag: pin it there by
+digest for a build that stays the same.
 
 **Secrets.** Decrypted only in `upstream.ts`, which builds a `ServiceAccess`
 for the services module: a `ServiceHost` (runs one command on the SSH server
@@ -1074,10 +1202,23 @@ serves at `http://127.0.0.1:<port>` (as the SSH server reaches it): an API
 endpoint (`createEndpoint` with the schema at `specPath`, the base URL at
 `basePath`, `publicOnly` off, since it is the owner's own machine, and the
 `auth` variable's secret as its header) or an MCP server (`createServer`,
-its tools read at once). A failure past starting the container removes the
-container and its volumes and whatever was made, and the error says what was
-taken back, with the container's last lines (scrubbed) when it did not
-become healthy.
+its tools read at once). Before `run`, PCP reads which of the definition's
+volumes are on the SSH server already (`existingVolumes`: a service removed
+before with its data kept); a failure from `run` on (Docker's `run
+--detach` makes the container and its volumes before it starts it, so a
+port in use leaves both) removes the container and only the volumes this
+launch made, and whatever was made in PCP, and the error says what was
+taken back and what was kept, with the container's first and last lines
+(scrubbed). `removeContainer` takes a container or volume that is gone as
+removed and reports anything else the engine refused, which the error then
+names as left on the SSH server to remove by hand. A secret the owner typed
+for the launch (on the launch form, or on an assistant's request) is kept
+when it fails, and the error names it, so they choose it when they try
+again. Making a container again (`recreateServiceOn`: an update, a changed
+secret, Start on a gone container) gets the image first, then removes the
+old container; when the new one does not start, the one made is removed
+(its volumes stay), the service's row is marked failed, and the error says
+that Start makes it again once what stopped it is fixed.
 
 **Status** is read only inside a request: the service's page when it opens
 (and on Check), `check_server` (for the service and for the server it
@@ -1112,11 +1253,25 @@ unit, which a Podman service's page says.
 **Tools** (`services/tools.ts`, on the service's own server): `status` and
 `logs` (read-only; `lines` 1 to 500, `since_minutes` up to a week), `start`
 (makes the container again from the definition when it is gone), `stop` and
-`restart`, their arguments checked before anything connects. None takes a
-command, an image or a variable. **Update** (the owner's) resolves the
-definition's `source` to its newest digest, pins it on the definition and
-makes this instance's container again; other instances show that they run an
-older image. **Remove** (the owner's, on the service's page; `deleteServer`
+`restart`, their arguments checked before anything connects, and `update`
+(below), which only proposes. None takes a command or a variable.
+**Update** (the owner's) resolves the definition's `source` to its newest
+digest, pins it on the definition and makes this instance's container
+again; other instances show that they run an older image. **Check for a
+newer image** on the page resolves the same digest (a pull and the digest
+the engine names, `updates.ts newerImageOn`) without making anything again,
+on the owner's click only, and shows both digests. **An assistant's
+`update`** (`services/updates.ts`) resolves the newest digest of the source
+(or takes a `digest` it names, which must be in the repository the service
+runs) and, when it differs, throws `OwnerNeeded` with a `service_change`
+request (`action: "update"`; the request's server is the service, its tool
+`update`) that shows the image it runs and the one it would run, both by
+digest, the tag it came from, and the other instances that share the
+definition; "Update it" runs `updateServiceOn` with that image and the
+definition's hash as it was (`basis`): changed since, nothing is updated.
+It is the service's own tool rather than `register_server` because the
+digest is resolved on the service's SSH server, which the call to the
+service already reaches, and `register_server` is for something new. **Remove** (the owner's, on the service's page; `deleteServer`
 refuses a service) removes the container first, its volumes and the server
 it serves as chosen.
 
@@ -1145,14 +1300,19 @@ every variable with its secret by name or fixed value, the volumes,
 arguments, health check, what PCP adds, the note and the definition in
 full; the owner launches it as shown or declines (they change nothing on
 the page). `applyServiceChange` launches exactly that through
-`launchService`, removing a typed secret again when the launch fails, and
+`launchService`, keeping a typed secret when the launch fails (the error
+names it), and
 gives a token scoped to chosen servers the service and what it serves.
 With `definition` it is another of a service definition the token sees,
-its own part only, launched while `definitionBasis` holds.
+its own part only, launched while `definitionBasis` holds. A definition
+with a `build` is refused: a build is the owner's alone.
 
 The test engine (`services/fake-docker.ts`) is a Node program on the PATH of
 a real sh that the test SSH server runs each command in, recording the
-words it got and the env file it read.
+words it got and the env file it read; it keeps named volumes, fails `run`
+after making the container when asked, and builds (checking the
+Containerfile and context the script hands it) from a test's tarball that
+its own curl and wget hand over.
 
 ## Exits
 
@@ -1918,7 +2078,8 @@ three parts:
   engine has the language and nothing of Node's: no `require`, `process`,
   `fetch`, timers or file system. Two host functions are put on its global
   object, and a prelude takes them off at once and wraps them as `pcp`
-  (`call`, `read`, `keep`, `tools`, `step`, `image`, `video`) and `console`;
+  (`call`, `read`, `keep`, `tools`, `step`, `image`, `video`, `sleep`,
+  `withTimeout`) and `console`;
   only strings cross, both ways, so the host never holds one of the
   program's objects. Memory is a
   `WebAssembly.Memory` made with a maximum (128 MB), which the WebAssembly
@@ -1933,13 +2094,30 @@ three parts:
 - **The bridge** (`run.ts`) is everything the program can ask for, as an
   operation name and a JSON payload it checks as untrusted: `call` (a
   server, a tool, its arguments, and call_tool's `fields`, `decode` and
-  `keep`), `read` (one of the token's own kept results, as text), `keep`
+  `keep`), `read` (one of the token's own kept results, as text or base64, whole
+  or a part: `offset` and `length` count a file's bytes or a text's
+  characters, so a program reads a large file a piece at a time within the
+  same bound on one answer), `keep`
   (a text kept as a result of the token's, returning its handle), `tools`
   (the token's servers, or one's tools, as `list_tools` gives them),
   `describe` (one of those tools as `describe` gives it, from the catalogue
   and without a call_handle, since `call` takes names; a blocked or unknown
-  tool is refused as a call to it would be, and no server is read) and
-  `media` (below). `tools` and `describe` are run_code's only: a wrapper's
+  tool is refused as a call to it would be, and no server is read),
+  `media` (below), and the waits: `sleep` (`pcp.sleep(ms)`, at most
+  `MAX_SLEEP_MS`, a minute, at once, and refused past what is left of the
+  run), `deadline` and `cancel` (`pcp.withTimeout(ms, fn)`'s timer, raced
+  against `fn` in the prelude and cancelled when `fn` settles first; on time
+  it rejects with a catchable `TimeoutError`, code `timeout`). Every wait is
+  a timer of PCP's in the bridge, counted against the run's wall clock and
+  ended with the run, `MAX_WAITS_PER_RUN` (200) a run; the program never
+  holds a timer, only a promise. What `withTimeout` gave up on is abandoned,
+  not taken back: a call under way goes on to its end (or the run's), and
+  may have gone through, which its error says. A tool error with a code of
+  its own (`_meta["gg.pcp/error"]`: `timeout`, `browser_busy`, …) reaches the
+  program as `error.code`, with `error.retryAfterMs` where it says when to
+  try again (`answers.ts errorCodeOf`), as a paced call's does. The sandbox's
+  `pcp.py` has `sleep` through the same bridge and `with_timeout` on a
+  thread of its own. `tools` and `describe` are run_code's only: a wrapper's
   program is refused both. A handle
   PCP wrote into an answer is made bare (`{"$result"}`) before a call, so a
   program passes on what it was handed as it is. Limits are in
@@ -2286,7 +2464,15 @@ Chromium's own, with its complete client hints, when there is a window (on
 the virtual display or in the desktop app); headless, its `platformVersion`
 hint stays blank. The locale and time zone are the container process's
 (`LANG` and `TZ`, which the installer passes in from the host; Compose users
-set them), and the viewport is 1280 by 800. Service workers are refused, not
+set them), and the viewport is 1280 by 800. The locale is Chromium's own
+languages, not Playwright's `locale` (which sends the bare locale as
+`Accept-Language` and lists it alone in `navigator.languages`, as no
+person's Chrome does): Chromium starts with `--lang=<locale>` and
+`--accept-lang=<locale>,<language>` (`launch.ts browserLanguages`), so it
+sends `en-US,en;q=0.9` and lists `["en-US", "en"]`, in pages and workers,
+in every mode; the pages' `Intl` locale follows `LANG`, as Node's does.
+Media devices are what the machine has: in the container image none (no
+sound server, no camera), so a page counts no speaker or microphone. Service workers are refused, not
 by an option (a service worker could answer a navigation without the network,
 around the gate): the gate refuses a service worker's script request itself
 (one marked `Service-Worker: script`), so registration fails, and no script is
@@ -2424,6 +2610,26 @@ the browser. The idle close has no key and saves nothing, so what a page
 changed on its own since the last save is lost. Counts (sites, cookies,
 size) are kept in the clear for the page. An export carries the row as
 ciphertext; Forget all sites closes the browser unsaved and deletes it.
+
+Sign-ins come from the browser's own use (a tab the owner signs in on, or
+an assistant's) or from the owner's import of one made elsewhere
+(`sign-in-import.ts`, the Browser page's Sign-ins section; never a tool, and
+nothing of it reaches an assistant). The owner pastes or chooses
+Playwright's storage state, a JSON cookie list (the `chrome.cookies` shape
+extensions such as Cookie-Editor save) or a Netscape cookies.txt, at most
+8 MB and 3,000 cookies. Each cookie is checked as Chromium would take it
+(name, value, domain, path, prefixes, SameSite=None only with Secure), since
+one Chromium refuses would keep the context from starting; expired ones,
+IP addresses, `localhost`, and PCP's own host with its subdomains and the
+domains above it are left out, and IndexedDB is not imported (local storage
+is). The preview names the sites and counts, what is left out and why, and
+what the profile holds for those sites now. Confirm sends the text again
+with the preview's `basis` (its SHA-256), and the import writes only that:
+inside `withBrowserClosed` (the browser's profile saved, then closed, so it
+cannot save over the import), each site the import names (its host, its
+subdomains and the domains above it) loses what the profile held, cookies
+and storage alike, and takes the import's; every other site stays. It is
+written through `writeProfile`, encrypted as any save is.
 Starting the browser for a page read for web_fetch loads the profile into the
 vault's own context as any start does; the read happens in a context of its
 own, which never touches the profile and is never saved.
@@ -2474,9 +2680,10 @@ Hosts are never logged.
 **What an assistant gets.** The tools are `tabs`, `navigate`, `back`,
 `snapshot`, `read_page`, `find`, `click`, `drag`, `type`, `press_key`,
 `select_option`, `upload_file`, `scroll`, `wait_for`, `screenshot`,
-`download`, `handle_dialog`, `hand_over`, `request_secret`, `evaluate`,
-`console_log` and `network_log`. Every one but
-`tabs`' open and list and `request_secret` names its tab (below). An assistant reads a snapshot (Playwright's
+`download`, `handle_dialog`, `hand_over`, `request_secret`,
+`update_secret_sites`, `evaluate`, `console_log` and `network_log`. Every one
+but `tabs`' open and list, `request_secret` and `update_secret_sites` names
+its tab (below). An assistant reads a snapshot (Playwright's
 accessibility tree, with PCP's refs, below), `find`'s elements of it as JSON (role, name,
 ref, states, and the landmark or region each is in, which tells two lines
 that read the same apart; `within` searches one element; `query` is taken
@@ -2489,7 +2696,19 @@ web_fetch's Markdown is unchanged. A page whose HTML holds next to no text,
 does, is read from the tab's snapshot instead, `snapshotText`, and the answer
 says so; a page with no words at all answers "(no text)"), a screenshot of
 the viewport or of one element, and the tab's address, title and the link
-to it in PCP. It acts by ref, or by a target
+to it in PCP. A screenshot's answer says how to read the text in it: pass
+its handle to an OCR tool, naming one the token can call when it has one
+(`ocr.ts`: found by its words, OCR in its name, description or arguments,
+or a `force_ocr` argument, never by vendor), since `read_result` does not
+show an image. What the tree cannot read is named (`unseen.ts`, in PCP's
+own world: Playwright's handles and the tab's DevTools session, never page
+script): an iframe the snapshot shows empty (by its ref, and whether it is
+cross-origin), a closed shadow root (`DOM.getDocument` with `pierce`), a
+canvas at least `MIN_UNSEEN_SIZE_PX` square, with the screenshot and OCR
+route; on `navigate`, `tabs` open and `snapshot`, on `read_page`'s whole
+page (whose HTML is the main frame's, so every iframe counts there), and on
+a `find` that matches nothing (its `unseen`, which for a form-like query
+says the form may be in one of them). It acts by ref, or by a target
 (`target.ts`: a role and a name, as Playwright's `getByRole` finds them,
 optionally `exact`, the `nth` of several, `within` an element), which a
 program can name without a snapshot; a target that is not exactly one
@@ -2521,7 +2740,10 @@ per tab and never reused, so an answer tells a ref whose element has gone
 (or is hidden or covered: Playwright gives such an element no ref) from
 one the tab never gave. A new document in the tab (its `performance.timeOrigin`,
 read in PCP's own world) starts the matching afresh; a frame's elements keep
-its mark (`f1e12`). The map holds the latest snapshot's elements
+its mark (`f1e12`), and the page's own never have one, though Playwright
+marks the main frame too once a navigation to another site replaced it
+(an element with no `iframe` above it in the tree is the page's; the number
+alone keeps refs apart). The map holds the latest snapshot's elements
 (`MAX_PAGE_REFS`) and the last `MAX_GONE_REFS` out of it for now, which get
 their refs back when they show again (a dialog over them closed); it goes
 with the tab. A screenshot steps its quality, then its size, down
@@ -2613,7 +2835,8 @@ are masked, in the entry and in `Referer`, `Location` and `Origin`.
 their handles, never inline. Every text there, and `evaluate`'s result,
 shows a secret PCP typed into the tab as `[secret: name]`: `held.ts`
 remembers the keyed hash of each for the page's life (`typedInto`), and
-`maskTyped` hashes each word (and its URL-decoded form) against them. A
+`maskTyped` hashes each word (and its URL-decoded form) against them, then
+looks for it as a page may write it its own way (below). A
 request a page sent after PCP typed a secret into it gives no body, since
 the body could carry the secret encoded.
 
@@ -2641,26 +2864,101 @@ That an API endpoint sends the secret never counts. Past the gate,
 `secrets.ts readTypedValue` decrypts it (a TOTP secret's code of the moment,
 RFC 6238 in `totp.ts`, the seed never leaving `secrets.ts`); the browser
 clears and focuses the field, checks again that the page, the frame and the
-focus (in the field's frame and each frame around it) are where they were,
-and types it with CDP `Input.insertText`. The page then holds it (`held.ts`:
-the secret's name and an HMAC of the field's value under a key of the
-process, never the value, by page, in memory): while any field of the page
-has that value, every answer to the token shows it as `[secret: name]`
-(the snapshot's field line, and the value wherever else it appears, a title
-included), and `screenshot` is refused (a tool error). It lets go when no
-field has the value any more: the field changed, or a new document does not
-have it. Every password field's value reads as `[password]` in a snapshot,
+focus (in the field's frame and each frame around it, and in each shadow
+root around it, whose `activeElement` it must be: a web component's field)
+are where they were, and types it with CDP `Input.insertText`. The page then
+holds it (`held.ts`: the secret's name and HMACs under a key of the process
+of the value as typed and as the field has it, each also normalised, white
+space and separators out and upper case, with that form's length; never the
+value, by page, in memory): while any field of the page has that value, as
+it is or reformatted (a bank writes an IBAN in groups of four), every answer
+to the token shows it as `[secret: name]` (the snapshot's field line, its
+`- text:` child where the field has a placeholder, and the value wherever
+else it appears, a title included), and `screenshot` is refused (a tool
+error). It lets go when no field has the value any more: the field changed,
+or a new document does not have it. For as long as the tab lives, whatever
+document it shows, every answer to the token (`callBrowserTool`'s
+`maskHeld`, so the snapshot, `find`, `read_page`, the logs and `evaluate`
+alike) also masks each secret PCP typed into any of its tabs wherever the
+text has it once normalised, within a word or across several (a summary
+page's "NL91 ABNA 0417 …"): a window of the normalised form's length slides
+over the normalised text, a keyed rolling fingerprint (a random base, a
+prime under 2^25) picks the places worth an HMAC, and a match masks the
+original text it came from. That is arithmetic per character, so it has no
+cap to leave text unmasked past; a value shorter than
+`MIN_NORMALISED_MASK_CHARS` once normalised is masked as a whole word only.
+Every password field's value reads as `[password]` in a snapshot,
 typed by anyone. `upstream.ts` scrubs the value from the answer and any error
 too, and the request log notes the secret's name and the origin on the
 call's line (`noteSecretTyped`; a use the owner's answer made gets a line of
 its own), never the value. `request_secret` (name, purpose, origins, kind
-text or totp) checks its arguments and refuses a name PCP holds (no
-assistant writes over a secret), then throws `OwnerNeeded` for a
-`secret_request`: the owner types the value (or the seed) on PCP's page, may
-change the origins, and saves it with the requesting token's allowance at
-each (one use, an hour, or always); the assistant hears the name. Origins
-are exported; allowances are not, are listed with End on the token's page
-and on the secret's row under Secrets, and are pruned once run out.
+text or totp, and for a text secret `username` and `generate`) checks its
+arguments and refuses a name PCP holds (no assistant writes over a secret),
+then throws `OwnerNeeded` for a `secret_request`: the owner types the value
+(or the seed) on PCP's page, or turns on Generate, ticks the origins asked
+for and may add more, and saves it with the requesting token's allowance at
+each (one use, an hour, or always); the assistant hears the name. The page
+is marked up for password managers: a text secret's login name
+(`autocomplete="username"`, filled in from `username`) and its value
+(`autocomplete="new-password"`) sit in a form of their own, so a password a
+manager suggests is saved with the right login, and the sites are checkboxes
+and a box outside it (`autocomplete="off"`, `data-1p-ignore`,
+`data-lpignore`), so autofill has nothing of theirs to write over; the
+origins are parsed again before anything is saved. Generate
+(`generate-password.ts`) makes the password in `decidePermission`, on PCP's
+machine, from the recipe on the page (length 8 to 128, the kinds of
+character, characters to leave out; the assistant's `generate` only fills it
+in): `crypto.randomInt` for every draw, one character of every kind chosen,
+the rest from all of them, shuffled. It is stored at once as the secret's
+value and never sent to the page or the assistant; the owner reveals it
+under Secrets like any other. Origins are exported; allowances are not, are
+listed with End on the token's page and on the secret's row under Secrets,
+and are pruned once run out.
+
+A secret's **login name** is typed as `{"$secret": name, "part": "username"}`
+(`"password"`, the value, is the default), one credential with its password:
+the placeholder's `part` is read by `wrappers/placeholders.ts`,
+`tools/validate.ts` and the family's check alike, and `upstream.ts` refuses it
+anywhere but the browser's `type`. It passes the same gate as the value
+(`admitSecretUse` with `part`; its `secret_use` request says it is the login
+name), and `secrets.ts readTypedLogin`
+opens it, refused before the owner is asked when the secret keeps none. It
+is no secret from the assistant (the sign-in note names it), so it is not
+held, masked or scrubbed, and screenshots go on. The login name and the
+password are one credential, so a once allowance is one sign-in: the part
+typed on it opens a window in memory (by token, secret, origin and tab, for
+`SECRET_SIGN_IN_WINDOW_MS`) that lets the other part through once; the same
+part again, another tab, a late one or a second sign-in asks the owner, and
+the owner ending the allowance or taking the site away ends the window.
+
+A **site** of a secret (`SecretBrowserOrigin`) is an origin, or with
+`include_subdomains` that origin and its subdomains: every origin at the
+same scheme and port whose host ends in the site's host and has the same
+registrable domain by the public suffix list, its private section included
+(`tldts`, `siteCovers`). `canCoverSubdomains` refuses the flag for an IP
+address, localhost or a public suffix itself (co.uk, github.io,
+s3.amazonaws.com), so a site never stands for another owner's names
+(amazonaws.com does not cover a bucket under s3.amazonaws.com). The gate,
+`isBoundOrigin` and `signInsAt` look up the page's origin and, flagged, each
+of its parents down to its registrable domain (`coveringOrigins`). Taking a
+site away, or its flag, drops every token's allowance at the origins it no
+longer covers. The owner sets the flag on the secret's row ("And its
+subdomains").
+
+`update_secret_sites` (name, reason, `add` with `subdomains`, `remove`) is an
+assistant's way to fix a secret's sites (a misspelled domain, another
+subdomain): checked first (a secret the browser types, plain text, sites to
+remove that it has, something that changes), it always throws `OwnerNeeded`
+for a `secret_sites_change`, whatever the token's levels. Its page shows the
+sites now and each change with a box, a site under a registrable domain
+none of them has is noted, and a lookalike (`lookalike-sites.ts`: an IDN in
+punycode, the same name under another ending, a confusable spelling, one or
+two edits from a site's domain name, or a site's name inside another
+domain) is flagged and left unticked. The answer carries the keys ticked and
+the sites as shown (`sitesBasis`): `checkSecretSitesAnswer` refuses before
+anything is written when the sites changed since, and
+`applySecretSitesChange` makes only the ticked changes through `bindOrigin`
+and `unbindOrigin`. The value never changes, and is never shown.
 
 **Sign-ins at a page's site** (`sign-in-hint.ts`). So an assistant types a
 password rather than asking the owner for it in the conversation, the
@@ -2699,6 +2997,29 @@ finishes alone. One call waits for a download at a time, whichever its
 tab; another meanwhile is told to try again. Profile saves run one at a
 time, and none once the browser has closed, so a call that finished past
 its deadline cannot write over a restore.
+
+**Time limits and a busy tab** (`clock.ts`, `queue.ts`). Every tool but
+`hand_over` and `request_secret` takes `timeout_ms` (`MIN_CALL_TIMEOUT_MS`
+to `MAX_CALL_TIMEOUT_MS`): how long the call waits in all, its turn on the
+tab included. `tabs` open, `navigate` and `snapshot` wait
+`DEFAULT_CALL_TIMEOUT_MS` (10 seconds) unless it says otherwise, lengthened
+once by `CHALLENGE_WAIT_MS` while a site's check is up (a limit the call gave
+is kept to), and starting Chromium does not count; the other tools wait for
+their tab's deadline alone. The call notes its step as it goes (waiting for
+its turn, loading the site, waiting for its check, reading the tab for the
+answer), and when the time runs out it is answered at once with a `timeout`
+tool error naming that step and whether what it was asked may have
+happened. A call still waiting for its turn leaves the queue (`giveUp`) and
+did nothing; one whose turn had come keeps it and finishes alone, so the
+tab's next call waits for it rather than racing it; a tab opened for a call
+that was answered meanwhile is closed. A lane keeps how many calls it holds
+and how long its turns took lately (a moving average), and a call that can
+expect to wait longer than it would (its time left, else
+`MAX_QUEUE_WAIT_MS`), or that would queue behind `MAX_LANE_QUEUE` others,
+is refused at once with `browser_busy` and `retryAfterMs` in
+`_meta["gg.pcp/error"]` (`tools/outcome.ts`); the browser's own lock
+(`withVault`, opening a tab) is bounded the same way. A program sees both
+as an error with those words.
 
 **Files** (`downloads.ts`, `call.ts`). A file crosses the browser only as a
 result kept for the token (see Long answers and kept results): never a path on the
@@ -2750,8 +3071,23 @@ token's lines as they are now (`mayOpen`, as the gate does): a page at a
 site it may no longer open (its line changed since, or the tab's history
 went back to a page the owner opened there) is refused, though the tab can
 still be sent elsewhere or closed. The tabs share one profile, so the
-sign-ins are every token's; the eight tabs are shared too, and a token
-told the browser is full learns only how many are its own.
+sign-ins are every token's; the eight tabs (`MAX_TABS`) are shared too,
+and every `tabs` answer says how many are open and how many of them are the
+token's ("5 of 8 tabs open in the browser, 2 of them this token's"), never
+more of the others. `tabs` list names, for each of the token's tabs, the
+run that opened it (`Tab.openedIn`: run_code's, or a wrapper's by its tool,
+`code/runs.ts labelRun`) and how long it has been idle.
+
+**Tabs that are done with** (`sweep.ts`). A tab belongs to the run whose
+call used it last (`Tab.run`, from the call's `runId` and the run's signal,
+which aborts when the run is over); a call outside any run takes it out of
+runs. At each browser call, inside its request, the tabs nobody used for
+`TAB_IDLE_TTL_MS` and those whose run ended `RUN_TAB_GRACE_MS` ago with no
+use since are closed, and the profile is saved with the call's key; when a
+tab is wanted and the browser is full, a tab whose run has ended goes at
+once. Never a tab a call holds, one being reopened, one the owner holds, the
+owner's own, or the one the call names. The token is told of its own tabs
+closed so in the answer's first lines; there is no timer.
 
 **The tabs view** (`app/(dashboard)/browser/page.tsx`,
 `components/browser-tabs.tsx`, `browserOverview` in `owner.ts`). The
@@ -3938,13 +4274,36 @@ none.
 In arguments, an object of only `$result` (and `as`) is replaced before the
 call is sent (`lib/core/result-handles.ts`, called from `upstream.ts` for MCP
 servers and the browser, from `endpoints.ts` for API endpoints, whose upload
-fields take a file's bytes instead, and from `mail/accounts.ts`, whose
-attachments do too): a text as its text, a file as base64, or the other way
+fields take a file's bytes instead, from `mail/accounts.ts`, whose
+attachments do too, and from `storage/roots.ts`, whose `save_file` takes a
+file's bytes the same way): a text as its text, a file as base64, or the other way
 with `as`. Only the token's own results resolve; an unknown or expired id is
 refused by name before anything is sent, and the gateway checks the ids
 before it asks the owner. A request
 waiting for the owner stores the handle, never the content, and its page
-shows each one's name, type, size and the tool that kept it.
+shows each one as a file chip: its name, type, size, the tool that kept it
+and until when (`lib/core/permission-files.ts requestFiles`, found at any
+depth in any tool's arguments, an attachment's `{"$result", name, type}`
+included), with the arguments themselves folded under them as they are.
+
+While the request waits, the owner can look at a file before answering, and
+download it: `app/api/permissions/[id]/files/[result]` is a route handler (a
+file needs Content-Type and Content-Disposition, which an action cannot
+send) that checks the request came from PCP's own page
+(`lib/server/same-origin.ts`) and the owner's session, and serves only a
+result that waiting call's arguments name, of the request's own token
+(`openRequestFile`: pending and not expired, `requestServes`; then
+`openResult` with the request's token, which also checks the day it is kept
+for), decrypted with the owner's key in that request. Once the request is
+answered or expires, nothing serves it. What goes out is decided by
+`servedFile`: a PDF goes as itself to the browser's own viewer and an image
+(PNG, JPEG, GIF, WebP, AVIF; never SVG) as itself, each only when its first
+bytes say it is what it claims; text, HTML and SVG among it, goes as
+`text/plain`; anything else, and every download, as an
+`application/octet-stream` attachment. Every answer carries `nosniff`, no
+caching, and a Content-Security-Policy that loads nothing and lets nothing
+frame it (sandboxed, but for a PDF, whose viewer does not open in a sandbox).
+Nothing of the file is logged.
 
 **File links** (`lib/core/file-links.ts`, `app/api/files/[secret]/`) move a
 kept file between PCP and the assistant's own computer (a sandbox or a
@@ -4178,7 +4537,10 @@ says to end the reply with the link (`owner-link.ts: linkLastText`, the link
 on its own last line as a markdown link whose label names the action, such
 as `[Allow gmail-imap/send_email?](…)`: an app that reads the reply aloud
 says the label rather than an address of ids, so the bare address is never
-to be pasted) and to call `check_permission` on the owner's next message,
+to be pasted). An assistant may keep working after a call that asks, and
+gather several links in one reply: it puts every one of them at the end,
+each on a line of its own, and calls no tool after them (`OWNER_LINK_RULE`).
+The result also says to call `check_permission` on the owner's next message,
 whatever it says, before sending the link again or assuming the request is
 still open (`owner-link.ts: nextMessageCheck`): the owner's words rarely say
 whether they answered, and an assistant that waited to be told sent links

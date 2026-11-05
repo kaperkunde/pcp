@@ -103,12 +103,18 @@ export function isResultHandle(value: unknown): boolean {
   )
 }
 
-/** {"$secret": name}, a secret's placeholder (wrappers/placeholders.ts). */
+/**
+ * {"$secret": name}, a secret's placeholder (wrappers/placeholders.ts), with
+ * "part" ("password" or "username") if it says which.
+ */
 function isSecretPlaceholder(value: unknown): boolean {
   return (
     isRecord(value) &&
     typeof value.$secret === "string" &&
-    Object.keys(value).length === 1
+    Object.keys(value).every((key) => key === "$secret" || key === "part") &&
+    (value.part === undefined ||
+      value.part === "password" ||
+      value.part === "username")
   )
 }
 

@@ -70,11 +70,14 @@ export function signInLine(
 
   const listed = signIns.map(entry).join("; ")
   const how = `type's text {"$secret": "${first.name}"}`
+  const login = first.loginName
+    ? `Type the login name with {"$secret": "${first.name}", "part": "username"} (or as plain text)`
+    : "Type the login name as plain text"
 
   if (passwordField) {
     return {
       loud: true,
-      line: `This page has a password field, and the owner keeps a sign-in for ${origin}: ${listed}. Type the login name as plain text, and the password (or a code) with ${how} into its field: PCP types it, and you never see it. Do not ask the owner for it in the conversation.`,
+      line: `This page has a password field, and the owner keeps a sign-in for ${origin}: ${listed}. ${login}, and the password (or a code) with ${how} into its field: PCP types it, and you never see it. Do not ask the owner for it in the conversation.`,
     }
   }
 

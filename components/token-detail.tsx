@@ -26,7 +26,10 @@ import {
   endAllowanceAction,
   revokeTokenAction,
 } from "@/lib/actions/tokens"
-import type { PermissionDecision as Decision } from "@/lib/core/constants"
+import type {
+  PasswordRecipe,
+  PermissionDecision as Decision,
+} from "@/lib/core/constants"
 import type { ShownText } from "@/lib/core/permission-rules"
 import type { ServerKind } from "@/lib/core/servers"
 import type { ActionState } from "@/lib/server/action-state"
@@ -57,6 +60,8 @@ export type WaitingRequest = {
     login?: string | null
     kind?: "text" | "totp"
     origins?: string[]
+    username?: string | null
+    generate?: PasswordRecipe | null
   } | null
   /** "Allow for" has one length (a secret the browser types: an hour). */
   allowForFixed?: boolean
