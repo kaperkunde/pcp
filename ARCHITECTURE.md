@@ -2684,10 +2684,15 @@ the placeholder's `part` is read by `wrappers/placeholders.ts`,
 `tools/validate.ts` and the family's check alike, and `upstream.ts` refuses it
 anywhere but the browser's `type`. It passes the same gate as the value
 (`admitSecretUse` with `part`; its `secret_use` request says it is the login
-name, and an answer covers that use only), and `secrets.ts readTypedLogin`
+name), and `secrets.ts readTypedLogin`
 opens it, refused before the owner is asked when the secret keeps none. It
 is no secret from the assistant (the sign-in note names it), so it is not
-held, masked or scrubbed, and screenshots go on.
+held, masked or scrubbed, and screenshots go on. The login name and the
+password are one credential, so a once allowance is one sign-in: the part
+typed on it opens a window in memory (by token, secret, origin and tab, for
+`SECRET_SIGN_IN_WINDOW_MS`) that lets the other part through once; the same
+part again, another tab, a late one or a second sign-in asks the owner, and
+the owner ending the allowance or taking the site away ends the window.
 
 A **site** of a secret (`SecretBrowserOrigin`) is an origin, or with
 `include_subdomains` that origin and its subdomains: every origin at the

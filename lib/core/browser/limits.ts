@@ -235,6 +235,14 @@ export const MAX_SECRET_REQUEST_ORIGINS = 10
 /** How long request_secret's purpose may be. */
 export const MAX_SECRET_PURPOSE_CHARS = 500
 /**
+ * One sign-in on a once allowance (browser-secrets.ts): after one part of a
+ * secret (its login name or its password) is typed on it, the other part
+ * may follow once, in the same tab at the same site, within this long.
+ */
+export const SECRET_SIGN_IN_WINDOW_MS = 2 * 60_000
+/** The most open sign-in windows kept in memory, oldest dropped first. */
+export const MAX_SECRET_SIGN_IN_WINDOWS = 1_000
+/**
  * An assistant's mouse (input.ts clickAt, wheelAt, dragBetween): the moves
  * a drag is made of between its two points, and the pause between them, so
  * a page that follows the pointer sees it travel.

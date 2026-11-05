@@ -2,7 +2,7 @@ import type { SecretSitesShown } from "../browser-secrets"
 import { siteKey } from "../fetch/rules"
 import { describeRecipe } from "../generate-password"
 import { visible, type ShownText } from "../permission-rules"
-import { EVALUATE_TIMEOUT_MS } from "./limits"
+import { EVALUATE_TIMEOUT_MS, SECRET_SIGN_IN_WINDOW_MS } from "./limits"
 import type {
   BrowseAsk,
   HandoverAsk,
@@ -88,10 +88,9 @@ export function describeSecretUseAsk(
         : `Type the secret "${ask.secretName}" at ${hostOf(ask.origin)}?`,
     lines: [
       ...(ask.part === "username"
-        ? [
-            "The login name you keep with the secret, not its password. Your answer covers this use only: the password asks again unless this token may type it here.",
-          ]
+        ? ["The login name you keep with the secret, not its password."]
         : []),
+      `Allow once is for one sign-in: this, then its other part (the login name or the password) in this tab within ${SECRET_SIGN_IN_WINDOW_MS / 60_000} minutes.`,
       `Site: ${ask.origin}`,
       `Into: ${ask.field}`,
       `Page: ${ask.title || "(no title)"}`,

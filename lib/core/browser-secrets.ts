@@ -6,6 +6,8 @@ import { requireToken } from "./api-tokens"
 import {
   MAX_SECRET_PURPOSE_CHARS,
   MAX_SECRET_REQUEST_ORIGINS,
+  MAX_SECRET_SIGN_IN_WINDOWS,
+  SECRET_SIGN_IN_WINDOW_MS,
 } from "./browser/limits"
 import {
   OwnerNeeded,
@@ -427,6 +429,7 @@ export async function unbindOrigin(
 ): Promise<void> {
   await requireTypable(ctx, secretId)
   const before = await sitesOf(secretId)
+  endSignInWindows(null, secretId)
 
   await db().$transaction([
     db().secretBrowserOrigin.deleteMany({ where: { secretId, origin } }),
@@ -569,13 +572,21 @@ export async function grantSecretUse(
  * the origin is the secret's.
  */
 export async function takeSecretUse(
+  target: { tokenId: string; secretId: string; origin: string },
+  now = new Date(),
+): Promise<boolean> {
+  return (await takeAllowance(target, now)) !== false
+}
+
+/** takeSecretUse, saying whether what it used was a once allowance. */
+async function takeAllowance(
   {
     tokenId,
     secretId,
     origin,
   }: { tokenId: string; secretId: string; origin: string },
-  now = new Date(),
-): Promise<boolean> {
+  now: Date,
+): Promise<false | "once" | "lasting"> {
   const row = await db().apiTokenSecretAllowance.findUnique({
     where: { tokenId_secretId_origin: { tokenId, secretId, origin } },
   })
@@ -585,7 +596,7 @@ export async function takeSecretUse(
   }
 
   if (row.until === null) {
-    return isBoundOrigin(secretId, origin)
+    return (await isBoundOrigin(secretId, origin)) ? "lasting" : false
   }
 
   if (row.until.getTime() <= now.getTime()) {
@@ -593,7 +604,7 @@ export async function takeSecretUse(
   }
 
   if (!row.once) {
-    return true
+    return "lasting"
   }
 
   // One use, however many calls race for it.
@@ -601,7 +612,65 @@ export async function takeSecretUse(
     where: { tokenId, secretId, origin, once: true, until: { gt: now } },
   })
 
-  return taken.count === 1
+  return taken.count === 1 ? "once" : false
+}
+
+// ---- One sign-in on a once allowance ------------------------------------------
+
+/**
+ * A secret's login name and password are one credential, so a once
+ * allowance is one sign-in: when one part is typed on it, the other part
+ * may follow once, by the same token, in the same tab at the same site,
+ * within SECRET_SIGN_IN_WINDOW_MS. Kept in memory only (a restart asks
+ * again), each window used up by that one other part, so a second sign-in
+ * asks the owner again.
+ */
+const signInWindows = new Map<string, { part: SecretPart; until: number }>()
+
+function windowKey(
+  tokenId: string,
+  secretId: string,
+  origin: string,
+  tabId: string,
+): string {
+  return [tokenId, secretId, origin, tabId].join("\n")
+}
+
+function openSignInWindow(key: string, part: SecretPart, now: Date): void {
+  for (const [other, window] of signInWindows) {
+    if (window.until <= now.getTime()) signInWindows.delete(other)
+  }
+
+  while (signInWindows.size >= MAX_SECRET_SIGN_IN_WINDOWS) {
+    signInWindows.delete(signInWindows.keys().next().value!)
+  }
+
+  signInWindows.set(key, {
+    part,
+    until: now.getTime() + SECRET_SIGN_IN_WINDOW_MS,
+  })
+}
+
+/** The other part of a sign-in begun on a once allowance, used up if so. */
+function takeSignInWindow(key: string, part: SecretPart, now: Date): boolean {
+  const window = signInWindows.get(key)
+
+  if (!window || window.until <= now.getTime() || window.part === part) {
+    return false
+  }
+
+  signInWindows.delete(key)
+  return true
+}
+
+/** Sign-ins begun for these, ended: the owner took the allowance or the site away. */
+function endSignInWindows(tokenId: string | null, secretId: string): void {
+  for (const key of signInWindows.keys()) {
+    const [token, secret] = key.split("\n")
+    if (secret === secretId && (tokenId === null || token === tokenId)) {
+      signInWindows.delete(key)
+    }
+  }
 }
 
 /** A once allowance the call it was given for did not use, gone. */
@@ -676,6 +745,7 @@ export async function endSecretAllowance(
   await requireToken(ctx, target.tokenId)
   await requireTypable(ctx, target.secretId)
   await db().apiTokenSecretAllowance.deleteMany({ where: target })
+  endSignInWindows(target.tokenId, target.secretId)
 }
 
 // ---- The gate -----------------------------------------------------------------
@@ -718,12 +788,22 @@ export async function admitSecretUse(
     throw invalid("A secret is typed only into a page at an http(s) site.")
   }
 
-  if (
-    await takeSecretUse(
-      { tokenId, secretId: secret.id, origin: use.origin },
-      now,
-    )
-  ) {
+  const key = windowKey(tokenId, secret.id, use.origin, use.tabId)
+
+  if (takeSignInWindow(key, part, now)) {
+    return secret
+  }
+
+  const taken = await takeAllowance(
+    { tokenId, secretId: secret.id, origin: use.origin },
+    now,
+  )
+
+  if (taken === "once") {
+    openSignInWindow(key, part, now)
+  }
+
+  if (taken) {
     return secret
   }
 

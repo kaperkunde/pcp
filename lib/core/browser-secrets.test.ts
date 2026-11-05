@@ -49,6 +49,7 @@ import { scratchDatabase } from "./test-db"
 import { totpCode } from "./totp"
 import { writeToolAccess } from "./tool-access"
 import { DEFAULT_PASSWORD_RECIPE } from "./constants"
+import { SECRET_SIGN_IN_WINDOW_MS } from "./browser/limits"
 import { setupVault } from "./vault"
 
 // Secrets the browser types, against a scratch database: the sites a secret
@@ -427,21 +428,82 @@ describe("the gate a type call passes", () => {
         part: "username",
       }),
     ).toMatchObject({ id: secretId })
-    // The once allowance went on it: the password asks again.
-    await asks(
-      admitSecretUse(ctx, {
+    // One sign-in: the password follows on the same once allowance.
+    expect(
+      await admitSecretUse(ctx, {
         tokenId,
         serverId,
         name: "Shop password",
         use: pageAt(SHOP),
       }),
-    )
+    ).toMatchObject({ id: secretId })
 
     await expect(readTypedLogin(ctx, secretId)).rejects.toThrow(
       /keeps no login name/,
     )
     await updateSecret(ctx, secretId, { loginName: "ada@example.com" })
     expect(await readTypedLogin(ctx, secretId)).toBe("ada@example.com")
+  })
+
+  it("lets a once allowance cover one sign-in: each part once, in the tab, within the window", async () => {
+    const admit = (part: "username" | "password", now: Date, tabId = "t1") =>
+      admitSecretUse(
+        ctx,
+        {
+          tokenId,
+          serverId,
+          name: "Shop password",
+          use: { ...pageAt(SHOP), tabId },
+          part,
+        },
+        now,
+      )
+    const start = new Date()
+    const later = (ms: number) => new Date(start.getTime() + ms)
+
+    // Password first, then the login name: one sign-in.
+    await grantSecretUse(
+      ctx,
+      { tokenId, secretId, origin: SHOP, level: "once" },
+      start,
+    )
+    await admit("password", start)
+    // The same part again is a second sign-in, and so is another tab.
+    await asks(admit("password", later(1_000)))
+    await asks(admit("username", later(1_000), "t2"))
+    await admit("username", later(60_000))
+    // Both parts used: the next sign-in asks again.
+    await asks(admit("username", later(61_000)))
+    await asks(admit("password", later(61_000)))
+
+    // The other part comes too late: asked again.
+    await grantSecretUse(
+      ctx,
+      { tokenId, secretId, origin: SHOP, level: "once" },
+      start,
+    )
+    await admit("username", start)
+    await asks(admit("password", later(SECRET_SIGN_IN_WINDOW_MS + 1)))
+
+    // The owner ending the allowance ends the sign-in too.
+    await grantSecretUse(
+      ctx,
+      { tokenId, secretId, origin: SHOP, level: "once" },
+      start,
+    )
+    await admit("username", start)
+    await endSecretAllowance(ctx, { tokenId, secretId, origin: SHOP })
+    await asks(admit("password", later(1_000)))
+
+    // An hour's allowance is untouched by any of it.
+    await grantSecretUse(
+      ctx,
+      { tokenId, secretId, origin: SHOP, level: "hour" },
+      start,
+    )
+    await admit("username", start)
+    await admit("username", later(1_000))
+    await admit("password", later(2_000), "t2")
   })
 
   it("refuses a secret it does not hold, or one the browser does not type", async () => {

@@ -575,7 +575,8 @@ embeddingProvider`, which hands `embeddings/provider.ts` the header;
   never a value. `"part": "username"` types the login name the owner keeps
   with it instead (`secrets.ts readTypedLogin`), through the same gate,
   refused anywhere but the browser and not held, since the assistant may
-  read it. The browser asks for it only at the moment of typing, for
+  read it; a once allowance is one sign-in, both parts in the same tab
+  within `SECRET_SIGN_IN_WINDOW_MS`, never more. The browser asks for it only at the moment of typing, for
   an input or textarea whose frame is the page's own origin; the typer lets
   it through only where the token has an allowance for that secret at that
   origin (once, an hour, or always while the origin is one of the secret's
