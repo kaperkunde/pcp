@@ -358,7 +358,7 @@ function serviceFlags(
       registers.kind === "openapi"
         ? `PCP adds an API endpoint from ${registers.specPath} on port ${registers.port}${registers.auth ? `, sending ${registers.auth.env}'s secret in ${registers.auth.header}` : ""}.`
         : registers.kind === "mcp"
-          ? `PCP adds an MCP server at ${registers.path} on port ${registers.port}.`
+          ? `PCP adds an MCP server at ${registers.path} on port ${registers.port}${registers.auth ? `, sending ${registers.auth.env}'s secret in ${registers.auth.header}` : ""}.`
           : "PCP adds nothing for it.",
     )
   }

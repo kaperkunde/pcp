@@ -26,6 +26,7 @@ import {
   launchService,
   readServiceStatus,
   reconcileServices,
+  recreateService,
   removeService,
   restartServicesUsingSecret,
   runServiceAction,
@@ -41,11 +42,16 @@ import {
   startFakeDocker,
   type FakeDocker,
 } from "./fake-docker"
-import type { ServiceDefinitionInput } from "./definition"
 import {
+  parseServiceDefinition,
+  type ServiceDefinitionInput,
+} from "./definition"
+import {
+  saveServiceSettings,
   serviceDial,
   serviceOfDefinition,
   serviceView,
+  writeServiceDefinition,
   type ServiceLaunchInput,
 } from "./services"
 
@@ -74,6 +80,10 @@ let answers: Record<string, { status: number; body: string }>
 let forwarding: boolean
 /** The tools the MCP server at /mcp lists. */
 let mcpTools: Array<{ name: string; description: string }>
+/** The Authorization the MCP server at /mcp asks for; null asks for none. */
+let mcpAuthorization: string | null
+/** The Authorization each request to /mcp came with. */
+let mcpSeen: Array<string | null>
 
 const SPEC = JSON.stringify({
   openapi: "3.0.3",
@@ -96,6 +106,14 @@ const SPEC = JSON.stringify({
 function answerMcp(request: IncomingMessage, response: ServerResponse) {
   if (request.method !== "POST") {
     response.writeHead(405).end()
+    return
+  }
+
+  const authorization = request.headers.authorization ?? null
+  mcpSeen.push(authorization)
+
+  if (mcpAuthorization !== null && authorization !== mcpAuthorization) {
+    response.writeHead(401).end()
     return
   }
 
@@ -158,6 +176,8 @@ async function setup(engine: "docker" | "podman" = "docker") {
   authorized = null
   forwarding = true
   mcpTools = [{ name: "convert", description: "Converts a document" }]
+  mcpAuthorization = null
+  mcpSeen = []
   docker = startFakeDocker({ engine })
   ssh = await startFakeSsh({
     authorizedKey: () => authorized,
@@ -230,6 +250,18 @@ function definition(
     ...change,
   }
 }
+
+/** What a service that serves an MCP server registers, with no header. */
+const MCP = { kind: "mcp", port: 5001, path: "/mcp" } as const
+/** The same, sending API_KEY's secret as a bearer token. */
+const MCP_WITH_AUTH = {
+  ...MCP,
+  auth: {
+    env: "API_KEY",
+    header: "Authorization",
+    template: "Bearer {{secret}}",
+  },
+} as const
 
 async function launchInput(
   hostId: string,
@@ -444,6 +476,55 @@ describe("launching a service", { timeout: 30_000 }, () => {
     expect(server.url).toBe(`http://127.0.0.1:${httpPort}/mcp`)
     expect(server.tools.map((tool) => tool.name)).toEqual(["convert"])
     expect(ssh.forwards).toContain(`127.0.0.1:${httpPort}`)
+  })
+
+  it("registers an MCP server that sends the secret its definition names in a header", async () => {
+    const hostId = await pinnedHost()
+    mcpAuthorization = `Bearer ${API_KEY}`
+    const launched = await launchService(
+      ctx,
+      await launchInput(hostId, {
+        definition: definition({ registers: MCP_WITH_AUTH }),
+      }),
+      FAST,
+    )
+    const secret = await db().secret.findFirstOrThrow({
+      where: { name: "docs-key" },
+    })
+    const server = await getServer(ctx, launched.registeredId!)
+
+    expect(server).toMatchObject({
+      kind: "mcp",
+      authType: "header",
+      authHeaderName: "Authorization",
+      authValueTemplate: "Bearer {{secret}}",
+      authSecretId: secret.id,
+    })
+    expect(server.tools.map((tool) => tool.name)).toEqual(["convert"])
+    expect(mcpSeen.length).toBeGreaterThan(0)
+    expect(new Set(mcpSeen)).toEqual(new Set([`Bearer ${API_KEY}`]))
+  })
+
+  it("refuses to launch an MCP server with a header before its variable has a secret", async () => {
+    const hostId = await pinnedHost()
+    const before = docker.commands.length
+
+    await expect(
+      launchService(
+        ctx,
+        await launchInput(hostId, {
+          definition: definition({
+            env: [{ name: "API_KEY" }],
+            registers: MCP_WITH_AUTH,
+          }),
+          env: {},
+        }),
+        FAST,
+      ),
+    ).rejects.toThrow(
+      /Choose the secret for API_KEY: the MCP server sends it in Authorization/,
+    )
+    expect(docker.commands.length).toBe(before)
   })
 
   it("takes everything back when the SSH server does not let PCP through", async () => {
@@ -959,6 +1040,108 @@ describe("a running service", { timeout: 30_000 }, () => {
     )
     expect(state.containers["pcp-docs"]!.env).toContain("sk-rotated-value-5678")
     expect(everythingSent()).not.toContain("sk-rotated-value-5678")
+  })
+
+  it("gives the MCP server it registered the header a definition gained, and the secret bound now, when it is made again", async () => {
+    const hostId = await pinnedHost()
+    const launched = await launchService(
+      ctx,
+      await launchInput(hostId, {
+        definition: definition({ registers: MCP }),
+      }),
+      FAST,
+    )
+    const secret = await db().secret.findFirstOrThrow({
+      where: { name: "docs-key" },
+    })
+    expect((await getServer(ctx, launched.registeredId!)).authType).toBe("none")
+
+    // The definition gains a header (a linked repository's, say): the
+    // server sends nothing new until the container is made again.
+    mcpAuthorization = `Bearer ${API_KEY}`
+    await writeServiceDefinition(
+      launched.id,
+      parseServiceDefinition(definition({ registers: MCP_WITH_AUTH })),
+    )
+    expect((await getServer(ctx, launched.registeredId!)).authType).toBe("none")
+
+    await updateService(ctx, launched.id, FAST)
+    const after = await getServer(ctx, launched.registeredId!)
+    expect(after).toMatchObject({
+      authType: "header",
+      authHeaderName: "Authorization",
+      authValueTemplate: "Bearer {{secret}}",
+      authSecretId: secret.id,
+      // Its tools are read again with the new credential.
+      status: "unknown",
+      lastSyncedAt: null,
+    })
+    expect((await syncServerTools(ctx, after, PUBLIC)).status).toBe("ok")
+    expect(mcpSeen.at(-1)).toBe(`Bearer ${API_KEY}`)
+
+    // Another secret bound to the variable: the remake the save asks for
+    // has the server send that one.
+    const other = await createSecret(ctx, {
+      name: "docs-key-two",
+      value: "sk-other-service-value-9876",
+    })
+    await saveServiceSettings(ctx, launched.id, {
+      name: (await getServer(ctx, launched.id)).name,
+      env: { API_KEY: other.id },
+    })
+    await recreateService(ctx, launched.id, FAST)
+    expect((await getServer(ctx, launched.registeredId!)).authSecretId).toBe(
+      other.id,
+    )
+  })
+
+  it("leaves the MCP server's credential alone when the definition names no header, or the owner moved it to OAuth", async () => {
+    const hostId = await pinnedHost()
+    const launched = await launchService(
+      ctx,
+      await launchInput(hostId, {
+        definition: definition({ registers: MCP }),
+      }),
+      FAST,
+    )
+    const secret = await db().secret.findFirstOrThrow({
+      where: { name: "docs-key" },
+    })
+    // The owner's own header, on the server's page.
+    await db().mcpServer.update({
+      where: { id: launched.registeredId! },
+      data: {
+        authType: "header",
+        authHeaderName: "X-Owner",
+        authValueTemplate: "{{secret}}",
+        authSecretId: secret.id,
+      },
+    })
+
+    await recreateService(ctx, launched.id, FAST)
+    expect(await getServer(ctx, launched.registeredId!)).toMatchObject({
+      authType: "header",
+      authHeaderName: "X-Owner",
+    })
+
+    await db().mcpServer.update({
+      where: { id: launched.registeredId! },
+      data: {
+        authType: "oauth",
+        authHeaderName: null,
+        authValueTemplate: null,
+        authSecretId: null,
+      },
+    })
+    await writeServiceDefinition(
+      launched.id,
+      parseServiceDefinition(definition({ registers: MCP_WITH_AUTH })),
+    )
+    await recreateService(ctx, launched.id, FAST)
+    expect(await getServer(ctx, launched.registeredId!)).toMatchObject({
+      authType: "oauth",
+      authSecretId: null,
+    })
   })
 
   it("names the service among what uses its secret, which cannot be deleted under it", async () => {

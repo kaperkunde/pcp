@@ -1532,6 +1532,55 @@ describe("proposing a service", () => {
     expect(launched[0]!.env).toEqual({ DOCLING_SERVE_API_KEY: key.id })
   })
 
+  it("shows the header an MCP server it registers sends, and needs that variable's secret named", async () => {
+    const host = await sshServer()
+    await connectSeeing()
+    const mcp = {
+      ...DEFINITION,
+      env: [{ name: "MCP_TOKEN" }],
+      registers: {
+        kind: "mcp",
+        port: 5001,
+        path: "/mcp",
+        auth: {
+          env: "MCP_TOKEN",
+          header: "Authorization",
+          template: "Bearer {{secret}}",
+        },
+      },
+    }
+
+    expect(
+      (
+        await register({
+          name: "Docs MCP",
+          service: mcp,
+          ssh_server: host.slug,
+        })
+      ).text,
+    ).toMatch(
+      /The MCP server sends MCP_TOKEN's secret in Authorization: name it in env_secrets/,
+    )
+    expect(await db().permissionRequest.count()).toBe(0)
+
+    await register({
+      name: "Docs MCP",
+      service: mcp,
+      ssh_server: host.slug,
+      env_secrets: [{ name: "MCP_TOKEN", secret: "Docs MCP token" }],
+    })
+    expect((await shown()).lines).toContain(
+      "PCP adds an MCP server at /mcp on port 5001, sending MCP_TOKEN's secret in Authorization",
+    )
+
+    await approve("mcp-token-typed-by-the-owner")
+    const secret = await db().secret.findFirstOrThrow({
+      where: { name: "Docs MCP token" },
+    })
+    expect(launched[0]!.env).toEqual({ MCP_TOKEN: secret.id })
+    expect(launched[0]!.definition).toMatchObject({ registers: mcp.registers })
+  })
+
   it("is refused before the owner is asked when it cannot run as proposed", async () => {
     const host = await sshServer()
     const unpinned = await sshServer("Spare box", false)

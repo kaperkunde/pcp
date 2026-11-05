@@ -221,7 +221,9 @@ so in the summary; the bump itself waits for the request.
   server only fills in a first instance. Format 3 adds `services/<name>.yaml`
   (a service's definition); every other kind is still written in the
   format that first held it (`FORMAT_OF_KIND`), so an older PCP reads them
-  and leaves `services/` alone. PCP's common items,
+  and leaves `services/` alone. Format 4 adds `auth` on a service's MCP
+  server, and only a service document that has one is written as 4
+  (`serviceFormat`). PCP's common items,
   `kaperkunde/pcp-gg-common` (`repos/common.ts`), are offered in one click,
   linked read-only and untrusted (pinned imports), read without a sign-in.
   A push is one commit per item, fast-forward only, and

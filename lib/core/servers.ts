@@ -1028,6 +1028,77 @@ export async function updateServer(
 }
 
 /**
+ * Makes an MCP server send one secret header, keeping its further headers:
+ * what remaking a service does to the MCP server it registered, when its
+ * definition names a header (services.ts followRegisteredAuth). Only a
+ * server with no credential or a header one is changed: one the owner moved
+ * to OAuth keeps it. A change marks its tools to be read again. Answers
+ * whether anything changed.
+ */
+export async function setMcpHeaderCredential(
+  vaultId: string,
+  id: string,
+  credential: { headerName: string; valueTemplate: string; secretId: string },
+): Promise<boolean> {
+  const row = await db().mcpServer.findFirst({
+    where: { id, vaultId, kind: "mcp" },
+  })
+
+  if (!row || (row.authType !== "none" && row.authType !== "header")) {
+    return false
+  }
+
+  const headerName = validateHeaderName(credential.headerName)
+  const template = validateValueTemplate(credential.valueTemplate)
+
+  if (
+    row.authType === "header" &&
+    row.authHeaderName === headerName &&
+    row.authValueTemplate === template &&
+    row.authSecretId === credential.secretId
+  ) {
+    return false
+  }
+
+  const secret = await db().secret.findFirst({
+    where: { id: credential.secretId, vaultId, kind: "text" },
+    select: { id: true },
+  })
+
+  if (!secret) {
+    throw invalid("That secret does not exist.")
+  }
+
+  const extras = row.authType === "header" ? await extraAuthHeaders(id) : []
+
+  if (
+    extras.some(
+      (extra) => extra.headerName.toLowerCase() === headerName.toLowerCase(),
+    )
+  ) {
+    throw invalid(
+      `${row.name} sends ${headerName} as a further header already: take that out on its page first.`,
+    )
+  }
+
+  await db().mcpServer.update({
+    where: { id },
+    data: {
+      authType: "header",
+      authHeaderName: headerName,
+      authValueTemplate: template,
+      authSecretId: credential.secretId,
+      // Another credential can mean other tools: read them again.
+      status: "unknown",
+      statusMessage: "",
+      lastSyncedAt: null,
+    },
+  })
+
+  return true
+}
+
+/**
  * Gives an OAuth server or endpoint the client the owner created with the
  * provider, keeping every other setting: what its page asks for when it
  * does not let PCP register itself. The client ID is required here, since
