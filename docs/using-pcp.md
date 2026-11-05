@@ -223,7 +223,9 @@ call's arguments and PCP puts the value there: a text as text, a file as
 base64. `get_attachment` reads any attachment that way, and `send_email` and
 `create_draft` take handles as attachments, so an attachment from one mail
 account can be sent from another, or handed to an API. The permission page
-shows what each handle is, never its content. A `call_tool_<tier>` answer also links
+shows each handle as a file (its name, type, size, the tool that kept it and
+until when), which you can open (a PDF, a picture, the first lines of a
+text) or download while the request waits. A `call_tool_<tier>` answer also links
 its handles as MCP resources (`pcp://results/<id>`), so a client that reads
 resources can open a kept file itself.
 

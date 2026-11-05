@@ -431,8 +431,14 @@ embeddingProvider`, which hands `embeddings/provider.ts` the header;
   `check_upload` waits for what arrived; it takes a few files for an hour,
   then a quarter of an hour from the first or until Done, each file a
   `file_link` slot made with it (result id and wrapped key up front), so it
-  too becomes a kept result only when the token uses its handle. Nothing
-  else serves a kept result over HTTP.
+  too becomes a kept result only when the token uses its handle. The one
+  other way a kept result goes over HTTP is to the owner's own page, while
+  a call that names it waits for them (`lib/core/permission-files.ts`,
+  `permissions.ts openRequestFile`): only a result that waiting request's
+  arguments name, of its own token, PDF and images as themselves when their
+  bytes agree, text (HTML and SVG too) as plain text, the rest as a
+  download, sandboxed and nosniff. Nothing else serves a kept result over
+  HTTP.
 - The request log (`lib/core/request-log.ts`) is a token's calls by name:
   tool, server, upstream tool, time, outcome, the permission request an
   ask made, and for a secret the browser typed, its name and the origin.
@@ -634,10 +640,12 @@ embeddingProvider`, which hands `embeddings/provider.ts` the header;
   origin itself, `lib/server/same-origin.ts`), file links
   (`app/api/files/[secret]/`: curl from an assistant's own computer, and
   the upload page's PUTs and Done, the link's secret its only credential),
-  and the browser's live view
+  the browser's live view
   (`app/api/browser/tabs/[id]/`: a stream of a tab's pictures and the
   owner's input, which an action cannot carry; the same origin check and
-  session).
+  session), and the files a waiting call carries
+  (`app/api/permissions/[id]/files/[result]/`: a preview or download needs
+  Content-Type and Content-Disposition; the same origin check and session).
 - The owner is asked by link only: a result hands the assistant a link to
   PCP's page, to end its reply with (`linkLastText`: nothing after it, or
   Claude's apps fold it out of sight; several links in one reply all go at

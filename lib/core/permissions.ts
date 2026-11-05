@@ -129,12 +129,19 @@ import { toolTier } from "./tool-tiers"
 import { noteOwnerAsked } from "./request-log"
 import { collectHandleIds } from "./result-handles"
 import {
-  describeResults,
   keepWholeAnswer,
+  openResult,
   resultKeepers,
   resultNotices,
   resultOpener,
+  type OpenedResult,
 } from "./tool-results"
+import {
+  fileLine,
+  requestFiles,
+  requestServes,
+  type RequestFile,
+} from "./permission-files"
 import { finishHandover, performNavigate } from "./browser/call"
 import { noteHandoverRequest } from "./browser/runtime"
 import { closePendingRequests } from "./permission-close"
@@ -381,6 +388,12 @@ export type PermissionView = {
    * it all.
    */
   full: ShownText[] | null
+  /**
+   * The kept results a call's arguments name, as the page shows them: one
+   * chip each, to open and download while the request waits
+   * (permission-files.ts). Empty for anything but a call.
+   */
+  files: RequestFile[]
   /** A memory request's memory, for the page to show its text first. */
   memory: MemoryShown | null
   /** A skill request's skill as it would be, and what changes, in full. */
@@ -1018,6 +1031,7 @@ async function summarizeRow(
   lines: string[]
   warning: string | null
   full?: ShownText[] | null
+  files?: RequestFile[]
   memory?: MemoryShown
   skill?: SkillShown
   wrapper?: WrapperShown
@@ -1404,6 +1418,7 @@ async function summarizeRow(
     row.server?.kind === "ssh" && row.toolName === RUN_COMMAND
       ? stdinAsText(args)
       : null
+  const files = await requestFiles(ctx, row.tokenId, args)
 
   return {
     title: `Allow ${toolLabel(row)}?`,
@@ -1417,8 +1432,8 @@ async function summarizeRow(
         : []),
       asker,
       ...previewArgs(args),
-      ...(await handleLines(ctx, row.tokenId, args)),
     ],
+    files,
     warning: destructive
       ? "This is a Destructive tool: it can change or delete things for good."
       : null,
@@ -1427,6 +1442,9 @@ async function summarizeRow(
       stdin === null
         ? []
         : [{ label: "stdin_base64, decoded as text", text: visible(stdin) }],
+      // A call that carries files shows its arguments as they are under
+      // the chips, so the owner can see where each one goes.
+      { always: files.length > 0 },
     ),
   }
 }
@@ -1460,56 +1478,6 @@ async function wrapperCallLines(
   ]
 }
 
-const COUNT = new Intl.NumberFormat("en-US")
-
-/**
- * What each kept result a call's arguments name is, so the owner sees what
- * the call carries without its content: its name, type and size, which
- * server's tool kept it, and until when. An id the token no longer has is
- * said too, since the call would fail.
- */
-async function handleLines(
-  ctx: VaultContext,
-  tokenId: string,
-  args: Record<string, unknown>,
-): Promise<string[]> {
-  let ids: string[]
-
-  try {
-    ids = collectHandleIds(args, { loose: true })
-  } catch {
-    return []
-  }
-
-  const infos = await describeResults(ctx, tokenId, ids)
-  const serverIds = infos.flatMap((info) =>
-    info.found && info.serverId ? [info.serverId] : [],
-  )
-  const servers = serverIds.length
-    ? await db().mcpServer.findMany({
-        where: { id: { in: serverIds }, vaultId: ctx.vaultId },
-        select: { id: true, slug: true },
-      })
-    : []
-  const slugs = new Map(servers.map((server) => [server.id, server.slug]))
-
-  return infos.map((info) => {
-    if (!info.found) {
-      return `Kept result ${info.id}: no longer available for this token; the call will fail`
-    }
-
-    const size =
-      info.kind === "bytes"
-        ? `${COUNT.format(info.length)} bytes`
-        : `${COUNT.format(info.length)} characters`
-    const from = info.serverId
-      ? `${slugs.get(info.serverId) ?? "(removed server)"}/${info.toolName}`
-      : info.toolName
-
-    return `Kept result ${info.id}: ${info.name ?? "(unnamed)"}, ${info.mediaType}, ${size}, from ${from}, readable until ${info.expiresAt.toISOString()}`
-  })
-}
-
 async function toView(
   ctx: VaultContext,
   row: Row,
@@ -1521,6 +1489,7 @@ async function toView(
     wrapper = null,
     repo = null,
     full = null,
+    files = [],
     ownerOnly = [],
     ...summary
   } = await summarizeRow(ctx, row, publicUrl)
@@ -1551,6 +1520,7 @@ async function toView(
     ].map((line) => visible(line)),
     ownerOnly: ownerOnly.map((line) => visible(line)),
     full,
+    files,
     memory,
     skill,
     wrapper,
@@ -1811,7 +1781,10 @@ function pendingText(view: PermissionView, detail?: string): string {
 
   const told = {
     ...view,
-    lines: view.lines.filter((line) => !view.ownerOnly.includes(line)),
+    lines: [
+      ...view.lines.filter((line) => !view.ownerOnly.includes(line)),
+      ...view.files.map(fileLine),
+    ],
   }
 
   return `Not done yet: this needs the owner's permission.\n\n${summaryText(told)}\n\nThe owner answers on the page at the link below, signed in to PCP.${typed} ${nextMessageCheck(`check_permission with id "${view.id}"`)} It gives the result (and waits a little if they are still on it). The request stays open until ${view.expiresAt.toISOString()}.\n\n${linkLastText(view.url, view.title)}`
@@ -3479,6 +3452,29 @@ export async function getPermissionView(
   })
 
   return row ? toView(ctx, row, publicUrl) : null
+}
+
+/**
+ * A kept result a waiting call's arguments name, opened for the owner's
+ * page (app/api/permissions/[id]/files/[result]/route.ts): only while the
+ * request waits, only a result its arguments name, and only one of the
+ * request's own token, still kept. Null for anything else, which the page
+ * reads as gone.
+ */
+export async function openRequestFile(
+  ctx: VaultContext,
+  input: { permissionId: string; resultId: string },
+  now = new Date(),
+): Promise<OpenedResult | null> {
+  const row = await db().permissionRequest.findFirst({
+    where: { id: input.permissionId, vaultId: ctx.vaultId },
+  })
+
+  if (!row || !requestServes(row, readArgs(ctx, row), input.resultId, now)) {
+    return null
+  }
+
+  return openResult(ctx, { tokenId: row.tokenId, id: input.resultId }, now)
 }
 
 /** A hand-over waiting for the owner, as its tab shows it in the tabs view. */
