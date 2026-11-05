@@ -57,7 +57,7 @@ describe("the OCR tool a token can call", () => {
       { name: "write_note", description: "Democracy notes", inputSchema: {} },
     ])
     expect(await ocrToolFor(ctx, tokenId)).toBeNull()
-    expect(ocrHint(null)).toContain('search for "ocr"')
+    expect(ocrHint(null)).toContain("read_image")
   })
 
   it("is found by force_ocr among its arguments, and named with it", async () => {

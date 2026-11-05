@@ -62,6 +62,9 @@ const ALL_TOOLS = [
   "run_code_write",
   "run_code_destructive",
   "check_run",
+  "read_image",
+  "convert_document",
+  "edit_pdf",
 ]
 
 /** Proposals: nothing happens until the owner agrees, and each is new. */
@@ -178,13 +181,16 @@ describe("PCP's own tools", () => {
         "check_permission",
         "check_server",
         "check_upload",
+        "convert_document",
         "create_upload_link",
         "create_wrapper",
         "delete_wrapper",
+        "edit_pdf",
         "get_endpoint",
         "get_wrapper",
         "list_secrets",
         "propose_tool_access",
+        "read_image",
         "receive_file",
         "register_server",
         "share_result",
@@ -244,7 +250,7 @@ describe("PCP's own tools", () => {
       const first = tool.description!.slice(0, 25)
 
       expect(first, tool.name).toMatch(
-        /^(START HERE: |(Search|List|Get|Call|Run|Check|Withdraw|Read|Share|Receive|Propose|Change|Fetch|Save) )/,
+        /^(START HERE: |(Search|List|Get|Call|Run|Check|Withdraw|Read|Share|Receive|Propose|Change|Fetch|Save|Edit|Convert) )/,
       )
       // A verb and an object, not a verb alone.
       expect(first.trim().split(/\s+/).length, tool.name).toBeGreaterThan(2)
@@ -282,6 +288,9 @@ describe("PCP's own tools", () => {
       propose_tool_access: /tool/,
       list_tools: /tool/,
       web_fetch: /web/,
+      read_image: /image/,
+      convert_document: /document/,
+      edit_pdf: /PDF/,
     }
 
     expect(Object.keys(keywords).sort()).toEqual([...ALL_TOOLS].sort())

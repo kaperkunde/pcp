@@ -45,7 +45,7 @@ import {
   proposeEndpointNote,
   updateEndpointDetails,
 } from "./endpoint-admin"
-import { MAX_FIELDS, readFields } from "./answers"
+import { MAX_FIELDS, readFields, type AnswerShape } from "./answers"
 import { isPcpError } from "./errors"
 import { instructionsBlock } from "./instructions-block"
 import { receiveFile, shareResult } from "./file-links"
@@ -118,6 +118,7 @@ import {
   bareHandles,
   checkRun,
   runCode,
+  type CallRun,
   type CodeDescriber,
   type CodeLister,
   type RunProgress,
@@ -143,6 +144,7 @@ import {
   runCodeCall,
   withdrawPermission,
   withPermission,
+  type CodeCallOutcome,
   type PermissionExecutor,
   type RegisterArgs,
 } from "./permissions"
@@ -150,7 +152,7 @@ import { MAX_PATCH_OPERATIONS } from "./openapi/limits"
 import { ANSWERED_WINDOW_MS, MAX_ANSWERED_NOTED } from "./permission-rules"
 import type { SchemaProblem } from "./openapi/lint"
 import { checkRateLimit } from "./rate-limit"
-import { appendRequestLog, noteOwnerAsked } from "./request-log"
+import { appendRequestLog, noteOwnerAsked, withLogNote } from "./request-log"
 import {
   requireEncryptedOrPrivate as requireCalDavEncryptedOrPrivate,
   validateCalDavUrl,
@@ -215,6 +217,30 @@ import {
   type AuthType,
 } from "./servers"
 import { collectHandleIds, missingResultMessage } from "./result-handles"
+import { capabilityProviders } from "./capabilities/candidates"
+import {
+  capabilitiesNamed,
+  capability,
+  capabilityOfTool,
+  type CapabilityId,
+} from "./capabilities/list"
+import {
+  MAX_ANSWER_CHARS as MAX_CAPABILITY_ANSWER_CHARS,
+  MAX_MERGED_FILES,
+} from "./capabilities/limits"
+import {
+  CONVERT_OUTPUT,
+  convertDocument,
+  EDIT_OUTPUT,
+  editPdf,
+  READ_IMAGE_OUTPUT,
+  readImage,
+  RESULT_HANDLE,
+  setupOutcome,
+  type Bridge,
+  type EditOperation,
+  type InputFile,
+} from "./capabilities/run"
 import {
   describeResults,
   openResult,
@@ -862,6 +888,28 @@ export function tierRefusal(
     : `${slug}/${tool.name} is a ${TOOL_TIER_LABELS[tool.tier]} tool, above this program's tier, so it was not run or asked: run the program with ${runEntryFor(tool.tier)} to call it.`
 }
 
+/**
+ * What read_result says of a file it cannot show that a capability tool
+ * reads (capabilities/): a picture or a scan, or a document.
+ */
+export function readPathHint(mediaType: string): string {
+  const type = mediaType.toLowerCase()
+
+  if (type.startsWith("image/")) {
+    return " To read the text in it, pass its handle to read_image."
+  }
+
+  if (type === "application/pdf") {
+    return " To read it, pass its handle to convert_document (or read_image for a scan); edit_pdf fills in, flattens, merges or signs it."
+  }
+
+  return /officedocument|msword|ms-excel|ms-powerpoint|opendocument|rtf/.test(
+    type,
+  )
+    ? " To read it, pass its handle to convert_document."
+    : ""
+}
+
 /** A tool's answer in prose. */
 function text(value: string): Outcome {
   return ok(value)
@@ -888,6 +936,18 @@ function tooManyCalls(value: string): Outcome {
 }
 
 const HEADER_NAME = /^[A-Za-z0-9-]{1,100}$/
+
+/**
+ * The capability tools' annotations (capabilities/): they hand a file to a
+ * provider, which may keep a copy in its own folder, and change nothing
+ * else; Write, so a provider's POST (a converter's) runs within them.
+ */
+const CAPABILITY_HINTS: ToolAnnotations = {
+  readOnlyHint: false,
+  destructiveHint: false,
+  idempotentHint: true,
+  openWorldHint: true,
+}
 
 /** Statuses a server has once PCP tried to read its tools. */
 const TOOLS_READ = new Set(["ok", "error", "refused"])
@@ -1250,8 +1310,36 @@ export function buildGatewayServer(
   }
 
   /** describe's answer for one of PCP's own tools. */
-  const describeOwn = ({ tool, note }: { tool: Tool; note: string | null }) =>
-    text(
+  const describeOwn = async ({
+    tool,
+    note,
+  }: {
+    tool: Tool
+    note: string | null
+  }) => {
+    // A capability's tool says whether a provider is there to do its work.
+    const cap = capabilityOfTool(tool.name)
+    let providers: Record<string, unknown> | undefined
+
+    if (cap) {
+      const found = Object.entries(await providersFor(cap.id)).flatMap(
+        ([operation, list]) =>
+          (list ?? []).map(
+            (provider) =>
+              `${provider.tool.server}/${provider.tool.tool} (${operation})`,
+          ),
+      )
+
+      providers =
+        found.length > 0
+          ? { providers: found }
+          : {
+              providers: [],
+              setup: `No tool of this token provides it yet: calling ${cap.tool} answers with the owner's link, "${cap.label}", to set one up.`,
+            }
+    }
+
+    return text(
       describeOwnTool(
         {
           name: tool.name,
@@ -1263,8 +1351,10 @@ export function buildGatewayServer(
           tier: tierFromAnnotations(tool.annotations),
         },
         note,
+        providers,
       ),
     )
+  }
 
   /** The owner is asked; the answer is the request's, passed on. */
   const asked = async (ask: Parameters<typeof withPermission>[1]) =>
@@ -1386,6 +1476,26 @@ export function buildGatewayServer(
     run: async (args: SearchArgs) => withSessionLines(await searchRun(args)),
   })
 
+  /**
+   * search's line for each capability the query names that has no
+   * provider among this token's tools (capabilities/list.ts).
+   */
+  async function missingCapabilities(query: string): Promise<string[]> {
+    const lines: string[] = []
+
+    for (const cap of capabilitiesNamed(query)) {
+      const found = await providersFor(cap.id)
+
+      if (!Object.values(found).some((list) => (list?.length ?? 0) > 0)) {
+        lines.push(
+          `not installed: ${cap.title} (pcp ${cap.tool}) — ${cap.summary} No tool of this token provides it yet: calling ${cap.tool} answers with the owner's link, "${cap.label}", to set one up.`,
+        )
+      }
+    }
+
+    return lines
+  }
+
   /** search's answer, before what it says once a session. */
   async function searchRun(args: SearchArgs): Promise<Outcome> {
     if (args.server && !bySlug.has(args.server)) {
@@ -1452,7 +1562,18 @@ export function buildGatewayServer(
       similarities,
     })
 
-    if (results.length === 0 && repoResults.length === 0) {
+    // A capability the query names that no tool of this token provides:
+    // its tool is there all the same, and answers with the owner's link.
+    const missing =
+      args.server || (args.kind && args.kind !== "pcp")
+        ? []
+        : await missingCapabilities(args.query)
+
+    if (
+      results.length === 0 &&
+      repoResults.length === 0 &&
+      missing.length === 0
+    ) {
       return text(
         `Nothing matches "${args.query}". Try other words, or list_tools for every tool on a server.`,
       )
@@ -1484,6 +1605,7 @@ export function buildGatewayServer(
             `${result.kind} ${result.ref}${result.title ? ` (${result.title})` : ""}${result.tier ? ` [${result.kind === "tool" ? `${result.tier}: ${callEntryFor(result.tier)}` : result.tier}]` : ""} — ${result.description}`,
         ),
         ...(notes.length ? ["", ...notes] : []),
+        ...(missing.length ? ["", ...missing] : []),
         ...(args.kind
           ? []
           : repoResults.map(
@@ -2301,6 +2423,107 @@ export function buildGatewayServer(
     }
   }
 
+  /**
+   * One call to a tool among the token's own, as run_code's pcp.call and
+   * the capability tools (capabilities/) make it, with the answer as a
+   * value: resolveCall first (blocked, a secret, a missing handle), then
+   * the caller's tier (a tool above it refused before anything is checked
+   * or asked), its arguments checked by the one validator, the owner asked
+   * where the level asks (askCodeCall: the call they allowed once a moment
+   * ago gets its answer), and otherwise runCodeCall, which is paced.
+   */
+  async function forwardCall(
+    slug: string,
+    name: string,
+    callArgs: Record<string, unknown>,
+    {
+      tier,
+      refusal,
+      fix,
+      run,
+      lookedUp,
+      signal,
+      shape = {},
+      max = resourceLimits().answerChars,
+    }: {
+      tier: ToolTier
+      /** The refusal of a tool above `tier`. */
+      refusal: (server: GatewayServer, tool: GatewayTool) => string
+      /** What a refusal of its arguments says to do. */
+      fix: (server: GatewayServer, tool: GatewayTool) => string
+      /** A program's run, whose signal its calls follow. */
+      run?: CallRun
+      lookedUp?: (readOnly: boolean) => void
+      signal?: AbortSignal
+      shape?: AnswerShape
+      /** The most characters of JSON handed back. */
+      max?: number
+    },
+  ): Promise<CodeCallOutcome> {
+    const found = await resolveCall(slug, name, callArgs)
+
+    if ("refused" in found) {
+      return { ok: false, error: found.refused, refused: true }
+    }
+
+    if (!tierAllows(tier, found.tool.tier)) {
+      return {
+        ok: false,
+        error: refusal(found.server, found.tool),
+        refused: true,
+      }
+    }
+
+    lookedUp?.(found.tool.tier === "read")
+
+    // As call_tool's: checked before anything runs or asks.
+    const row = await toolRow(found.server.id, found.tool.name)
+    const unfit = row
+      ? await argumentsUnfit(found.server, found.tool.name, row, callArgs, {
+          fix: fix(found.server, found.tool),
+          showSchema: false,
+        })
+      : { args: callArgs, notes: [] }
+
+    if ("refusal" in unfit) {
+      return { ok: false, error: unfit.refusal, refused: true }
+    }
+
+    const sent = unfit.args
+    // An old argument name, renamed: the caller is told what to call it.
+    const noted = <T extends object>(outcome: T) =>
+      unfit.notes.length > 0 && "ok" in outcome && outcome.ok
+        ? { ...outcome, notes: unfit.notes }
+        : outcome
+
+    // The owner is asked, unless this is the call they allowed once a
+    // moment ago: then the caller gets what it answered.
+    if (found.tool.access === "ask") {
+      return noted(
+        await askCodeCall(scope, {
+          kind: "call",
+          server: found.server,
+          tool: found.tool,
+          args: sent,
+          ...shape,
+        }),
+      )
+    }
+
+    // A run's own signal, not the request's: a run that goes on past its
+    // call keeps its calls (and a wrapper's) going.
+    return noted(
+      await runCodeCall(scope.ctx, found.server, found.tool.name, sent, {
+        publicUrl: scope.publicUrl,
+        tokenId: scope.tokenId,
+        max,
+        executor: callsFor(run?.signal ?? signal),
+        ...(run ? { run } : {}),
+        ...shape,
+      }),
+    )
+  }
+
   /** What each entry tool says first: what it runs, and what it refuses. */
   const CALL_LEADS: Record<ToolTier, string> = {
     read: 'Call a Read-tier tool by call_handle: one that only reads (describe says tier "read"), such as an API\'s GET or a search of a mail account. A Write or Destructive tool is refused, naming the entry that runs it.',
@@ -2346,6 +2569,302 @@ export function buildGatewayServer(
         }),
     })
   }
+
+  // ---- Capabilities (capabilities/) ------------------------------------
+  //
+  // read_image, edit_pdf and convert_document are always there; what does
+  // the work is a provider among this token's own tools, called through
+  // forwardCall at its levels and within the capability tool's own tier.
+  // With none, the answer is the owner's link to set one up.
+
+  /** The token's servers as they are now (a re-read may have refreshed one). */
+  const currentServers = () => [...bySlug.values()]
+
+  /** The providers of a capability's operations among the token's tools. */
+  const providersFor = (id: CapabilityId) =>
+    capabilityProviders(scope.ctx, currentServers(), id)
+
+  /** The tier a capability tool calls its providers within. */
+  const capabilityTier = (name: string): ToolTier =>
+    ownTiers[name] ?? tierFromAnnotations(CAPABILITY_HINTS)
+
+  /**
+   * The bridge a capability tool's calls go through: forwardCall, each call
+   * a line of its own in the request log under the capability tool's name,
+   * as a program's calls are under run_code's.
+   */
+  const bridgeFor =
+    (name: string, signal?: AbortSignal): Bridge =>
+    async ({ server: slug, tool, args, fields }) => {
+      const tier = capabilityTier(name)
+      const at = Date.now()
+      const { outcome, note } = await withLogNote(async (note) => ({
+        outcome: await forwardCall(slug, tool, args, {
+          tier,
+          refusal: (found, upstream) =>
+            `${found.slug}/${upstream.name} is a ${TOOL_TIER_LABELS[upstream.tier]} tool, above ${name} (${TOOL_TIER_LABELS[tier]}), so ${name} did not run it or ask the owner: run it yourself with ${callEntryFor(upstream.tier)} (describe gives its call_handle), or the owner can choose a lower tier for it on its server's page in PCP.`,
+          fix: (found, upstream) =>
+            `${name} could not call ${found.slug}/${upstream.name} with the arguments it takes: describe it to see them, and call it yourself with call_tool_*.`,
+          ...(signal ? { signal } : {}),
+          ...(fields ? { shape: { fields } } : {}),
+          max: MAX_CAPABILITY_ANSWER_CHARS,
+        }),
+        note,
+      }))
+      const owner = "owner" in outcome
+
+      if (note.asked) {
+        noteOwnerAsked(note.request)
+      }
+
+      void appendRequestLog({
+        vaultId: scope.ctx.vaultId,
+        tokenId: scope.tokenId,
+        tool: name,
+        server: slug,
+        upstreamTool: tool,
+        ok: owner || outcome.ok,
+        ms: Date.now() - at,
+        ...(!owner && !outcome.ok ? { error: "The call failed." } : {}),
+        ...(owner || note.asked ? { asked: true } : {}),
+        ...(note.request ? { request: note.request } : {}),
+      })
+
+      return outcome
+    }
+
+  /** The files a capability call names, each the token's own kept result. */
+  const inputFiles = async (
+    handles: Array<{ $result: string }>,
+  ): Promise<InputFile[] | Outcome> => {
+    const found = await describeResults(
+      scope.ctx,
+      scope.tokenId,
+      handles.map((handle) => handle.$result),
+    )
+    const files: InputFile[] = []
+
+    for (const info of found) {
+      if (!info.found) {
+        return failure(missingResultMessage(), "not_found")
+      }
+
+      files.push({ id: info.id, name: info.name, mediaType: info.mediaType })
+    }
+
+    return files
+  }
+
+  const fileArg = (what: string) =>
+    RESULT_HANDLE.describe(
+      `${what}: a handle {"$result": …} as an answer gave it (a browser download or screenshot, a mail attachment, an upload, another tool's file). Pass it as it is.`,
+    )
+
+  register({
+    name: "read_image",
+    title: "Read an image or scan",
+    description: `Read text in an image or scan (OCR): a photo, a screenshot, a scanned page or a PDF of one, by its file handle. Runs every OCR provider this token may use on it (a service the owner launched, an OCR server they added) and answers each reading with how sure it was, flagging where the readings disagree or one is unsure; check digits and meter readings against the picture. Each provider's call follows this token's levels and runs at most at this tool's tier: one the owner has not allowed yet answers with their link. With no provider installed it answers with a link for the owner to set one up; once they have, call it again. ${OWNER_LINK_RULE}`,
+    input: z.object({ file: fileArg("The picture or scan") }),
+    output: READ_IMAGE_OUTPUT,
+    annotations: CAPABILITY_HINTS,
+    async run(args: { file: { $result: string } }, ctx) {
+      const cap = capability("read_image")
+      const files = await inputFiles([args.file])
+
+      if (!Array.isArray(files)) {
+        return files
+      }
+
+      const providers = (await providersFor(cap.id)).read ?? []
+
+      if (providers.length === 0) {
+        return setupOutcome(
+          cap,
+          scope.publicUrl,
+          "no tool this token can use reads the text in a picture.",
+        )
+      }
+
+      return readImage(
+        cap,
+        providers,
+        files[0]!,
+        bridgeFor("read_image", ctx.signal),
+        scope.publicUrl,
+      )
+    },
+  })
+
+  register({
+    name: "convert_document",
+    title: "Convert a document to text",
+    description: `Convert a document to Markdown or text: a PDF, Word, PowerPoint, Excel or HTML file, by its file handle, so you can read, quote or summarise it. Uses the best provider this token may use (a document converter the owner launched or added), trying the next when one fails; a long text comes back as a handle for read_result. Each call follows this token's levels and runs at most at this tool's tier: one the owner has not allowed yet answers with their link. With no provider installed it answers with a link for the owner to set one up; once they have, call it again. ${OWNER_LINK_RULE}`,
+    input: z.object({ file: fileArg("The document") }),
+    output: CONVERT_OUTPUT,
+    annotations: CAPABILITY_HINTS,
+    async run(args: { file: { $result: string } }, ctx) {
+      const cap = capability("convert_document")
+      const files = await inputFiles([args.file])
+
+      if (!Array.isArray(files)) {
+        return files
+      }
+
+      const providers = (await providersFor(cap.id)).convert ?? []
+
+      if (providers.length === 0) {
+        return setupOutcome(
+          cap,
+          scope.publicUrl,
+          "no tool this token can use turns a document into text.",
+        )
+      }
+
+      return convertDocument(
+        cap,
+        providers,
+        files[0]!,
+        bridgeFor("convert_document", ctx.signal),
+        scope.publicUrl,
+      )
+    },
+  })
+
+  type EditArgs = {
+    operation: EditOperation
+    file?: { $result: string }
+    files?: Array<{ $result: string }>
+    fields?: Record<string, string | number | boolean>
+    flatten?: boolean
+    signature?: { $result: string }
+    page?: number
+    rect?: number[]
+  }
+
+  register({
+    name: "edit_pdf",
+    title: "Edit a PDF",
+    description: `Edit a PDF: list or fill in its form fields, flatten it, merge several into one, or place a picture of a signature on a page, by file handles; the new PDF comes back as a handle to send, store or share. Uses the best provider this token may use (a PDF server the owner launched or added). Each call follows this token's levels and runs at most at this tool's tier: one the owner has not allowed yet answers with their link. With no provider installed it answers with a link for the owner to set one up; once they have, call it again. ${OWNER_LINK_RULE}`,
+    input: z
+      .object({
+        operation: z
+          .enum(["form_fields", "fill_form", "flatten", "merge", "sign"])
+          .describe(
+            "form_fields: the form's fields and their values now. fill_form: set fields (and flatten, if asked). flatten: make the form and notes part of the page, no longer editable. merge: several PDFs into one, in order. sign: place a picture of a signature on a page (not a digital signature).",
+          ),
+        file: fileArg("The PDF (for every operation but merge)").optional(),
+        files: z
+          .array(fileArg("A PDF"))
+          .min(2)
+          .max(MAX_MERGED_FILES)
+          .optional()
+          .describe("merge: the PDFs, in the order they go in."),
+        fields: z
+          .record(
+            z.string().min(1).max(500),
+            z.union([z.string().max(10_000), z.number(), z.boolean()]),
+          )
+          .optional()
+          .describe(
+            "fill_form: the value for each field, by the field's name as form_fields gives it.",
+          ),
+        flatten: z
+          .boolean()
+          .optional()
+          .describe(
+            "fill_form: also flatten it, so the values can no longer be changed.",
+          ),
+        signature: fileArg(
+          "sign: the picture of the signature (PNG or JPEG)",
+        ).optional(),
+        page: z
+          .number()
+          .int()
+          .min(1)
+          .max(10_000)
+          .optional()
+          .describe("sign: the page it goes on, from 1."),
+        rect: z
+          .array(z.number().min(0).max(100_000))
+          .length(4)
+          .optional()
+          .describe(
+            "sign: where on the page, [x0, y0, x1, y1] in PDF points; the provider places it itself without one, where it can.",
+          ),
+      })
+      .meta({
+        allOf: [
+          {
+            if: {
+              properties: { operation: { const: "merge" } },
+              required: ["operation"],
+            },
+            then: { required: ["files"] },
+            else: { required: ["file"] },
+          },
+          {
+            if: {
+              properties: { operation: { const: "fill_form" } },
+              required: ["operation"],
+            },
+            then: { required: ["fields"] },
+          },
+          {
+            if: {
+              properties: { operation: { const: "sign" } },
+              required: ["operation"],
+            },
+            then: { required: ["signature", "page"] },
+          },
+        ],
+      }),
+    output: EDIT_OUTPUT,
+    annotations: { ...CAPABILITY_HINTS, idempotentHint: false },
+    async run(args: EditArgs, ctx) {
+      const cap = capability("pdf_edit")
+      const main = await inputFiles(
+        args.operation === "merge" ? (args.files ?? []) : [args.file!],
+      )
+
+      if (!Array.isArray(main)) {
+        return main
+      }
+
+      const image =
+        args.operation === "sign" && args.signature
+          ? await inputFiles([args.signature])
+          : []
+
+      if (!Array.isArray(image)) {
+        return image
+      }
+
+      const providers = (await providersFor(cap.id))[args.operation] ?? []
+
+      if (providers.length === 0) {
+        return setupOutcome(
+          cap,
+          scope.publicUrl,
+          `no tool this token can use does ${args.operation} on a PDF.`,
+        )
+      }
+
+      return editPdf(
+        cap,
+        args.operation,
+        providers,
+        { main, ...(image[0] ? { image: image[0] } : {}) },
+        {
+          ...(args.fields ? { fields: args.fields } : {}),
+          ...(args.flatten !== undefined ? { flatten: args.flatten } : {}),
+          ...(args.page !== undefined ? { page: args.page } : {}),
+          ...(args.rect ? { rect: args.rect } : {}),
+        },
+        bridgeFor("edit_pdf", ctx.signal),
+        scope.publicUrl,
+      )
+    },
+  })
 
   register({
     name: "check_permission",
@@ -2695,7 +3214,7 @@ export function buildGatewayServer(
 
       if (slice.binary) {
         return text(
-          `[result ${slice.id}: ${slice.name ?? "binary data"}, ${slice.mediaType}, ${slice.total} bytes, readable until ${until}] PCP does not show binary data. To hand it to another tool, pass {"$result": "${slice.id}"} where that tool wants a string (it becomes base64), or as an attachment where the tool takes them.${scope.shareFiles ? " To get it onto your own computer, call share_result and download the link with curl." : ""}`,
+          `[result ${slice.id}: ${slice.name ?? "binary data"}, ${slice.mediaType}, ${slice.total} bytes, readable until ${until}] PCP does not show binary data. To hand it to another tool, pass {"$result": "${slice.id}"} where that tool wants a string (it becomes base64), or as an attachment where the tool takes them.${readPathHint(slice.mediaType)}${scope.shareFiles ? " To get it onto your own computer, call share_result and download the link with curl." : ""}`,
         )
       }
 
@@ -5100,92 +5619,26 @@ export function buildGatewayServer(
                 ...(runner ? { executor: runner } : {}),
                 list,
                 describe: describeForCode,
-                call: async ({
+                call: ({
                   server: slug,
                   tool: name,
                   args: callArgs,
                   run,
                   lookedUp,
                   ...shape
-                }) => {
-                  const found = await resolveCall(slug, name, callArgs)
-
-                  if ("refused" in found) {
-                    return { ok: false, error: found.refused, refused: true }
-                  }
-
-                  // Above the program's tier: refused before its arguments
-                  // are checked or the owner asked, and the program may catch it.
-                  if (!tierAllows(tier, found.tool.tier)) {
-                    return {
-                      ok: false,
-                      error: tierRefusal(found.server.slug, found.tool, "run"),
-                      refused: true,
-                    }
-                  }
-
-                  lookedUp?.(found.tool.tier === "read")
-
-                  // As call_tool's: checked before anything runs or asks.
-                  const row = await toolRow(found.server.id, found.tool.name)
-                  const unfit = row
-                    ? await argumentsUnfit(
-                        found.server,
-                        found.tool.name,
-                        row,
-                        callArgs,
-                        {
-                          fix: `Fix them; pcp.describe("${found.server.slug}", "${found.tool.name}") gives its inputSchema.`,
-                          showSchema: false,
-                        },
-                      )
-                    : { args: callArgs, notes: [] }
-
-                  if ("refusal" in unfit) {
-                    return { ok: false, error: unfit.refusal, refused: true }
-                  }
-
-                  const sent = unfit.args
-                  // An old argument name, renamed: the program is told, in
-                  // what the run prints, what to call it.
-                  const noted = <T extends object>(outcome: T) =>
-                    unfit.notes.length > 0 && "ok" in outcome && outcome.ok
-                      ? { ...outcome, notes: unfit.notes }
-                      : outcome
-
-                  // The owner is asked, unless this is the call they allowed
-                  // once a moment ago: then the program gets what it answered.
-                  if (found.tool.access === "ask") {
-                    return noted(
-                      await askCodeCall(scope, {
-                        kind: "call",
-                        server: found.server,
-                        tool: found.tool,
-                        args: sent,
-                        ...shape,
-                      }),
-                    )
-                  }
-
-                  // The run's own signal, not the request's: a run that goes
-                  // on past its call keeps its calls (and a wrapper's) going.
-                  return noted(
-                    await runCodeCall(
-                      scope.ctx,
-                      found.server,
-                      found.tool.name,
-                      sent,
-                      {
-                        publicUrl: scope.publicUrl,
-                        tokenId: scope.tokenId,
-                        max: resourceLimits().answerChars,
-                        executor: callsFor(run.signal),
-                        run,
-                        ...shape,
-                      },
-                    ),
-                  )
-                },
+                }) =>
+                  forwardCall(slug, name, callArgs, {
+                    tier,
+                    // Above the program's tier: refused before its arguments
+                    // are checked or the owner asked, and the program may catch it.
+                    refusal: (found, tool) =>
+                      tierRefusal(found.slug, tool, "run"),
+                    fix: (found, tool) =>
+                      `Fix them; pcp.describe("${found.slug}", "${tool.name}") gives its inputSchema.`,
+                    run,
+                    lookedUp,
+                    shape,
+                  }),
               },
             ),
           )

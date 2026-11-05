@@ -1350,7 +1350,7 @@ describe.skipIf(!executable)(
       })
       const tab = tabOf(opened)
       const frame = refOf(opened, /- iframe/)
-      const line = `1 cross-origin iframe (ref ${frame}), 1 closed shadow root and 1 canvas not included: the page shows more than this. Take a screenshot and OCR it to see them (pass its handle to an OCR tool, if the owner has added one (search for "ocr")); click with a point (x, y) from the screenshot reaches into them.`
+      const line = `1 cross-origin iframe (ref ${frame}), 1 closed shadow root and 1 canvas not included: the page shows more than this. Take a screenshot and OCR it to see them (pass its handle to read_image, which runs the OCR providers this token may use or answers with a link to set one up); click with a point (x, y) from the screenshot reaches into them.`
 
       expect(textOf(opened)).toContain(line)
       expect(textOf(await call("snapshot", { tab }))).toContain(line)
@@ -1394,7 +1394,7 @@ describe.skipIf(!executable)(
       })
       const picture = await call("screenshot", { tab: tabOf(opened) })
       expect(textOf(picture)).toContain(
-        'To read the text in this picture, pass its handle to an OCR tool, if the owner has added one (search for "ocr"); read_result does not show an image.',
+        "To read the text in this picture, pass its handle to read_image, which runs the OCR providers this token may use or answers with a link to set one up; read_result does not show an image.",
       )
     })
 
