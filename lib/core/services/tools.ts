@@ -14,12 +14,13 @@ import {
 } from "./limits"
 
 /**
- * The tools a service's own server offers: its status and logs, and
+ * The tools a service's own server offers: its status and logs,
  * starting, stopping and restarting it, at the owner's levels like any
- * tool. Each is defined on PCP's one tool interface
+ * tool, and proposing a newer image (`update`), which the owner answers on
+ * PCP's page. Each is defined on PCP's one tool interface
  * (lib/core/tools/family.ts), its arguments checked by the one validator
- * before anything connects. None takes an engine command, an image or a
- * variable: what runs is the owner's, on the service's page.
+ * before anything connects. None takes an engine command or a variable,
+ * and `update`'s digest only proposes: what runs is the owner's.
  */
 
 export const SERVICE_TOOL_NAMES = [
@@ -28,6 +29,7 @@ export const SERVICE_TOOL_NAMES = [
   "start",
   "stop",
   "restart",
+  "update",
 ] as const
 export type ServiceToolName = (typeof SERVICE_TOOL_NAMES)[number]
 
@@ -52,6 +54,19 @@ const logsArgs = () =>
       .optional()
       .describe(
         "Only lines from the last this many minutes; left out, however old they are.",
+      ),
+  })
+
+const updateArgs = () =>
+  z.strictObject({
+    digest: z
+      .string()
+      .regex(/^sha256:[a-f0-9]{64}$/, {
+        message: "A digest is sha256: and 64 hex digits.",
+      })
+      .optional()
+      .describe(
+        "The image to update to, by its digest (sha256: and 64 hex digits) in the repository the service runs; left out, the newest of the tag it updates from, as its SSH server finds it now.",
       ),
   })
 
@@ -132,6 +147,19 @@ const SPECS: Spec[] = [
       openWorldHint: true,
     },
   },
+  {
+    name: "update",
+    title: "Propose an image update",
+    description: ({ service, host }) =>
+      `Proposes updating the service ${service} on ${host} to a newer image: the newest of the tag it updates from, or a digest you name in its repository. Nothing changes until the owner agrees on PCP's page, which shows the image it runs and the one it would run; the answer is a link for them. Not for a service built from a repository, which only the owner updates.`,
+    args: updateArgs,
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
+  },
 ]
 
 const TOOLS = new Map<string, InnerTool>(
@@ -163,6 +191,7 @@ export function serviceTools(where: Where): CatalogueTool[] {
 export type ServiceCall =
   | { tool: "status" | "start" | "stop" | "restart" }
   | { tool: "logs"; lines: number; sinceMinutes?: number }
+  | { tool: "update"; digest?: string }
 
 /**
  * A call's tool and arguments, checked: what to do, or why not (no such
@@ -198,6 +227,18 @@ export function readServiceCall(
         ...(data.since_minutes !== undefined
           ? { sinceMinutes: data.since_minutes }
           : {}),
+      },
+    }
+  }
+
+  if (toolName === "update") {
+    const data = checked.args as { digest?: string }
+    return {
+      fits: true,
+      notes: checked.notes,
+      call: {
+        tool: "update",
+        ...(data.digest !== undefined ? { digest: data.digest } : {}),
       },
     }
   }

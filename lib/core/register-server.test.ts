@@ -1549,6 +1549,27 @@ describe("proposing a service", () => {
       (await propose({ service: { ...DEFINITION, image: "docling:latest" } }))
         .text,
     ).toMatch(/pinned by digest/)
+    const unpinned_ = Object.fromEntries(
+      Object.entries(DEFINITION).filter(
+        ([key]) => key !== "image" && key !== "source",
+      ),
+    )
+    expect(
+      (
+        await propose({
+          service: {
+            ...unpinned_,
+            build: {
+              repository: "kaperkunde/docling",
+              commit: "a".repeat(40),
+              containerfile: "Containerfile",
+            },
+          },
+        })
+      ).text,
+    ).toMatch(
+      /built from a repository on the SSH server, which only the owner sets up/,
+    )
     expect((await propose({ ssh_server: "nowhere" })).text).toMatch(
       /No SSH server called nowhere that this token sees/,
     )

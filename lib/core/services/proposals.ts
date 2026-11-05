@@ -134,6 +134,14 @@ export async function prepareServiceProposal(
     description = args.description ?? ""
   }
 
+  // A build from a repository is the owner's alone: what it runs is made
+  // on their SSH server from code, not an image anyone pinned.
+  if (definition.build) {
+    throw invalid(
+      "This service is built from a repository on the SSH server, which only the owner sets up, on PCP's launch page (Servers, Add, Service). Propose an image pinned by digest instead, or ask them to launch it.",
+    )
+  }
+
   // An exit is the owner's alone to add (lib/core/exits/): an assistant
   // names one in its calls, never makes one.
   if (definition.registers.kind === "exit") {

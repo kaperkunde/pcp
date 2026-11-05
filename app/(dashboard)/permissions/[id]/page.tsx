@@ -509,10 +509,10 @@ function PendingNote({ view }: { view: PermissionView }) {
     case "service_change":
       return (
         <p className={note}>
-          Launching it pulls the image exactly as shown above, by its digest,
-          and runs it on that SSH server with the secrets named there; nothing
-          runs until you agree. You can stop, update or remove it on its page
-          under{" "}
+          Launching or updating it pulls the image exactly as shown above, by
+          its digest, and runs it on that SSH server with the secrets named
+          there; nothing runs until you agree. You can stop, update or remove it
+          on its page under{" "}
           <Link href="/servers" className="underline">
             Servers
           </Link>

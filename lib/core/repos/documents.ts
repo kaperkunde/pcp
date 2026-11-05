@@ -375,7 +375,7 @@ function serviceYaml(definition: ServiceDefinition): Record<string, unknown> {
     list.length > 0 ? { [key]: list } : {}
 
   return {
-    image: definition.image,
+    image: definition.image ?? "",
     ...(definition.source !== undefined ? { source: definition.source } : {}),
     ...listed(
       "ports",
@@ -1466,6 +1466,14 @@ function parseService(item: ItemFiles): ServiceDocument {
 
   if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
     throw invalid(`${what} is a YAML mapping.`)
+  }
+
+  // A build from a repository is the owner's alone, on their launch page:
+  // a document names an image pinned by digest. (Format 3 never had one.)
+  if ("build" in raw) {
+    throw invalid(
+      `${what} builds its image from a repository, which only the owner sets up on PCP's launch page: a service's document names an image pinned by digest.`,
+    )
   }
 
   const own = Object.keys(raw).filter((key) => key in SERVICE_INSTANCE_KEYS)

@@ -7,14 +7,20 @@ import {
   IMAGE_BY_DIGEST,
   IMAGE_BY_TAG,
   imageRepository,
+  LOCAL_IMAGE,
   volumeOnHost,
+  type ServiceBuild,
   type ServiceDefinition,
   type ServicePublish,
 } from "./definition"
 import {
+  BUILD_LOG_TAIL_BYTES,
+  BUILD_TIMEOUT_MS,
   ENGINE_COMMAND_TIMEOUT_MS,
   ENGINE_OUTPUT_BYTES,
   ENGINE_PULL_TIMEOUT_MS,
+  MAX_BUILD_SOURCE_BYTES,
+  MAX_BUILT_IMAGE_BYTES,
   MAX_ENV_SECRET_BYTES,
   MAX_LOG_BYTES,
   STOP_GRACE_SECONDS,
@@ -156,6 +162,12 @@ export async function pullImage(
     throw new EngineError("An image is pulled by digest.")
   }
 
+  if (LOCAL_IMAGE.test(image)) {
+    throw new EngineError(
+      `${image} was built on the SSH server from a repository: it is never pulled.`,
+    )
+  }
+
   const result = await run(
     host,
     commandLine([program(engine), "pull", "--quiet", image]),
@@ -231,6 +243,175 @@ export function pickDigest(output: string, source: string): string {
   }
 
   return `${repository}@${found.slice(found.indexOf("@") + 1)}`
+}
+
+// ---- Building from a repository ----------------------------------------------
+
+/** What the engine runs an image as: a built one by its id, `sha256:<id>`. */
+export function runReference(image: string): string {
+  return LOCAL_IMAGE.test(image) ? image.slice(image.indexOf("@") + 1) : image
+}
+
+/** The name a build's image is tagged with: localhost/pcp-<repository's name>. */
+export function builtImageName(
+  build: Pick<ServiceBuild, "repository">,
+): string {
+  const name =
+    (build.repository.split("/")[1] ?? "")
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "")
+      .slice(0, 50) || "build"
+
+  return `localhost/pcp-${name}`
+}
+
+/** Where the repository's tarball at the commit is, on GitHub: no redirect. */
+export function buildSourceUrl(
+  build: Pick<ServiceBuild, "repository" | "commit">,
+): string {
+  return `https://codeload.github.com/${build.repository}/tar.gz/${build.commit}`
+}
+
+/**
+ * The script that builds: in a folder of its own (mktemp -d, removed on
+ * exit however it ends) it downloads the repository at the commit with
+ * curl or wget (whichever the login has; HTTPS only, bounded in time and
+ * size), unpacks it, checks that the Containerfile and the build's folder
+ * are inside it (not reached through a link out), builds with the engine
+ * and writes the image id. Every word from the definition is quoted; the
+ * only words left to the shell are its own variables.
+ */
+export function buildScript(
+  engine: ServiceEngine,
+  build: ServiceBuild,
+): string {
+  const exe = program(engine)
+  const url = buildSourceUrl(build)
+  const parts = build.containerfile.split("/")
+  const base = parts.pop()!
+  const fileDir = ["src", ...parts].join("/")
+  const contextDir = build.context === "." ? "src" : `src/${build.context}`
+  const limit = String(MAX_BUILD_SOURCE_BYTES)
+  const refuse = (message: string, code: number) =>
+    `{ echo ${shellQuote(message)} >&2; exit ${code}; }`
+  const args = build.args.flatMap((arg) => [
+    "--build-arg",
+    `${arg.name}=${arg.value}`,
+  ])
+
+  return [
+    "umask 022",
+    "d=$(mktemp -d) || exit 1",
+    `trap 'rm -rf "$d"' EXIT`,
+    "trap 'exit 129' HUP INT TERM",
+    'cd "$d" || exit 1',
+    "if command -v curl >/dev/null 2>&1; then",
+    `  ${commandLine(["curl", "-fsS", "--proto", "=https", "--max-time", "600", "--max-filesize", limit, "-o", "src.tar.gz", url])} || ${refuse(`PCP could not download ${build.repository} at ${build.commit} from GitHub (a public repository and a commit it has).`, 3)}`,
+    "elif command -v wget >/dev/null 2>&1; then",
+    `  ${commandLine(["wget", "-q", "-T", "60", "-O", "src.tar.gz", url])} || ${refuse(`PCP could not download ${build.repository} at ${build.commit} from GitHub (a public repository and a commit it has).`, 3)}`,
+    "else",
+    `  ${refuse("Neither curl nor wget is installed for the login PCP uses: PCP downloads the repository with one of them.", 4)}`,
+    "fi",
+    `command -v tar >/dev/null 2>&1 || ${refuse("tar is not installed for the login PCP uses: PCP unpacks the repository with it.", 4)}`,
+    `[ "$(wc -c < src.tar.gz)" -le ${limit} ] || ${refuse(`The repository at that commit is larger than the ${MAX_BUILD_SOURCE_BYTES / 1024 / 1024} MB PCP builds.`, 5)}`,
+    `mkdir src && tar -xzf src.tar.gz -C src --strip-components=1 --no-same-owner || ${refuse("The repository's download did not unpack.", 6)}`,
+    "rm -f src.tar.gz",
+    "s=$(cd src && pwd -P) || exit 6",
+    `c=$(cd ${shellQuote(contextDir)} 2>/dev/null && pwd -P) || ${refuse(`There is no folder ${build.context} in the repository at that commit.`, 7)}`,
+    `case "$c/" in "$s"/*) ;; *) ${refuse(`The build's folder ${build.context} leads out of the repository.`, 7)} ;; esac`,
+    `f=$(cd ${shellQuote(fileDir)} 2>/dev/null && pwd -P) || ${refuse(`There is no ${build.containerfile} in the repository at that commit.`, 7)}`,
+    `case "$f/" in "$s"/*) ;; *) ${refuse(`${build.containerfile} leads out of the repository.`, 7)} ;; esac`,
+    `[ -f "$f"/${shellQuote(base)} ] && [ ! -L "$f"/${shellQuote(base)} ] || ${refuse(`There is no ${build.containerfile} in the repository at that commit.`, 7)}`,
+    `${commandLine([exe, "build", "--file"])} "$f"/${shellQuote(base)} --iidfile "$d/iid" ${commandLine(["--tag", `${builtImageName(build)}:${build.commit.slice(0, 12)}`, ...args])} "$c" >"$d/log" 2>&1 || { tail -c ${BUILD_LOG_TAIL_BYTES} "$d/log" >&2; exit 8; }`,
+    'cat "$d/iid"',
+  ].join("\n")
+}
+
+/**
+ * Builds the definition's repository at its commit on the SSH server and
+ * answers the image it made, as `localhost/pcp-<name>@sha256:<id>`: what
+ * the definition pins and a container runs by id. An image past
+ * MAX_BUILT_IMAGE_BYTES is removed again and refused.
+ */
+export async function buildImage(
+  host: ServiceHost,
+  engine: ServiceEngine,
+  build: ServiceBuild,
+): Promise<string> {
+  const result = await run(host, buildScript(engine, build), {
+    timeoutMs: BUILD_TIMEOUT_MS,
+  })
+
+  if (failed(result)) {
+    throw new EngineError(
+      `${host.name} could not build ${build.repository} at ${build.commit.slice(0, 12)}: ${result.timedOut ? `it took longer than ${BUILD_TIMEOUT_MS / 60_000} minutes` : said(result, [])}`,
+    )
+  }
+
+  const found = /^(?:sha256:)?([a-f0-9]{64})\s*$/.exec(
+    text(result.stdout).trim(),
+  )
+
+  if (!found) {
+    throw new EngineError(
+      `${host.name}'s engine built ${build.repository} but named no image id.`,
+    )
+  }
+
+  const id = `sha256:${found[1]}`
+  const exe = program(engine)
+  const size = await run(
+    host,
+    commandLine([exe, "image", "inspect", "--format", "{{.Size}}", id]),
+  )
+  const bytes = Number(text(size.stdout).trim())
+
+  if (failed(size) || !Number.isFinite(bytes)) {
+    throw new EngineError(
+      `${host.name} could not read the size of the image it built: ${said(size, [])}`,
+    )
+  }
+
+  if (bytes > MAX_BUILT_IMAGE_BYTES) {
+    await run(host, `${commandLine([exe, "rmi", id])} >/dev/null 2>&1; true`)
+    throw new EngineError(
+      `The image built from ${build.repository} is ${Math.round(bytes / 1024 / 1024)} MB, more than the ${MAX_BUILT_IMAGE_BYTES / 1024 / 1024 / 1024} GB PCP keeps: it was removed again.`,
+    )
+  }
+
+  return `${builtImageName(build)}@${id}`
+}
+
+/** Whether the SSH server still has an image PCP built (by its id). */
+export async function imagePresent(
+  host: ServiceHost,
+  engine: ServiceEngine,
+  image: string,
+): Promise<boolean> {
+  const result = await run(
+    host,
+    commandLine([
+      program(engine),
+      "image",
+      "inspect",
+      "--format",
+      "{{.Id}}",
+      runReference(image),
+    ]),
+  )
+
+  if (!failed(result)) {
+    return true
+  }
+
+  if (/no such image|image not known|not found/i.test(text(result.stderr))) {
+    return false
+  }
+
+  throw new EngineError(
+    `${host.name} could not look for the image ${image}: ${said(result, [])}`,
+  )
 }
 
 // ---- The container ----------------------------------------------------------
@@ -339,12 +520,17 @@ export function runWords(engine: ServiceEngine, spec: ContainerSpec): string[] {
     words.push("--device", device)
   }
 
-  if (!IMAGE_BY_DIGEST.test(definition.image)) {
+  if (!definition.image || !IMAGE_BY_DIGEST.test(definition.image)) {
     throw new EngineError("A service's image is pinned by digest.")
   }
 
   // The image's arguments follow it: nothing after it is the engine's.
-  words.push("--env-file", "\0ENVFILE\0", definition.image, ...definition.args)
+  words.push(
+    "--env-file",
+    "\0ENVFILE\0",
+    runReference(definition.image),
+    ...definition.args,
+  )
   return words
 }
 
@@ -513,12 +699,14 @@ export type ContainerState = {
   error: string | null
   /** The image it was created from, as PCP named it (by digest). */
   image: string | null
+  /** The id of that image, as the engine has it: sha256:<64 hex>. */
+  imageId: string | null
   /** pcp.service on it: the service it belongs to. */
   serviceLabel: string | null
 }
 
 const INSPECT_FORMAT =
-  "[{{json .State}},{{json .Config.Image}},{{json .Config.Labels}}]"
+  "[{{json .State}},{{json .Config.Image}},{{json .Config.Labels}},{{json .Image}}]"
 
 /**
  * The container's state, image and label, through a narrow format: never
@@ -564,6 +752,7 @@ export function missingState(): ContainerState {
     exitCode: null,
     error: null,
     image: null,
+    imageId: null,
     serviceLabel: null,
   }
 }
@@ -586,7 +775,7 @@ export function parseInspect(output: string, redact: string[]): ContainerState {
     )
   }
 
-  const [state, image, labels] = Array.isArray(parsed) ? parsed : []
+  const [state, image, labels, imageId] = Array.isArray(parsed) ? parsed : []
   const s = (state ?? {}) as Record<string, unknown>
   const health = (s.Health ?? s.Healthcheck) as
     Record<string, unknown> | undefined
@@ -600,11 +789,21 @@ export function parseInspect(output: string, redact: string[]): ContainerState {
     exitCode: typeof s.ExitCode === "number" ? s.ExitCode : null,
     error: error ? scrub.text(error) : null,
     image: short(image, 400),
+    imageId: imageIdOf(imageId),
     serviceLabel: short(
       (labels as Record<string, unknown> | null)?.["pcp.service"],
       100,
     ),
   }
+}
+
+/** An image id as Docker (sha256:<hex>) or Podman (<hex>) writes it. */
+function imageIdOf(value: unknown): string | null {
+  const found =
+    typeof value === "string"
+      ? /^(?:sha256:)?([a-f0-9]{64})$/.exec(value)
+      : null
+  return found ? `sha256:${found[1]}` : null
 }
 
 export type LogsRequest = { lines: number; sinceMinutes?: number }

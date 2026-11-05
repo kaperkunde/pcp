@@ -1,5 +1,6 @@
 import type { ToolAccess } from "../constants"
 import type { FetchArgs } from "../fetch/request"
+import type { ServiceUpdateAsk } from "../services/updates"
 
 /**
  * What the rest of PCP knows about the browser without loading it: a tab
@@ -160,12 +161,19 @@ export type SecretTyper = {
 }
 
 /**
- * Thrown by a browser tool when the owner has to answer first. The call
- * that ran the tool (permissions.ts runCall) turns it into a permission
- * request, so the browser never imports the permission flow.
+ * What a tool outside the browser asks the owner the same way: a service's
+ * `update`, an image update to agree to (services/updates.ts).
+ */
+export type OwnerAsk =
+  BrowserAsk | { kind: "service_change"; input: ServiceUpdateAsk }
+
+/**
+ * Thrown by a browser tool (or a service's `update`) when the owner has to
+ * answer first. The call that ran the tool (permissions.ts runCall) turns
+ * it into a permission request, so neither imports the permission flow.
  */
 export class OwnerNeeded extends Error {
-  constructor(readonly ask: BrowserAsk) {
+  constructor(readonly ask: OwnerAsk) {
     super("The owner's answer is needed first.")
     this.name = "OwnerNeeded"
   }

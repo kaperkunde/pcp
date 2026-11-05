@@ -137,7 +137,7 @@ async function owner(promise: Promise<unknown>): Promise<BrowserAsk> {
   try {
     await promise
   } catch (error) {
-    if (isOwnerNeeded(error)) return error.ask
+    if (isOwnerNeeded(error)) return error.ask as BrowserAsk
     throw error
   }
   throw new Error("expected the owner to be asked")

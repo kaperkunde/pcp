@@ -16,6 +16,7 @@ import {
 } from "../definition-rows"
 import { createEndpoint } from "../endpoints"
 import { invalid, isPcpError, notFound, PcpError } from "../errors"
+import { OwnerNeeded } from "../browser/types"
 import { forgetExitAnswers } from "../exits/dial"
 import { DOH_RESOLVERS } from "../exits/doh"
 import { checkNewExit, createServiceExit } from "../exits/exits"
@@ -42,6 +43,8 @@ import { parseSshAddress } from "../ssh/hosts"
 import {
   checkEnvBindings,
   checkPlainValues,
+  COMMIT,
+  LOCAL_IMAGE,
   EXIT_PUBLISH_ADDRESS,
   parsePublish,
   parseServiceDefinition,
@@ -68,10 +71,13 @@ import {
   EngineError,
   existingVolumes,
   inspectContainer,
+  buildImage,
+  imagePresent,
   pullImage,
   removeContainer,
   resolveDigest,
   runContainer,
+  runReference,
   type ContainerAction,
   type ContainerState,
   type ServiceEngine,
@@ -88,6 +94,7 @@ import {
   START_ON_DEMAND_WAIT_MS,
 } from "./limits"
 import { readServiceCall, SERVICE_TOOL_NAMES, serviceTools } from "./tools"
+import { checkUpdateImage, prepareServiceUpdate } from "./updates"
 
 /**
  * Services: containers PCP runs with the owner's own Docker or Podman, on
@@ -498,23 +505,29 @@ export type LaunchResult = {
  */
 export async function launchServiceOn(
   ctx: VaultContext,
-  prepared: PreparedLaunch,
+  asked: PreparedLaunch,
   access: ServiceAccess,
 ): Promise<LaunchResult> {
   const { host, env } = access
   const found = await engineCall(() => detectEngine(host))
   const id = newId()
+
+  // The image: pulled by digest, or built from the repository when the SSH
+  // server does not have it. Nothing is on the SSH server yet that a
+  // failure here would leave (a build cleans up after itself).
+  const image = await engineCall(() =>
+    ensureImage(host, found.engine, asked.definition),
+  )
+  const rebuilt = image !== asked.definition.image
+  const prepared: PreparedLaunch = rebuilt
+    ? { ...asked, definition: { ...asked.definition, image } }
+    : asked
   const spec = {
     serviceId: id,
     containerName: prepared.containerName,
     definition: prepared.definition,
     publish: prepared.publish,
   }
-
-  // Nothing is on the SSH server yet that a failure here would leave.
-  await engineCall(() =>
-    pullImage(host, found.engine, prepared.definition.image),
-  )
 
   // Volumes there already (a service removed before, its data kept) stay
   // whatever happens; only the ones this launch makes are taken back.
@@ -606,6 +619,11 @@ export async function launchServiceOn(
     ])
     made = true
     await ensureDefinition(id)
+
+    // Another of a definition built here: its siblings pin the image built.
+    if (rebuilt && definitionRow) {
+      await writeServiceDefinition(id, prepared.definition)
+    }
     await storeTools(
       id,
       serviceTools({ service: prepared.name, host: prepared.host.name }),
@@ -1137,8 +1155,8 @@ export type ServiceStatus = {
   exitCode: number | null
   /** The image the container runs, by digest. */
   image: string | null
-  /** The image its definition names. */
-  definitionImage: string
+  /** The image its definition names (none before a build's first). */
+  definitionImage: string | null
   /** It runs the image its definition names. */
   upToDate: boolean
   /** The container by that name is not this service's (its pcp.service label). */
@@ -1181,8 +1199,8 @@ export async function serviceStatusOn(
     startedAt: state.startedAt,
     exitCode: state.exitCode,
     image: state.image,
-    definitionImage: loaded.definition.image,
-    upToDate: state.image === loaded.definition.image,
+    definitionImage: loaded.definition.image ?? null,
+    upToDate: runsImage(state, loaded.definition.image),
     foreign,
     engine: loaded.engine,
     engineVersion: loaded.spec.engineVersion,
@@ -1203,6 +1221,22 @@ export async function serviceStatusOn(
 
   await recordStatus(loaded, status)
   return status
+}
+
+/**
+ * Whether the container runs the image the definition pins: by name for a
+ * pulled one, by image id for one built on the SSH server.
+ */
+function runsImage(state: ContainerState, image: string | undefined): boolean {
+  if (!image) {
+    return false
+  }
+
+  if (LOCAL_IMAGE.test(image)) {
+    return state.imageId === runReference(image)
+  }
+
+  return state.image === image
 }
 
 /** The status in words, for the server's row and an assistant. */
@@ -1336,10 +1370,18 @@ export async function recreateServiceOn(
   const name = loaded.spec.containerName
   const reach: ServiceReach = access.forward ? "tunnel" : loaded.reach
 
-  // The image first: when it cannot be had, the container runs on as it was.
-  await engineCall(() =>
-    pullImage(access.host, loaded.engine, loaded.definition.image),
+  // The image first: when it cannot be had, the container runs on as it
+  // was. One built here and gone since (pruned) is built again from the
+  // same commit, and pinned.
+  const image = await engineCall(() =>
+    ensureImage(access.host, loaded.engine, loaded.definition),
   )
+
+  if (image !== loaded.definition.image) {
+    loaded.definition = { ...loaded.definition, image }
+    await writeServiceDefinition(loaded.server.id, loaded.definition)
+  }
+
   await engineCall(() => removeContainer(access.host, loaded.engine, name))
   await recordIntent(loaded, "running")
 
@@ -1436,38 +1478,120 @@ async function failedRecreate(
 }
 
 /**
- * Pulls the newest image of the definition's `source` tag, pins its digest
- * on the definition (every instance's), and makes this instance's container
- * again from it. Without a source, makes it again from the pinned image.
+ * The image a definition runs, on this SSH server: pulled by its digest,
+ * or for one built from a repository, the image built there, built (again)
+ * when the SSH server does not have it. Answers the image to pin, which
+ * differs from the definition's only after a build.
+ */
+export async function ensureImage(
+  host: ServiceHost,
+  engine: ServiceEngine,
+  definition: ServiceDefinition,
+): Promise<string> {
+  if (definition.build) {
+    if (
+      definition.image &&
+      (await imagePresent(host, engine, definition.image))
+    ) {
+      return definition.image
+    }
+
+    return buildImage(host, engine, definition.build)
+  }
+
+  if (!definition.image) {
+    throw new EngineError("A service's image is pinned by digest.")
+  }
+
+  await pullImage(host, engine, definition.image)
+  return definition.image
+}
+
+/** What an update is asked for: by the owner, or as an assistant proposed it. */
+export type ServiceUpdateChoice = {
+  /** A digest of the same repository (an assistant's proposal, approved). */
+  image?: string
+  /** The definition's hash when the owner was asked: unchanged, or nothing. */
+  basis?: string
+  /** A service built from a repository: the commit to build. */
+  commit?: string
+}
+
+/**
+ * Pins a new image on the definition (every instance's) and makes this
+ * instance's container again from it: the newest of the definition's
+ * `source` tag, or the image named (`image`, of the same repository); for
+ * one built from a repository, the image built from `commit`. Without
+ * either, makes it again from the image pinned.
  */
 export async function updateServiceOn(
   loaded: LoadedService,
   access: ServiceAccess,
+  choice: ServiceUpdateChoice = {},
 ): Promise<{ status: ServiceStatus; image: string; changed: boolean }> {
-  let image = loaded.definition.image
-
-  if (loaded.definition.source) {
-    const source = loaded.definition.source
-    image = await engineCall(() =>
-      resolveDigest(access.host, loaded.engine, source),
+  if (choice.basis !== undefined && loaded.spec.hash !== choice.basis) {
+    throw new PcpError(
+      "state",
+      `${loaded.server.name}'s definition changed since this was asked (it pins ${loaded.definition.image ?? "no image"} now), so nothing was updated. The assistant can ask again.`,
     )
   }
 
-  const changed = image !== loaded.definition.image
+  const before = loaded.definition.image
+  let definition = loaded.definition
 
-  if (changed) {
-    await writeServiceDefinition(loaded.server.id, {
-      ...loaded.definition,
-      image,
-    })
+  if (definition.build) {
+    if (choice.image !== undefined) {
+      throw invalid(
+        `${loaded.server.name} is built from a repository: it updates to a new commit.`,
+      )
+    }
+
+    const commit = choice.commit?.trim() || definition.build.commit
+
+    if (!COMMIT.test(commit)) {
+      throw invalid("The commit, by its full id: 40 hex digits.")
+    }
+
+    if (commit !== definition.build.commit) {
+      const build = { ...definition.build, commit }
+      const image = await engineCall(() =>
+        buildImage(access.host, loaded.engine, build),
+      )
+      definition = { ...definition, build, image }
+    }
+  } else if (choice.commit !== undefined) {
+    throw invalid(
+      `${loaded.server.name} runs an image it pulls: it has no commit to build.`,
+    )
+  } else if (choice.image !== undefined) {
+    definition = {
+      ...definition,
+      image: checkUpdateImage(loaded, choice.image),
+    }
+  } else if (definition.source) {
+    const source = definition.source
+    const image = await engineCall(() =>
+      resolveDigest(access.host, loaded.engine, source),
+    )
+    definition = { ...definition, image }
   }
 
-  const status = await recreateServiceOn(
-    { ...loaded, definition: { ...loaded.definition, image } },
-    access,
-  )
+  const changed =
+    JSON.stringify(definition) !== JSON.stringify(loaded.definition)
 
-  return { status, image, changed }
+  if (changed) {
+    await writeServiceDefinition(loaded.server.id, definition)
+  }
+
+  const next = { ...loaded, definition }
+  const status = await recreateServiceOn(next, access)
+
+  // A rebuild of an image that was gone pins a new one too.
+  return {
+    status,
+    image: next.definition.image ?? "",
+    changed: changed || next.definition.image !== before,
+  }
 }
 
 /**
@@ -1653,6 +1777,33 @@ export async function callServiceTool(
 
   const { call } = read
   const redact = access.env.redact
+
+  // An image update is the owner's: what it finds is a request for them.
+  if (call.tool === "update") {
+    let proposed: Awaited<ReturnType<typeof prepareServiceUpdate>>
+
+    try {
+      proposed = await prepareServiceUpdate(loaded, access, call.digest)
+    } catch (error) {
+      if (isPcpError(error) && error.code !== "upstream") {
+        return familyError(error.message, error.code)
+      }
+
+      return errorToolResult(
+        `${error instanceof Error ? error.message : String(error)}\nThe service's page: ${markdownLink(`Open ${loaded.server.name}'s page in PCP`, pageOf(loaded.server.id, publicUrl))}`,
+        { redact },
+      )
+    }
+
+    if ("already" in proposed) {
+      return jsonToolResult(
+        { summary: proposed.already, image: loaded.definition.image },
+        { redact },
+      )
+    }
+
+    throw new OwnerNeeded({ kind: "service_change", input: proposed })
+  }
 
   try {
     if (call.tool === "logs") {
@@ -2080,7 +2231,7 @@ export async function exitServiceDefinitions(
       if (definition.registers.kind === "exit") {
         found.set(id, {
           name: spec.server.name.replace(/ service$/i, ""),
-          image: definition.image,
+          image: definition.image ?? "",
         })
       }
     } catch {

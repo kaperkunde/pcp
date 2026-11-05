@@ -356,7 +356,8 @@ async function serverDocument(
 /**
  * A service's definition, as every instance of it shares it: never the SSH
  * server, the published address, the secrets its variables take, its
- * container or what it registered.
+ * container or what it registered. One built from a repository on the
+ * owner's SSH server is never shared.
  */
 async function serviceDocument(
   row: McpServer,
@@ -371,13 +372,23 @@ async function serviceDocument(
     throw invalid(`${row.name} has no service definition to share.`)
   }
 
+  const definition = readServiceDefinition(spec.definition)
+
+  // Its image is one the owner's own SSH server built: nothing another PCP
+  // could pull, and a build is the owner's alone to set up.
+  if (definition.build) {
+    throw invalid(
+      `${row.name} is built from ${definition.build.repository} on your SSH server, so it is not shared through a repository: its image is that server's own.`,
+    )
+  }
+
   return {
     kind: "service",
     name: named.slug,
     version: row.syncVersion ?? 1,
     displayName: named.name,
     description: row.description,
-    definition: readServiceDefinition(spec.definition),
+    definition,
   }
 }
 

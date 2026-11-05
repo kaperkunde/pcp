@@ -87,7 +87,9 @@ import {
   type ServiceAccess,
   type ServiceLaunchInput,
   type ServiceStatus,
+  type ServiceUpdateChoice,
 } from "./services/services"
+import { newerImageOn, type NewerImage } from "./services/updates"
 import {
   AddressBlockedError,
   isOwnAddress,
@@ -2923,14 +2925,33 @@ export async function recreateService(
   return recreateServiceOn(loaded, await requireAccess(ctx, loaded, options))
 }
 
-/** The newest image of the definition's source, pinned, and the container made again. */
+/**
+ * A new image pinned and the container made again (services.ts
+ * updateServiceOn): the newest of the definition's source, the image an
+ * approved proposal names, or for one built from a repository, a commit.
+ */
 export async function updateService(
   ctx: VaultContext,
   id: string,
   options: ServiceOptions,
+  choice: ServiceUpdateChoice = {},
 ): Promise<{ status: ServiceStatus; image: string; changed: boolean }> {
   const loaded = await loadService(ctx, id)
-  return updateServiceOn(loaded, await requireAccess(ctx, loaded, options))
+  return updateServiceOn(
+    loaded,
+    await requireAccess(ctx, loaded, options),
+    choice,
+  )
+}
+
+/** The owner's look for a newer image of a service's source, changing nothing. */
+export async function checkServiceImage(
+  ctx: VaultContext,
+  id: string,
+  options: ServiceOptions,
+): Promise<NewerImage> {
+  const loaded = await loadService(ctx, id)
+  return newerImageOn(loaded, await requireAccess(ctx, loaded, options))
 }
 
 /** Removes the service, its container first (see removeServiceOn). */

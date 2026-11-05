@@ -191,12 +191,19 @@ import {
   needsConnecting,
   openExitForCall,
   syncServerTools,
+  updateService,
 } from "./upstream"
 import {
   applyServiceChange,
   describeServiceAsk,
   type ServiceChangeAsk,
 } from "./services/proposals"
+import {
+  applyServiceUpdate,
+  describeServiceUpdate,
+  isServiceUpdate,
+  type ServiceUpdateAsk,
+} from "./services/updates"
 import {
   applyWrapperChange,
   type WrapperChangeAsk,
@@ -319,7 +326,7 @@ export type PermissionAsk =
   | { kind: "repo_change"; input: RepoChangeAsk }
   | { kind: "repo_share"; input: RepoShareAsk }
   | { kind: "note_change"; input: NoteChangeAsk }
-  | { kind: "service_change"; input: ServiceChangeAsk }
+  | { kind: "service_change"; input: ServiceChangeAsk | ServiceUpdateAsk }
   | MemoryAsk
   | SkillAsk
   | AccessAsk
@@ -348,6 +355,8 @@ export type PermissionExecutor = {
   browse?: typeof performNavigate
   /** A service the owner agreed to launch; the real one when left out. */
   launchService?: typeof launchService
+  /** An image update the owner agreed to; the real one when left out. */
+  updateService?: typeof updateService
 }
 
 export const defaultExecutor: PermissionExecutor = {
@@ -809,7 +818,9 @@ function describeAsk(ask: PermissionAsk): {
       }
     case "service_change":
       return {
-        target: `service:${ask.input.host.id}\n${ask.input.name}`,
+        target: isServiceUpdate(ask.input)
+          ? `service_update:${ask.input.serviceId}\n${ask.input.to}`
+          : `service:${ask.input.host.id}\n${ask.input.name}`,
         args: ask.input as Record<string, unknown>,
       }
     case "fetch":
@@ -859,8 +870,10 @@ function toolNameOf(ask: PermissionAsk): string {
     case "call":
       return ask.tool.name
     case "register":
-    case "service_change":
       return "register_server"
+    case "service_change":
+      // An image update is asked by the service's own tool.
+      return isServiceUpdate(ask.input) ? "update" : "register_server"
     case "access":
       return "propose_tool_access"
     case "endpoint_change":
@@ -1087,7 +1100,9 @@ async function summarizeRow(
   }
 
   if (row.kind === "service_change") {
-    const asked = describeServiceAsk(args as ServiceChangeAsk)
+    const asked = isServiceUpdate(args)
+      ? describeServiceUpdate(args)
+      : describeServiceAsk(args as ServiceChangeAsk)
 
     return { ...asked, lines: [...asked.lines, asker] }
   }
@@ -1568,7 +1583,14 @@ async function toView(
     expiresAt: row.expiresAt,
     outcome: readResult(ctx, row),
     outcomeIsError: row.resultIsError,
-    decisions: decisionsFor(kind),
+    decisions:
+      kind === "service_change" && isServiceUpdate(readArgs(ctx, row))
+        ? decisionsFor(kind).map((decision) =>
+            decision.value === "allow_once"
+              ? { ...decision, label: "Update it" }
+              : decision,
+          )
+        : decisionsFor(kind),
     connect:
       finished && row.server && needsConnecting(row.server)
         ? connectLinks(row.server, publicUrl)
@@ -1916,7 +1938,9 @@ export async function withPermission(
                 ? (ask.input.browse?.serverId ?? null)
                 : ask.kind === "note_change" && ask.input.target === "server"
                   ? ask.input.id
-                  : null,
+                  : ask.kind === "service_change" && isServiceUpdate(ask.input)
+                    ? ask.input.serviceId
+                    : null,
         toolName: toolNameOf(ask),
         fields:
           ask.kind === "call" && ask.fields ? JSON.stringify(ask.fields) : null,
@@ -2516,75 +2540,95 @@ export async function decidePermission(
                         readArgs(ctx, row) as NoteChangeAsk,
                       ),
                     )
-                  : kind === "service_change"
+                  : kind === "service_change" &&
+                      isServiceUpdate(readArgs(ctx, row))
                     ? text(
-                        await applyServiceChange(
+                        await applyServiceUpdate(
                           ctx,
-                          readArgs(ctx, row) as ServiceChangeAsk,
+                          readArgs(ctx, row) as ServiceUpdateAsk,
                           {
-                            tokenId: row.tokenId,
-                            ...(secretValue ? { secretValue } : {}),
-                            access: chosenAccess,
-                            launch: (launchCtx, input) =>
-                              (executor.launchService ?? launchService)(
-                                launchCtx,
-                                input,
+                            update: (updateCtx, id, change) =>
+                              (executor.updateService ?? updateService)(
+                                updateCtx,
+                                id,
                                 { publicUrl },
+                                change,
                               ),
                           },
                         ),
                       )
-                    : kind === "fetch"
-                      ? await executeFetch(ctx, row, publicUrl, executor)
-                      : kind === "browse"
-                        ? await executeBrowse(ctx, row, publicUrl, executor)
-                        : kind === "browser_handover"
-                          ? await executeHandover(ctx, row)
-                          : kind === "secret_use"
-                            ? await executeSecretUse(
-                                ctx,
-                                row,
-                                secretLevel(choice),
-                                publicUrl,
-                                executor,
-                              )
-                            : kind === "script_use"
-                              ? await executeScriptUse(
+                    : kind === "service_change"
+                      ? text(
+                          await applyServiceChange(
+                            ctx,
+                            readArgs(ctx, row) as ServiceChangeAsk,
+                            {
+                              tokenId: row.tokenId,
+                              ...(secretValue ? { secretValue } : {}),
+                              access: chosenAccess,
+                              launch: (launchCtx, input) =>
+                                (executor.launchService ?? launchService)(
+                                  launchCtx,
+                                  input,
+                                  { publicUrl },
+                                ),
+                            },
+                          ),
+                        )
+                      : kind === "fetch"
+                        ? await executeFetch(ctx, row, publicUrl, executor)
+                        : kind === "browse"
+                          ? await executeBrowse(ctx, row, publicUrl, executor)
+                          : kind === "browser_handover"
+                            ? await executeHandover(ctx, row)
+                            : kind === "secret_use"
+                              ? await executeSecretUse(
                                   ctx,
                                   row,
-                                  choice,
+                                  secretLevel(choice),
                                   publicUrl,
                                   executor,
                                 )
-                              : kind === "exit_use"
-                                ? await executeExitUse(
+                              : kind === "script_use"
+                                ? await executeScriptUse(
                                     ctx,
                                     row,
+                                    choice,
                                     publicUrl,
                                     executor,
                                   )
-                                : kind === "secret_request"
-                                  ? text(
-                                      await applySecretRequest(
-                                        ctx,
-                                        row.tokenId,
-                                        readArgs(ctx, row) as SecretRequestAsk,
-                                        {
-                                          value: secretValue,
-                                          origins,
-                                          level: secretLevel(choice),
-                                        },
-                                      ),
-                                    )
-                                  : await executeRegister(
+                                : kind === "exit_use"
+                                  ? await executeExitUse(
                                       ctx,
                                       row,
                                       publicUrl,
                                       executor,
-                                      secretValue,
-                                      allowPrivate === true,
-                                      chosenAccess,
                                     )
+                                  : kind === "secret_request"
+                                    ? text(
+                                        await applySecretRequest(
+                                          ctx,
+                                          row.tokenId,
+                                          readArgs(
+                                            ctx,
+                                            row,
+                                          ) as SecretRequestAsk,
+                                          {
+                                            value: secretValue,
+                                            origins,
+                                            level: secretLevel(choice),
+                                          },
+                                        ),
+                                      )
+                                    : await executeRegister(
+                                        ctx,
+                                        row,
+                                        publicUrl,
+                                        executor,
+                                        secretValue,
+                                        allowPrivate === true,
+                                        chosenAccess,
+                                      )
   } catch (error) {
     if (!isPcpError(error)) {
       console.error("[permissions] running an allowed request failed", {

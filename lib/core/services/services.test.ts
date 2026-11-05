@@ -22,6 +22,7 @@ import { closeAllSshConnections } from "../ssh/client"
 import {
   embeddingProvider,
   callServerTool,
+  checkServiceImage,
   launchService,
   readServiceStatus,
   reconcileServices,
@@ -33,7 +34,13 @@ import {
   updateService,
 } from "../upstream"
 import { setupVault } from "../vault"
-import { startFakeDocker, type FakeDocker } from "./fake-docker"
+import { createApiToken, resolveApiToken } from "../api-tokens"
+import { decidePermission, getPermissionView, runCall } from "../permissions"
+import {
+  fakeRepositoryTarball,
+  startFakeDocker,
+  type FakeDocker,
+} from "./fake-docker"
 import type { ServiceDefinitionInput } from "./definition"
 import {
   serviceDial,
@@ -269,6 +276,7 @@ describe("launching a service", { timeout: 30_000 }, () => {
       "start",
       "status",
       "stop",
+      "update",
     ])
 
     const endpoint = await getServer(ctx, launched.registeredId!)
@@ -1069,6 +1077,430 @@ describe("a running service", { timeout: 30_000 }, () => {
         where: { serverId: service.id },
       }),
     ).toEqual(before)
+  })
+})
+
+describe("an image update", { timeout: 30_000 }, () => {
+  beforeEach(() => setup())
+  afterEach(teardown)
+
+  const NEWER = `ghcr.io/example/docs@sha256:${"b".repeat(64)}`
+
+  async function launchedWithToken() {
+    const hostId = await pinnedHost()
+    const result = await launchService(ctx, await launchInput(hostId), FAST)
+    const { token } = await createApiToken(ctx, {
+      name: "Claude",
+      allowAllServers: true,
+    })
+    const tokenId = (await resolveApiToken(token))!.tokenId
+    return { ...result, service: await getServer(ctx, result.id), tokenId }
+  }
+
+  function textOf(result: { content: unknown }): string {
+    return (result.content as Array<{ text: string }>)[0]!.text
+  }
+
+  it("is looked for on the owner's click, changing nothing", async () => {
+    const { service } = await launchedWithToken()
+    const calls = docker.state().calls.length
+
+    const found = await checkServiceImage(ctx, service.id, FAST)
+
+    expect(found).toEqual({
+      current: `ghcr.io/example/docs@${DIGEST}`,
+      newest: NEWER,
+      source: "ghcr.io/example/docs:latest",
+      newer: true,
+    })
+    // A pull and a look at its digest; no container made again.
+    const since = docker.state().calls.slice(calls)
+    expect(since.map((call) => call[0])).toEqual(["pull", "image"])
+    expect(docker.state().containers["pcp-docs"]!.image).toBe(
+      `ghcr.io/example/docs@${DIGEST}`,
+    )
+  })
+
+  it("is proposed by an assistant as a request showing both images, and made only once the owner agrees", async () => {
+    const { service, tokenId } = await launchedWithToken()
+
+    const asked = await runCall(
+      ctx,
+      service,
+      "update",
+      {},
+      {
+        ...PUBLIC,
+        tokenId,
+      },
+    )
+
+    expect(textOf(asked)).toMatch(/permissions\//)
+    const row = await db().permissionRequest.findFirstOrThrow({
+      where: { kind: "service_change" },
+    })
+    expect(row.serverId).toBe(service.id)
+    expect(row.toolName).toBe("update")
+    const view = (await getPermissionView(ctx, row.id, PUBLIC))!
+    expect(view.title).toBe("Update Docs service to a new image?")
+    expect(view.lines).toEqual(
+      expect.arrayContaining([
+        `Image now: ghcr.io/example/docs@${DIGEST}`,
+        `Image after: ${NEWER}`,
+        "The newest ghcr.io/example/docs:latest, as Build box resolved it when the assistant asked",
+      ]),
+    )
+    expect(view.decisions.map((decision) => decision.label)).toEqual([
+      "Update it",
+      "Not now",
+    ])
+    // Nothing changed yet.
+    expect(docker.state().containers["pcp-docs"]!.image).toBe(
+      `ghcr.io/example/docs@${DIGEST}`,
+    )
+
+    const done = await decidePermission(ctx, row.id, "allow_once", PUBLIC)
+
+    expect(done.isError).not.toBe(true)
+    expect(textOf(done)).toMatch(/now runs ghcr\.io\/example\/docs@sha256:b+/)
+    expect(docker.state().containers["pcp-docs"]!.image).toBe(NEWER)
+    const spec = await db().serviceSpec.findUniqueOrThrow({
+      where: { serverId: service.id },
+    })
+    expect(JSON.parse(spec.definition).image).toBe(NEWER)
+  })
+
+  it("takes a digest an assistant names in the same repository, and refuses another", async () => {
+    const { service, tokenId } = await launchedWithToken()
+    const named = `sha256:${"c".repeat(64)}`
+
+    await runCall(
+      ctx,
+      service,
+      "update",
+      { digest: named },
+      {
+        ...PUBLIC,
+        tokenId,
+      },
+    )
+    const row = await db().permissionRequest.findFirstOrThrow({
+      where: { kind: "service_change" },
+    })
+    expect((await getPermissionView(ctx, row.id, PUBLIC))!.lines).toEqual(
+      expect.arrayContaining([
+        `Image after: ghcr.io/example/docs@${named}`,
+        "A digest the assistant named, in the same repository",
+      ]),
+    )
+
+    const wrong = await runCall(
+      ctx,
+      service,
+      "update",
+      { digest: "latest" },
+      {
+        ...PUBLIC,
+        tokenId,
+      },
+    )
+    expect(wrong.isError).toBe(true)
+    expect(textOf(wrong)).toMatch(/digest/)
+  })
+
+  it("asks nothing when the service runs the newest already", async () => {
+    const { service, tokenId } = await launchedWithToken()
+    docker.update((state) => {
+      state.digest = DIGEST
+    })
+
+    const answer = await runCall(
+      ctx,
+      service,
+      "update",
+      {},
+      {
+        ...PUBLIC,
+        tokenId,
+      },
+    )
+
+    expect(textOf(answer)).toMatch(/already runs .*nothing to update/)
+    expect(await db().permissionRequest.count()).toBe(0)
+  })
+
+  it("updates nothing when the definition changed since the owner was asked", async () => {
+    const { service, tokenId } = await launchedWithToken()
+    await runCall(
+      ctx,
+      service,
+      "update",
+      { digest: `sha256:${"c".repeat(64)}` },
+      {
+        ...PUBLIC,
+        tokenId,
+      },
+    )
+    const row = await db().permissionRequest.findFirstOrThrow({
+      where: { kind: "service_change" },
+    })
+    // The owner updated it in the meantime.
+    await updateService(ctx, service.id, FAST)
+
+    const done = await decidePermission(ctx, row.id, "allow_once", PUBLIC)
+
+    expect(done.isError).toBe(true)
+    expect(textOf(done)).toMatch(/changed since this was asked/)
+    expect(docker.state().containers["pcp-docs"]!.image).toBe(NEWER)
+  })
+})
+
+describe("a service built from a repository", { timeout: 60_000 }, () => {
+  beforeEach(() => setup())
+  afterEach(teardown)
+
+  const COMMIT = "a".repeat(40)
+  const BUILT = `sha256:${"d".repeat(64)}`
+
+  function built(change: Record<string, unknown> = {}) {
+    return definition({
+      image: undefined,
+      source: undefined,
+      build: {
+        repository: "kaperkunde/docs-server",
+        commit: COMMIT,
+        containerfile: "deploy/Containerfile",
+        context: ".",
+        args: [{ name: "VERSION", value: "1.2 beta" }],
+        ...change,
+      },
+    })
+  }
+
+  function repository(links: Record<string, string> = {}) {
+    docker.update((state) => {
+      state.tarball = fakeRepositoryTarball(
+        docker.dir,
+        {
+          "deploy/Containerfile": "FROM scratch\nCOPY app /app\n",
+          "app/main.py": "print('docs')\n",
+        },
+        { links },
+      )
+    })
+  }
+
+  it("builds the image on the SSH server at the commit, and never pulls it", async () => {
+    const hostId = await pinnedHost()
+    repository()
+
+    const launched = await launchService(
+      ctx,
+      await launchInput(hostId, { definition: built() }),
+      FAST,
+    )
+
+    const state = docker.state()
+    expect(state.downloads).toEqual([
+      expect.objectContaining({
+        program: "curl",
+        url: `https://codeload.github.com/kaperkunde/docs-server/tar.gz/${COMMIT}`,
+      }),
+    ])
+    expect(state.downloads[0]!.args).toEqual(
+      expect.arrayContaining(["--proto", "=https"]),
+    )
+    expect(state.builds).toHaveLength(1)
+    expect(state.builds[0]).toMatchObject({
+      containerfile: "FROM scratch\nCOPY app /app\n",
+      tag: "localhost/pcp-docs-server:aaaaaaaaaaaa",
+      buildArgs: ["VERSION=1.2 beta"],
+    })
+    expect(state.builds[0]!.contextFiles).toEqual([
+      "app/main.py",
+      "deploy/Containerfile",
+    ])
+    expect(state.calls.some((call) => call[0] === "pull")).toBe(false)
+    expect(state.containers["pcp-docs"]!.image).toBe(BUILT)
+    // The folder it built in is gone.
+    expect(docker.leftovers()).toEqual([])
+
+    const spec = await db().serviceSpec.findUniqueOrThrow({
+      where: { serverId: launched.id },
+    })
+    expect(JSON.parse(spec.definition).image).toBe(
+      `localhost/pcp-docs-server@${BUILT}`,
+    )
+    expect((await readServiceStatus(ctx, launched.id, PUBLIC)).upToDate).toBe(
+      true,
+    )
+  })
+
+  it("downloads with wget when the login has no curl, and says when it has neither", async () => {
+    const hostId = await pinnedHost()
+    repository()
+    docker.withoutDownloader("curl")
+
+    const first = await launchService(
+      ctx,
+      await launchInput(hostId, { definition: built() }),
+      FAST,
+    )
+    expect(docker.state().downloads[0]!.program).toBe("wget")
+    const definitionId = (await getServer(ctx, first.id)).definitionId!
+
+    docker.withoutDownloader("wget")
+    // Another of the definition: the image is there, so nothing is built.
+    await launchService(
+      ctx,
+      await launchInput(hostId, {
+        name: "Docs two",
+        definition: undefined,
+        definitionId,
+      }),
+      FAST,
+    )
+    expect(docker.state().downloads).toHaveLength(1)
+    expect(docker.state().builds).toHaveLength(1)
+
+    docker.update((state) => {
+      state.images = []
+    })
+    await expect(
+      launchService(
+        ctx,
+        await launchInput(hostId, {
+          name: "Docs three",
+          definition: undefined,
+          definitionId,
+        }),
+        FAST,
+      ),
+    ).rejects.toThrow(/Neither curl nor wget is installed/)
+  })
+
+  it("refuses a Containerfile or folder that leads out of the repository", async () => {
+    const hostId = await pinnedHost()
+    repository({ "deploy/outside": "/etc", linked: "/" })
+
+    await expect(
+      launchService(
+        ctx,
+        await launchInput(hostId, {
+          definition: built({ containerfile: "deploy/outside/passwd" }),
+        }),
+        FAST,
+      ),
+    ).rejects.toThrow(/leads out of the repository/)
+    await expect(
+      launchService(
+        ctx,
+        await launchInput(hostId, { definition: built({ context: "linked" }) }),
+        FAST,
+      ),
+    ).rejects.toThrow(/leads out of the repository/)
+    await expect(
+      launchService(
+        ctx,
+        await launchInput(hostId, {
+          definition: built({ containerfile: "Dockerfile" }),
+        }),
+        FAST,
+      ),
+    ).rejects.toThrow(/There is no Dockerfile in the repository/)
+    expect(docker.state().builds).toEqual([])
+    expect(docker.leftovers()).toEqual([])
+    expect(await db().serviceSpec.count()).toBe(0)
+  })
+
+  it("removes an image larger than PCP keeps, and says so", async () => {
+    const hostId = await pinnedHost()
+    repository()
+    docker.update((state) => {
+      state.imageSize = 9 * 1024 * 1024 * 1024
+    })
+
+    await expect(
+      launchService(
+        ctx,
+        await launchInput(hostId, { definition: built() }),
+        FAST,
+      ),
+    ).rejects.toThrow(/more than the 8 GB PCP keeps/)
+    expect(docker.state().imagesRemoved).toEqual([BUILT])
+    expect(docker.state().containers).toEqual({})
+  })
+
+  it("updates to a new commit on the owner's word, and builds again an image that is gone", async () => {
+    const hostId = await pinnedHost()
+    repository()
+    const launched = await launchService(
+      ctx,
+      await launchInput(hostId, { definition: built() }),
+      FAST,
+    )
+    const next = "b".repeat(40)
+    docker.update((state) => {
+      state.buildId = "e".repeat(64)
+    })
+
+    const result = await updateService(ctx, launched.id, FAST, {
+      commit: next,
+    })
+
+    expect(result).toMatchObject({
+      image: `localhost/pcp-docs-server@sha256:${"e".repeat(64)}`,
+      changed: true,
+    })
+    expect(docker.state().downloads.at(-1)!.url).toMatch(new RegExp(`${next}$`))
+    expect(docker.state().containers["pcp-docs"]!.image).toBe(
+      `sha256:${"e".repeat(64)}`,
+    )
+    const definitionNow = (await serviceView(ctx, launched.id)).definition
+    expect(definitionNow.build?.commit).toBe(next)
+
+    // The image pruned on the SSH server: made again from the same commit.
+    docker.update((state) => {
+      state.images = []
+      state.buildId = "9".repeat(64)
+    })
+    await runServiceAction(ctx, launched.id, "restart", FAST)
+    await updateService(ctx, launched.id, FAST)
+    expect(docker.state().containers["pcp-docs"]!.image).toBe(
+      `sha256:${"9".repeat(64)}`,
+    )
+    await expect(
+      updateService(ctx, launched.id, FAST, { commit: "main" }),
+    ).rejects.toThrow(/40 hex digits/)
+  })
+
+  it("is not proposed for an update by an assistant", async () => {
+    const hostId = await pinnedHost()
+    repository()
+    const launched = await launchService(
+      ctx,
+      await launchInput(hostId, { definition: built() }),
+      FAST,
+    )
+    const { token } = await createApiToken(ctx, {
+      name: "Claude",
+      allowAllServers: true,
+    })
+    const tokenId = (await resolveApiToken(token))!.tokenId
+
+    const answer = await runCall(
+      ctx,
+      await getServer(ctx, launched.id),
+      "update",
+      {},
+      { ...PUBLIC, tokenId },
+    )
+
+    expect(answer.isError).toBe(true)
+    expect((answer.content as Array<{ text: string }>)[0]!.text).toMatch(
+      /only the owner updates it, to a new commit/,
+    )
+    expect(await db().permissionRequest.count()).toBe(0)
   })
 })
 
