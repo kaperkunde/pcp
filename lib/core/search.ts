@@ -132,6 +132,7 @@ const SYNONYM_GROUPS: ReadonlyArray<readonly string[]> = [
   ["launch", "start", "run", "deploy"],
   ["store", "save", "keep"],
   ["email", "mail"],
+  ["folder", "directory"],
 ]
 
 const SYNONYMS: ReadonlyMap<string, readonly string[]> = (() => {

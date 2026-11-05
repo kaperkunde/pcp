@@ -142,7 +142,8 @@ so in the summary; the bump itself waits for the request.
   stays backward compatible.
 - Every tool PCP exposes is defined through `lib/core/tools/`: PCP's own
   at `/mcp` with `defineTool`, the families behind call_tool (browser, mail,
-  calendar, SSH, services) with `defineInnerTool` (`tools/family.ts`); a
+  calendar, SSH, services, storage folders) with `defineInnerTool`
+  (`tools/family.ts`); a
   strict zod input published as JSON Schema 2020-12 (objects closed, every
   property described), rules across arguments as JSON Schema under
   `allOf`, all four annotations, an `output` when every answer is one
@@ -313,12 +314,36 @@ so in the summary; the bump itself waits for the request.
   algorithms in `client.ts`; no child process, no `ssh` binary. One tool,
   `run_command` (`ssh/tools.ts`), its arguments checked before anything
   connects: `exec` only, never a terminal, an agent or a file transfer.
-  Forwarding is open for exits and services only (`openChannel`, below):
+  SFTP is for storage folders only (`openSftp`, below), confined to the
+  folder. Forwarding is open for exits and services only (`openChannel`, below):
   outbound direct-tcpip, never remote forwarding (`tcpip-forward`),
   streamlocal, the agent or X11. Only the owner adds or changes one; `register_server` has
   no kind for it. Its limits go in `ssh/limits.ts`, and a change to how a host
   is trusted, PCP signs in or a channel opens gets a test against the test
   server (`ssh/client.test.ts`).
+- Storage folders (`lib/core/storage/`, kind `storage`, a `storage_root`
+  row) are folders on an SSH server PCP holds that assistants list, find,
+  get, save, move and delete files in, over SFTP on the SSH server's pooled
+  connection (`ssh/client.ts openSftp`): a pinned host only, opened with
+  the key a request handed in (`upstream.ts storageConnect`), never in the
+  background, and SFTP for nothing else. Every path is confined by
+  `storage/files.ts`: `..` refused before anything connects, the folder a
+  name is in resolved by its real path on the server and refused unless it
+  is the root's or inside it, the name itself never followed (a link is
+  followed only to read or list through, and only into the root; delete
+  and move act on the link). A write goes to `<name>.<random>.pcp-part`
+  with exclusive create, gets the root's umask, and is renamed into place;
+  a file there is replaced only with `overwrite`. SFTP writes as the login:
+  `write_as` is what the owner wants, said on the page when it differs,
+  never sudo or chown. Files leave as kept results (`get_file`, bounded by
+  `resourceLimits().fileBytes`) and come in as the token's own
+  (`save_file`'s `file`, read before anything connects). A read-only folder
+  offers and runs the reading tools only; `delete` is Destructive. Only
+  the owner adds one (on the SSH server's page) or changes it;
+  `register_server` has no kind for it. Its file browser
+  (`/servers/<id>/files`) goes through the same confinement. Limits go in
+  `storage/limits.ts`, and a new tool, argument or way a path is resolved
+  gets a test against the test server's SFTP (`storage/storage.test.ts`).
 - Exits (`lib/core/exits/`) let web_fetch (`exit`) and a new browser tab
   (`tabs` open with `exit`) go out from somewhere else than PCP's machine:
   an SSH server PCP holds (kind `ssh`), or a VPN container PCP started on one
@@ -415,7 +440,8 @@ embeddingProvider`, which hands `embeddings/provider.ts` the header;
   `tool_result:<id>`, readable by the token whose call produced them, gone
   after a day, never logged and never exported. A handle (`{"$result": id}`)
   in a call's arguments is replaced only in `upstream.ts`, `endpoints.ts`,
-  `mail/accounts.ts` and `browser/call.ts` (`lib/core/result-handles.ts`), with the token's own
+  `mail/accounts.ts`, `storage/roots.ts` and `browser/call.ts`
+  (`lib/core/result-handles.ts`), with the token's own
   results, before anything is sent; a waiting request stores the handle,
   never the content. File links (`lib/core/file-links.ts`, only for a token
   with `shareFiles`) move one kept file to or from the assistant's own
@@ -467,7 +493,8 @@ embeddingProvider`, which hands `embeddings/provider.ts` the header;
   `resolveCall` and `runCodeCall`: the token's own tools at its own levels,
   an "ask" tool stopping the run with the usual permission request, every
   call in the request log, files as handles (read as base64 only when the
-  program asks). Listing (`pcp.tools`) shows what `list_tools` would. No credential, network, file
+  program asks, whole or a part: `pcp.read(handle, { offset, length })`).
+  Listing (`pcp.tools`) shows what `list_tools` would. No credential, network, file
   or timer ever reaches the program, and nothing but strings crosses into
   it (a wrapper's program gets its arguments the same way, as text). Its
   memory is capped by the `WebAssembly.Memory` maximum (QuickJS's
@@ -627,10 +654,13 @@ embeddingProvider`, which hands `embeddings/provider.ts` the header;
   origin itself, `lib/server/same-origin.ts`), file links
   (`app/api/files/[secret]/`: curl from an assistant's own computer, and
   the upload page's PUTs and Done, the link's secret its only credential),
-  and the browser's live view
+  the browser's live view
   (`app/api/browser/tabs/[id]/`: a stream of a tab's pictures and the
   owner's input, which an action cannot carry; the same origin check and
-  session).
+  session), and a storage folder's download
+  (`app/api/storage/[id]/download/`: a file needs `Content-Disposition` and
+  can be larger than an action's answer; streamed from the SSH server, kept
+  nowhere; the same origin check and session).
 - The owner is asked by link only: a result hands the assistant a link to
   PCP's page, to end its reply with (`linkLastText`: nothing after it, or
   Claude's apps fold it out of sight; a markdown link with a short label
@@ -757,7 +787,9 @@ The owner is "you"; the assistant is "an assistant"; the thing PCP holds is
 a "secret", the server it talks to is a "server", and an API added from an
 OpenAPI schema is an "endpoint" ("API endpoints" in the UI); a mailbox PCP
 signs in to is a "mail account"; a machine PCP runs commands on is an "SSH
-server" ("SSH servers" in the UI); a container PCP runs on one is a
+server" ("SSH servers" in the UI); a folder on one that assistants keep
+files in is a "storage folder" ("Storage folders" in the UI; a storage root
+in code); a container PCP runs on one is a
 "service" ("Services" in the UI); calendars and reminders PCP reaches over
 CalDAV are a "calendar account" ("Calendar accounts" in the UI); a server
 whose tools are programs over the

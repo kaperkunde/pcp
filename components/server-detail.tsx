@@ -171,7 +171,9 @@ export function ServerDetail({
           ? "Check service"
           : browser
             ? "Check browser"
-            : "Refresh tools"
+            : server.kind === "storage"
+              ? "Check folder"
+              : "Refresh tools"
   const statusTrouble = server.statusMessage && server.status !== "ok"
   const instances = (about?.instances ?? []).map((instance) => instance.slug)
 

@@ -887,7 +887,8 @@ or local address is flagged to the owner alone, as for IMAP.
 An SSH server is a server row of kind `ssh` (`url` is `ssh://host:port`,
 `auth_username` the login) whose one tool, `run_command`, runs one command per
 call with `exec`: no shell session kept between calls, no terminal, no
-agent, no file transfer, and no forwarding but the outbound channels of an
+agent, no file transfer but a storage folder's SFTP (below, [Storage
+folders](#storage-folders)), and no forwarding but the outbound channels of an
 exit or a service (below, [Exits](#exits) and [Services](#services)). Only the owner adds one, on the
 Servers page; `register_server` has no kind for it, because a shell on a
 machine is more than an assistant should be able to ask for in a sentence.
@@ -958,7 +959,85 @@ browser's exit proxy, between requests) only an open connection is used, so
 nothing reconnects in the background. A server that refuses the channel
 ("administratively prohibited": `AllowTcpForwarding no`, or `restrict` /
 `no-port-forwarding` on PCP's key) is said to, in those words. A changed
-address, login, host key or PCP key closes the server's connection.
+address, login, host key or PCP key closes the server's connection. The
+long-lived connection sets TCP_NODELAY: its traffic is many small requests
+and answers (SFTP's, a proxy's handshake), and Nagle's algorithm held each
+for a delayed acknowledgement.
+
+## Storage folders
+
+A storage folder (a storage root in code, `lib/core/storage/`) is a folder on
+one of the owner's SSH servers that assistants work with files in. It is a
+server row of kind `storage` (`url` the fixed `pcp:storage`) with a
+`storage_root` row beside it: the SSH server (`host_id`, null once that is
+deleted, when the folder says so and PCP no longer reaches it), the folder's
+absolute path, whose files the owner wants these to be (`write_as`) and the
+umask for what PCP makes (`umask`, 002 by default, so a Samba share's group
+sees ordinary files). Being a server, it has levels, tiers, read-only,
+pacing, search and describe as any other; it has no definition, and it is
+never an item in a linked repository. Only the owner adds one, from the SSH
+server's page, and changes it on its own; `register_server` has no kind for
+it, as for the SSH server itself. Its rows are exported and wiped with the
+vault.
+
+**SFTP, confined to the root.** The files travel over SFTP on the SSH
+server's long-lived connection (`ssh/client.ts openSftp`): the subsystem is
+opened only on a host whose key the owner pinned, with PCP's key, which
+`upstream.ts storageConnect` decrypts when a request opens the session and
+hands to the ssh module (a `StorageConnect`, as a service gets a
+`ServiceHost`); nothing connects in the background, and the session closes
+when the call is done. Nothing else in PCP asks for a subsystem. Every path
+a call names is relative to the root and confined by `storage/files.ts`:
+`..` is refused before anything connects (`paths.ts`), the folder a name is
+in is resolved by its real path on the server, which must be the root's real
+path or inside it, and what the name is is looked at without following a
+link (lstat). A link is followed only to read or list through it, and only
+when its real path is inside too; deleting or moving a link acts on the link
+itself. So neither `..` nor a symbolic link leads out. The race between that
+check and the operation is the server's own (someone who can write in the
+folder there could swap a folder for a link); PCP has no `openat` over SFTP.
+
+**Writes are whole or nothing.** `save_file` writes under a part name
+(`<name>.<random>.pcp-part`) with exclusive create, sets its mode from the
+root's umask (after the server's own umask had its say), and renames it into
+place. SFTP's own rename fails when the name is taken (OpenSSH links and
+unlinks), so a file is never replaced unless the call says `overwrite`, which
+uses OpenSSH's `posix-rename` where the server has it and otherwise removes
+the old file first. A failed write removes its part file. SFTP writes as the
+SSH login: "write as" is what the owner wants, and the page says so when
+that is not the login (sign PCP in as that user, or give the login the
+folder's group); PCP adds no sudo and no chown.
+
+**Tools** (`storage/tools.ts`, defined with `defineInnerTool` and checked by
+the one validator before anything connects): `list_folder` (at most 1,000
+entries, folders first, links marked inside, outside or nowhere),
+`find_files` (a name glob with `*`, `?` and `[...]`, matched against names
+only, case ignored by default; at most 500 matches, 2,000 folders and 32
+levels, links never followed), `get_file` (the file kept for the token as
+a kept result, its handle answered with its size, type and date and, for
+text, its start; a file over the largest file PCP keeps,
+`resourceLimits().fileBytes`, is refused), `save_file` (a kept result's
+handle as `file`, read as bytes from the token's own results before
+anything connects, or `text`), `make_folder` (with `parents`), `move`
+(within the folder; never a folder into itself, never over a folder) and
+`delete` (Destructive: a file, a link, an empty folder, or with `recursive`
+a folder and everything in it, at most 10,000 entries, never following a
+link). A read-only folder offers the first three and refuses the rest. SFTP
+failures are tool errors in PCP's words (nothing there, permission
+denied); a key the server turns down or another host key answers with the
+SSH server's page; a server that cannot be reached is an error. Limits are
+in `storage/limits.ts`; the test server answers SFTP on the machine's own
+file system (`ssh/fake-server.ts`, `storage/storage.test.ts`).
+
+**The file browser** (`/servers/<id>/files`) is the owner's: one folder at a
+time, read over SFTP when the page loads, with sizes and dates, upload (a
+Server Action), a new folder, rename or move, and delete with a confirm, all
+through the same confinement, and none of them on a read-only folder.
+Download is a route handler (`app/api/storage/[id]/download`), like the
+export's, because a file needs `Content-Disposition` and may be larger than
+an action's answer: it checks the request came from PCP's own page and the
+owner's session, and streams the file from the SSH server as it is read,
+keeping nothing.
 
 ## Services
 
@@ -1933,7 +2012,10 @@ three parts:
 - **The bridge** (`run.ts`) is everything the program can ask for, as an
   operation name and a JSON payload it checks as untrusted: `call` (a
   server, a tool, its arguments, and call_tool's `fields`, `decode` and
-  `keep`), `read` (one of the token's own kept results, as text), `keep`
+  `keep`), `read` (one of the token's own kept results, as text or base64, whole
+  or a part: `offset` and `length` count a file's bytes or a text's
+  characters, so a program reads a large file a piece at a time within the
+  same bound on one answer), `keep`
   (a text kept as a result of the token's, returning its handle), `tools`
   (the token's servers, or one's tools, as `list_tools` gives them),
   `describe` (one of those tools as `describe` gives it, from the catalogue
@@ -3938,8 +4020,9 @@ none.
 In arguments, an object of only `$result` (and `as`) is replaced before the
 call is sent (`lib/core/result-handles.ts`, called from `upstream.ts` for MCP
 servers and the browser, from `endpoints.ts` for API endpoints, whose upload
-fields take a file's bytes instead, and from `mail/accounts.ts`, whose
-attachments do too): a text as its text, a file as base64, or the other way
+fields take a file's bytes instead, from `mail/accounts.ts`, whose
+attachments do too, and from `storage/roots.ts`, whose `save_file` takes a
+file's bytes the same way): a text as its text, a file as base64, or the other way
 with `as`. Only the token's own results resolve; an unknown or expired id is
 refused by name before anything is sent, and the gateway checks the ids
 before it asks the owner. A request
