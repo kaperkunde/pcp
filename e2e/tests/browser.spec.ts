@@ -225,6 +225,27 @@ test("the sign-ins outlast the browser, and are gone once forgotten", async ({
     url: `${upstream.browserUrl}/cookie`,
   })
   expect(toolText(forgotten)).toContain("Cookie: none")
+
+  // A sign-in made elsewhere, imported by the owner: previewed, then kept.
+  await page.reload()
+  await page.getByText("Import a sign-in").click()
+  await page
+    .getByLabel("Cookie export", { exact: true })
+    .fill(
+      `.example.com\tTRUE\t/\tTRUE\t${Math.floor(Date.now() / 1000) + 86_400}\tsid\tabc\n127.0.0.1\tFALSE\t/\tFALSE\t0\tlocal\t1`,
+    )
+  await page.getByRole("button", { name: "Preview" }).click()
+  const preview = page.getByTestId("browser-import-preview")
+  await expect(preview).toContainText("a cookies.txt file: 1 cookie")
+  await expect(preview).toContainText("example.com")
+  await expect(preview).toContainText(
+    "Left out: 1 for an IP address rather than a site's name.",
+  )
+  await page.getByRole("button", { name: "Import", exact: true }).click()
+  await expect(page.getByText("Imported 1 cookie for 1 site.")).toBeVisible()
+  await expect(page.getByTestId("browser-profile")).toContainText(
+    "Kept for 1 site (1 cookie)",
+  )
 })
 
 test("the tabs view: a hand-over answered on its tab, old links led there, a stale tab closed", async ({

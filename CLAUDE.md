@@ -544,7 +544,13 @@ embeddingProvider`, which hands `embeddings/provider.ts` the header;
   (`wrappers.test.ts`).
 - The browser (`lib/core/browser/`) runs Chromium for the vault and keeps
   nothing on disk: its sign-ins are the vault's `browser_profile`,
-  encrypted, saved only while a request holds the key. Every connection goes
+  encrypted, saved only while a request holds the key. They come from the
+  browser's use or from the owner's import on the Browser page
+  (`sign-in-import.ts`: storage state or a cookie export, checked as
+  Chromium takes a cookie, PCP's own site left out, merged per site as
+  previewed, with the browser closed); never a tool. Its languages are
+  Chromium's own switches from the host's locale (`--lang`,
+  `--accept-lang`), never Playwright's `locale`. Every connection goes
   through its proxy (`proxy.ts`), which checks the address it dials as web
   fetch does, and every page a tab's main frame opens passes the gate in
   `runtime.ts`: the driving token's web fetch site lines, a site the owner

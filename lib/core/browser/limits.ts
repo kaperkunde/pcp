@@ -1,4 +1,4 @@
-import { BROWSER_VIEWPORT } from "../constants"
+import { BROWSER_VIEWPORT, MAX_SIGN_IN_IMPORT_BYTES } from "../constants"
 
 /**
  * Bounds on what the browser makes PCP do. Addresses, text to type and
@@ -38,6 +38,14 @@ export const FAVICON_BUFFER_BYTES = 512 * 1024
 export const MAX_WAIT_MS = 30_000
 /** The profile (the sign-ins) as JSON, before encryption. */
 export const MAX_PROFILE_BYTES = 8 * 1024 * 1024
+/**
+ * An owner's import of sign-ins made elsewhere (sign-in-import.ts): the
+ * text pasted or uploaded, the cookies in it (Chromium keeps about 3,300 in
+ * all) and the origins whose local storage it carries.
+ */
+export const MAX_IMPORT_BYTES = MAX_SIGN_IN_IMPORT_BYTES
+export const MAX_IMPORT_COOKIES = 3_000
+export const MAX_IMPORT_ORIGINS = 500
 /** A profile is saved at most this often while input streams in. */
 export const PROFILE_SAVE_INTERVAL_MS = 2_000
 /** read_page's text per call, unless the assistant asks for another length. */

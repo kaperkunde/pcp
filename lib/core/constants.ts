@@ -28,6 +28,12 @@ export const MAX_AUTH_HEADERS = 5
  */
 export const NEW_SECRET = "new"
 
+/**
+ * The largest sign-in import the Browser page takes (a cookie export or
+ * Playwright's storage state), as the browser's profile is at most.
+ */
+export const MAX_SIGN_IN_IMPORT_BYTES = 8 * 1024 * 1024
+
 /** The largest OpenAPI schema PCP reads, uploaded or downloaded. */
 export const MAX_SPEC_BYTES = 5 * 1024 * 1024
 export const SPEC_FILE_ACCEPT =
