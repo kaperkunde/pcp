@@ -2008,10 +2008,13 @@ async function callEndpoint(
   {
     publicUrl,
     open,
+    keepBytes,
     placed = [],
   }: {
     publicUrl: string
     open?: ResultOpener
+    /** Keeps a file the API answers for the token (a PDF, an image). */
+    keepBytes?: BytesKeeper
     /** Secrets a wrapper's call carries in its arguments (placeSecrets). */
     placed?: string[]
   },
@@ -2024,6 +2027,7 @@ async function callEndpoint(
       authHeaders: headers,
       redact: [...redact, ...placed],
       open,
+      ...(keepBytes ? { keepBytes } : {}),
       ...(reach ? { reach } : {}),
       ...(server.authType === "oauth"
         ? {
@@ -2512,6 +2516,7 @@ async function dispatchKind(
     return callEndpoint(ctx, server, toolName, args, {
       publicUrl,
       open,
+      ...(keepBytes ? { keepBytes } : {}),
       placed,
     })
   }

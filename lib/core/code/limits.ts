@@ -43,6 +43,17 @@ export const DUPLICATE_RUN_MS = 5 * 60_000
 export const REMEMBERED_RUN_MS = 24 * 60 * 60_000
 /** Runs remembered at most, the oldest ended ones forgotten first. */
 export const MAX_REMEMBERED_RUNS = 2_000
+/**
+ * The longest one pcp.sleep waits. Every wait is PCP's, in the bridge
+ * (run.ts), and counts against RUN_TIMEOUT_MS: a sleep longer than what is
+ * left of the run is refused rather than cut off by the run's end.
+ */
+export const MAX_SLEEP_MS = 60_000
+/**
+ * Waits one run may start: pcp.sleep's and pcp.withTimeout's together, so a
+ * polling loop has room without a program that waits for nothing.
+ */
+export const MAX_WAITS_PER_RUN = 200
 /** Time the program itself spends computing, waiting on calls not counted. */
 export const RUN_CPU_MS = 15_000
 /** How deep the program's own calls may nest. */

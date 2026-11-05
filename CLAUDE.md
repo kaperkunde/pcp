@@ -57,7 +57,8 @@ so in the summary; the bump itself waits for the request.
   moment is typed, and only by the browser. An API endpoint's calls
   (`lib/core/endpoints.ts`, `lib/core/openapi/`) are handed their finished
   header by `upstream.ts` and never read a secret; `openapi/call.ts` scrubs
-  the secret from what the API answers.
+  the secret from what the API answers, and refuses a file answer (kept as
+  a result, its handle answered) whose bytes hold it.
 - What an assistant may do to an endpoint through the gateway
   (`lib/core/endpoint-admin.ts`) is narrower than what the owner may do, on
   purpose. It registers one through `register_server` with OpenAPI text or a
@@ -521,7 +522,10 @@ embeddingProvider`, which hands `embeddings/provider.ts` the header;
   program asks, whole or a part: `pcp.read(handle, { offset, length })`).
   Listing (`pcp.tools`) shows what `list_tools` would. No credential, network, file
   or timer ever reaches the program, and nothing but strings crosses into
-  it (a wrapper's program gets its arguments the same way, as text). Its
+  it (a wrapper's program gets its arguments the same way, as text). Waits
+  (`pcp.sleep`, `pcp.withTimeout`) happen only in PCP's bridge, as timers
+  of the bridge's that the program holds no handle to, capped in
+  `code/limits.ts` and counted against the run's wall clock. Its
   memory is capped by the `WebAssembly.Memory` maximum (QuickJS's
   own limit counts nothing in these builds). The sandbox container
   (`code/sandbox.ts`, `sandbox/`, `docker-compose.sandbox.yaml`) is a second

@@ -16,6 +16,7 @@ import {
   MAX_RANDOM_BYTES,
   MAX_READS_PER_RUN,
   MAX_STEP_NAME_CHARS,
+  MAX_WAITS_PER_RUN,
   RUN_CPU_MS,
   RUN_STACK_BYTES,
 } from "./limits"
@@ -36,6 +37,10 @@ import type { BridgeReply, Executor, RunEnd, RunResult } from "./types"
  * - `__pcp_print(text)` adds a line to the output;
  * - `__pcp_random(count)` returns that many random bytes, as hex.
  *
+ * No timer reaches the program: `pcp.sleep(ms)` and `pcp.withTimeout(ms,
+ * fn)` ask the bridge to wait (ops "sleep", "deadline" and "cancel"), which
+ * holds the time on the run's wall clock (limits.ts MAX_SLEEP_MS, a sleep).
+ *
  * `pcp.step(name, fn)` is the prelude's alone: it runs fn, sends the step's
  * name along with each call made in it, and rethrows an error from it with
  * the step named, so no operation of the bridge's is added for it.
@@ -52,7 +57,7 @@ import type { BridgeReply, Executor, RunEnd, RunResult } from "./types"
  * malloc_usable_size), so it is not relied on.
  *
  * The program's time is counted while it computes, not while it waits on a
- * call: an interrupt stops it past RUN_CPU_MS, when the run is aborted, and
+ * call or a sleep (those count against the run's wall clock): an interrupt stops it past RUN_CPU_MS, when the run is aborted, and
  * when the bridge says stop, and none of those can be caught by the
  * program. After a stop nothing of it runs again.
  */
@@ -301,18 +306,66 @@ const PRELUDE = `(() => {
   }
 
   // A call PCP's pacing refused throws an error with code "paced" and
-  // retryAfterMs, for a program that tells it apart from the tool's own.
+  // retryAfterMs, for a program that tells it apart from the tool's own; a
+  // tool error with a code of its own ("timeout", "browser_busy") carries
+  // that code, and retryAfterMs where it says when to try again.
   const ask = async (op, payload) => {
     const reply = JSON.parse(await host(op, JSON.stringify(payload)))
     if (!reply.ok) {
       const error = new Error(reply.error)
-      if (reply.code === "paced") {
-        error.code = "paced"
-        error.retryAfterMs = typeof reply.retryAfterMs === "number" ? reply.retryAfterMs : 0
+      if (typeof reply.code === "string") {
+        error.code = reply.code
+        if (typeof reply.retryAfterMs === "number") error.retryAfterMs = reply.retryAfterMs
+        else if (reply.code === "paced") error.retryAfterMs = 0
       }
       throw error
     }
     return reply.value
+  }
+
+  // Waits are PCP's: the bridge holds the time, on the run's wall clock, and
+  // the program gets only a promise. pcp.withTimeout races its function
+  // against a timer of the bridge's, which it cancels when the function
+  // settles first; a timer's id stays in here.
+  const msOf = (ms, what) => {
+    if (typeof ms !== "number" || !Number.isFinite(ms) || ms < 0) {
+      throw new TypeError(what + " takes a number of milliseconds, 0 or more.")
+    }
+    return ms
+  }
+  const sleep = async (ms) => {
+    await ask("sleep", { ms: msOf(ms, "pcp.sleep") })
+  }
+  let timers = 0
+  const NEVER = new Promise(() => {})
+  const TIMEOUT_USAGE = "pcp.withTimeout takes milliseconds and a function: await pcp.withTimeout(10000, () => pcp.call(…))."
+  const withTimeout = async (ms, fn) => {
+    msOf(ms, "pcp.withTimeout")
+    if (typeof fn !== "function") throw new TypeError(TIMEOUT_USAGE)
+    const id = "t" + ++timers
+    let fired = false
+    const timer = ask("deadline", { ms, id }).then((up) => {
+      if (!up) return NEVER
+      fired = true
+      const error = new Error(
+        "pcp.withTimeout: no result within " + ms + " ms, so the program went on without it. " +
+          "What it started may still finish: a call under way is not taken back and may have gone through, so check before you try it again."
+      )
+      error.name = "TimeoutError"
+      error.code = "timeout"
+      throw error
+    })
+    try {
+      return await Promise.race([(async () => fn())(), timer])
+    } finally {
+      if (!fired) {
+        try {
+          host("cancel", JSON.stringify({ id })).catch(() => {})
+        } catch {
+          // Past the run's requests: the timer ends with the run.
+        }
+      }
+    }
   }
 
   const idOf = (handle) =>
@@ -366,6 +419,8 @@ const PRELUDE = `(() => {
         step: currentStep ?? undefined,
       }),
     step,
+    sleep,
+    withTimeout,
     read: async (handle, options) => {
       const as = options?.as ?? "text"
       const range = { offset: options?.offset, length: options?.length }
@@ -468,9 +523,16 @@ export async function checkSyntax(code: string): Promise<string | null> {
   }
 }
 
-/** Requests one run may send, of every kind together. */
+/**
+ * Requests one run may send, of every kind together: a wait of
+ * pcp.withTimeout's is two (its timer and the cancel).
+ */
 const MAX_REQUESTS =
-  MAX_CALLS_PER_RUN + MAX_KEEPS_PER_RUN + MAX_READS_PER_RUN + MAX_MEDIA_PER_RUN
+  MAX_CALLS_PER_RUN +
+  MAX_KEEPS_PER_RUN +
+  MAX_READS_PER_RUN +
+  MAX_MEDIA_PER_RUN +
+  2 * MAX_WAITS_PER_RUN
 
 function clip(text: string): string {
   return text.length > MAX_ERROR_CHARS
@@ -650,7 +712,7 @@ async function runInQuickJs(
     if (++requests > MAX_REQUESTS) {
       overRequests = true
       throw new Error(
-        `A run may ask PCP for at most ${MAX_REQUESTS} things (calls, reads, keeps, images and videos together).`,
+        `A run may ask PCP for at most ${MAX_REQUESTS} things (calls, reads, keeps, images, videos and waits together).`,
       )
     }
 
@@ -808,7 +870,7 @@ async function runInQuickJs(
         return ended({
           kind: "error",
           message:
-            "The program is waiting on a promise that nothing will settle (PCP has no timers), so it was stopped.",
+            "The program is waiting on a promise that nothing will settle, so it was stopped. PCP has no setTimeout: wait with await pcp.sleep(ms).",
         })
       }
 
