@@ -639,9 +639,13 @@ export type CodeCallOutcome =
        * answer in time), so it may have gone through.
        */
       transit?: boolean
-      /** "paced": its turn under pacing was too far off; nothing was sent. */
-      code?: "paced"
-      /** With "paced": when the destination takes its next action. */
+      /**
+       * "paced": its turn under pacing was too far off; nothing was sent.
+       * Otherwise the tool error's own code, when it gave one ("timeout",
+       * "browser_busy", …).
+       */
+      code?: string
+      /** When trying again may go through, where the code says so. */
       retryAfterMs?: number
     }
   /** The owner has to act first: the result with their link. */

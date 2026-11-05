@@ -2,7 +2,7 @@ import { STATUS_CODES } from "node:http"
 
 import type { CallToolResult } from "@modelcontextprotocol/client"
 
-import { PcpError } from "../errors"
+import { isPcpError, PcpError } from "../errors"
 import { PublicOnlyRefusal } from "../public-only"
 import { AddressBlockedError } from "./address"
 import { describeFetchError, discard, readCapped } from "./http"
@@ -503,7 +503,19 @@ async function keptFileAnswer(
     )
   }
 
-  const handle = await keepFile(file)
+  let handle: { $result: string }
+
+  try {
+    handle = await keepFile(file)
+  } catch (error) {
+    // PCP's own refusal (the file is past what it keeps): the API answered,
+    // so this is not an outage of the endpoint's.
+    if (isPcpError(error)) {
+      return refusedFile(status, error.message)
+    }
+
+    throw error
+  }
   const value = { file: handle, note: FILE_NOTE(handle.$result) }
 
   return {

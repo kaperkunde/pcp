@@ -217,7 +217,8 @@ first place a text appears.
 
 Files and long values move between tools without passing through the
 assistant. A file in an answer (an attachment, an image, base64 that decodes
-to a PDF) and any part named in `keep` come back as a handle,
+to a PDF, a PDF or image an API endpoint answers with) and any part named in
+`keep` come back as a handle,
 `{"$result": "<id>", …}`, with its type and size. Put that handle in any later
 call's arguments and PCP puts the value there: a text as text, a file as
 base64. `get_attachment` reads any attachment that way, and `send_email` and
@@ -391,7 +392,12 @@ into another tool's arguments as a handle, never read by the program or the
 assistant. `pcp.tools()` lists the token's servers and tools, as `list_tools`
 does, and `pcp.describe(server, tool)` gives one tool's arguments and what
 it returns, as `describe` does. The program also has `atob`, `btoa`, `TextEncoder`, `TextDecoder` and
-`crypto.getRandomValues`, so it can make a strong secret itself.
+`crypto.getRandomValues`, so it can make a strong secret itself. It has no
+timers of its own: `await pcp.sleep(ms)` waits (a minute at most at once),
+and `pcp.withTimeout(ms, fn)` gives up on a slow part with an error coded
+`timeout`, both on PCP's clock and within the run's three minutes. What it
+gave up on is not taken back, so a call it was waiting for may still have
+gone through.
 
 A large picture costs an assistant far more to look at than a small one, so
 `pcp.image.compress(handle, { maxWidth, maxHeight, crop, grayscale, format,

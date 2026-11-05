@@ -246,9 +246,23 @@ send is reported in its status. `executeCall` sends it with a timeout and a
 cap on the answer, **without following redirects** (`fetch` would repeat a
 custom header such as `X-API-Key` on the next host), turns the answer into a
 tool result (JSON pretty-printed and, when small, as `structuredContent`; text
-as it is; other types described, not dumped; an error status as an error
-result), and removes the credential from it before parsing, because an API
-that echoes a key back (in an error, say) must not hand it to the assistant.
+as it is; an error status as an error result), and removes the credential
+from it before parsing, because an API that echoes a key back (in an error,
+say) must not hand it to the assistant. A **file** (a successful answer of
+any other type, a PDF or an image, or of a type the operation declares with a
+schema of `format: binary`, which the plan keeps as `fileAnswers`) is kept
+whole as the token's result (`keepBytes`) and answered as its handle,
+`{file: {"$result", type, size, name}, note}`, the name from
+`Content-Disposition` without a path, so call_tool, a program's `pcp.call`
+and a wrapper pass it on without reading it; describe's `returns` says so.
+It is read up to its own cap, the smaller of `MAX_FILE_RESPONSE_BYTES`
+(`openapi/limits.ts`) and the largest file PCP keeps (`resourceLimits()`),
+and a larger one is refused, never cut (a `Content-Length` past it is refused
+before any of it is read). Its bytes are not text to scrub: a file that holds
+the credential as it was sent is refused, the type is kept only as a plain
+`type/subtype` without it, and the name is scrubbed; text declared as a file
+is scrubbed like any text and kept as UTF-8. Without a keeper (no token), a
+file is described, not dumped, as before.
 
 **Where requests go** is the owner's choice, made once. The base URL is the
 owner's own field when filled, otherwise the schema's first server, resolved
@@ -1918,7 +1932,8 @@ three parts:
   engine has the language and nothing of Node's: no `require`, `process`,
   `fetch`, timers or file system. Two host functions are put on its global
   object, and a prelude takes them off at once and wraps them as `pcp`
-  (`call`, `read`, `keep`, `tools`, `step`, `image`, `video`) and `console`;
+  (`call`, `read`, `keep`, `tools`, `step`, `image`, `video`, `sleep`,
+  `withTimeout`) and `console`;
   only strings cross, both ways, so the host never holds one of the
   program's objects. Memory is a
   `WebAssembly.Memory` made with a maximum (128 MB), which the WebAssembly
@@ -1938,8 +1953,22 @@ three parts:
   (the token's servers, or one's tools, as `list_tools` gives them),
   `describe` (one of those tools as `describe` gives it, from the catalogue
   and without a call_handle, since `call` takes names; a blocked or unknown
-  tool is refused as a call to it would be, and no server is read) and
-  `media` (below). `tools` and `describe` are run_code's only: a wrapper's
+  tool is refused as a call to it would be, and no server is read),
+  `media` (below), and the waits: `sleep` (`pcp.sleep(ms)`, at most
+  `MAX_SLEEP_MS`, a minute, at once, and refused past what is left of the
+  run), `deadline` and `cancel` (`pcp.withTimeout(ms, fn)`'s timer, raced
+  against `fn` in the prelude and cancelled when `fn` settles first; on time
+  it rejects with a catchable `TimeoutError`, code `timeout`). Every wait is
+  a timer of PCP's in the bridge, counted against the run's wall clock and
+  ended with the run, `MAX_WAITS_PER_RUN` (200) a run; the program never
+  holds a timer, only a promise. What `withTimeout` gave up on is abandoned,
+  not taken back: a call under way goes on to its end (or the run's), and
+  may have gone through, which its error says. A tool error with a code of
+  its own (`_meta["gg.pcp/error"]`: `timeout`, `browser_busy`, …) reaches the
+  program as `error.code`, with `error.retryAfterMs` where it says when to
+  try again (`answers.ts errorCodeOf`), as a paced call's does. The sandbox's
+  `pcp.py` has `sleep` through the same bridge and `with_timeout` on a
+  thread of its own. `tools` and `describe` are run_code's only: a wrapper's
   program is refused both. A handle
   PCP wrote into an answer is made bare (`{"$result"}`) before a call, so a
   program passes on what it was handed as it is. Limits are in

@@ -30,7 +30,9 @@ import {
   MAX_MEDIA_PER_RUN,
   MAX_PARALLEL_CALLS,
   MAX_READS_PER_RUN,
+  MAX_SLEEP_MS,
   MAX_STEP_NAME_CHARS,
+  MAX_WAITS_PER_RUN,
   RUN_ANSWER_MS,
   RUN_PROGRESS_MS,
   RUN_TIMEOUT_MS,
@@ -781,6 +783,9 @@ export async function runProgram(
   let reads = 0
   let keeps = 0
   let media = 0
+  let waits = 0
+  /** pcp.withTimeout's timers under way, by the id the prelude gave each. */
+  const deadlines = new Map<string, () => void>()
   /** Where the owner has to act first, once a call said so. */
   const halt: { stop: { at: string; result: CallToolResult } | null } = {
     stop: null,
@@ -967,7 +972,8 @@ export async function runProgram(
       }
 
       // The program is told the value or the error, nothing else; a call
-      // pacing refused says so, and when to try again.
+      // pacing refused says so, and when to try again, and a tool error's
+      // own code ("timeout", "browser_busy") comes with it as it is.
       return outcome.ok
         ? { ok: true, value: outcome.value }
         : {
@@ -975,7 +981,14 @@ export async function runProgram(
             error: outcome.error,
             ...(outcome.code === "paced"
               ? { code: "paced", retryAfterMs: outcome.retryAfterMs ?? 0 }
-              : {}),
+              : outcome.code
+                ? {
+                    code: outcome.code,
+                    ...(outcome.retryAfterMs !== undefined
+                      ? { retryAfterMs: outcome.retryAfterMs }
+                      : {}),
+                  }
+                : {}),
           }
     })
   }
@@ -1359,6 +1372,104 @@ export async function runProgram(
     return describe(payload.server as string, payload.tool as string)
   }
 
+  /**
+   * Waits ms on PCP's clock, the run's own: answers true when the time is
+   * up, false when `cancel` ended it first. The run's end ends it too.
+   */
+  function waitFor(ms: number, id?: string): Promise<BridgeReply> {
+    if (controller.signal.aborted) {
+      return Promise.resolve(refuse("The run is over."))
+    }
+
+    return new Promise((resolve) => {
+      const done = (reply: BridgeReply) => {
+        clearTimeout(timer)
+        controller.signal.removeEventListener("abort", over)
+        if (id !== undefined) deadlines.delete(id)
+        resolve(reply)
+      }
+      const over = () => done(refuse("The run is over."))
+      const timer = setTimeout(() => done({ ok: true, value: true }), ms)
+
+      if (id !== undefined) {
+        deadlines.set(id, () => done({ ok: true, value: false }))
+      }
+
+      controller.signal.addEventListener("abort", over, { once: true })
+    })
+  }
+
+  /** A wait's milliseconds, or why they are not. */
+  function waitMs(payload: unknown, what: string): number | string {
+    const ms = isRecord(payload) ? payload.ms : undefined
+
+    if (typeof ms !== "number" || !Number.isFinite(ms) || ms < 0) {
+      return `${what} takes a number of milliseconds, 0 or more.`
+    }
+
+    if (++waits > MAX_WAITS_PER_RUN) {
+      return `A run waits at most ${MAX_WAITS_PER_RUN} times (pcp.sleep and pcp.withTimeout together).`
+    }
+
+    return Math.round(ms)
+  }
+
+  async function sleep(payload: unknown): Promise<BridgeReply> {
+    const ms = waitMs(payload, "pcp.sleep")
+
+    if (typeof ms === "string") {
+      return refuse(ms)
+    }
+
+    if (ms > MAX_SLEEP_MS) {
+      return refuse(
+        `pcp.sleep waits ${MAX_SLEEP_MS / 1000} seconds at most at once.`,
+      )
+    }
+
+    const left = deadline - Date.now()
+
+    if (ms > left) {
+      return refuse(
+        `The run has ${seconds(Math.max(0, left))} left, less than that wait of ${seconds(ms)}.`,
+      )
+    }
+
+    const reply = await waitFor(ms)
+    return "ok" in reply && reply.ok ? { ok: true, value: null } : reply
+  }
+
+  /**
+   * pcp.withTimeout's timer: the prelude races it against the function and
+   * cancels it when the function wins. Past what is left of the run, the
+   * run's end comes first.
+   */
+  async function startDeadline(payload: unknown): Promise<BridgeReply> {
+    const id = isRecord(payload) ? payload.id : undefined
+
+    if (typeof id !== "string" || id === "" || id.length > 40) {
+      return refuse("That timer has no id.")
+    }
+
+    const ms = waitMs(payload, "pcp.withTimeout")
+
+    if (typeof ms === "string") {
+      return refuse(ms)
+    }
+
+    return waitFor(Math.min(ms, Math.max(0, deadline - Date.now())), id)
+  }
+
+  function cancelDeadline(payload: unknown): BridgeReply {
+    const id = isRecord(payload) ? payload.id : undefined
+
+    if (typeof id === "string") {
+      deadlines.get(id)?.()
+    }
+
+    return { ok: true, value: null }
+  }
+
   const bridge: Bridge = async (op, payload) => {
     switch (op) {
       case "call":
@@ -1373,6 +1484,12 @@ export async function runProgram(
         return describeTool(payload)
       case "media":
         return mediaOp(payload)
+      case "sleep":
+        return sleep(payload)
+      case "deadline":
+        return startDeadline(payload)
+      case "cancel":
+        return cancelDeadline(payload)
       default:
         return refuse(`PCP does not know "${String(op).slice(0, 40)}".`)
     }

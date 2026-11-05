@@ -27,7 +27,12 @@ import { EMPTY_CONFIG, saveResourceConfig } from "../resources/state"
 import { keepBytes, keepResult, openResult } from "../tool-results"
 import { writeToolAccess } from "../tool-access"
 import { setupVault } from "../vault"
-import { MAX_CALLS_PER_RUN, MAX_MEDIA_PER_RUN } from "./limits"
+import {
+  MAX_CALLS_PER_RUN,
+  MAX_MEDIA_PER_RUN,
+  MAX_SLEEP_MS,
+  MAX_WAITS_PER_RUN,
+} from "./limits"
 import { checkRun, runCode, runProgram } from "./run"
 import { javaScriptExecutor } from "./quickjs"
 import { MAY_HAVE_TAKEN_EFFECT } from "./runs"
@@ -89,6 +94,15 @@ const executor: PermissionExecutor = {
         return { content: [{ type: "text", text: "sent slowly" }] }
       case "flaky":
         throw new PcpError("upstream", "Postcards could not be reached.")
+      case "busy_tab":
+        // A family's tool error with a code of its own (tools/outcome.ts).
+        return {
+          content: [{ type: "text", text: "The tab is busy." }],
+          isError: true,
+          _meta: {
+            "gg.pcp/error": { code: "browser_busy", retryAfterMs: 1200 },
+          },
+        }
       default:
         return { content: [{ type: "text", text: `ran ${tool}` }] }
     }
@@ -115,6 +129,7 @@ async function connect(
     "archive",
     "slow_send",
     "flaky",
+    "busy_tab",
   ]) {
     await db().mcpTool.create({
       data: {
@@ -144,6 +159,7 @@ async function connect(
     "archive",
     "slow_send",
     "flaky",
+    "busy_tab",
   ]) {
     await writeToolAccess(tokenId, serverId, name, "allowed")
   }
@@ -489,12 +505,13 @@ describe("a program's calls", () => {
           server: "postcards",
           name: "Postcards",
           description: "",
-          tools: 7,
+          tools: 8,
         },
       ],
       tools: [
         ["archive", "allowed"],
         ["broken", "allowed"],
+        ["busy_tab", "allowed"],
         ["flaky", "allowed"],
         ["list_cards", "allowed"],
         ["scan_card", "allowed"],
@@ -1481,6 +1498,37 @@ describe("how a run says it ended", () => {
     })
   })
 
+  it("throws a tool error's own code, and when to try again, as the tool said", async () => {
+    await connect()
+    const { isError, text } = await run(`
+      try {
+        await pcp.call("postcards", "busy_tab")
+      } catch (error) {
+        return [error.code, error.retryAfterMs, error.message]
+      }
+    `)
+
+    expect(isError).toBe(false)
+    expect(returned(text)).toEqual(["browser_busy", 1200, "The tab is busy."])
+
+    const timedOut = await runProgram(
+      scope,
+      {
+        code: `try { await pcp.call("browser", "navigate") } catch (error) { return [error.code, "retryAfterMs" in error] }`,
+      },
+      {
+        call: async () => ({
+          ok: false,
+          error: "navigate took longer than 10 s.",
+          code: "timeout",
+        }),
+      },
+    )
+    expect(timedOut).toMatchObject({
+      result: { kind: "done", returned: JSON.stringify(["timeout", false]) },
+    })
+  })
+
   it("prints a call's note about an old argument name once, beside the value", async () => {
     await connect()
     const run = await runProgram(
@@ -1841,5 +1889,129 @@ describe("the same program again", () => {
 
     expect((await run(program)).text).toContain("stopped at")
     expect((await run(program)).text).toContain("stopped at")
+  })
+})
+
+describe("waits", () => {
+  beforeEach(async () => {
+    await connect()
+  })
+
+  const quick: Parameters<typeof runProgram>[2]["call"] = async () => ({
+    ok: true,
+    value: "done",
+  })
+
+  async function program(
+    code: string,
+    options: Partial<Parameters<typeof runProgram>[2]> = {},
+  ) {
+    return runProgram(scope, { code }, { call: quick, ...options })
+  }
+
+  it("sleeps on PCP's clock, which counts against the run's wall clock", async () => {
+    const run = await program(
+      `const at = Date.now(); await pcp.sleep(150); return Date.now() - at`,
+    )
+
+    expect(run).toMatchObject({ state: "finished" })
+    if ("busy" in run) throw new Error("busy")
+    expect(
+      Number(run.result.kind === "done" && run.result.returned),
+    ).toBeGreaterThanOrEqual(140)
+    expect(run.took).toBeGreaterThanOrEqual(140)
+  })
+
+  it("refuses a sleep past its cap, or past what is left of the run, as an error the program catches", async () => {
+    const run = await program(
+      `const said = []
+       for (const ms of [${MAX_SLEEP_MS + 1}, 5000, -1]) {
+         try { await pcp.sleep(ms) } catch (error) { said.push(error.message) }
+       }
+       try { await pcp.sleep("1s") } catch (error) { said.push(error.name) }
+       return said`,
+      { timeoutMs: 2000 },
+    )
+
+    if ("busy" in run || run.result.kind !== "done") throw new Error("failed")
+    const said = JSON.parse(run.result.returned!) as string[]
+    expect(said[0]).toMatch(/waits 60 seconds at most at once/)
+    expect(said[1]).toMatch(/The run has \d+(\.\d+)? ?s(econds)? left/)
+    expect(said[2]).toMatch(/number of milliseconds/)
+    expect(said[3]).toBe("TypeError")
+  })
+
+  it("ends a sleep with the run when its request goes away", async () => {
+    const signal = AbortSignal.timeout(100)
+    const at = Date.now()
+    const run = await program(`await pcp.sleep(30000); return 1`, { signal })
+
+    expect(run).toMatchObject({ state: "failed", reason: "gone" })
+    expect(Date.now() - at).toBeLessThan(5000)
+  })
+
+  it("counts every wait against the run's waits", async () => {
+    const run = await program(
+      `let n = 0
+       try { for (;;) { await pcp.sleep(0); n++ } } catch (error) { return [n, error.message] }`,
+    )
+
+    if ("busy" in run || run.result.kind !== "done") throw new Error("failed")
+    const [count, message] = JSON.parse(run.result.returned!) as [
+      number,
+      string,
+    ]
+    expect(count).toBe(MAX_WAITS_PER_RUN)
+    expect(message).toMatch(/waits at most/)
+  })
+
+  it("answers withTimeout with the function's value when it is in time", async () => {
+    const at = Date.now()
+    const run = await program(
+      `return await pcp.withTimeout(20000, () => pcp.call("a", "b"))`,
+    )
+
+    expect(run).toMatchObject({
+      state: "finished",
+      result: { returned: JSON.stringify("done") },
+    })
+    // The timer was cancelled, not waited for.
+    expect(Date.now() - at).toBeLessThan(5000)
+  })
+
+  it("passes on the function's own error", async () => {
+    const run = await program(
+      `try { await pcp.withTimeout(5000, async () => { throw new RangeError("nope") }) } catch (error) { return [error.name, error.message] }`,
+    )
+
+    expect(run).toMatchObject({
+      result: { returned: JSON.stringify(["RangeError", "nope"]) },
+    })
+  })
+
+  it("rejects withTimeout past its time with a catchable timeout error, the call left to finish", async () => {
+    let finished = false
+    const slow: Parameters<typeof runProgram>[2]["call"] = async () => {
+      await new Promise((resolve) => setTimeout(resolve, 400))
+      finished = true
+      return { ok: true, value: "late" }
+    }
+    const run = await program(
+      `try {
+         await pcp.withTimeout(50, () => pcp.call("a", "b"))
+         return "no timeout"
+       } catch (error) {
+         return [error.name, error.code, error.message]
+       }`,
+      { call: slow },
+    )
+
+    if ("busy" in run || run.result.kind !== "done") throw new Error("failed")
+    const [name, code, message] = JSON.parse(run.result.returned!) as string[]
+    expect(name).toBe("TimeoutError")
+    expect(code).toBe("timeout")
+    expect(message).toMatch(/no result within 50 ms/)
+    expect(message).toMatch(/may have gone through/)
+    expect(finished).toBe(false)
   })
 })
