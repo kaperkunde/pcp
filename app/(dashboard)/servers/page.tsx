@@ -9,11 +9,14 @@ import { listApiTokens } from "@/lib/core/api-tokens"
 import { listServers } from "@/lib/core/servers"
 import { flowWrapperIds } from "@/lib/core/wrappers/definition"
 import { requireContext } from "@/lib/server/session"
+import { ensureOwnStore } from "@/lib/core/storage/roots"
 
 export const metadata: Metadata = { title: "Servers" }
 
 export default async function ServersPage() {
   const ctx = await requireContext()
+  // PCP's own store is always there, for a vault from before it too.
+  await ensureOwnStore(ctx)
   const [servers, tokens, flows] = await Promise.all([
     listServers(ctx),
     listApiTokens(ctx),

@@ -1,23 +1,40 @@
 import Link from "next/link"
 
+import { StoreConversionForm } from "@/components/store-conversion-form"
 import { ButtonLink } from "@/components/ui/button"
 import { List, ListRow, ListSection } from "@/components/ui/list"
 import type { StorageRootView } from "@/lib/core/storage/roots"
 
 /**
- * A storage folder's own card on its page: where it is, whose files PCP
- * writes, and the way to its file browser.
+ * A store's own card on its page: where its files are, whether PCP keeps
+ * them encrypted, whose files PCP writes, the way to its file browser, and
+ * the conversion either way.
  */
 export function StorageCard({ view }: { view: StorageRootView }) {
   const login = view.host?.login ?? ""
+  const local = view.backend === "local"
+  const reachable = local || view.host !== null
+  const to =
+    view.converting ?? (view.mode === "encrypted" ? "plain" : "encrypted")
 
   return (
-    <ListSection title="Folder" data-testid="storage-folder">
+    <ListSection
+      title={local ? "Store" : "Folder"}
+      data-testid="storage-folder"
+    >
       <List>
         <ListRow
-          title={<code className="text-[13px]">{view.path}</code>}
+          title={
+            local ? (
+              "In PCP's data folder"
+            ) : (
+              <code className="text-[13px]">{view.path}</code>
+            )
+          }
           description={
-            view.host ? (
+            local ? (
+              "On the machine PCP runs on. Exports carry its index and keys, not its files: back up PCP's data folder to keep them."
+            ) : view.host ? (
               <>
                 On{" "}
                 <Link
@@ -33,7 +50,7 @@ export function StorageCard({ view }: { view: StorageRootView }) {
             )
           }
           trailing={
-            view.host ? (
+            reachable && !view.converting ? (
               <ButtonLink
                 href={`/servers/${view.id}/files`}
                 variant="secondary"
@@ -41,6 +58,35 @@ export function StorageCard({ view }: { view: StorageRootView }) {
               >
                 Browse files
               </ButtonLink>
+            ) : null
+          }
+        />
+        <ListRow
+          title={
+            view.converting
+              ? view.converting === "encrypted"
+                ? "Being encrypted"
+                : "Being made plain"
+              : view.mode === "encrypted"
+                ? "Encrypted"
+                : "Plain"
+          }
+          description={
+            view.converting
+              ? "Assistants' calls to it wait until this is done. Continue until it says so."
+              : view.mode === "encrypted"
+                ? local
+                  ? "PCP keeps the files encrypted, names and folders too, and decrypts them only for a request."
+                  : "The SSH server holds only encrypted objects: names, folders and content are PCP's to read, and other apps (Samba, Finder) see none of it. Making it plain writes the files back as they are."
+                : "The files are there as they are, for other apps (Samba, Finder, the Files app) too. Encrypting replaces each with an encrypted object only PCP can read, one batch at a time."
+          }
+          trailing={
+            reachable && !view.readOnly ? (
+              <StoreConversionForm
+                id={view.id}
+                to={to}
+                underway={view.converting !== null}
+              />
             ) : null
           }
         />

@@ -200,7 +200,15 @@ export async function updateStorageRoot(
   id: string,
   input: StorageRootInput,
 ): Promise<void> {
-  await loadStorageRoot(ctx, id)
+  const loaded = await loadStorageRoot(ctx, id)
+
+  if (isLocalStore(loaded.root)) {
+    throw new PcpError(
+      "state",
+      "PCP's own store is in its data folder: its name and description are changed like any server's.",
+    )
+  }
+
   const data = normalize(input)
 
   await db().mcpServer.update({

@@ -2442,18 +2442,18 @@ export function buildGatewayServer(
   /** The words of PCP's own store tools, each opening with what it does. */
   const STORE_TOOL_WORDS: Record<StorageToolName, string> = {
     list_folder:
-      "List files in a store: the files and folders in a folder of one, each with its name, path, type, size and when it changed, folders first.",
+      "List files in a folder: the files and folders in a folder of a store, each with its name, path, type, size and when it changed, folders first.",
     find_files:
-      "Find files in a store by name, with * and ? in the name, in a folder and every folder under it.",
+      "Find files by name: in a folder of a store and every folder under it, with * and ? in the name.",
     get_file:
-      "Get a file from a store as a kept result's handle, {\"$result\": \"<id>\"}, to pass on whole to another tool (send_email's attachments, save_file, an API's file field) without reading it yourself; a text file's start comes back as text too.",
+      "Get a file as a handle: one file of a store as a kept result's handle, {\"$result\": \"<id>\"}, to pass on whole to another tool (send_email's attachments, save_file, an API's file field) without reading it yourself; a text file's start comes back as text too.",
     save_file:
       'Save a file to a store, to keep it for good: a kept result\'s handle (file, {"$result": "<id>"}: a mail attachment, a download, an upload) or text. It is written whole before it takes its name; a file already there is replaced only with overwrite: true.',
     make_folder:
-      "Make a folder in a store, with parents: true also the folders above it.",
-    move: "Move or rename a file or folder in a store: from and to are both full paths inside it. A file at to is replaced only with overwrite: true; a folder never.",
+      "Make a folder: in a store, with parents: true also the folders above it.",
+    move: "Move or rename a file or folder: in a store, from and to both full paths inside it. A file at to is replaced only with overwrite: true; a folder never.",
     delete:
-      "Delete a file or folder in a store for good: there is no Trash. A folder must be empty unless recursive: true.",
+      "Delete a file or folder for good: in a store, with no Trash. A folder must be empty unless recursive: true.",
   }
   const STORE_LEAD =
     "Without store, PCP's own store, which keeps files encrypted on the machine PCP runs on; store names another the owner added (a folder on one of their SSH servers), by its short name. The owner's levels for that store's tool apply, as for call_tool."
@@ -2464,7 +2464,9 @@ export function buildGatewayServer(
 
     register({
       name,
-      title: `${inner.title} in a store`,
+      // The store only where it is the task (keeping a file for good):
+      // search reads a title as it reads a name.
+      title: name === "save_file" ? "Save a file to a store" : inner.title,
       description: `${STORE_TOOL_WORDS[name]} ${STORE_LEAD}`,
       input: inner.input.extend({
         store: z

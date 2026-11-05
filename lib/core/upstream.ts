@@ -1,6 +1,5 @@
 import { randomBytes } from "node:crypto"
 import { isIP } from "node:net"
-import type { Readable } from "node:stream"
 
 import {
   auth,

@@ -25,6 +25,7 @@ import { publicUrlFor, publicUrlWithoutSession } from "@/lib/server/public-url"
 import { loadResourceLimits } from "@/lib/core/resources/state"
 import { runDueSyncs } from "@/lib/core/repos/sync"
 import { reconcileServices } from "@/lib/core/upstream"
+import { ensureOwnStore } from "@/lib/core/storage/roots"
 
 /**
  * The gateway endpoint: https://<pcp>/mcp
@@ -50,6 +51,10 @@ const mcpHandler = createMcpHandler(
     if (!scope) {
       throw new Error("the gateway was called without a resolved token")
     }
+
+    // PCP's own store is always there: made on a vault's first request
+    // when it is from before stores (and at setup otherwise).
+    await ensureOwnStore(scope.ctx)
 
     const servers = await ensureCatalogue(
       scope,

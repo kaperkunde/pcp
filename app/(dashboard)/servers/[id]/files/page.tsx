@@ -64,8 +64,14 @@ export default async function StorageFilesPage({
         title="Files"
         description={
           <>
-            <code>{loaded.root.path}</code> on{" "}
-            {loaded.host?.name ?? "an SSH server no longer in PCP"}
+            {loaded.root.backend === "local" ? (
+              "PCP's own store, encrypted in its data folder"
+            ) : (
+              <>
+                <code>{loaded.root.path}</code> on{" "}
+                {loaded.host?.name ?? "an SSH server no longer in PCP"}
+              </>
+            )}
             {loaded.server.readOnly
               ? ". Read-only in PCP: you can look and download here."
               : "."}
