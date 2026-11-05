@@ -4197,7 +4197,10 @@ says to end the reply with the link (`owner-link.ts: linkLastText`, the link
 on its own last line as a markdown link whose label names the action, such
 as `[Allow gmail-imap/send_email?](…)`: an app that reads the reply aloud
 says the label rather than an address of ids, so the bare address is never
-to be pasted) and to call `check_permission` on the owner's next message,
+to be pasted). An assistant may keep working after a call that asks, and
+gather several links in one reply: it puts every one of them at the end,
+each on a line of its own, and calls no tool after them (`OWNER_LINK_RULE`).
+The result also says to call `check_permission` on the owner's next message,
 whatever it says, before sending the link again or assuming the request is
 still open (`owner-link.ts: nextMessageCheck`): the owner's words rarely say
 whether they answered, and an assistant that waited to be told sent links

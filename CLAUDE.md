@@ -640,7 +640,8 @@ embeddingProvider`, which hands `embeddings/provider.ts` the header;
   session).
 - The owner is asked by link only: a result hands the assistant a link to
   PCP's page, to end its reply with (`linkLastText`: nothing after it, or
-  Claude's apps fold it out of sight; a markdown link with a short label
+  Claude's apps fold it out of sight; several links in one reply all go at
+  its end, each on its own line; a markdown link with a short label
   naming the action, never the bare address, so voice mode reads the label;
   `owner-link.ts` holds the label rules and the wording instructions and
   descriptions use), and a check to call on the owner's next message,

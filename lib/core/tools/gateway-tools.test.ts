@@ -620,7 +620,7 @@ describe("once a session, for the app on the other end (#53)", () => {
     expect(every).toHaveLength(1)
     expect(every[0]).toContain(MIRRORED_LEAD)
     expect(every[0]).toContain("call_handle")
-    expect(every[0]).toContain("End your reply with the link")
+    expect(every[0]).toContain("end your reply with every one of them")
     // read_memory every had them: search does not repeat them.
     expect(await texts(app, "search", { query: "memory" })).toHaveLength(1)
     await app.close()
