@@ -17,7 +17,9 @@ import {
 // owner; the assistant reads and acts on the page by refs; a link to
 // another site stops; the sign-ins outlast the browser and are forgotten
 // on request; the tabs view settles a hand-over on its tab, takes the old
-// links there and closes a tab nobody needs. The fake upstream is on
+// links there and closes a tab nobody needs; a secret for the browser is
+// asked for with its login name and a password PCP makes, and its sites
+// changed on request. The fake upstream is on
 // 127.0.0.1, so the token is allowed private addresses first. The owner's
 // input in the live view and Cloudflare checks are covered by
 // lib/core/browser's unit tests.
@@ -295,4 +297,92 @@ test("the tabs view: a hand-over answered on its tab, old links led there, a sta
   await expect(
     page.getByRole("region", { name: "Live tab" }).getByRole("alert"),
   ).toContainText("This tab is closed")
+})
+
+test("a secret for the browser: its login name, a password PCP makes, and its sites changed on request", async ({
+  page,
+  baseURL,
+}) => {
+  await answerEverythingWaiting(page)
+  const name = `Energy ${RUN}`
+  const asked = toolText(
+    await browse(baseURL!, "request_secret", {
+      name,
+      purpose: "To sign up at the energy company.",
+      origins: ["https://www.frankenergie.nl"],
+      username: "ada@example.com",
+      generate: { length: 20, symbols: false },
+    }),
+  )
+  expect(asked).toContain("Not done yet")
+  const id = asked.match(/\/permissions\/([\w-]+)/)?.[1]
+  expect(id, asked).toBeTruthy()
+
+  // Marked up for password managers: the login name and a new password
+  // together, the sites as boxes out of their reach.
+  await page.goto(`/permissions/${id}`)
+  const login = page.getByLabel("Login name")
+  await expect(login).toHaveValue("ada@example.com")
+  await expect(login).toHaveAttribute("autocomplete", "username")
+  const generate = page.getByRole("switch", {
+    name: /Have PCP make a new password/,
+  })
+  await expect(generate).toBeChecked()
+  await expect(page.getByLabel("Length")).toHaveValue("20")
+  await expect(
+    page.getByRole("checkbox", { name: "https://www.frankenergie.nl" }),
+  ).toBeChecked()
+  await expect(page.getByLabel("More sites (optional)")).toHaveAttribute(
+    "data-lpignore",
+    "true",
+  )
+  await clickHydrated(generate)
+  await expect(
+    page.getByLabel(`Value of the secret "${name}"`),
+  ).toHaveAttribute("autocomplete", "new-password")
+  await clickHydrated(generate)
+
+  await clickHydrated(page.getByRole("button", { name: "Save, allow one use" }))
+  await expect(page.getByTestId("permission-outcome")).toContainText(
+    "PCP made its value itself",
+  )
+  expect(
+    toolText(await callTool(baseURL!, token, "check_permission", { id })),
+  ).toContain('"part": "username"')
+
+  // Its sites, on the assistant's proposal: a lookalike is flagged and left
+  // unticked, the rest made as ticked.
+  const proposed = toolText(
+    await browse(baseURL!, "update_secret_sites", {
+      name,
+      reason: "The site signs in at mijn.frankenergie.nl too.",
+      add: [
+        { origin: "https://frankenergie.nl", subdomains: true },
+        { origin: "https://www.frankenergy.nl" },
+      ],
+    }),
+  )
+  expect(proposed).toContain("Not done yet")
+  const sitesId = proposed.match(/\/permissions\/([\w-]+)/)?.[1]
+  expect(sitesId, proposed).toBeTruthy()
+
+  await page.goto(`/permissions/${sitesId}`)
+  await expect(page.getByText(/letter or two away/).first()).toBeVisible()
+  await expect(
+    page.getByRole("checkbox", { name: /www\.frankenergy\.nl/ }),
+  ).not.toBeChecked()
+  await expect(
+    page.getByRole("checkbox", {
+      name: /frankenergie\.nl and its subdomains/,
+    }),
+  ).toBeChecked()
+  await clickHydrated(
+    page.getByRole("button", { name: "Apply ticked changes" }),
+  )
+  await expect(page.getByTestId("permission-outcome")).toContainText(
+    "Added: https://frankenergie.nl and its subdomains.",
+  )
+  await expect(page.getByTestId("permission-outcome")).toContainText(
+    "Not done: adding https://www.frankenergy.nl.",
+  )
 })
