@@ -420,6 +420,8 @@ function advancedSummary(kind: ServerKind): string {
       return "Host, port, login, name, pacing"
     case "service":
       return "Name, description, secrets for its variables, pacing"
+    case "storage":
+      return "Folder, whose files, umask, read-only, name, pacing"
     case "wrapper":
       return "The whole definition as JSON, short name, name"
     case "browser":
@@ -452,7 +454,8 @@ function SignInRow({
     server.kind === "browser" ||
     server.kind === "wrapper" ||
     server.kind === "ssh" ||
-    server.kind === "service"
+    server.kind === "service" ||
+    server.kind === "storage"
   ) {
     return null
   }
@@ -566,12 +569,14 @@ function RemoveServer({ server }: { server: ServerDetailProps["server"] }) {
         : server.kind === "caldav"
           ? "Takes the account out of PCP, with its tool list and any OAuth tokens PCP holds for it. Your calendars and reminders stay on the server, and secrets you added stay."
           : server.kind === "ssh"
-            ? "Takes the server out of PCP and deletes PCP's key for it. Nothing on the server changes: take the key out of authorized_keys there too."
-            : server.kind === "browser"
-              ? "Takes the browser away from assistants and closes its tabs. The sign-ins it keeps stay until you forget them on the Browser page."
-              : server.kind === "wrapper"
-                ? "Deletes the wrapper and its tools. The tools it stands in for show in search again; secrets you added stay."
-                : "Deletes the server, its tool list and any OAuth tokens PCP holds for it. Secrets you added stay."
+            ? "Takes the server out of PCP and deletes PCP's key for it. Nothing on the server changes: take the key out of authorized_keys there too. Its storage folders stay in PCP, without a way to reach them."
+            : server.kind === "storage"
+              ? "Takes the folder out of PCP, with its tools. The folder and its files stay on the server."
+              : server.kind === "browser"
+                ? "Takes the browser away from assistants and closes its tabs. The sign-ins it keeps stay until you forget them on the Browser page."
+                : server.kind === "wrapper"
+                  ? "Deletes the wrapper and its tools. The tools it stands in for show in search again; secrets you added stay."
+                  : "Deletes the server, its tool list and any OAuth tokens PCP holds for it. Secrets you added stay."
 
   return (
     <div className="flex flex-col items-center gap-1.5 pt-2 text-center">

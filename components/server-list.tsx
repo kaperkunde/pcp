@@ -34,6 +34,7 @@ type Filter =
   | "mail"
   | "calendar"
   | "ssh"
+  | "storage"
   | "service"
   | "wrapper"
   | "browser"
@@ -48,6 +49,7 @@ const FILTERS: Array<{
   { value: "mail", label: "Mail", kinds: ["jmap", "imap"] },
   { value: "calendar", label: "Calendars", kinds: ["caldav"] },
   { value: "ssh", label: "SSH", kinds: ["ssh"] },
+  { value: "storage", label: "Folders", kinds: ["storage"] },
   { value: "service", label: "Services", kinds: ["service"] },
   { value: "wrapper", label: "Wrappers", kinds: ["wrapper"] },
   { value: "browser", label: "Browser", kinds: ["browser"] },
