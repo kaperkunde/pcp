@@ -40,10 +40,16 @@ function inputFrom(formData: FormData): StorageRootInput {
   }
 }
 
+/** The Files pages: the list of stores (what PCP's own holds) and its own. */
+function revalidateFiles(id: string) {
+  revalidatePath("/files")
+  revalidatePath(`/files/${id}`)
+}
+
 function revalidate(id: string, hostId?: string) {
   revalidatePath("/servers")
   revalidatePath(`/servers/${id}`)
-  revalidatePath(`/servers/${id}/files`)
+  revalidateFiles(id)
   if (hostId) revalidatePath(`/servers/${hostId}`)
   revalidatePath("/tokens/[id]", "page")
 }
@@ -174,7 +180,7 @@ export async function uploadFilesAction(
     }
   })
 
-  revalidatePath(`/servers/${id}/files`)
+  revalidateFiles(id)
   return result
 }
 
@@ -196,7 +202,7 @@ export async function makeFolderAction(
     }
   })
 
-  revalidatePath(`/servers/${id}/files`)
+  revalidateFiles(id)
   return result
 }
 
@@ -220,7 +226,7 @@ export async function moveEntryAction(
     return { message: `Moved to ${moved.to}.` }
   })
 
-  revalidatePath(`/servers/${id}/files`)
+  revalidateFiles(id)
   return result
 }
 
@@ -236,7 +242,7 @@ export async function deleteEntryAction(
     return { message: `Deleted ${removed.path}.` }
   })
 
-  revalidatePath(`/servers/${id}/files`)
+  revalidateFiles(id)
   return result
 }
 
@@ -270,5 +276,6 @@ export async function convertStoreAction(
   })
 
   revalidatePath(`/servers/${id}`)
+  revalidateFiles(id)
   return result
 }

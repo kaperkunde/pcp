@@ -74,6 +74,8 @@ test("a folder is added on its SSH server's page and browsed there", async ({
   await expect(page.getByTestId("storage-folder")).toContainText(top)
 
   await page.getByRole("link", { name: "Browse files" }).click()
+  // Its file browser is under Files, and Files lists it after PCP's own.
+  await expect(page).toHaveURL(/\/files\/[\w-]+$/)
   const entries = page.getByTestId("storage-entries")
   await expect(entries).toContainText("hello.txt")
   await expect(entries).toContainText("A link out of the folder")
@@ -100,6 +102,14 @@ test("a folder is added on its SSH server's page and browsed there", async ({
     .getByRole("button", { name: "Delete" })
     .click()
   await expect(entries).not.toContainText("note.txt")
+
+  await page.goto("/files")
+  const stores = page.getByTestId("stores").getByRole("listitem")
+  await expect(stores.first()).toContainText("PCP files")
+  await expect(stores.filter({ hasText: FOLDER })).toContainText(
+    `${top} on ${HOST}`,
+  )
+  await expect(stores.filter({ hasText: FOLDER })).toContainText("Plain")
 })
 
 test("an assistant saves a file once the owner allows it, inside the folder only", async ({
