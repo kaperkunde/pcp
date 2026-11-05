@@ -23,7 +23,7 @@ import {
 } from "../upstream"
 import { setupVault } from "../vault"
 import { CHUNK_BYTES } from "./crypt"
-import { openEncryptedFolder } from "./encrypted"
+import { openEncryptedFolder, openSealedObject } from "./encrypted"
 import { OBJECTS_FOLDER } from "./limits"
 import { localFs, localStoreDir } from "./local"
 import { storeRoom, storeUsage } from "./quota"
@@ -243,9 +243,11 @@ describe("PCP's own store", () => {
     bytes[bytes.length - 3]! ^= 1
     fs.writeFileSync(at, bytes)
 
-    await expect(call(id, "get_file", { path: "a.txt" })).rejects.toThrow(
-      /did not decrypt/,
+    expect(refusal(await call(id, "get_file", { path: "a.txt" }))).toMatch(
+      /did not decrypt.*changed outside PCP/,
     )
+    // The store stays as it was: only the file is refused.
+    expect((await getServer(ctx, id)).status).toBe("ok")
   })
 
   it("streams a range for a download, decrypting only its chunks", async () => {
@@ -265,6 +267,19 @@ describe("PCP's own store", () => {
     )
     fs.mkdirSync(localStoreDir(id), { recursive: true })
     await folder.saveFrom("big.bin", [content], { overwrite: false })
+
+    // With the file's own key alone, as a public link would read it.
+    const sealed = await folder.sealed!("big.bin")
+    expect(sealed).toMatchObject({ name: "big.bin", size: content.length })
+    const head = openSealedObject(
+      localFs(),
+      sealed.rootReal,
+      sealed.objectId,
+      sealed.fileKey,
+      sealed.size,
+      { offset: 10, length: 20 },
+    )
+    expect((await buffer(head)).equals(content.subarray(10, 30))).toBe(true)
 
     const whole = await openStorageDownload(ctx, id, "big.bin", PUBLIC)
     expect(whole.size).toBe(content.length)

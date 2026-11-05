@@ -4,7 +4,7 @@ import type { McpServer, StorageRoot } from "@/lib/generated/prisma/client"
 
 import { storeTools, type SyncResult } from "../catalogue"
 import type { VaultContext } from "../context"
-import { asBytes } from "../crypto"
+import { asBytes, CryptoError } from "../crypto"
 import { db } from "../db"
 import { invalid, isPcpError, PcpError } from "../errors"
 import { newId } from "../ids"
@@ -679,6 +679,16 @@ export async function callStorageTool(
 
     return withNotes(jsonToolResult(value), notes)
   } catch (error) {
+    // A stored file that does not open was changed outside PCP: the
+    // store itself is reachable.
+    if (error instanceof CryptoError) {
+      return familyError(
+        `${server.name}: ${error.message}. It was changed outside PCP; nothing was read.`,
+        "state",
+        { notes },
+      )
+    }
+
     if (error instanceof FileTooLargeError) {
       return familyError(
         `That file is ${bytesWords(error.readSoFar)} bytes or more, more than PCP keeps of one file (${bytesWords(fileBytes)}). The owner can raise that in PCP's settings, under Resources.`,

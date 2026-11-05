@@ -1,6 +1,7 @@
 import type { Readable } from "node:stream"
 
 import { PcpError } from "../errors"
+import type { SealedFile } from "./encrypted"
 import {
   MAX_DELETE_ENTRIES,
   MAX_DEPTH,
@@ -119,6 +120,12 @@ export type StorageFolder = {
   ): Promise<{ path: string; type: EntryType; removed: number }>
   /** Whether PCP can write here: a part file made and removed. */
   probeWrite(): Promise<void>
+  /**
+   * An encrypted store's file with its own key and where its object is
+   * (encrypted.ts SealedFile), for what reads it with that key alone (a
+   * public link); a plain folder has none.
+   */
+  sealed?(path: string): Promise<SealedFile>
 }
 
 export type OpenedFile = {

@@ -303,14 +303,46 @@ export function readObject(
     entry.objectId,
     entry.fileKey,
   )
+  return openSealedObject(fs, store.rootReal, entry.objectId, fileKey, size, {
+    offset,
+    length,
+  })
+}
+
+/**
+ * One object opened with its file key alone, whole or a range: what a
+ * holder of that one key reads (a public link to one file, whose key the
+ * link wraps), with no store key or vault key.
+ */
+export function openSealedObject(
+  fs: RemoteFs,
+  rootReal: string,
+  objectId: string,
+  fileKey: Buffer,
+  size: number,
+  { offset, length }: { offset: number; length: number },
+): Readable {
   const range = sealedRange(size, offset, length)
-  const raw = fs.readStream(objectPath(store.rootReal, entry.objectId), {
+  const raw = fs.readStream(objectPath(rootReal, objectId), {
     start: range.start,
     end: range.end,
   })
-  const plain = decryptStream(fileKey, entry.objectId, { size, offset, length })
+  const plain = decryptStream(fileKey, objectId, { size, offset, length })
   raw.on("error", (error) => plain.destroy(error))
   return raw.pipe(plain)
+}
+
+/** One file of an encrypted store with its own key, for one request. */
+export type SealedFile = {
+  path: string
+  name: string
+  size: number
+  modified: string
+  objectId: string
+  /** The file's key, unwrapped: wrap it again before keeping it anywhere. */
+  fileKey: Buffer
+  /** The store's real folder on its backend, where the object is. */
+  rootReal: string
 }
 
 /**
@@ -650,6 +682,29 @@ export async function openEncryptedFolder(
         name: meta.n,
         bytes: Buffer.concat(chunks),
         modified: meta.m,
+      }
+    },
+
+    async sealed(raw) {
+      const { names, entry, meta } = await fileEntry(raw)
+
+      if (!entry.fileKey) {
+        throw new PcpError("state", "A file of the store's index has no key.")
+      }
+
+      return {
+        path: joinRelative(names),
+        name: meta.n,
+        size: meta.s ?? 0,
+        modified: meta.m,
+        objectId: entry.objectId,
+        fileKey: unwrapFileKey(
+          store.storeKey,
+          serverId,
+          entry.objectId,
+          entry.fileKey,
+        ),
+        rootReal: store.rootReal,
       }
     },
 
