@@ -23,7 +23,16 @@ import { checkNewExit, createServiceExit } from "../exits/exits"
 import { httpConnect, socks5Connect, type ProxyAuth } from "../exits/handshake"
 import { newId } from "../ids"
 import { errorToolResult, jsonToolResult } from "../json-result"
-import { argumentsResult, familyError } from "../tools/family"
+import {
+  argumentsResult,
+  familyError,
+  refusalOf,
+  withNotes,
+} from "../tools/family"
+import { bareType, fileMediaType } from "../media-types"
+import { loadResourceLimits } from "../resources/state"
+import { missingResultMessage } from "../result-handles"
+import { handleOf, type BytesKeeper, type ResultOpener } from "../tool-results"
 import { readCapped } from "../openapi/http"
 import { makeRedactor } from "../openapi/redact"
 import { send, type SendOptions } from "../openapi/transport"
@@ -67,6 +76,9 @@ import {
   CONTAINER_NAME,
   containerAction,
   containerLogs,
+  ContainerFileTooLargeError,
+  copyIntoContainer,
+  copyOutOfContainer,
   detectEngine,
   EngineError,
   existingVolumes,
@@ -76,6 +88,7 @@ import {
   pullImage,
   removeContainer,
   resolveDigest,
+  probeContainerFile,
   runContainer,
   runReference,
   type ContainerAction,
@@ -93,7 +106,14 @@ import {
   SERVICE_RECONCILE_INTERVAL_MS,
   START_ON_DEMAND_WAIT_MS,
 } from "./limits"
-import { readServiceCall, SERVICE_TOOL_NAMES, serviceTools } from "./tools"
+import { fileName } from "./files"
+import {
+  readServiceCall,
+  SERVICE_FILE_TOOLS,
+  SERVICE_TOOL_NAMES,
+  serviceTools,
+  type ServiceCall,
+} from "./tools"
 import { checkUpdateImage, prepareServiceUpdate } from "./updates"
 
 /**
@@ -626,7 +646,11 @@ export async function launchServiceOn(
     }
     await storeTools(
       id,
-      serviceTools({ service: prepared.name, host: prepared.host.name }),
+      serviceTools({
+        service: prepared.name,
+        host: prepared.host.name,
+        files: prepared.definition.files?.path ?? null,
+      }),
     )
 
     if (prepared.note) {
@@ -1612,12 +1636,35 @@ export async function writeServiceDefinition(
     data: { definition: json, hash },
   })
 
+  const instances = [id]
+
   for (const sibling of await siblingInstances(id)) {
     if (sibling.kind === "service") {
       await db().serviceSpec.updateMany({
         where: { serverId: sibling.id, hash: { not: hash } },
         data: { definition: json, hash },
       })
+      instances.push(sibling.id)
+    }
+  }
+
+  // Its tools follow the definition: put_file and get_file come and go
+  // with a files folder.
+  for (const serverId of instances) {
+    const row = await db().mcpServer.findUnique({
+      where: { id: serverId },
+      select: { name: true, serviceSpec: { select: { host: true } } },
+    })
+
+    if (row) {
+      await storeTools(
+        serverId,
+        serviceTools({
+          service: row.name.replace(/ service$/, ""),
+          host: row.serviceSpec?.host?.name ?? "its SSH server",
+          files: checked.files?.path ?? null,
+        }),
+      )
     }
   }
 }
@@ -1728,6 +1775,7 @@ export async function syncServiceTools(
     serviceTools({
       service: loaded.server.name.replace(/ service$/, ""),
       host: loaded.host?.name ?? "its SSH server",
+      files: loaded.definition.files?.path ?? null,
     }),
   )
 
@@ -1754,20 +1802,29 @@ export async function syncServiceTools(
   }
 }
 
-/** One call to a service's tool, its arguments checked before anything connects. */
+/**
+ * One call to a service's tool, its arguments checked before anything
+ * connects. put_file reads its file from the token's kept results itself
+ * (`open`), before anything connects; get_file keeps what it reads as one
+ * (`keepBytes`).
+ */
 export async function callServiceTool(
   loaded: LoadedService,
   toolName: string,
   args: Record<string, unknown>,
   access: ServiceAccess,
-  { publicUrl }: { publicUrl: string },
+  {
+    publicUrl,
+    open,
+    keepBytes,
+  }: { publicUrl: string; open?: ResultOpener; keepBytes?: BytesKeeper },
 ): Promise<CallToolResult> {
   const read = readServiceCall(toolName, args)
 
   if (!read.fits) {
     return "unknown" in read
       ? familyError(
-          `A service has no tool called ${toolName}; it has ${SERVICE_TOOL_NAMES.join(", ")}.`,
+          `A service has no tool called ${toolName}; it has ${SERVICE_TOOL_NAMES.filter((name) => loaded.definition.files || !SERVICE_FILE_TOOLS.includes(name)).join(", ")}.`,
           "not_found",
         )
       : argumentsResult(`${loaded.server.slug}/${toolName}`, read.problems, {
@@ -1803,6 +1860,15 @@ export async function callServiceTool(
     }
 
     throw new OwnerNeeded({ kind: "service_change", input: proposed })
+  }
+
+  if (call.tool === "put_file" || call.tool === "get_file") {
+    return serviceFileCall(loaded, call, access, {
+      publicUrl,
+      open,
+      keepBytes,
+      notes: read.notes,
+    })
   }
 
   try {
@@ -1843,6 +1909,207 @@ export async function callServiceTool(
     if (isPcpError(error) && error.code !== "upstream") {
       throw error
     }
+
+    return errorToolResult(
+      `${error instanceof Error ? error.message : String(error)}\nThe service's page: ${markdownLink(`Open ${loaded.server.name}'s page in PCP`, pageOf(loaded.server.id, publicUrl))}`,
+      { redact },
+    )
+  }
+}
+
+/** Whether a file's bytes hold one of the values PCP handed the service. */
+function holdsSecret(bytes: Buffer, values: string[]): boolean {
+  return values.some(
+    (value) => value.length >= 4 && bytes.includes(Buffer.from(value, "utf8")),
+  )
+}
+
+function bytesWords(count: number): string {
+  return new Intl.NumberFormat("en").format(count)
+}
+
+/**
+ * put_file and get_file: a kept file copied into the service's files
+ * folder, or one copied out of it as a kept result, with the engine's own
+ * `cp` (engine.ts). The name is checked, and put_file's file read, before
+ * anything connects; a service without a files folder refuses.
+ */
+async function serviceFileCall(
+  loaded: LoadedService,
+  call: Extract<ServiceCall, { tool: "put_file" | "get_file" }>,
+  access: ServiceAccess,
+  {
+    publicUrl,
+    open,
+    keepBytes,
+    notes,
+  }: {
+    publicUrl: string
+    open?: ResultOpener
+    keepBytes?: BytesKeeper
+    notes: string[]
+  },
+): Promise<CallToolResult> {
+  const label = `${loaded.server.slug}/${call.tool}`
+  const files = loaded.definition.files
+  const redact = access.env.redact
+
+  if (!files) {
+    return familyError(
+      `${loaded.server.name} has no files folder: its definition names none (files, a folder in one of its volumes), so PCP has nowhere to put a file or get one. The owner can add one to its definition.`,
+      "not_found",
+      { notes },
+    )
+  }
+
+  const { fileBytes } = await loadResourceLimits()
+  let upload: Buffer | null = null
+  let path: string
+
+  // Before anything connects: a name that leaves the folder, or a file
+  // the token does not have, never reaches the SSH server.
+  try {
+    path = fileName(files, call.path).path
+
+    if (call.tool === "put_file") {
+      if (!open) {
+        throw invalid(
+          "put_file's file is a result PCP kept for this token, and this call cannot read it.",
+        )
+      }
+
+      const opened = await open(call.resultId)
+
+      if (!opened) {
+        throw invalid(missingResultMessage())
+      }
+
+      upload = opened.bytes()
+
+      if (upload.length > fileBytes) {
+        throw invalid(
+          `That file is ${bytesWords(upload.length)} bytes, more than PCP copies at once (${bytesWords(fileBytes)}). The owner can raise that in PCP's settings, under Resources.`,
+        )
+      }
+    } else if (!keepBytes) {
+      throw new PcpError(
+        "state",
+        "get_file answers with a kept result, which this call cannot make.",
+      )
+    }
+  } catch (error) {
+    const refused = refusalOf(error, label, notes)
+    if (refused) return refused
+    throw error
+  }
+
+  const { host } = access
+  const container = loaded.spec.containerName
+
+  try {
+    if (call.tool === "put_file" && upload) {
+      const there = await probeContainerFile(
+        host,
+        loaded.engine,
+        container,
+        files,
+        path,
+      )
+
+      if (there === "folder" || (there !== "none" && !call.overwrite)) {
+        return familyError(
+          there === "folder"
+            ? `${path} is a folder in ${loaded.server.name}: put_file puts a file, and never replaces a folder.`
+            : `There is already ${there === "file" ? "a file" : "something"} at ${path} in ${loaded.server.name}: nothing changed. overwrite: true replaces it, or choose another name.`,
+          "conflict",
+          { notes },
+        )
+      }
+
+      const placed = await copyIntoContainer(
+        host,
+        loaded.engine,
+        container,
+        files,
+        path,
+        upload,
+      )
+
+      return withNotes(
+        jsonToolResult(
+          {
+            summary: `Put the file in ${loaded.server.name} at ${placed}: pass that path to its own tools.`,
+            path: placed,
+            size: upload.length,
+            ...(there !== "none" ? { replaced: true } : {}),
+          },
+          { redact },
+        ),
+        notes,
+      )
+    }
+
+    const got = await copyOutOfContainer(
+      host,
+      loaded.engine,
+      container,
+      files,
+      path,
+      fileBytes,
+    )
+
+    if (!got) {
+      return familyError(
+        `There is no file at ${path} in ${loaded.server.name}.`,
+        "not_found",
+        { notes },
+      )
+    }
+
+    // Bytes are not text to scrub: a file that holds a value PCP handed
+    // the service (a secret of the owner's) is not kept at all.
+    if (holdsSecret(got.bytes, redact)) {
+      return familyError(
+        `${path} holds a secret PCP handed ${loaded.server.name}, so PCP did not keep it.`,
+        "forbidden",
+        { notes },
+      )
+    }
+
+    const type = fileMediaType(got.name, got.bytes)
+    const kept = await keepBytes!({
+      bytes: got.bytes,
+      mediaType: type,
+      name: got.name,
+      serverId: loaded.server.id,
+      toolName: "get_file",
+    })
+
+    return withNotes(
+      jsonToolResult(
+        {
+          path: got.path,
+          name: got.name,
+          size: got.bytes.length,
+          type: bareType(type),
+          result: handleOf(kept),
+          note: `PCP keeps this file for you: pass {"$result": "${kept.id}"} where a tool wants it (put_file on another service, save_file in a storage folder, send_email's attachments, an API's file field), or read it in a program with pcp.read.`,
+        },
+        { redact },
+      ),
+      notes,
+    )
+  } catch (error) {
+    if (error instanceof ContainerFileTooLargeError) {
+      return familyError(
+        `${error.path} is larger than PCP keeps of one file (${bytesWords(fileBytes)} bytes). The owner can raise that in PCP's settings, under Resources.`,
+        "validation",
+        { notes },
+      )
+    }
+
+    const refused = refusalOf(error, label, notes)
+    if (refused) return refused
 
     return errorToolResult(
       `${error instanceof Error ? error.message : String(error)}\nThe service's page: ${markdownLink(`Open ${loaded.server.name}'s page in PCP`, pageOf(loaded.server.id, publicUrl))}`,

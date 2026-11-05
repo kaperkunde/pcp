@@ -1085,7 +1085,10 @@ proposes one, or an image update, as a permission request (below).
 specPath, basePath, auth?}` (an API endpoint from the schema it serves,
   `auth` naming the variable whose secret the endpoint sends in a header),
   `{kind: "mcp", port, path}`, `{kind: "exit", port, protocol, auth?}` (a
-  VPN's proxy, see [Exits](#exits)) or `{kind: "none"}`. `hash` is its canonical JSON's SHA-256, and
+  VPN's proxy, see [Exits](#exits)) or `{kind: "none"}`; and optionally
+  `files` (`{volume, path}`: a folder in one of its volumes, at or under
+  its mount path, for a service whose own tools take file paths there,
+  below). `hash` is its canonical JSON's SHA-256, and
   `definitionBasis` includes it. `writeServiceDefinition` writes it on every
   instance, as `writeWrapper` does a program.
 - The instance's own part: `host_id` (the SSH server; null once that is
@@ -1255,6 +1258,32 @@ unit, which a Podman service's page says.
 (makes the container again from the definition when it is gone), `stop` and
 `restart`, their arguments checked before anything connects, and `update`
 (below), which only proposes. None takes a command or a variable.
+**Files** (`put_file`, Write, and `get_file`, Read; offered and run only
+for a definition with `files`, refused with `not_found` otherwise): a
+service whose tools take paths in its volume (a PDF tool's `/data`) gets a
+kept file through PCP rather than `run_command` on the host. Both go
+through the engine's own `cp` over SSH `exec` (`engine.ts`), so no shell
+or program runs in the container and an image without one works: put_file
+sends a tar stream of that one file (`services/files.ts fileTar`: built in
+PCP, mode 0644, owner 0:0 so the engine sets the container's, no folder
+entries, so a folder that is there keeps its owner and mode) to `cp -
+<container>:<files path>` on standard input, after `cp
+<container>:<path> -` read only its first `FILE_PROBE_BYTES` to see what is
+there: nothing, or a file or link replaced only with `overwrite`, never a
+folder (the engine would remove it whole). get_file reads `cp
+<container>:<path> -` to standard output, bounded by
+`resourceLimits().fileBytes` plus `FILE_TAR_OVERHEAD_BYTES`
+(`services/limits.ts`), takes a regular file only (a link is never
+followed, a folder refused), refuses one whose bytes hold a value PCP
+handed the service, and keeps it as the token's result. The name is
+relative to the files folder or a full path inside it, checked before
+anything connects (`fileName`: letters, digits, spaces and `._@+,=()-`,
+no `.`, `..` or empty part, within bounds), and checked again in the
+engine; the engine resolves it inside the container's own filesystem,
+never the SSH server's. put_file reads its file from the token's kept
+results itself, before anything connects (`services.ts` is among the
+modules that open a handle). The check and the copy are two commands: a
+file made between them is replaced, as the engine has no exclusive create.
 **Update** (the owner's) resolves the definition's `source` to its newest
 digest, pins it on the definition and makes this instance's container
 again; other instances show that they run an older image. **Check for a
@@ -1309,7 +1338,9 @@ with a `build` is refused: a build is the owner's alone.
 
 The test engine (`services/fake-docker.ts`) is a Node program on the PATH of
 a real sh that the test SSH server runs each command in, recording the
-words it got and the env file it read; it keeps named volumes, fails `run`
+words it got and the env file it read; it keeps named volumes (as folders
+of its own, which its `cp` reads and writes with the machine's real tar,
+so PCP's tar streams are tested against one), fails `run`
 after making the container when asked, and builds (checking the
 Containerfile and context the script hands it) from a test's tarball that
 its own curl and wget hand over.
@@ -1691,6 +1722,11 @@ the GitHub client and sync itself build on it.
   services needed the new format, so every other kind is still written as
   format 2 (`FORMAT_OF_KIND`): a PCP that reads format 2 reads them, and
   leaves `services/` alone as it does any folder its layout has no kind for.
+  Format 4 added a service's `files` folder (`{volume, path}`): only a
+  service document that has one is written as format 4
+  (`documents.ts serviceFormat`), every other one keeps its format and its
+  hash, so an older PCP refuses just that document as written by a newer
+  PCP; a format-3 document that names `files` is refused.
 - **Versions.** Each document carries `version`, a whole number: a skill's
   own version; for a server, endpoint or wrapper, `mcp_server.sync_version`
   (null reads as 1), which applying an item sets to the document's. PCP's

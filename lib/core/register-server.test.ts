@@ -1686,6 +1686,42 @@ describe("proposing a service", () => {
     expect(launched).toHaveLength(2)
   })
 
+  it("shows a files folder it names, and the tools that come with it", async () => {
+    const host = await sshServer()
+    await connectSeeing()
+
+    const asked = await register({
+      name: "Docling",
+      kind: "service",
+      service: {
+        ...DEFINITION,
+        files: { volume: "cache", path: "/opt/cache/in" },
+      },
+      ssh_server: host.slug,
+      env_secrets: [{ name: "DOCLING_SERVE_API_KEY", secret: "Docling key" }],
+    })
+
+    expect(asked.isError).toBe(false)
+    const view = await shown()
+    expect(view.lines).toEqual(
+      expect.arrayContaining([
+        "Files folder: /opt/cache/in, in its volume cache: its put_file copies a file an assistant has into it, and get_file copies one out",
+        "Its tools (status, logs, start, stop, restart, put_file, get_file) and what it adds ask you first, for every token, as a new server's do",
+      ]),
+    )
+    expect(view.full?.[0]?.text).toContain('"files"')
+
+    const outside = await register({
+      name: "Docling two",
+      kind: "service",
+      service: { ...DEFINITION, files: { volume: "data", path: "/data" } },
+      ssh_server: host.slug,
+      env_secrets: [{ name: "DOCLING_SERVE_API_KEY", secret: "Docling key" }],
+    })
+    expect(outside.isError).toBe(true)
+    expect(outside.text).toMatch(/not one of the service's volumes/)
+  })
+
   it("takes tool_access for what it registers, by name, and refuses it for a service that registers nothing", async () => {
     const host = await sshServer()
     await connectSeeing()

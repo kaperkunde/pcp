@@ -2506,7 +2506,9 @@ async function dispatchKind(
         ...access,
         env: { ...access.env, redact: [...access.env.redact, ...placed] },
       },
-      { publicUrl },
+      // put_file reads its file from the token's kept results itself, as
+      // bytes, before anything connects; get_file keeps what it reads.
+      { publicUrl, open, keepBytes },
     )
   }
 
