@@ -10,9 +10,9 @@ export const dynamic = "force-dynamic"
 export const runtime = "nodejs"
 
 /**
- * One file of a storage folder (lib/core/storage/), for the owner's file
- * browser: streamed from the SSH server over SFTP as it is read, never
- * kept in PCP. A route handler, not a Server Action, for the export's
+ * One file of a store (lib/core/storage/), for the owner's file browser:
+ * streamed from the SSH server over SFTP, or from PCP's data folder, as it
+ * is read (and decrypted, for an encrypted store), never kept in PCP. A route handler, not a Server Action, for the export's
  * reason: a download needs Content-Disposition, and a file can be larger
  * than an action's answer. So it checks for itself that the request came
  * from PCP's own page (a link the owner clicked there) and that the owner
@@ -45,7 +45,7 @@ export async function GET(
       {
         headers: {
           "Content-Type": "application/octet-stream",
-          "Content-Length": String(file.size),
+          "Content-Length": String(file.length),
           "Content-Disposition": `attachment; filename="${asciiName(file.name)}"; filename*=UTF-8''${encodeURIComponent(file.name)}`,
           "X-Content-Type-Options": "nosniff",
           "Cache-Control": "no-store",

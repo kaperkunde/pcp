@@ -1265,6 +1265,32 @@ export async function deleteServer(ctx: VaultContext, id: string) {
       "Remove a service on its own page: PCP removes its container from the SSH server first.",
     )
   }
+  // A store's files: PCP's own store is always there, and an encrypted
+  // store's files go with its keys, so it is emptied or made plain first.
+  if (existing.kind === "storage") {
+    const root = await db().storageRoot.findUnique({
+      where: { serverId: id },
+      select: { backend: true, mode: true, converting: true },
+    })
+
+    if (root?.backend === "local") {
+      throw new PcpError(
+        "state",
+        "PCP's own store stays: delete its files instead, or keep them.",
+      )
+    }
+
+    if (
+      (root?.mode === "encrypted" || root?.converting) &&
+      (await db().storageEntry.count({ where: { serverId: id } })) > 0
+    ) {
+      throw new PcpError(
+        "state",
+        "This store holds encrypted files only PCP can open: make it plain first (its files stay on the server), or delete them, then remove it.",
+      )
+    }
+  }
+
   // Its exits go with it (a cascade), and their levels with them.
   const exits = await db().exit.findMany({
     where: { OR: [{ serverId: id }, { serviceId: id }] },

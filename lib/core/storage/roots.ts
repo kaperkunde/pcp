@@ -4,6 +4,7 @@ import type { McpServer, StorageRoot } from "@/lib/generated/prisma/client"
 
 import { storeTools, type SyncResult } from "../catalogue"
 import type { VaultContext } from "../context"
+import { asBytes, CryptoError } from "../crypto"
 import { db } from "../db"
 import { invalid, isPcpError, PcpError } from "../errors"
 import { newId } from "../ids"
@@ -36,18 +37,26 @@ import {
   refusalOf,
   withNotes,
 } from "../tools/family"
+import { newKey, unwrapStoreKey, wrapStoreKey } from "./crypt"
+import { openEncryptedFolder } from "./encrypted"
 import { openFolder, type StorageFolder } from "./files"
 import { DEFAULT_FIND_RESULTS, MAX_GET_TEXT_CHARS } from "./limits"
+import { ensureLocalStoreDir, localFs } from "./local"
 import { globMatcher, normalizeRootPath, splitPath } from "./paths"
+import { storeRoom } from "./quota"
 import { FileTooLargeError, type RemoteFs } from "./sftp"
 import { isStorageWrite, storageTool, storageTools } from "./tools"
 
 /**
- * Storage roots: servers of kind "storage", each a folder on one of the
- * owner's SSH servers that assistants read and write files in, over SFTP
- * on PCP's own SSH connection (ssh/client.ts openSftp). Only the owner adds
- * or changes one, on its SSH server's page: there is no register_server for
- * it, as for the SSH server itself.
+ * Stores: servers of kind "storage", each a place assistants read and write
+ * files in. A store's backend is a folder on one of the owner's SSH
+ * servers, over SFTP on PCP's own SSH connection (ssh/client.ts openSftp),
+ * or PCP's own data folder (the local store, one per vault, which PCP makes
+ * itself: ensureOwnStore). Its mode is plain (the files as they are, which
+ * other apps read too) or encrypted (opaque objects and an encrypted index,
+ * encrypted.ts). Only the owner adds or changes one, on its SSH server's
+ * page: there is no register_server for it, as for the SSH server itself;
+ * and only the owner converts one either way (convert.ts).
  *
  * Every path is confined to the root by files.ts. SFTP writes as the SSH
  * login: "write as" names whose files the owner wants these to be, and the
@@ -72,12 +81,29 @@ export type StorageRootInput = {
 export type LoadedStorage = {
   server: McpServer
   root: StorageRoot
-  /** The SSH server; null once it was deleted. */
+  /** The SSH server; null for the local store, or once it was deleted. */
   host: McpServer | null
 }
 
-/** Opens an SFTP session on the root's SSH server, for one request. */
+/**
+ * Opens the store's backend for one request: an SFTP session on its SSH
+ * server, or the data folder for the local store.
+ */
 export type StorageConnect = () => Promise<RemoteFs>
+
+export type StoreBackend = "sftp" | "local"
+export type StoreMode = "plain" | "encrypted"
+
+export function isLocalStore(root: Pick<StorageRoot, "backend">): boolean {
+  return root.backend === "local"
+}
+
+export function isEncryptedStore(root: Pick<StorageRoot, "mode">): boolean {
+  return root.mode === "encrypted"
+}
+
+/** The local store's backend: the data folder, no key needed. */
+export const localConnect: StorageConnect = async () => localFs()
 
 const DEFAULT_UMASK = 0o002
 
@@ -174,7 +200,15 @@ export async function updateStorageRoot(
   id: string,
   input: StorageRootInput,
 ): Promise<void> {
-  await loadStorageRoot(ctx, id)
+  const loaded = await loadStorageRoot(ctx, id)
+
+  if (isLocalStore(loaded.root)) {
+    throw new PcpError(
+      "state",
+      "PCP's own store is in its data folder: its name and description are changed like any server's.",
+    )
+  }
+
   const data = normalize(input)
 
   await db().mcpServer.update({
@@ -200,7 +234,7 @@ export async function loadStorageRoot(
   if (server.kind !== "storage") {
     throw new PcpError(
       "state",
-      `This is ${kindNoun(server.kind)}, not a storage folder.`,
+      `This is ${kindNoun(server.kind)}, not a store.`,
     )
   }
 
@@ -239,6 +273,10 @@ export type StorageRootView = {
   umask: string
   readOnly: boolean
   host: { id: string; name: string; login: string } | null
+  backend: StoreBackend
+  mode: StoreMode
+  /** While the owner converts it: the mode it is going to. */
+  converting: StoreMode | null
   /** "write as" names someone else than the SSH login. */
   loginDiffers: boolean
   status: string
@@ -260,7 +298,14 @@ function viewOf(
     umask: formatUmask(root.umask),
     readOnly: server.readOnly,
     host: host ? { id: host.id, name: host.name, login } : null,
-    loginDiffers: root.writeAs !== "" && root.writeAs !== login,
+    backend: isLocalStore(root) ? "local" : "sftp",
+    mode: isEncryptedStore(root) ? "encrypted" : "plain",
+    converting:
+      root.converting === "encrypted" || root.converting === "plain"
+        ? root.converting
+        : null,
+    loginDiffers:
+      !isLocalStore(root) && root.writeAs !== "" && root.writeAs !== login,
     status: server.status,
     statusMessage: server.statusMessage,
   }
@@ -272,8 +317,10 @@ export function storageRootView(loaded: LoadedStorage): StorageRootView {
 
 function toolsOf(loaded: LoadedStorage) {
   return storageTools({
-    folder: loaded.root.path,
-    host: loaded.host?.name ?? "its SSH server",
+    where: isLocalStore(loaded.root)
+      ? `${loaded.server.name}, PCP's own store`
+      : `the folder ${loaded.root.path} on ${loaded.host?.name ?? "its SSH server"}`,
+    encrypted: isEncryptedStore(loaded.root),
     readOnly: loaded.server.readOnly,
   })
 }
@@ -295,6 +342,10 @@ export function unreachableReason(
 ): string | null {
   const { server, host } = loaded
 
+  if (isLocalStore(loaded.root)) {
+    return null
+  }
+
   if (!host) {
     return `${server.name}'s SSH server is no longer in PCP, so PCP cannot reach the folder. The owner adds the folder again on an SSH server's page.`
   }
@@ -306,21 +357,107 @@ export function unreachableReason(
   return null
 }
 
-/** Opens the root's folder on a session `connect` makes, and closes it after. */
+/** The store's folder on its backend, as configured. */
+export async function storePath(loaded: LoadedStorage): Promise<string> {
+  return isLocalStore(loaded.root)
+    ? ensureLocalStoreDir(loaded.server.id)
+    : loaded.root.path
+}
+
+/** The store key, for an encrypted store, unwrapped for this request. */
+export function storeKeyOf(ctx: VaultContext, loaded: LoadedStorage): Buffer {
+  if (!loaded.root.storeKey) {
+    throw new PcpError("state", `${loaded.server.name} has lost its key.`)
+  }
+
+  return unwrapStoreKey(ctx.dek, loaded.server.id, loaded.root.storeKey)
+}
+
+/** A new store key, wrapped under the vault key, for the row. */
+export function newWrappedStoreKey(
+  ctx: VaultContext,
+  serverId: string,
+): Uint8Array<ArrayBuffer> {
+  return asBytes(wrapStoreKey(ctx.dek, serverId, newKey()))
+}
+
+/** A store being converted refuses everything but its conversion. */
+export function convertingRefusal(loaded: LoadedStorage): string | null {
+  const to = loaded.root.converting
+
+  return to === "encrypted" || to === "plain"
+    ? `${loaded.server.name} is being ${to === "encrypted" ? "encrypted" : "decrypted"}: the owner finishes that on its page in PCP, and its files are there again after.`
+    : null
+}
+
+/**
+ * Opens a store on a session `connect` makes: its files, plain or
+ * encrypted, behind the same calls. `end` closes the session; until then a
+ * stream read from it may go on (a download).
+ */
+export async function openStoreFolder(
+  ctx: VaultContext,
+  loaded: LoadedStorage,
+  connect: StorageConnect,
+  { converting = false }: { converting?: boolean } = {},
+): Promise<{ folder: StorageFolder; fs: RemoteFs; end: () => void }> {
+  const refusal = convertingRefusal(loaded)
+
+  if (refusal && !converting) {
+    throw new PcpError("state", refusal)
+  }
+
+  const fs = await connect()
+
+  try {
+    const path = await storePath(loaded)
+    const folder = isEncryptedStore(loaded.root)
+      ? await openEncrypted(ctx, loaded, fs, path)
+      : await openFolder(fs, path, { umask: loaded.root.umask })
+    return { folder, fs, end: () => fs.end() }
+  } catch (error) {
+    fs.end()
+    throw error
+  }
+}
+
+/** An encrypted store's index and objects, its folder checked first. */
+export async function openEncrypted(
+  ctx: VaultContext,
+  loaded: LoadedStorage,
+  fs: RemoteFs,
+  path: string,
+): Promise<StorageFolder> {
+  // The folder itself is checked as a plain one is (there, a folder); its
+  // real path is where the objects go.
+  const top = await openFolder(fs, path, { umask: loaded.root.umask })
+
+  return openEncryptedFolder(
+    ctx,
+    {
+      serverId: loaded.server.id,
+      storeKey: storeKeyOf(ctx, loaded),
+      rootReal: top.rootReal,
+      umask: loaded.root.umask,
+      room: () => storeRoom(loaded),
+    },
+    fs,
+  )
+}
+
+/** Opens the store on a session `connect` makes, and closes it after. */
 export async function withFolder<T>(
+  ctx: VaultContext,
   loaded: LoadedStorage,
   connect: StorageConnect,
   run: (folder: StorageFolder) => Promise<T>,
 ): Promise<T> {
-  const fs = await connect()
+  const { folder, end } = await openStoreFolder(ctx, loaded, connect)
 
   try {
-    const folder = await openFolder(fs, loaded.root.path, {
-      umask: loaded.root.umask,
-    })
     return await run(folder)
   } finally {
-    fs.end()
+    end()
   }
 }
 
@@ -359,6 +496,7 @@ async function failure(
  * in it. A read for an assistant only stores the tools.
  */
 export async function syncStorageTools(
+  ctx: VaultContext,
   loaded: LoadedStorage,
   connect: StorageConnect | null,
   { publicUrl }: { publicUrl: string },
@@ -380,7 +518,7 @@ export async function syncStorageTools(
   }
 
   try {
-    await withFolder(loaded, connect, async (folder) => {
+    await withFolder(ctx, loaded, connect, async (folder) => {
       if (!loaded.server.readOnly) {
         await folder.probeWrite()
       }
@@ -391,7 +529,9 @@ export async function syncStorageTools(
     return { status: "ok", message: "", toolCount }
   } catch (error) {
     if (isPcpError(error)) {
-      const message = `${loaded.root.path}: ${error.message}`
+      const message = isLocalStore(loaded.root)
+        ? error.message
+        : `${loaded.root.path}: ${error.message}`
       await setServerStatus(loaded.server.id, "error", message)
       return { status: "error", message, toolCount }
     }
@@ -411,6 +551,7 @@ function bytesWords(count: number): string {
  * for the token (`keepBytes`), never passed through the answer whole.
  */
 export async function callStorageTool(
+  ctx: VaultContext,
   loaded: LoadedStorage,
   toolName: string,
   args: Record<string, unknown>,
@@ -503,14 +644,27 @@ export async function callStorageTool(
     throw error
   }
 
-  const unreachable = unreachableReason(loaded, publicUrl)
+  const unreachable =
+    unreachableReason(loaded, publicUrl) ?? convertingRefusal(loaded)
 
   if (unreachable) {
     return familyError(unreachable, "state", { notes })
   }
 
+  if (upload) {
+    const room = await storeRoom(loaded)
+
+    if (room !== null && upload.length > room) {
+      return familyError(
+        `${server.name} has room for ${bytesWords(Math.max(0, room))} more bytes, less than that file. Delete files there, or the owner raises the store's size in PCP's settings, under Resources.`,
+        "state",
+        { notes },
+      )
+    }
+  }
+
   try {
-    const value = await withFolder(loaded, connect, (folder) =>
+    const value = await withFolder(ctx, loaded, connect, (folder) =>
       runTool(folder, loaded, toolName, a, {
         matcher,
         upload,
@@ -525,6 +679,16 @@ export async function callStorageTool(
 
     return withNotes(jsonToolResult(value), notes)
   } catch (error) {
+    // A stored file that does not open was changed outside PCP: the
+    // store itself is reachable.
+    if (error instanceof CryptoError) {
+      return familyError(
+        `${server.name}: ${error.message}. It was changed outside PCP; nothing was read.`,
+        "state",
+        { notes },
+      )
+    }
+
     if (error instanceof FileTooLargeError) {
       return familyError(
         `That file is ${bytesWords(error.readSoFar)} bytes or more, more than PCP keeps of one file (${bytesWords(fileBytes)}). The owner can raise that in PCP's settings, under Resources.`,
@@ -647,4 +811,105 @@ async function runTool(
   }
 
   throw new PcpError("not_found", `There is no tool called ${toolName}.`)
+}
+
+// ---- PCP's own store --------------------------------------------------------
+
+/** The name PCP gives its own store. */
+export const OWN_STORE_NAME = "PCP files"
+const OWN_STORE_DESCRIPTION =
+  "PCP's own file store, in its data folder on this machine: files kept for good, encrypted, until they are deleted."
+
+/** The vault's local store's server id, or null when there is none yet. */
+export async function findOwnStore(ctx: VaultContext): Promise<string | null> {
+  const row = await db().storageRoot.findFirst({
+    where: { backend: "local", server: { vaultId: ctx.vaultId } },
+    select: { serverId: true },
+    orderBy: { createdAt: "asc" },
+  })
+
+  return row?.serverId ?? null
+}
+
+const making = new Map<string, Promise<string>>()
+
+/**
+ * PCP's own store, made when the vault has none: at setup, and for a vault
+ * from before stores on its first request. Encrypted, in the data folder,
+ * with its tools; one per vault (two requests at once make one).
+ */
+export async function ensureOwnStore(ctx: VaultContext): Promise<string> {
+  const found = await findOwnStore(ctx)
+
+  if (found) {
+    return found
+  }
+
+  const pending = making.get(ctx.vaultId)
+
+  if (pending) {
+    return pending
+  }
+
+  const made = (async () => {
+    const again = await findOwnStore(ctx)
+
+    if (again) {
+      return again
+    }
+
+    const id = newId()
+
+    await db().mcpServer.create({
+      data: {
+        id,
+        vaultId: ctx.vaultId,
+        kind: "storage",
+        slug: await uniqueSlug(ctx.vaultId, slugify(OWN_STORE_NAME)),
+        name: OWN_STORE_NAME,
+        description: OWN_STORE_DESCRIPTION,
+        url: STORAGE_URL,
+        status: "ok",
+        storageRoot: {
+          create: {
+            path: "",
+            backend: "local",
+            mode: "encrypted",
+            storeKey: newWrappedStoreKey(ctx, id),
+            umask: 0o077,
+          },
+        },
+      },
+    })
+    await storeTools(id, toolsOf(await loadStorageRoot(ctx, id)))
+    return id
+  })()
+
+  making.set(ctx.vaultId, made)
+
+  try {
+    return await made
+  } finally {
+    making.delete(ctx.vaultId)
+  }
+}
+
+/** Every store of the vault, for the owner's Files pages. */
+export async function listStores(
+  ctx: VaultContext,
+): Promise<StorageRootView[]> {
+  const rows = await db().storageRoot.findMany({
+    where: { server: { vaultId: ctx.vaultId } },
+    include: { server: true, host: true },
+  })
+
+  return rows
+    .map((row) => viewOf(row.server, row, row.host))
+    .sort((a, b) =>
+      a.backend !== b.backend
+        ? a.backend === "local"
+          ? -1
+          : 1
+        : a.name.localeCompare(b.name),
+    )
 }

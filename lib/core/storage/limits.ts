@@ -36,3 +36,32 @@ export const WRITE_CHUNK_BYTES = 32 * 1024
  * half file under the real name.
  */
 export const PART_SUFFIX = ".pcp-part"
+/**
+ * The folder an encrypted store keeps its objects in, at the top of its
+ * folder on the backend: `.pcp-store/<two hex>/<object id>`.
+ */
+export const OBJECTS_FOLDER = ".pcp-store"
+/**
+ * How long an object being written may stay in storage_pending before a
+ * sweep takes it for one that never finished (one let go of is dated at
+ * the epoch and swept at once).
+ */
+export const PENDING_SWEEP_AGE_MS = 6 * 60 * 60_000
+/** Objects one sweep removes. */
+export const PENDING_SWEEP_BATCH = 100
+/**
+ * Entries PCP looks at to add up what a plain local store holds, for its
+ * quota; past them the count stops.
+ */
+export const MAX_USAGE_ENTRIES = 100_000
+/** Sweeps a delete runs at once; the rest go with a later request. */
+export const LET_GO_ROUNDS = 10
+/**
+ * One batch of the owner's conversion of a store (convert.ts), within one
+ * request: it stops after this long, or this many files, and the page
+ * calls again.
+ */
+export const CONVERT_BUDGET_MS = 20_000
+export const CONVERT_BATCH_FILES = 200
+/** A part file in PCP's own store older than this is a write cut off. */
+export const PART_FILE_AGE_MS = 24 * 60 * 60_000

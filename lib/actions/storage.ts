@@ -11,8 +11,12 @@ import {
   updateStorageRoot,
   type StorageRootInput,
 } from "@/lib/core/storage/roots"
-import { syncServerTools, withStorageFolder } from "@/lib/core/upstream"
-import { field, guarded } from "@/lib/server/action-state"
+import {
+  convertStore,
+  syncServerTools,
+  withStorageFolder,
+} from "@/lib/core/upstream"
+import { type ActionState, field, guarded } from "@/lib/server/action-state"
 import { publicUrlFor } from "@/lib/server/public-url"
 import { requireContext } from "@/lib/server/session"
 
@@ -233,5 +237,38 @@ export async function deleteEntryAction(
   })
 
   revalidatePath(`/servers/${id}/files`)
+  return result
+}
+
+// ---- Converting a store ----------------------------------------------------
+
+export type ConvertStoreResult = ActionState<{
+  message?: string
+  done?: boolean
+}>
+
+/**
+ * One batch of encrypting a store, or of making it plain again: the page
+ * calls again until it is done (storage/convert.ts). Only the owner.
+ */
+export async function convertStoreAction(
+  id: string,
+  to: "encrypted" | "plain",
+): Promise<ConvertStoreResult> {
+  const result = await guarded(async () => {
+    const ctx = await requireContext()
+
+    if (to !== "encrypted" && to !== "plain") {
+      throw invalid("Choose encrypted or plain.")
+    }
+
+    const step = await convertStore(ctx, id, to, {
+      publicUrl: await publicUrlFor(ctx),
+    })
+
+    return { message: step.message, done: step.done }
+  })
+
+  revalidatePath(`/servers/${id}`)
   return result
 }

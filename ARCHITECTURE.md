@@ -66,7 +66,13 @@ associated data (a ciphertext cannot be moved to another row):
   `skill.personal_note` with `skill:<id>:note`),
 - the login name and note of one of the owner's secrets
   (`secret.login_name` with `secret:<id>:login`, `secret.note` with
-  `secret:<id>:note`): not secret, but theirs.
+  `secret:<id>:note`): not secret, but theirs,
+- a store's key (`storage_root.store_key`, `storage_store:<server id>`),
+  which in turn wraps each file's key in an encrypted store, and the
+  store's index of names, sizes and times (`storage_entry.meta`,
+  `storage_entry:<id>`); the files themselves are sealed in chunks under
+  their own keys on the store's backend (see "Stores and storage
+  folders").
 
 The DEK itself is stored only **wrapped** — AES-256-GCM under a **key
 encryption key (KEK)** — once per credential, in `key_grant`:
@@ -902,7 +908,7 @@ An SSH server is a server row of kind `ssh` (`url` is `ssh://host:port`,
 `auth_username` the login) whose one tool, `run_command`, runs one command per
 call with `exec`: no shell session kept between calls, no terminal, no
 agent, no file transfer but a storage folder's SFTP (below, [Storage
-folders](#storage-folders)), and no forwarding but the outbound channels of an
+folders](#stores-and-storage-folders)), and no forwarding but the outbound channels of an
 exit or a service (below, [Exits](#exits) and [Services](#services)). Only the owner adds one, on the
 Servers page; `register_server` has no kind for it, because a shell on a
 machine is more than an assistant should be able to ask for in a sentence.
@@ -978,9 +984,81 @@ long-lived connection sets TCP_NODELAY: its traffic is many small requests
 and answers (SFTP's, a proxy's handshake), and Nagle's algorithm held each
 for a delayed acknowledgement.
 
-## Storage folders
+## Stores and storage folders
 
-A storage folder (a storage root in code, `lib/core/storage/`) is a folder on
+A store (a storage root in code, `lib/core/storage/`) is a place assistants
+keep files in: a storage folder on one of the owner's SSH servers (backend
+`sftp`), or PCP's own store in its data folder (backend `local`,
+`<data>/storage/<server id>/`). Each is plain (the files as they are, which
+other apps such as Samba, Finder or the Files app read too) or encrypted
+(below), and the owner converts one either way. Everything below about a
+storage folder's SFTP and confinement holds for both modes; an encrypted
+store adds a layer between the tools and those files.
+
+**PCP's own store** is made by PCP, one per vault (`ensureOwnStore`): at
+setup, and for a vault from before stores on its first gateway request or
+the owner's Servers page. It is encrypted from the start, has no SSH
+server and no key to open (`localConnect` is the machine's file system as a
+`RemoteFs`, `storage/local.ts`, its errors as SFTP's status codes), and
+cannot be removed or pointed elsewhere. What it may hold is a resource limit
+(`resourceLimits().storeBytes`, a quarter of the disk PCP keeps its data on
+by default, set on Settings → Resources), counted as the sealed objects'
+sizes in the index (`storage/quota.ts`); a store on an SSH server has that
+server's disk as its bound.
+
+**Encrypted stores.** The SSH server or the data folder holds only opaque
+objects, `.pcp-store/<two hex>/<object id>` with random 128-bit ids; the
+names, folders, sizes, types and times are the index, `storage_entry` (one
+row per file or folder: its folder's id, a keyed hash of its name there for
+lookups and uniqueness, `nameKeyOf`, and its meta encrypted under the vault
+key as `storage_entry:<id>`). Keys come in two layers (`storage/crypt.ts`,
+pure): the store key, random, wrapped under the vault key as
+`storage_store:<server id>` on `storage_root.store_key`; and each file's key,
+random and new for every write, wrapped under the store key as
+`storage_object:<server id>:<object id>` on its entry, so a key moved to
+another object or store does not open. The content is a header (`PCPS`,
+format 1) and 64 KiB chunks, each sealed with AES-256-GCM under the file
+key, its nonce the chunk's index and its associated data the object's id,
+the index and whether it is the last chunk: a file streams in and out a
+chunk at a time, a range (a download's, a preview's) opens only the chunks
+it covers (`sealedRange`, `decryptStream`), and a chunk changed, swapped
+(within the object or from another), cut off or followed by more is
+refused. A write seals the file under a part name, renames it into place,
+and only then points the index at it, in one transaction that also lets go
+of the object it replaced; until then the object is in `storage_pending`,
+which the next request that opens the store sweeps once it is old (and the
+cleanup, for PCP's own store, which needs no key for that). Decryption
+happens only inside a request: the store key is unwrapped with the request's
+vault key, and nothing of a file is kept but what is being read. An export
+carries the store rows, their wrapped keys and the index, never a file:
+the objects stay where they are, and a restore elsewhere has the index of
+files it cannot read until the data folder (or SSH server) comes with it.
+
+**Converting** (`storage/convert.ts`) is the owner's alone, on the store's
+page, one batch a request (`CONVERT_BUDGET_MS`, `CONVERT_BATCH_FILES`),
+never on a timer. Encrypting walks the plain folder deepest first, seals
+each file into the index and only then removes it, and removes each folder
+once it is empty; making it plain writes each file back under its name
+(with part file and rename, as `save_file` does) before its entry and object
+go, and removes `.pcp-store` with the last. While `storage_root.converting`
+is set every tool and the file browser refuse the store, so nothing changes
+it between batches; a batch cut short is picked up where it stopped, and a
+file a cut-short batch had already put in the index is recognised by name
+and size. Links and anything else that is not a file or folder stay where
+they are and are named. An encrypted store with files cannot be removed
+until it is made plain or emptied: its files go with its keys.
+
+**PCP's own tools for stores.** `list_folder`, `find_files`, `get_file`,
+`save_file`, `make_folder`, `move` and `delete` are also top-level tools at
+`/mcp` (`gateway.ts`), taking the family's arguments and `store` (a store's
+short name; without it, PCP's own). They are the default way in, not a second
+implementation: the tool named is the store server's own, run through the
+same path as `call_tool_<tier>` (`callResolved`: the token's level for that
+server's tool, blocked refused, ask a permission request, the arguments
+checked by the one validator, the tier at most the top-level tool's own),
+and logged under the store's server and tool.
+
+A storage folder is a folder on
 one of the owner's SSH servers that assistants work with files in. It is a
 server row of kind `storage` (`url` the fixed `pcp:storage`) with a
 `storage_root` row beside it: the SSH server (`host_id`, null once that is
@@ -3447,6 +3525,13 @@ Linux):
 - `tls/` — only once HTTPS is turned on: the ACME account key and, per name,
   `key.pem` and `cert.pem`. Directory mode 0700, files 0600 (see "Reaching
   PCP").
+- `storage/<server id>/` — PCP's own store (see "Stores and storage
+  folders"): encrypted, only `.pcp-store/<two hex>/<object id>` objects whose
+  names, keys and folders are in the database; plain once the owner converts
+  it. Directory mode 0700. An export carries its index and keys, not these
+  files: back up the data folder to keep them. The cleanup removes the
+  folder of a store that is gone, objects let go of and part files a write
+  left behind.
 - `browsers/chromium-<revision>/` — only once the owner installs Chromium
   from the Browser page: Playwright's build of it, as Playwright lays it out
   (see "Browser"). Machine data, not the vault's: it holds nothing of the

@@ -65,6 +65,14 @@ const ALL_TOOLS = [
   "read_image",
   "convert_document",
   "edit_pdf",
+  // PCP's own store, and the others by store (#90).
+  "list_folder",
+  "find_files",
+  "get_file",
+  "save_file",
+  "make_folder",
+  "move",
+  "delete",
 ]
 
 /** Proposals: nothing happens until the owner agrees, and each is new. */
@@ -250,7 +258,7 @@ describe("PCP's own tools", () => {
       const first = tool.description!.slice(0, 25)
 
       expect(first, tool.name).toMatch(
-        /^(START HERE: |(Search|List|Get|Call|Run|Check|Withdraw|Read|Share|Receive|Propose|Change|Fetch|Save|Edit|Convert) )/,
+        /^(START HERE: |(Search|List|Get|Call|Run|Check|Withdraw|Read|Share|Receive|Propose|Change|Fetch|Save|Edit|Convert|Find|Make|Move|Delete) )/,
       )
       // A verb and an object, not a verb alone.
       expect(first.trim().split(/\s+/).length, tool.name).toBeGreaterThan(2)
@@ -291,6 +299,13 @@ describe("PCP's own tools", () => {
       read_image: /image/,
       convert_document: /document/,
       edit_pdf: /PDF/,
+      list_folder: /^List files in a folder/,
+      find_files: /^Find files by name/,
+      get_file: /^Get a file as a handle/,
+      save_file: /^Save a file to a store/,
+      make_folder: /^Make a folder/,
+      move: /^Move or rename/,
+      delete: /^Delete a file or folder/,
     }
 
     expect(Object.keys(keywords).sort()).toEqual([...ALL_TOOLS].sort())
