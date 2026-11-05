@@ -1,6 +1,7 @@
 import { z } from "zod"
 
 import type { CatalogueTool } from "../catalogue"
+import { nextMessageCheck, OWNER_LINK_RULE } from "../owner-link"
 import type { ToolAnnotations } from "../tools/define"
 import {
   defineInnerTool,
@@ -151,7 +152,7 @@ const SPECS: Spec[] = [
     name: "update",
     title: "Propose an image update",
     description: ({ service, host }) =>
-      `Proposes updating the service ${service} on ${host} to a newer image: the newest of the tag it updates from, or a digest you name in its repository. Nothing changes until the owner agrees on PCP's page, which shows the image it runs and the one it would run; the answer is a link for them. Not for a service built from a repository, which only the owner updates.`,
+      `Proposes updating the service ${service} on ${host} to a newer image: the newest of the tag it updates from, or a digest you name in its repository. Nothing changes until the owner agrees on PCP's page, which shows the image it runs and the one it would run: it answers "Not done yet" with a link. ${OWNER_LINK_RULE} ${nextMessageCheck("check_permission with the id it gave")} Not for a service built from a repository, which only the owner updates.`,
     args: updateArgs,
     annotations: {
       readOnlyHint: false,

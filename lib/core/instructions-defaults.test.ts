@@ -90,4 +90,30 @@ describe("PCP's suggested instructions", () => {
       conflicts: 0,
     })
   })
+
+  it("let several links close one reply from version 6, offered as a merge", () => {
+    const v5 = templateText(5)!
+    const v6 = templateText(6)!
+
+    // Version 5 stays as it was: one link, last.
+    expect(v5).toContain(
+      "- When an answer gives you a link to PCP, end your reply with it as a markdown link",
+    )
+    expect(v6).toContain(
+      "- When answers give you links to PCP, end your reply with all of them, each a markdown link with a short label",
+    )
+    expect(v6).toContain("never the bare address")
+    // Only that line changed.
+    const changed = v6
+      .split("\n")
+      .filter((line) => !v5.split("\n").includes(line))
+    expect(changed).toHaveLength(1)
+    expect(mergeLines(v5, v5, v6)).toEqual({ text: v6, conflicts: 0 })
+
+    const mine = `${v5}\n- Answer in Dutch.`
+    expect(mergeLines(v5, mine, v6)).toEqual({
+      text: `${v6}\n- Answer in Dutch.`,
+      conflicts: 0,
+    })
+  })
 })
