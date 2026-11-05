@@ -757,6 +757,38 @@ function sizeOf(handle: ResultHandle): string {
     : `${(handle.length ?? 0).toLocaleString("en")} characters`
 }
 
+/**
+ * The name an embedded file is kept under: the last part of its URI's path
+ * (its scheme, query and fragment left out), URL-decoded (`my%20file.pdf`
+ * is `my file.pdf`; a malformed escape is kept as written). A separator the
+ * decoding brought in (`%2F`, `%5C`) does not make a path: only what follows
+ * the last one counts. Null when nothing is left, or only `.` or `..`.
+ */
+export function resourceFileName(uri: string): string | null {
+  const segment = uri
+    .replace(/[?#][\s\S]*$/, "")
+    .replace(/^[a-z][a-z0-9+.-]*:/i, "")
+    .split("/")
+    .filter(Boolean)
+    .pop()
+
+  if (!segment) {
+    return null
+  }
+
+  let decoded = segment
+
+  try {
+    decoded = decodeURIComponent(segment)
+  } catch {
+    // A malformed escape: the segment as it is.
+  }
+
+  const name = decoded.split(/[/\\]/).filter(Boolean).pop()
+
+  return name && name !== "." && name !== ".." ? name : null
+}
+
 /** Makes the handles of one answer, and says what it made. */
 class Handles {
   made: Array<{ path: string; handle: ResultHandle }> = []
@@ -997,8 +1029,7 @@ class Handles {
           ? {
               data: block.resource.blob,
               type: block.resource.mimeType ?? null,
-              name:
-                block.resource.uri.split(/[/?#]/).filter(Boolean).pop() ?? null,
+              name: resourceFileName(block.resource.uri),
               what: "file",
             }
           : null
