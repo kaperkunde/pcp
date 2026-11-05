@@ -1,4 +1,11 @@
-import { mkdirSync, readdirSync, statSync, writeFileSync } from "node:fs"
+import {
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  statSync,
+  utimesSync,
+  writeFileSync,
+} from "node:fs"
 import path from "node:path"
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
@@ -19,6 +26,8 @@ import { scratchDatabase } from "../test-db"
 import { EMPTY_CONFIG, saveResourceConfig } from "../resources/state"
 import { keepBytes, keepResult, RESULT_TTL_MS } from "../tool-results"
 import { createUploadLink, UPLOAD_LINK_TTL_MS } from "../upload-links"
+import { localStoreDir } from "../storage/local"
+import { ensureOwnStore } from "../storage/roots"
 import { setupVault } from "../vault"
 import { DEFAULT_CLEANUP_CRON, DEFAULT_LOG_DAYS } from "./limits"
 import { runCleanup } from "./run"
@@ -242,6 +251,39 @@ describe("a run", () => {
     })
     expect(describeRemoved(status.removed!)).toBe(
       "1 kept result past its day and 2 days of log",
+    )
+  })
+
+  it("removes what PCP's own store left behind, and the folders of stores that are gone", async () => {
+    const own = await ensureOwnStore(ctx)
+    const dir = localStoreDir(own)
+    const objects = path.join(dir, ".pcp-store", "ab")
+    mkdirSync(objects, { recursive: true })
+    // An object let go of, a part file a write left a day and more ago,
+    // and a fresh one still being written.
+    const object = "ab".repeat(16)
+    writeFileSync(path.join(objects, object), "x".repeat(100))
+    await db().storagePending.create({
+      data: { objectId: object, serverId: own, createdAt: new Date(0) },
+    })
+    const old = path.join(objects, `${"cd".repeat(16)}.1234.pcp-part`)
+    writeFileSync(old, "half")
+    utimesSync(old, new Date(0), new Date(0))
+    writeFileSync(path.join(objects, `${"ef".repeat(16)}.5678.pcp-part`), "now")
+    // A store whose row is gone.
+    const gone = localStoreDir("gone-store")
+    mkdirSync(gone, { recursive: true })
+    writeFileSync(path.join(gone, "file"), "x")
+
+    const status = await runCleanup("owner")
+
+    expect(status.removed?.storage).toBe(3)
+    expect(readdirSync(objects)).toEqual([`${"ef".repeat(16)}.5678.pcp-part`])
+    expect(await db().storagePending.count()).toBe(0)
+    expect(existsSync(gone)).toBe(false)
+    expect(status.storeBytes).toBe(3)
+    expect(describeRemoved(status.removed!)).toContain(
+      "3 leftover stored files",
     )
   })
 

@@ -6,10 +6,11 @@ import { pruneUnusedClients } from "../oauth-server/clients"
 import { pruneOAuthCredentials } from "../oauth-server/tokens"
 import { prunePermissionRequests, pruneReusableAnswers } from "../permissions"
 import { pruneRequestLog } from "../request-log"
+import { pruneLocalStores } from "../storage/cleanup"
 import { pruneExpiredSessions } from "../sessions"
 import { pruneToolResults } from "../tool-results"
 import { pruneUploadLinks } from "../upload-links"
-import { reclaimSpace } from "./space"
+import { reclaimSpace, storesSpace } from "./space"
 import {
   describeRemoved,
   getCleanupConfig,
@@ -30,7 +31,7 @@ type Part = {
   key: keyof CleanupCounts
   /** For the owner, when it fails. */
   label: string
-  run: (logDays: number, now: Date) => Promise<number>
+  run: (logDays: number, now: Date, freed: { bytes: number }) => Promise<number>
 }
 
 const PARTS: Part[] = [
@@ -78,6 +79,15 @@ const PARTS: Part[] = [
     run: (_, now) => pruneEmbeddingVectors(now),
   },
   {
+    key: "storage",
+    label: "what PCP's own store left behind",
+    run: async (_, now, freed) => {
+      const { removed, freedBytes } = await pruneLocalStores(now)
+      freed.bytes += freedBytes
+      return removed
+    },
+  },
+  {
     key: "logDays",
     label: "old days of the log",
     run: (logDays, now) => pruneRequestLog(logDays, now),
@@ -98,13 +108,16 @@ export async function runCleanup(
     results: 0,
     allowances: 0,
     vectors: 0,
+    storage: 0,
     logDays: 0,
   }
   const problems: string[] = []
+  // Files a part removed from the data folder, beside the database's pages.
+  const freed = { bytes: 0 }
 
   for (const part of PARTS) {
     try {
-      removed[part.key] = await part.run(logDays, now)
+      removed[part.key] = await part.run(logDays, now, freed)
     } catch (error) {
       console.error(`[cleanup] could not remove ${part.label}`, error)
       problems.push(`Could not remove ${part.label}.`)
@@ -112,10 +125,10 @@ export async function runCleanup(
   }
 
   // What was removed goes back to the disk, not only to SQLite's free list.
-  let freedBytes = 0
+  let freedBytes = freed.bytes
 
   try {
-    freedBytes = await reclaimSpace()
+    freedBytes += await reclaimSpace()
   } catch (error) {
     console.error("[cleanup] could not give back disk space", error)
     problems.push("Could not give back the disk space it freed.")
@@ -127,6 +140,7 @@ export async function runCleanup(
     ms: Date.now() - started,
     removed,
     ...(freedBytes > 0 ? { freedBytes } : {}),
+    ...(await storesSpace()),
     ...(problems.length > 0 ? { problems } : {}),
   }
 

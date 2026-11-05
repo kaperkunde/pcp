@@ -63,3 +63,5 @@ export const LET_GO_ROUNDS = 10
  */
 export const CONVERT_BUDGET_MS = 20_000
 export const CONVERT_BATCH_FILES = 200
+/** A part file in PCP's own store older than this is a write cut off. */
+export const PART_FILE_AGE_MS = 24 * 60 * 60_000

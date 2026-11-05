@@ -46,7 +46,8 @@ export function CleanupCard({ overview }: { overview: CleanupOverview }) {
         <>
           PCP removes what it keeps only for a while: sign-ins that ended (yours
           and apps&apos;), results kept for a day, permission requests a week
-          after they expired, search vectors no search used for a month, and
+          after they expired, search vectors no search used for a month, what
+          PCP&apos;s own store left behind (files a write never finished), and
           days of the{" "}
           <Link
             href="/log"
@@ -92,6 +93,9 @@ function CleanupStatusLine({ overview }: { overview: CleanupOverview }) {
               ? `, and gave ${size(status.freedBytes)} of disk back`
               : ""}
             .
+            {status.storeBytes
+              ? ` PCP's own store takes ${size(status.storeBytes)}.`
+              : ""}
           </span>
         ) : null}
       </div>
