@@ -117,6 +117,23 @@
    Changing a secret it uses restarts it with the new value. Its tools
    (`status`, `logs`, `start`, `stop`, `restart`) follow your levels; a tool
    of the server it serves, called while it is stopped, says so.
+   **Storage folders** are on them too: **Add a folder** on the SSH server's
+   page takes the folder's path (a Samba share, a scans folder), whose files
+   it should be, a umask (002 by default, so a group share sees ordinary
+   files) and **Read-only**. Assistants then list, find, get, save, move and
+   delete files there over SFTP, on the same SSH connection: `list_folder`,
+   `find_files`, `get_file` (the file comes back as a kept result's handle),
+   `save_file` (takes a handle, so a mail attachment, a scan or a converted
+   document goes into the folder in one call), `make_folder`, `move` and
+   `delete` (for good, Destructive). Every path stays inside the folder: PCP
+   refuses `..` and checks each path's real path on the server, so a link to
+   somewhere else is not followed. A file is written under a temporary
+   `.pcp-part` name and renamed into place when whole, and one already there
+   is replaced only when the call says `overwrite`. SFTP writes as PCP's
+   login: when you want the files to be another user's, the page says so
+   (sign PCP in as that user, or give the login the folder's group). The
+   folder's page has a file browser of its own: folders, sizes and dates,
+   download, upload, new folder, rename and delete.
 7. **API tokens.** Create a token per assistant or machine; PCP asks for your
    password (or Touch ID in the Mac app) to make one. A token can reach every
    server and endpoint or only the ones you pick, and can expire. Revoking it
@@ -385,7 +402,9 @@ another, and only what it prints and returns goes back to the assistant.
 Files move as handles, as they do between calls (above); `pcp.keep` keeps a
 text it made (a CSV, a report), or bytes, as a handle to pass on, and
 `pcp.read(handle, { as: "base64" })` reads a file's bytes when the program
-has to build something from them (a MIME message with an attachment). With
+has to build something from them (a MIME message with an attachment);
+`{ offset, length }` reads only a part (bytes of a file, characters of a
+text), so a large file is read a piece at a time. With
 `keep`, a value one tool makes, such as a password a server generates, goes
 into another tool's arguments as a handle, never read by the program or the
 assistant. `pcp.tools()` lists the token's servers and tools, as `list_tools`

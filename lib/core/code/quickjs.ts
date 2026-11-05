@@ -368,8 +368,9 @@ const PRELUDE = `(() => {
     step,
     read: async (handle, options) => {
       const as = options?.as ?? "text"
-      if (as === "bytes") return decode64(await ask("read", { id: idOf(handle), as: "base64" }))
-      return ask("read", { id: idOf(handle), as })
+      const range = { offset: options?.offset, length: options?.length }
+      if (as === "bytes") return decode64(await ask("read", { id: idOf(handle), as: "base64", ...range }))
+      return ask("read", { id: idOf(handle), as, ...range })
     },
     keep: (value, options) => {
       if (value instanceof ArrayBuffer || isView(value)) {

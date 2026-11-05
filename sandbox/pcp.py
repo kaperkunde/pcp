@@ -122,14 +122,20 @@ def call(server, tool, args=None, *, fields=None, decode=None, keep=None):
     return _ask("call", payload)
 
 
-def read(handle, as_="text"):
+def read(handle, as_="text", *, offset=None, length=None):
     """A kept result, by its handle or its id: its text, or a file's bytes
-    as base64 (as_="base64") or as bytes (as_="bytes")."""
+    as base64 (as_="base64") or as bytes (as_="bytes"). offset and length
+    read a part: bytes of a file, characters of a text."""
     if isinstance(handle, dict):
         handle = handle.get("$result")
+    payload = {"id": handle, "as": "base64" if as_ == "bytes" else as_}
+    if offset is not None:
+        payload["offset"] = offset
+    if length is not None:
+        payload["length"] = length
     if as_ == "bytes":
-        return base64.b64decode(_ask("read", {"id": handle, "as": "base64"}))
-    return _ask("read", {"id": handle, "as": as_})
+        return base64.b64decode(_ask("read", payload))
+    return _ask("read", payload)
 
 
 def keep(value, *, name=None, type=None, encoding=None):

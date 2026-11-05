@@ -474,6 +474,43 @@ describe("a program's calls", () => {
     )
   })
 
+  it("reads a part of a kept file or text with offset and length", async () => {
+    const bytes = Buffer.from([0, 1, 2, 3, 4, 5, 6, 7, 8, 9])
+    const file = await keepBytes(ctx, {
+      tokenId: scope.tokenId,
+      serverId: null,
+      toolName: "get_file",
+      bytes,
+      mediaType: "application/octet-stream",
+      name: "data.bin",
+    })
+    const text = await keepResult(ctx, {
+      tokenId: scope.tokenId,
+      serverId: null,
+      toolName: "read_result",
+      text: "hello, world",
+      mediaType: "text/plain",
+    })
+
+    const read = await run(`
+      const middle = await pcp.read("${file.id}", { as: "bytes", offset: 3, length: 4 })
+      const tail = await pcp.read("${file.id}", { as: "base64", offset: 8 })
+      const past = await pcp.read("${file.id}", { as: "bytes", offset: 20, length: 5 })
+      const word = await pcp.read("${text.id}", { offset: 7, length: 5 })
+      let refused
+      try { await pcp.read("${file.id}", { as: "bytes", offset: -1 }) } catch (error) { refused = error.message }
+      return [Array.from(middle), tail, past.length, word, refused]
+    `)
+
+    expect(returned(read.text)).toEqual([
+      [3, 4, 5, 6],
+      Buffer.from([8, 9]).toString("base64"),
+      0,
+      "world",
+      "pcp.read's offset is a whole number, 0 or more.",
+    ])
+  })
+
   it("lists the token's servers and the tools it can see, as list_tools does", async () => {
     const { text } = await run(`
       const servers = await pcp.tools()

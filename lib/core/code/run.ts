@@ -992,6 +992,23 @@ export async function runProgram(
       return refuse('pcp.read reads as "text" (the default) or "base64".')
     }
 
+    // A part of it: offset and length count bytes of a file (or of a text
+    // read as base64) and characters of a text, as read_result does.
+    const offset = isRecord(payload) ? payload.offset : undefined
+    const length = isRecord(payload) ? payload.length : undefined
+
+    for (const [name, value] of [
+      ["offset", offset],
+      ["length", length],
+    ] as const) {
+      if (
+        value !== undefined &&
+        (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0)
+      ) {
+        return refuse(`pcp.read's ${name} is a whole number, 0 or more.`)
+      }
+    }
+
     if (++reads > MAX_READS_PER_RUN) {
       return refuse(`A run reads at most ${MAX_READS_PER_RUN} kept results.`)
     }
@@ -1013,12 +1030,25 @@ export async function runProgram(
     }
 
     try {
+      const ranged = offset !== undefined || length !== undefined
+      const start = (offset as number | undefined) ?? 0
+      const end = length === undefined ? undefined : start + (length as number)
       const value =
-        as === "base64" ? opened.bytes().toString("base64") : opened.text()
+        as === "base64"
+          ? (ranged
+              ? opened.bytes().subarray(start, end)
+              : opened.bytes()
+            ).toString("base64")
+          : ranged
+            ? opened.kind === "bytes"
+              ? // A file's bytes from offset, as text: cut where asked.
+                new TextDecoder().decode(opened.bytes().subarray(start, end))
+              : opened.text().slice(start, end)
+            : opened.text()
 
       if (value.length > limits.answerChars) {
         return refuse(
-          `Result ${id} is ${value.length.toLocaleString("en")} characters${as === "base64" ? " as base64" : ""}, more than a program reads at once (${limits.answerChars.toLocaleString("en")}). The owner can raise the largest file in PCP's settings, under Resources.`,
+          `Result ${id} is ${value.length.toLocaleString("en")} characters${as === "base64" ? " as base64" : ""}${ranged ? " in that part" : ""}, more than a program reads at once (${limits.answerChars.toLocaleString("en")}): read it in parts with offset and length. The owner can raise the largest file in PCP's settings, under Resources.`,
         )
       }
 

@@ -1,5 +1,6 @@
 import { randomBytes } from "node:crypto"
 import { isIP } from "node:net"
+import type { Readable } from "node:stream"
 
 import {
   auth,
@@ -38,10 +39,22 @@ import { GITHUB_SIGNIN_SECRET } from "./repos/limits"
 import {
   ensureSshConnection,
   openChannel,
+  openSftp,
   sshConnectionAddress,
   sshExec,
   type SshIdentity,
 } from "./ssh/client"
+import { openFolder, type StorageFolder } from "./storage/files"
+import {
+  callStorageTool,
+  loadStorageRoot,
+  syncStorageTools,
+  unreachableReason,
+  withFolder,
+  type LoadedStorage,
+  type StorageConnect,
+} from "./storage/roots"
+import { remoteFs } from "./storage/sftp"
 import {
   makeExitDialer,
   proxiedTransport,
@@ -130,6 +143,7 @@ import {
   isMailKind,
   isServiceKind,
   isSshKind,
+  isStorageKind,
   kindNoun,
   renderAuthValue,
   setServerStatus,
@@ -166,7 +180,10 @@ import {
  * SSH servers (kind "ssh") to lib/core/ssh/hosts.ts, with PCP's key for the
  * server, decrypted here; services (kind "service") to
  * lib/core/services/, with a way to run commands on their SSH server and
- * their variables' values (ServiceAccess), built here. Linked repositories' GitHub client
+ * their variables' values (ServiceAccess), built here; storage roots (kind
+ * "storage") to lib/core/storage/, with a way to open an SFTP session on
+ * their SSH server (StorageConnect), built here with PCP's key. Linked
+ * repositories' GitHub client
  * (lib/core/repos/github.ts) gets its Authorization header from
  * githubCredential, the same way, and search's embeddings provider
  * (lib/core/embeddings/) its header from embeddingProvider.
@@ -1409,6 +1426,98 @@ async function sshIdentity(
 }
 
 /**
+ * How a storage root opens an SFTP session: on its SSH server's long-lived
+ * connection, made with PCP's key for that server, decrypted here when the
+ * session is opened and handed to the ssh module, never further. A host
+ * whose key the owner has not pinned is not connected to (openSftp refuses).
+ */
+function storageConnect(
+  ctx: VaultContext,
+  loaded: LoadedStorage,
+): StorageConnect {
+  return async () => {
+    const host = loaded.host
+
+    if (!host || !isSshKind(host.kind)) {
+      throw new PcpError(
+        "state",
+        `${loaded.server.name}'s SSH server is no longer in PCP, so PCP cannot reach the folder.`,
+      )
+    }
+
+    const session = await openSftp(
+      host.id,
+      sshTarget(host),
+      await sshIdentity(ctx, host),
+    )
+    return remoteFs(session.sftp, session.release)
+  }
+}
+
+/**
+ * A storage root's folder for the owner's file browser, opened for one
+ * request: `run` gets it, and the session is closed after. Refused while
+ * the root's SSH server is gone or its host key not pinned.
+ */
+export async function withStorageFolder<T>(
+  ctx: VaultContext,
+  serverId: string,
+  { publicUrl }: { publicUrl: string },
+  run: (folder: StorageFolder, loaded: LoadedStorage) => Promise<T>,
+): Promise<T> {
+  const loaded = await loadStorageRoot(ctx, serverId)
+  const unreachable = unreachableReason(loaded, publicUrl)
+
+  if (unreachable) {
+    throw new PcpError("state", unreachable.split("\n")[0]!)
+  }
+
+  return withFolder(loaded, storageConnect(ctx, loaded), (folder) =>
+    run(folder, loaded),
+  )
+}
+
+/**
+ * One file of a storage root as a stream, for the owner's download: the
+ * session stays open while the stream is read and closes when it ends.
+ */
+export async function openStorageDownload(
+  ctx: VaultContext,
+  serverId: string,
+  path: string,
+  { publicUrl }: { publicUrl: string },
+): Promise<{ name: string; size: number; stream: Readable }> {
+  const loaded = await loadStorageRoot(ctx, serverId)
+  const unreachable = unreachableReason(loaded, publicUrl)
+
+  if (unreachable) {
+    throw new PcpError("state", unreachable.split("\n")[0]!)
+  }
+
+  const fs = await storageConnect(ctx, loaded)()
+
+  try {
+    const folder = await openFolder(fs, loaded.root.path, {
+      umask: loaded.root.umask,
+    })
+    const file = await folder.file(path)
+    const stream = fs.readStream(file.real)
+    let ended = false
+    const end = () => {
+      if (ended) return
+      ended = true
+      fs.end()
+    }
+    stream.once("close", end)
+    stream.once("error", end)
+    return { name: file.name, size: file.size, stream }
+  } catch (error) {
+    fs.end()
+    throw error
+  }
+}
+
+/**
  * An upstream tool's outputSchema as the catalogue keeps it: an object
  * schema of a bounded size, else nothing (describe then shows none).
  */
@@ -1768,6 +1877,20 @@ async function readServerTools(
       publicUrl,
       byOwner,
     })
+  }
+
+  if (isStorageKind(server.kind)) {
+    const loaded = await loadStorageRoot(ctx, server.id)
+
+    return syncStorageTools(
+      loaded,
+      // Only the owner's check connects: a read for an assistant stores
+      // the tools as they are.
+      byOwner && !unreachableReason(loaded, publicUrl)
+        ? storageConnect(ctx, loaded)
+        : null,
+      { publicUrl },
+    )
   }
 
   if (isServiceKind(server.kind)) {
@@ -2342,6 +2465,19 @@ async function dispatchKind(
       identity: await sshIdentity(ctx, server),
       publicUrl,
       redact: placed,
+    })
+  }
+
+  if (isStorageKind(server.kind)) {
+    const loaded = await loadStorageRoot(ctx, server.id)
+
+    // The root reads a file to save from the token's kept results itself,
+    // as bytes, before anything connects.
+    return callStorageTool(loaded, toolName, args, {
+      connect: storageConnect(ctx, loaded),
+      publicUrl,
+      keepBytes,
+      open,
     })
   }
 

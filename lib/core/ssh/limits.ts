@@ -19,8 +19,9 @@ export const MAX_OUTPUT_BYTES = 1024 * 1024
 /** A login name, as OpenSSH allows it. */
 export const MAX_USERNAME_CHARS = 64
 
-// Exits (lib/core/exits/): one long-lived connection per SSH server that
-// carries direct-tcpip channels, open only while it is used.
+// Exits (lib/core/exits/), services and storage roots: one long-lived
+// connection per SSH server that carries direct-tcpip channels and storage
+// roots' SFTP sessions, open only while it is used.
 
 /** Opening one channel, once the connection is up. */
 export const SSH_CHANNEL_OPEN_TIMEOUT_MS = 15_000

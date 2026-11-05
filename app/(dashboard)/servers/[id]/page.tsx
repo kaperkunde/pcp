@@ -14,6 +14,9 @@ import { ServiceCard } from "@/components/service-card"
 import { ServiceSettingsForm } from "@/components/service-form"
 import { SshAccessCard } from "@/components/ssh-access-card"
 import { SshServerForm } from "@/components/ssh-server-form"
+import { StorageCard } from "@/components/storage-card"
+import { StorageFolderForm } from "@/components/storage-folder-form"
+import { StorageFoldersCard } from "@/components/storage-folders-card"
 import { WrapperForm } from "@/components/wrapper-form"
 import { db } from "@/lib/core/db"
 import { isPcpError } from "@/lib/core/errors"
@@ -33,6 +36,11 @@ import {
 import { listExits } from "@/lib/core/exits/exits"
 import { serviceView } from "@/lib/core/services/services"
 import { sshServerView } from "@/lib/core/ssh/hosts"
+import {
+  listStorageRoots,
+  loadStorageRoot,
+  storageRootView,
+} from "@/lib/core/storage/roots"
 import { describeOAuthConnection } from "@/lib/core/upstream"
 import { getWrapper, replacedTools } from "@/lib/core/wrappers/admin"
 import { itemAbout } from "@/lib/core/item-about"
@@ -85,6 +93,11 @@ export default async function ServerPage({
   const browser = kind === "browser"
   const ssh = kind === "ssh" ? sshServerView(server) : null
   const exits = ssh ? await listExits(ctx, { serverId: server.id }) : []
+  const folders = ssh ? await listStorageRoots(ctx, server.id) : []
+  const storage =
+    kind === "storage"
+      ? storageRootView(await loadStorageRoot(ctx, server.id))
+      : null
   const wrapper = kind === "wrapper" ? await getWrapper(ctx, { id }) : null
   const service = kind === "service" ? await serviceView(ctx, id) : null
   const replaced = await replacedTools(ctx, server.id)
@@ -121,7 +134,21 @@ export default async function ServerPage({
           }
         : null
 
-  const settings = service ? (
+  const settings = storage ? (
+    <StorageFolderForm
+      initial={{
+        id: server.id,
+        name: server.name,
+        slug: server.slug,
+        description: server.description,
+        path: storage.path,
+        writeAs: storage.writeAs,
+        umask: storage.umask,
+        readOnly: storage.readOnly,
+      }}
+      login={storage.host?.login ?? ""}
+    />
+  ) : service ? (
     <ServiceSettingsForm
       initial={{
         id: server.id,
@@ -361,6 +388,10 @@ export default async function ServerPage({
         about={about}
       >
         {ssh ? <SshAccessCard serverId={server.id} view={ssh} /> : null}
+        {storage ? <StorageCard view={storage} /> : null}
+        {ssh ? (
+          <StorageFoldersCard serverId={server.id} folders={folders} />
+        ) : null}
         {ssh ? <ExitsCard serverId={server.id} exits={exits} /> : null}
         {service ? <ServiceCard view={service} /> : null}
       </ServerDetail>
