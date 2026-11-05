@@ -224,6 +224,7 @@ import {
 } from "./tool-results"
 import { resultUri } from "./answers"
 import {
+  deliverUploads,
   embeddingProvider,
   needsConnecting,
   serviceStateLine,
@@ -270,6 +271,7 @@ import {
   MAX_WRAPPER_TOOLS,
 } from "./wrappers/limits"
 import { ensureOwnStore } from "./storage/roots"
+import { cleanFolder, savedPlaces } from "./store-uploads"
 import {
   STORAGE_INPUTS,
   STORAGE_TOOL_NAMES,
@@ -2439,6 +2441,54 @@ export function buildGatewayServer(
     )
   }
 
+  /**
+   * Where an upload link's files go besides becoming handles: a store the
+   * token reaches whose save_file is not blocked for it (a read-only one
+   * has none), and a folder there; null when the call names neither. The
+   * owner sees it on the upload page before they send anything.
+   */
+  async function uploadDestination(
+    store: string | undefined,
+    folder: string | undefined,
+  ): Promise<
+    | { storeId: string; storeName: string; folder: string }
+    | { refused: string }
+    | null
+  > {
+    if (store === undefined && folder === undefined) {
+      return null
+    }
+
+    const target = await storeServer(store)
+
+    if ("refused" in target) {
+      return target
+    }
+
+    const found = await lookup(target.slug, "save_file", {
+      includeBlocked: true,
+    })
+
+    if ("error" in found || found.tool.access === "blocked") {
+      return {
+        refused: target.readOnly
+          ? `${target.name} is read-only in PCP: files cannot be saved there.`
+          : `The owner has blocked ${target.slug}/save_file for this token, so files are not saved there.`,
+      }
+    }
+
+    try {
+      return {
+        storeId: target.id,
+        storeName: target.name,
+        folder: cleanFolder(folder),
+      }
+    } catch (error) {
+      if (isPcpError(error)) return { refused: error.message }
+      throw error
+    }
+  }
+
   /** The words of PCP's own store tools, each opening with what it does. */
   const STORE_TOOL_WORDS: Record<StorageToolName, string> = {
     list_folder:
@@ -2447,6 +2497,8 @@ export function buildGatewayServer(
       "Find files by name: in a folder of a store and every folder under it, with * and ? in the name.",
     get_file:
       "Get a file as a handle: one file of a store as a kept result's handle, {\"$result\": \"<id>\"}, to pass on whole to another tool (send_email's attachments, save_file, an API's file field) without reading it yourself; a text file's start comes back as text too.",
+    share_file:
+      "Share a stored file by public link: a download link to one file of a store, for someone else or another device, which anyone holding it can use until it expires (an hour and a few downloads by default, at most a week); its bytes never pass through you. Give the link only to whom it is for.",
     save_file:
       'Save a file to a store, to keep it for good: a kept result\'s handle (file, {"$result": "<id>"}: a mail attachment, a download, an upload) or text. It is written whole before it takes its name; a file already there is replaced only with overwrite: true.',
     make_folder:
@@ -2459,6 +2511,9 @@ export function buildGatewayServer(
     "Without store, PCP's own store, which keeps files encrypted on the machine PCP runs on; store names another the owner added (a folder on one of their SSH servers), by its short name. The owner's levels for that store's tool apply, as for call_tool."
 
   for (const name of STORAGE_TOOL_NAMES) {
+    // A public link only for a token the owner lets move files by link.
+    if (name === "share_file" && !scope.shareFiles) continue
+
     const inner = STORAGE_INPUTS[name]
     const ownTier = ownTiers[name] ?? tierFromAnnotations(inner.annotations)
 
@@ -2974,6 +3029,24 @@ export function buildGatewayServer(
           .describe(
             "Its media type; by default what the upload says, or its name and first bytes.",
           ),
+        store: z
+          .string()
+          .min(1)
+          .max(128)
+          .optional()
+          .describe(
+            "A store to save the file in too, by its short name; with folder alone, PCP's own store. Left out with folder, it only becomes a handle.",
+          ),
+        folder: z
+          .string()
+          .max(4096)
+          .regex(/^[^\u0000]*$/, {
+            message: "A path cannot contain a NUL character.",
+          })
+          .optional()
+          .describe(
+            'The folder in that store, relative to its top ("scans/2026"), made if it is not there; left out, the top. A name taken there gets " (2)".',
+          ),
       }),
       output: z.object({
         url: z.string(),
@@ -2981,6 +3054,7 @@ export function buildGatewayServer(
         expiresAt: z.string(),
         curl: z.string(),
         note: z.string(),
+        saveTo: z.object({ store: z.string(), folder: z.string() }).optional(),
       }),
       annotations: {
         readOnlyHint: false,
@@ -2989,20 +3063,43 @@ export function buildGatewayServer(
         openWorldHint: false,
       },
       quiet: true,
-      async run(args: { name?: string; type?: string }) {
+      async run(args: {
+        name?: string
+        type?: string
+        store?: string
+        folder?: string
+      }) {
+        const destination = await uploadDestination(args.store, args.folder)
+
+        if (destination && "refused" in destination) {
+          return failure(destination.refused, "forbidden")
+        }
+
         const link = await receiveFile(scope.ctx, {
           tokenId: scope.tokenId,
           publicUrl: scope.publicUrl,
           name: args.name ?? null,
           type: args.type ?? null,
+          destination,
         })
+        const saved = destination
+          ? ` PCP also saves it in ${destination.storeName}${destination.folder ? `, in ${destination.folder}` : ""}, on your next call to PCP after it arrived.`
+          : ""
 
         return ok({
           url: link.url,
           result: { $result: link.resultId },
           expiresAt: link.expiresAt.toISOString(),
           curl: `curl -fsS -T ${shellWord(args.name ?? "FILE")} ${shellWord(link.url)}`,
-          note: `Send the file (curl -T, or --data-binary @file), then pass {"$result": "${link.resultId}"} where a tool wants it. Until the file has arrived, the handle names nothing.`,
+          note: `Send the file (curl -T, or --data-binary @file), then pass {"$result": "${link.resultId}"} where a tool wants it. Until the file has arrived, the handle names nothing.${saved}`,
+          ...(destination
+            ? {
+                saveTo: {
+                  store: destination.storeName,
+                  folder: destination.folder,
+                },
+              }
+            : {}),
         })
       },
     })
@@ -3042,6 +3139,24 @@ export function buildGatewayServer(
           .describe(
             `How long the page waits for the first file, in minutes; ${UPLOAD_LINK_TTL_MS / 60_000} by default.`,
           ),
+        store: z
+          .string()
+          .min(1)
+          .max(128)
+          .optional()
+          .describe(
+            "A store to save the files in too, by its short name; with folder alone, PCP's own store. Left out with folder, each only becomes a handle.",
+          ),
+        folder: z
+          .string()
+          .max(4096)
+          .regex(/^[^\u0000]*$/, {
+            message: "A path cannot contain a NUL character.",
+          })
+          .optional()
+          .describe(
+            'The folder in that store, relative to its top ("scans/2026"), made if it is not there; left out, the top. A name taken there gets " (2)".',
+          ),
       }),
       output: NEEDS_OWNER,
       annotations: {
@@ -3054,13 +3169,22 @@ export function buildGatewayServer(
         purpose: string
         max_files?: number
         expires_in_minutes?: number
+        store?: string
+        folder?: string
       }) {
+        const destination = await uploadDestination(args.store, args.folder)
+
+        if (destination && "refused" in destination) {
+          return failure(destination.refused, "forbidden")
+        }
+
         const link = await createUploadLink(scope.ctx, {
           tokenId: scope.tokenId,
           publicUrl: scope.publicUrl,
           purpose: args.purpose,
           maxFiles: args.max_files,
           minutes: args.expires_in_minutes,
+          ...(destination ? { destination } : {}),
         })
         const until = link.acceptUntil.toISOString()
         const label = "Upload files"
@@ -3074,7 +3198,7 @@ export function buildGatewayServer(
             label,
             upload: { id: link.id, maxFiles: link.maxFiles, until },
           },
-          `Not done yet: the owner uploads the files on PCP's page, from their phone or computer. It takes up to ${link.maxFiles} file${link.maxFiles === 1 ? "" : "s"} until ${until} (a quarter of an hour once the first arrives), or until they tap Done. Whoever has the link can upload to it: give it to the owner and no one else. ${nextMessageCheck(`check_upload with id "${link.id}"`, "nothing has arrived")} It gives each file as a handle {"$result": …} to pass where a tool wants a file.\n\n${linkLastText(link.url, label)}`,
+          `Not done yet: the owner uploads the files on PCP's page, from their phone or computer. It takes up to ${link.maxFiles} file${link.maxFiles === 1 ? "" : "s"} until ${until} (a quarter of an hour once the first arrives), or until they tap Done. Whoever has the link can upload to it: give it to the owner and no one else. ${nextMessageCheck(`check_upload with id "${link.id}"`, "nothing has arrived")} It gives each file as a handle {"$result": …} to pass where a tool wants a file${destination ? `, and saves each in ${destination.storeName}${destination.folder ? `, in ${destination.folder}` : ""} too (the page says so)` : ""}.\n\n${linkLastText(link.url, label)}`,
         )
       },
     })
@@ -3104,6 +3228,14 @@ export function buildGatewayServer(
             type: z.string(),
             size: z.number(),
             readableUntil: z.string(),
+            /** Where it was saved, for a link made with a store. */
+            saved: z
+              .object({
+                store: z.string(),
+                path: z.string().nullable(),
+                error: z.string().optional(),
+              })
+              .optional(),
           }),
         ),
         /** What the text says. */
@@ -3130,19 +3262,58 @@ export function buildGatewayServer(
           )
         }
 
+        // Files for a store are saved there now, with the key this call
+        // holds; one that failed says why.
+        const tried = await deliverUploads(scope.ctx, {
+          publicUrl: scope.publicUrl,
+          tokenId: scope.tokenId,
+          uploadLinkId: status.id,
+          retryNow: true,
+        })
+        const places = await savedPlaces(scope.ctx, { uploadLinkId: status.id })
+        const stores = new Map(
+          (
+            await db().mcpServer.findMany({
+              where: {
+                vaultId: scope.ctx.vaultId,
+                id: { in: [...places.values()].map((place) => place.storeId) },
+              },
+              select: { id: true, slug: true },
+            })
+          ).map((row) => [row.id, row.slug]),
+        )
+        const savedOf = (resultId: string) => {
+          const place = places.get(resultId)
+          if (!place) return {}
+          const failed = tried.find(
+            (each) => each.resultId === resultId && "error" in each,
+          )
+          return {
+            saved: {
+              store: stores.get(place.storeId) ?? "a store no longer in PCP",
+              path: place.path,
+              ...(failed && "error" in failed ? { error: failed.error } : {}),
+            },
+          }
+        }
         const files = status.files.map((file) => ({
           handle: { $result: file.resultId },
           name: file.name,
           type: file.mediaType,
           size: file.size,
           readableUntil: file.readableUntil.toISOString(),
+          ...savedOf(file.resultId),
         }))
         const until = status.acceptUntil.toISOString()
         const listed = files
-          .map(
-            (file) =>
-              `${file.name ?? "a file"} (${file.type}, ${file.size} bytes): {"$result": "${file.handle.$result}"}`,
-          )
+          .map((file) => {
+            const saved = file.saved
+              ? file.saved.path !== null
+                ? `, saved in ${file.saved.store} as ${file.saved.path}`
+                : `, not saved in ${file.saved.store} yet${file.saved.error ? ` (${file.saved.error})` : ""}`
+              : ""
+            return `${file.name ?? "a file"} (${file.type}, ${file.size} bytes${saved}): {"$result": "${file.handle.$result}"}`
+          })
           .join("; ")
         const state = status.open
           ? `The link takes up to ${status.remaining} more until ${until}, or until the owner taps Done.`

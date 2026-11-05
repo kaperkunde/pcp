@@ -1204,7 +1204,7 @@ model FileLink {
   vault      Vault     @relation(fields: [vaultId], references: [id], onDelete: Cascade)
   tokenId    String    @map("token_id")
   token      ApiToken  @relation(fields: [tokenId], references: [id], onDelete: Cascade)
-  /// download | upload
+  /// download | upload | store
   kind       String
   /// SHA-256 of the link's secret, which a request is looked up by.
   secretHash String    @unique @map("secret_hash")
@@ -1233,6 +1233,29 @@ model FileLink {
   /// receive_file link. Not a relation: a file that arrived outlives its
   /// page until the token uses it, and the cleanup removes each by its date.
   uploadLinkId String? @map("upload_link_id")
+  /// A "store" link (share_file): the store whose object it reads with the
+  /// file's key alone (PCP's own store, encrypted), or null for a copy made
+  /// when it was shared (file_links/ in the data folder). An upload: the
+  /// store the file goes to once a request holds the key. Not a relation:
+  /// the link ends with the file, which the index says (storage_entry).
+  storeId      String?   @map("store_id")
+  /// An upload into a store: the folder it goes to, then the file's path
+  /// there once saved; AES-256-GCM under the vault's data key with
+  /// "file_link_store_path:<id>".
+  storePath    Bytes?    @map("store_path")
+  /// An upload into a store: when it was saved there.
+  deliveredAt  DateTime? @map("delivered_at")
+  /// An upload into a store: when the token used its handle (it then is a
+  /// kept result too); the row stays until it is saved.
+  claimedAt    DateTime? @map("claimed_at")
+  /// A "store" link: the sealed object it serves (storage/crypt.ts).
+  objectId     String?   @map("object_id")
+  /// A "store" link: that object's file key, AES-256-GCM under the link's
+  /// key with "file_link_file_key:<id>", so only the link opens it.
+  fileKey      Bytes?    @map("file_key")
+  /// A "store" link: bytes served so far, ranges counted; it serves
+  /// maxUses times the file's size.
+  servedBytes  Float     @default(0) @map("served_bytes")
 
   @@index([tokenId, resultId])
   @@index([expiresAt])
@@ -1270,6 +1293,10 @@ model UploadLink {
   closedAt    DateTime? @map("closed_at")
   /// The row is kept until then, for check_upload: a day past acceptUntil.
   expiresAt   DateTime  @map("expires_at")
+  /// Where its files go besides becoming kept results, as the page shows
+  /// it ({store, folder} as JSON): AES-256-GCM under the link's key with
+  /// "upload_link_destination:<id>"; null for none.
+  destination Bytes?
 
   @@index([tokenId])
   @@index([expiresAt])

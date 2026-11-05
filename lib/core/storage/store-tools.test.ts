@@ -79,7 +79,7 @@ describe("the store tools", () => {
 
     // Made for this vault, with its tools, which ask by default.
     const own = await ensureOwnStore(ctx)
-    expect(await db().mcpTool.count({ where: { serverId: own } })).toBe(7)
+    expect(await db().mcpTool.count({ where: { serverId: own } })).toBe(8)
     expect(textOf(asked)).toMatch(/Not done yet/)
     expect(await db().permissionRequest.count()).toBe(1)
     expect(await db().storageEntry.count()).toBe(0)

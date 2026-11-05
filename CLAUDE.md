@@ -345,7 +345,8 @@ so in the summary; the bump itself waits for the request.
   either way (`storage/convert.ts`, a batch per request, never a timer,
   each file removed only once its replacement is whole, every tool refused
   while `converting` is set); an encrypted store with files is not removed.
-  PCP's own tools `list_folder`, `find_files`, `get_file`, `save_file`,
+  PCP's own tools `list_folder`, `find_files`, `get_file`, `share_file`
+  (only for a token with `shareFiles`), `save_file`,
   `make_folder`, `move` and `delete` take `store` (a short name; without
   it, PCP's own) and run that store's own tool through `gateway.ts
 callResolved`, the same path, levels, tier gate and validator as
@@ -501,14 +502,31 @@ embeddingProvider`, which hands `embeddings/provider.ts` the header;
   upload's key also wrapped under the vault's, so it becomes a kept result
   only when the token uses its handle); an hour, a few downloads or one
   upload, its token live, every use in the request log, never exported, and
-  pruned by the cleanup. Upload links (`lib/core/upload-links.ts`, same
+  pruned by the cleanup. A store's file goes out by a public link
+  (`lib/core/store-links.ts`, `share_file`, a store tool at the owner's
+  levels, same option): a `file_link` of kind `store` that holds that one
+  file's key wrapped under the link's key (`file_link_file_key:<id>`),
+  never the store key; a file of PCP's own store, encrypted, is read in
+  place with that key alone (`openSealedObject`) and the link ends when the
+  index no longer names its object; any other store's file is copied when
+  shared, sealed the same way, into `<data>/file-links/` (a public request
+  holds no SSH key). Ranges are served, counted against `max_downloads`
+  times the file; at most a week (`storage/limits.ts`); the cleanup removes
+  copies no link names. Upload links (`lib/core/upload-links.ts`, same
   option) are the one link for the owner: `create_upload_link` hands the
   assistant `/upload/<secret>` (a page outside the dashboard, no session,
   the link alone its credential) to give the owner as a markdown link, and
   `check_upload` waits for what arrived; it takes a few files for an hour,
   then a quarter of an hour from the first or until Done, each file a
   `file_link` slot made with it (result id and wrapped key up front), so it
-  too becomes a kept result only when the token uses its handle. The one
+  too becomes a kept result only when the token uses its handle. Made with
+  a `store` and `folder` (also `receive_file`; a store whose save_file is
+  not blocked for the token, shown on the page), each file is saved there
+  too by the next request that holds the vault's key
+  (`lib/core/store-uploads.ts`: check_upload, or `after()` from `/mcp` and
+  the owner's pages; never a timer, never over a file there), its folder
+  and path encrypted (`file_link_store_path:<id>`). Kept results stay rows
+  for a day: a file kept for good is `save_file`'s, into a store. The one
   other way a kept result goes over HTTP is to the owner's own page, while
   a call that names it waits for them (`lib/core/permission-files.ts`,
   `permissions.ts openRequestFile`): only a result that waiting request's
@@ -750,8 +768,9 @@ embeddingProvider`, which hands `embeddings/provider.ts` the header;
   request for the wrapper to read), the export download (`app/api/export/route.ts`: a file needs
   `Content-Disposition`, which an action cannot send; it checks the request's
   origin itself, `lib/server/same-origin.ts`), file links
-  (`app/api/files/[secret]/`: curl from an assistant's own computer, and
-  the upload page's PUTs and Done, the link's secret its only credential),
+  (`app/api/files/[secret]/`: curl from an assistant's own computer, a
+  `share_file` link's download with its Range, and the upload page's PUTs
+  and Done, the link's secret its only credential),
   the browser's live view
   (`app/api/browser/tabs/[id]/`: a stream of a tab's pictures and the
   owner's input, which an action cannot carry; the same origin check and

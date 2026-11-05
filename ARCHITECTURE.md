@@ -15,7 +15,7 @@ app/                 Routes and pages (Next.js App Router)
   api/oauth/…        OAuth callback and PCP's client metadata document
   api/servers/…      OAuth start (and the per-server callback older clients use)
   api/export/…       The export download (a file needs Content-Disposition)
-  api/files/…        File links: an assistant's own computer downloads or sends one file
+  api/files/…        File links: an assistant's own computer downloads or sends one file; a store file's public link
   api/health/…       The health check; in the desktop app, the version and an install request
   api/browser/…      A browser tab's live view: its pictures out, the owner's input in
 components/          React components; forms call Server Actions
@@ -4455,6 +4455,68 @@ ask, the page and the route share the file links' rate limit, and the page
 sends no referrer and is not indexed. The row is kept a day past its last
 file time for `check_upload`; the cleanup removes it then, and the empty
 rows when the link stops taking files. Not exported, wiped with the vault.
+
+**Public links to a store's file** (`lib/core/store-links.ts`, #90) are a
+third kind of `file_link`, `store`, made by the store tool `share_file`
+(through PCP's own top-level `share_file`, which takes `store` like the
+other store tools, at the owner's levels for that store's tool; only a
+token with **Move files by link**, refused for any other before anything
+connects). The link is for whoever the assistant gives it to, not only its
+own computer: anyone holding it downloads that one file, whole or one
+`Range` (206, `Accept-Ranges: bytes`), streamed and decrypted as it is
+read, as an attachment with `nosniff` and a `sandbox` CSP. Its secret
+derives a key (HKDF of the secret and the row's id, as a file link's) that
+wraps that one file's key (`file_link_file_key:<id>`); the row keeps the
+secret's hash, never the store key, and serving it needs no vault key:
+
+- A file of PCP's own store, encrypted: the key wrapped is the one the
+  store sealed that object under (`StorageFolder.sealed`), and the route
+  reads the object in place (`storage/encrypted.ts openSealedObject`, the
+  file key alone). Before each use it checks that the index still names
+  that object (`storage_entry.object_id`) and the store is still local,
+  encrypted and not converting: a file changed (a new object) or deleted
+  ends the link at once (410).
+- Any other store's file (a storage folder on an SSH server, which a
+  public request cannot reach without PCP's key; or a plain store, whose
+  file has no key): copied when shared, streamed through the store's own
+  confinement and sealed in the store format under a fresh key into
+  `<data>/file-links/.pcp-store/<xx>/<id>`, up to the largest-file limit.
+  Later changes to the file do not reach the copy.
+
+A link works for an hour by default and at most a week
+(`expires_in_minutes`, `storage/limits.ts`), for `max_downloads` whole
+files (5 by default, at most 100), counted in bytes so ranges cost what
+they read (`served_bytes`, at least one per request). It counts against the
+token's live file links, works only while its token is live and has the
+switch, and each use is a request-log line (`file_link/store_download`),
+under the files route's per-address rate limit. Not exported, wiped with
+the vault (the rows; the copies with them by the cleanup), gone with its
+token; the cleanup's results part removes expired rows and then every copy
+no row names (`pruneLinkCopies`, by names and dates, older than ten
+minutes, and part files older than a day).
+
+**Uploads into a store** (`lib/core/store-uploads.ts`, #90): `receive_file`
+and `create_upload_link` take `store` and `folder` (a folder alone means
+PCP's own store). The store must be one the token reaches whose `save_file`
+is not blocked for it (a read-only store has none); the upload page says
+where the files go, from a destination encrypted under the link's key
+(`upload_link.destination`). The file arrives as any upload does, held
+under the link's key, and still becomes a kept result when the token uses
+its handle; besides, the slot carries the store (`store_id`) and the folder
+encrypted under the vault key (`file_link_store_path:<id>`), and the first
+request that holds the vault's key saves it there: `check_upload` (which
+answers where each file went, or why not yet), or `after()` on `/mcp` and
+the owner's pages, one run per vault at a time, a failure tried again after
+five minutes. It writes through the store's own `StorageFolder` (encrypted
+or plain, confined, the folder made with its parents), never over a file:
+a taken name gets " (2)" and so on. Then the slot keeps the path it got
+(encrypted) for `check_upload` until its day is up; a slot that is both
+kept and saved drops its bytes, and `claimUploads` marks such a slot
+`claimed_at` instead of deleting it. Nothing is saved on a timer, and a
+store made read-only since gets nothing.
+
+Kept results themselves stay what they were: `tool_result` rows for a day.
+A file meant to last goes into a store with `save_file`.
 
 ### Descriptions read in a few words, and client profiles
 

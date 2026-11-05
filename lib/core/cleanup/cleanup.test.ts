@@ -27,6 +27,7 @@ import { EMPTY_CONFIG, saveResourceConfig } from "../resources/state"
 import { keepBytes, keepResult, RESULT_TTL_MS } from "../tool-results"
 import { createUploadLink, UPLOAD_LINK_TTL_MS } from "../upload-links"
 import { localStoreDir } from "../storage/local"
+import { linkCopiesDir } from "../store-links"
 import { ensureOwnStore } from "../storage/roots"
 import { setupVault } from "../vault"
 import { DEFAULT_CLEANUP_CRON, DEFAULT_LOG_DAYS } from "./limits"
@@ -198,6 +199,28 @@ describe("a run", () => {
     expect(status.removed?.results).toBe(1)
     expect(await db().fileLink.count()).toBe(2)
     expect(await db().toolResult.count()).toBe(1)
+  })
+
+  it("removes the copies share_file made once no link names them (#90)", async () => {
+    const now = new Date()
+    const bucket = path.join(linkCopiesDir(), ".pcp-store", "ab")
+    const orphan = path.join(bucket, "ab".padEnd(32, "0"))
+    const fresh = path.join(bucket, "ab".padEnd(32, "1"))
+    const part = path.join(bucket, `${"ab".padEnd(32, "2")}.x.pcp-part`)
+    mkdirSync(bucket, { recursive: true })
+    for (const file of [orphan, fresh, part])
+      writeFileSync(file, "x".repeat(10))
+    const hourAgo = new Date(now.getTime() - 60 * 60_000)
+    utimesSync(orphan, hourAgo, hourAgo)
+
+    const status = await runCleanup("owner", now)
+
+    // The orphan goes; one just written (a share under way) and a part
+    // file younger than a day stay.
+    expect(status.removed?.results).toBe(1)
+    expect(existsSync(orphan)).toBe(false)
+    expect(existsSync(fresh)).toBe(true)
+    expect(existsSync(part)).toBe(true)
   })
 
   it("removes upload links a day after they stop taking files, with their empty places", async () => {

@@ -154,10 +154,11 @@ describe("adding a storage folder", () => {
       "make_folder",
       "move",
       "save_file",
+      "share_file",
     ])
 
     const sync = await syncServerTools(ctx, await getServer(ctx, id), OWNER)
-    expect(sync).toEqual({ status: "ok", message: "", toolCount: 7 })
+    expect(sync).toEqual({ status: "ok", message: "", toolCount: 8 })
     // The check wrote and removed a part file, and left nothing.
     expect(fs.readdirSync(top)).toEqual([])
 
@@ -171,6 +172,7 @@ describe("adding a storage folder", () => {
       "find_files",
       "get_file",
       "list_folder",
+      "share_file",
     ])
     expect(
       refusal(await call(id, "save_file", { path: "a.txt", text: "x" })),
