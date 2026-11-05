@@ -478,6 +478,8 @@ async function connectPooled(
     keepaliveInterval: SSH_KEEPALIVE_INTERVAL_MS,
     keepaliveCountMax: SSH_KEEPALIVE_COUNT,
   })
+  // Many small requests and answers (SFTP's): no waiting to fill a packet.
+  client.setNoDelay(true)
   const socket = (client as unknown as { _sock?: { remoteAddress?: string } })
     ._sock
   const entry: Pooled = {

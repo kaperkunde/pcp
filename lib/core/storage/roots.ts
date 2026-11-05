@@ -38,7 +38,7 @@ import {
 } from "../tools/family"
 import { openFolder, type StorageFolder } from "./files"
 import { DEFAULT_FIND_RESULTS, MAX_GET_TEXT_CHARS } from "./limits"
-import { globMatcher, normalizeRootPath } from "./paths"
+import { globMatcher, normalizeRootPath, splitPath } from "./paths"
 import { FileTooLargeError, type RemoteFs } from "./sftp"
 import { isStorageWrite, storageTool, storageTools } from "./tools"
 
@@ -457,6 +457,12 @@ export async function callStorageTool(
   const { fileBytes } = await loadResourceLimits()
 
   try {
+    // Every path is read before anything connects: `..` never reaches
+    // the server.
+    for (const key of ["path", "from", "to"]) {
+      if (typeof a[key] === "string") splitPath(a[key])
+    }
+
     if (toolName === "find_files") {
       matcher = globMatcher(String(a.name), {
         caseSensitive: a.case_sensitive === true,

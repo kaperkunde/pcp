@@ -8,6 +8,7 @@ import {
   closeAllSshConnections,
   ensureSshConnection,
   openChannel,
+  openSftp,
   SshForwardingRefusedError,
   SshNotConnectedError,
   SshUnpinnedError,
@@ -417,6 +418,41 @@ describe("openChannel, for services", () => {
       site.closeAllConnections()
       await new Promise<void>((resolve) => site.close(() => resolve()))
     }
+  })
+})
+
+describe("openSftp, for storage roots", () => {
+  it("never connects to a host whose key the owner has not pinned", async () => {
+    const { server, target } = await start({ sftp: true })
+
+    await expect(openSftp("srv", target, identity)).rejects.toThrow(
+      SshUnpinnedError,
+    )
+    expect(server.connections()).toBe(0)
+  })
+
+  it("opens the subsystem on the pooled connection, and says so when the server has none", async () => {
+    const { server, target } = await start({ sftp: true }, "right")
+    const session = await openSftp("srv", target, identity)
+    const real = await new Promise<string>((resolve, reject) =>
+      session.sftp.realpath("/", (error, path) =>
+        error ? reject(error) : resolve(path),
+      ),
+    )
+    session.release()
+    expect(real).toBe("/")
+    expect(server.sftpRequests).toEqual(["REALPATH /"])
+
+    // An exit's channel shares the connection: still one sign-in.
+    await ensureSshConnection("srv", target, identity)
+    expect(server.connections()).toBe(1)
+
+    closeAllSshConnections()
+    await server.close()
+    const { target: bare } = await start({}, "right")
+    await expect(openSftp("srv", bare, identity)).rejects.toThrow(
+      /would not start SFTP/,
+    )
   })
 })
 
