@@ -226,6 +226,13 @@ export const BROWSER_LOCK_DEADLINE_MS = 30_000
  */
 export const MAX_MASKED_FRAMES = 50
 /**
+ * A secret PCP typed is also looked for in every answer as the page may
+ * write it back reformatted (held.ts): white space and separators taken
+ * out, upper case. A value shorter than this, read that way, is masked as
+ * a whole word only: shorter ones would mask ordinary text.
+ */
+export const MIN_NORMALISED_MASK_CHARS = 6
+/**
  * The most of the owner's sign-ins at a page's site that navigate, snapshot
  * and tabs open name (sign-in-hint.ts).
  */

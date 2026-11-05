@@ -43,6 +43,38 @@ const MIRROR = `<!doctype html><title>Mirror</title>
 <label>Token <input id="token" oninput="document.getElementById('said').textContent = 'You typed ' + this.value; document.title = 'Got ' + this.value"></label>
 <p id="said">Nothing yet</p>`
 
+/** A sign-in built as a web component: its field inside an open shadow root. */
+const SHADOW = `<!doctype html><title>Shadow</title>
+<script>
+customElements.define("x-login", class extends HTMLElement {
+  constructor() {
+    super()
+    this.attachShadow({ mode: "open" }).innerHTML =
+      '<label>Shadow password <input type="password" id="inner"></label>'
+  }
+})
+</script>
+<x-login></x-login>`
+
+/** The IBAN as the secret holds it, and as the bank's pages write it. */
+const IBAN = "nl91abna0417164300"
+const IBAN_SPACED = "NL91 ABNA 0417 1643 00"
+
+/** A field the page reformats once it loses the focus, and repeats. */
+const TRANSFER = `<!doctype html><title>Transfer</title>
+<label>IBAN <input id="iban" placeholder="NL00 BANK 0123 4567 89" onchange="this.value = this.value.replace(/\\s+/g, '').toUpperCase().replace(/(.{4})/g, '$1 ').trim(); document.getElementById('said').textContent = 'To account ' + this.value"></label>
+<p id="said">No account yet</p>
+<button>Next</button>`
+
+/** The next page, a new document, which repeats the IBAN its own way. */
+const SUMMARY = `<!doctype html><title>Summary</title>
+<h1>Check your transfer</h1>
+<p>From ${IBAN_SPACED}, account ending ${IBAN_SPACED.slice(-7)}</p>`
+
+/** A password field with a placeholder: Playwright writes its value as a child. */
+const PLACEHOLDER = `<!doctype html><title>Placeholder</title>
+<label>Password <input type="password" id="pw" placeholder="Your password"></label>`
+
 let cleanup: () => Promise<void>
 let site: TestApi
 /** Another site, whose page the login page frames. */
@@ -88,6 +120,17 @@ beforeEach(async () => {
 
     if (request.url.startsWith("/mirror")) {
       return res.end(MIRROR)
+    }
+
+    for (const [path, page] of [
+      ["/shadow", SHADOW],
+      ["/transfer", TRANSFER],
+      ["/summary", SUMMARY],
+      ["/placeholder", PLACEHOLDER],
+    ] as const) {
+      if (request.url.startsWith(path)) {
+        return res.end(page)
+      }
     }
 
     res.end("<title>Elsewhere</title><h1>Another page</h1>")
@@ -352,6 +395,87 @@ describe.skipIf(!executable)("typing a secret", { timeout: 90_000 }, () => {
     ]) {
       expect(textOf(read)).not.toContain(VALUE)
     }
+  })
+
+  it("types into a field inside a web component's shadow root", async () => {
+    await always()
+    const { tab, opened } = await open("/shadow")
+
+    const typed = await call("type", {
+      tab,
+      ref: refOf(opened, /textbox "Shadow password"/),
+      text: { $secret: "Shop password" },
+    })
+
+    expect(typed.isError, textOf(typed)).toBeUndefined()
+    expect(textOf(typed)).toContain('Typed the secret "Shop password"')
+    expect(await fieldValue(tab, "#inner")).toBe(VALUE)
+    expect(textOf(typed)).not.toContain(VALUE)
+  })
+
+  it("never shows a password field's value the snapshot writes under it", async () => {
+    const { tab, opened } = await open("/placeholder")
+
+    const typed = await call("type", {
+      tab,
+      ref: refOf(opened, /textbox "Password"/),
+      text: "plain-typed-password",
+    })
+
+    expect(textOf(typed)).not.toContain("plain-typed-password")
+    expect(textOf(await call("snapshot", { tab }))).not.toContain(
+      "plain-typed-password",
+    )
+  })
+
+  it("masks a value the page reformats, and repeats on a later page", async () => {
+    const { id: bankId } = await createSecret(ctx, {
+      name: "Bank",
+      value: IBAN,
+    })
+    await grantSecretUse(ctx, {
+      tokenId,
+      secretId: bankId,
+      origin: site.origin,
+      level: "always",
+    })
+    const { tab, opened } = await open("/transfer")
+
+    const typed = await call("type", {
+      tab,
+      ref: refOf(opened, /textbox "IBAN"/),
+      text: { $secret: "Bank" },
+    })
+    expect(typed.isError, textOf(typed)).toBeUndefined()
+
+    // Typed as it is; the page writes it its own way once the field lets go.
+    await call("press_key", { tab, key: "Tab" })
+    expect(await fieldValue(tab, "#iban")).toBe(IBAN_SPACED)
+
+    const pieces = [IBAN, IBAN_SPACED, IBAN.toUpperCase(), "ABNA 0417"]
+    const shown = (result: CallToolResult) => {
+      for (const piece of pieces) {
+        expect(textOf(result), textOf(result)).not.toContain(piece)
+      }
+    }
+
+    const snapshot = await call("snapshot", { tab })
+    shown(snapshot)
+    expect(textOf(snapshot)).toContain("To account [secret: Bank]")
+    shown(await call("read_page", { tab }))
+    shown(await call("find", { tab, text: "IBAN" }))
+    // The field still holds it, reformatted.
+    expect((await call("screenshot", { tab })).isError).toBe(true)
+
+    // A new document, which holds nothing, repeats it.
+    const summary = await call("navigate", {
+      tab,
+      url: `${site.origin}/summary`,
+    })
+    shown(summary)
+    expect(textOf(summary)).toContain("From [secret: Bank]")
+    shown(await call("read_page", { tab }))
+    shown(await call("snapshot", { tab }))
   })
 
   it("types a one-time code secret's code of the moment, never its seed", async () => {

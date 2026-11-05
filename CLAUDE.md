@@ -579,11 +579,18 @@ embeddingProvider`, which hands `embeddings/provider.ts` the header;
   `SecretBrowserOrigin`), or else asks the owner (`secret_use`, with
   `noteOwnerAsked`), whose answer never changes a tool's level; an API
   endpoint's use of the secret never counts. It is typed with CDP
-  `Input.insertText` once the field has the focus. While a field holds it
-  (`browser/held.ts`, a keyed hash, never the value), every answer shows it
-  as `[secret: name]` and `screenshot` is refused; a password field's value
-  never shows. The value is scrubbed from answers and errors, and the
-  request log has the secret's name and origin, never the value.
+  `Input.insertText` once the field has the focus (in its frame, each frame
+  around it and each shadow root around it). While a field holds it, as
+  typed or as the page reformatted it (`browser/held.ts`, keyed hashes of
+  the value and of its normalised form, white space and separators out and
+  upper case, never the value), every answer shows it as `[secret: name]`
+  and `screenshot` is refused; a password field's value never shows, its
+  snapshot `- text:` child included. For the life of the tab, every answer
+  to the token masks each secret typed into any of its tabs wherever the
+  text has it once normalised (`maskTyped`: a keyed rolling fingerprint,
+  then an HMAC), whatever document the tab shows now. The value is
+  scrubbed from answers and errors, and the request log has the secret's
+  name and origin, never the value.
   `request_secret` asks the owner to type a new one on PCP's page and never
   writes over a name PCP holds. Allowances are not exported; origins are.
   `navigate`, `snapshot` and `tabs` open name the owner's secrets bound to

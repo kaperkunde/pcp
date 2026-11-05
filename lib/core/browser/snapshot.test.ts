@@ -202,6 +202,36 @@ describe("a snapshot's masked fields", () => {
     ).toContain('textbox "Email" [ref=e2]: [secret: Mail]')
     expect(maskFields(TREE, new Map())).toBe(TREE)
   })
+
+  it("masks the value a field with a placeholder writes as its text child", () => {
+    const tree = `- generic [ref=e1]:
+  - textbox "IBAN" [ref=e2]:
+    - /placeholder: NL00 BANK 0123 4567 89
+    - text: NL91 ABNA 0417 1643 00
+  - textbox "Password" [ref=e3]:
+    - /placeholder: Your password
+    - text: hunter2
+  - paragraph [ref=e4]:
+    - text: hunter2`
+
+    expect(
+      maskFields(
+        tree,
+        new Map([
+          ["NL91 ABNA 0417 1643 00", secretMask("Bank")],
+          ["hunter2", PASSWORD_MASK],
+        ]),
+      ),
+    ).toBe(`- generic [ref=e1]:
+  - textbox "IBAN" [ref=e2]:
+    - /placeholder: NL00 BANK 0123 4567 89
+    - text: [secret: Bank]
+  - textbox "Password" [ref=e3]:
+    - /placeholder: Your password
+    - text: [password]
+  - paragraph [ref=e4]:
+    - text: hunter2`)
+  })
 })
 
 describe("a snapshot's words", () => {

@@ -1,5 +1,5 @@
 import type { CallToolResult } from "@modelcontextprotocol/server"
-import type { Locator } from "patchright-core"
+import type { Locator, Page } from "patchright-core"
 
 import type { McpServer } from "@/lib/generated/prisma/client"
 
@@ -38,7 +38,7 @@ import { consoleLog, networkLog } from "./devtools"
 import { catchDownload, offeredName, tabOwnsFrame } from "./downloads"
 import { evaluateInTab } from "./evaluate"
 import { coveringElement, coveringLine, failureReason } from "./failures"
-import { heldSecret, heldValues, holdSecret } from "./held"
+import { heldSecret, heldValues, holdSecret, maskTypedResult } from "./held"
 import { clickAt, dragBetween, wheelAt, type MouseButton } from "./input"
 import {
   ACTION_TIMEOUT_MS,
@@ -1252,7 +1252,10 @@ async function onTab(
 /**
  * An answer with what the token's tabs hold of a secret PCP typed shown as
  * [secret: name], wherever it appears (held.ts): a page can repeat a field's
- * value in its text or its title.
+ * value in its text or its title. Then every secret PCP typed into any of
+ * the token's tabs while it lived, as it is or as a page writes it its own
+ * way (spaced, upper case), whichever page the tab shows now: a summary
+ * page repeats what was typed on the one before.
  */
 async function maskHeld(
   { ctx, tokenId }: Pick<BrowserScope, "ctx" | "tokenId">,
@@ -1260,18 +1263,21 @@ async function maskHeld(
 ): Promise<CallToolResult> {
   const vault = runningBrowser(ctx.vaultId)
   let masked = result
+  const pages: Page[] = []
 
   for (const tab of vault?.tabs.values() ?? []) {
     if (tab.tokenId !== tokenId) {
       continue
     }
 
+    pages.push(tab.page)
+
     for (const { name, value } of (await heldValues(tab.page)).values) {
       masked = scrubResult(masked, [value], { replacement: secretMask(name) })
     }
   }
 
-  return masked
+  return maskTypedResult(pages, masked)
 }
 
 /** The type call as it is made again once the owner allows the secret. */
@@ -1371,17 +1377,27 @@ async function typeSecret(
     // Again at the last moment: the page and the field's frame are where
     // they were, and the field has the focus, in its frame and every frame
     // around it, so the text goes nowhere else.
+    // A field inside a web component (a shadow root) is its root's active
+    // element, and the document's is the component itself.
     const focused = await handle
       .evaluate((element) => {
         let node: Element = element
-        let doc = element.ownerDocument
 
         for (;;) {
-          if (doc.activeElement !== node) return false
+          const root = node.getRootNode()
+
+          if (root.nodeType === Node.DOCUMENT_FRAGMENT_NODE && "host" in root) {
+            const shadow = root as ShadowRoot
+            if (shadow.activeElement !== node) return false
+            node = shadow.host
+            continue
+          }
+
+          const doc = node.ownerDocument
+          if (root !== doc || doc.activeElement !== node) return false
           const around = doc.defaultView?.frameElement
           if (!around) return true
           node = around
-          doc = around.ownerDocument
         }
       })
       .catch(() => false)
@@ -1402,6 +1418,8 @@ async function typeSecret(
       ACTION_TIMEOUT_MS,
       "Input.insertText",
     )
+    // As the field has it (the page may have cut or reformatted it), and
+    // as it was typed, which a later page may repeat.
     holdSecret(
       tab.page,
       typer.name,
@@ -1409,6 +1427,7 @@ async function typeSecret(
         .inputValue({ timeout: ACTION_TIMEOUT_MS })
         .catch(() => value),
     )
+    holdSecret(tab.page, typer.name, value)
 
     if (args.submit) {
       await locator.press("Enter", { timeout: ACTION_TIMEOUT_MS })
