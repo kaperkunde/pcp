@@ -106,10 +106,16 @@ import { MAX_DOCUMENT_DEPTH } from "./limits"
  * A service's own part (the SSH server it runs on, where its ports are
  * published, which secret each variable takes, its container's name, what
  * it registered, the owner's note) is never in a document.
+ *
+ * Format 4 adds a secret header to an MCP server a service registers
+ * (`registers: {kind: mcp, …, auth}`, as kind openapi has had since format
+ * 3). Only a service document that has one is written as format 4
+ * (`serviceFormat`); a format-3 document that names one is refused, as a
+ * PCP that reads format 3 would.
  */
 
 /** The newest document format this PCP reads and writes. */
-export const PCP_FORMAT = 3
+export const PCP_FORMAT = 4
 
 /**
  * The format each kind is written in: the first that holds it. A kind
@@ -124,6 +130,19 @@ export const FORMAT_OF_KIND: Record<ItemKind, number> = {
   endpoint: 2,
   server: 2,
   service: 3,
+}
+
+/**
+ * The format of a service's document: 4 when what it registers is an MCP
+ * server that sends a secret header (`registers.auth` on kind mcp, which
+ * format 4 added), else 3. Only a document that holds the new field is
+ * written in the new format, so an older PCP reads every other one, and
+ * refuses that one as "written by a newer PCP" rather than half-reading it.
+ */
+export function serviceFormat(definition: ServiceDefinition): number {
+  return definition.registers.kind === "mcp" && definition.registers.auth
+    ? 4
+    : FORMAT_OF_KIND.service
 }
 
 // ---- Documents --------------------------------------------------------------
@@ -415,7 +434,20 @@ function serviceYaml(definition: ServiceDefinition): Record<string, unknown> {
       : {
           registers:
             registers.kind === "mcp"
-              ? { kind: "mcp", port: registers.port, path: registers.path }
+              ? {
+                  kind: "mcp",
+                  port: registers.port,
+                  path: registers.path,
+                  ...(registers.auth
+                    ? {
+                        auth: {
+                          env: registers.auth.env,
+                          header: registers.auth.header,
+                          template: registers.auth.template,
+                        },
+                      }
+                    : {}),
+                }
               : registers.kind === "exit"
                 ? {
                     kind: "exit",
@@ -550,7 +582,7 @@ export function serializeItem(document: ItemDocument): RepoFiles {
 
     case "service": {
       files[itemRoot(ref)] = yaml({
-        pcp_format: FORMAT_OF_KIND.service,
+        pcp_format: serviceFormat(document.definition),
         version: document.version,
         name: document.displayName,
         description: document.description,
@@ -1462,7 +1494,7 @@ function parseService(item: ItemFiles): ServiceDocument {
         (path[0] === "name" || path[0] === "description")) ||
       (path.length === 3 && path[0] === "env" && path[2] === "description"),
   )
-  formatOf(raw, what)
+  const format = formatOf(raw, what)
 
   if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
     throw invalid(`${what} is a YAML mapping.`)
@@ -1498,6 +1530,16 @@ function parseService(item: ItemFiles): ServiceDocument {
     definition = parseServiceDefinition(rest)
   } catch (error) {
     throw withWhere(error, what)
+  }
+
+  if (
+    format < 4 &&
+    definition.registers.kind === "mcp" &&
+    definition.registers.auth
+  ) {
+    throw invalid(
+      `${what} is in format ${format}, whose MCP server sends no secret header: write it as format 4 to have registers.auth.`,
+    )
   }
 
   return {

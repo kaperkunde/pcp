@@ -165,7 +165,10 @@ const HealthSchema = z.discriminatedUnion("kind", [
   z.strictObject({ kind: z.literal("none") }),
 ])
 
-/** An API endpoint's secret header, sent with the secret bound to `env`. */
+/**
+ * The secret header an API endpoint or an MCP server it registers sends,
+ * with the secret bound to `env`.
+ */
 const RegisterAuthSchema = z.strictObject({
   env: envName,
   header: z.string().regex(HEADER_NAME),
@@ -203,7 +206,12 @@ const RegistersSchema = z.discriminatedUnion("kind", [
     basePath: httpPath.default("/"),
     auth: RegisterAuthSchema.optional(),
   }),
-  z.strictObject({ kind: z.literal("mcp"), port, path: httpPath }),
+  z.strictObject({
+    kind: z.literal("mcp"),
+    port,
+    path: httpPath,
+    auth: RegisterAuthSchema.optional(),
+  }),
   /** A VPN container's proxy, which PCP adds as an exit. */
   z.strictObject({
     kind: z.literal("exit"),
@@ -426,14 +434,12 @@ export const ServiceDefinitionSchema = z
       }
     }
 
-    if (
-      definition.registers.kind === "openapi" &&
-      definition.registers.auth &&
-      !names.includes(definition.registers.auth.env)
-    ) {
+    const auth = registerAuth(definition.registers)
+
+    if (auth && !names.includes(auth.env)) {
       issue.addIssue({
         code: "custom",
-        message: `The endpoint's secret comes from ${definition.registers.auth.env}, which is not one of the service's variables.`,
+        message: `The ${registeredNoun(definition.registers)}'s secret comes from ${auth.env}, which is not one of the service's variables.`,
       })
     }
   })
@@ -441,6 +447,24 @@ export const ServiceDefinitionSchema = z
 export type ServiceDefinition = z.output<typeof ServiceDefinitionSchema>
 export type ServiceDefinitionInput = z.input<typeof ServiceDefinitionSchema>
 export type ServiceRegisters = ServiceDefinition["registers"]
+export type ServiceRegisterAuth = z.output<typeof RegisterAuthSchema>
+
+/**
+ * The secret header what a service registers sends (an API endpoint's or an
+ * MCP server's), or null: an exit's login is PCP's own (ExitAuthSchema).
+ */
+export function registerAuth(
+  registers: ServiceRegisters,
+): ServiceRegisterAuth | null {
+  return registers.kind === "openapi" || registers.kind === "mcp"
+    ? (registers.auth ?? null)
+    : null
+}
+
+/** What a service registers, in words: "endpoint" or "MCP server". */
+function registeredNoun(registers: Pick<ServiceRegisters, "kind">): string {
+  return registers.kind === "mcp" ? "MCP server" : "endpoint"
+}
 
 function problems(error: z.ZodError): string {
   return error.issues
@@ -700,12 +724,11 @@ export function checkEnvBindings(
     }
   }
 
-  const auth =
-    definition.registers.kind === "openapi" ? definition.registers.auth : null
+  const auth = registerAuth(definition.registers)
 
   if (auth && !checked[auth.env]) {
     throw invalid(
-      `Choose the secret for ${auth.env}: the endpoint sends it in ${auth.header}.`,
+      `Choose the secret for ${auth.env}: the ${registeredNoun(definition.registers)} sends it in ${auth.header}.`,
     )
   }
 

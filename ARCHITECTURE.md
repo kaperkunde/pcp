@@ -1084,7 +1084,8 @@ proposes one, or an image update, as a permission request (below).
   `{kind: "none"}`); and what it `registers`: `{kind: "openapi", port,
 specPath, basePath, auth?}` (an API endpoint from the schema it serves,
   `auth` naming the variable whose secret the endpoint sends in a header),
-  `{kind: "mcp", port, path}`, `{kind: "exit", port, protocol, auth?}` (a
+  `{kind: "mcp", port, path, auth?}` (an MCP server, `auth` the same: the
+  variable, the header and its template), `{kind: "exit", port, protocol, auth?}` (a
   VPN's proxy, see [Exits](#exits)) or `{kind: "none"}`. `hash` is its canonical JSON's SHA-256, and
   `definitionBasis` includes it. `writeServiceDefinition` writes it on every
   instance, as `writeWrapper` does a program.
@@ -1202,7 +1203,9 @@ serves at `http://127.0.0.1:<port>` (as the SSH server reaches it): an API
 endpoint (`createEndpoint` with the schema at `specPath`, the base URL at
 `basePath`, `publicOnly` off, since it is the owner's own machine, and the
 `auth` variable's secret as its header) or an MCP server (`createServer`,
-its tools read at once). Before `run`, PCP reads which of the definition's
+its tools read at once; with `auth`, authType `header` with that header,
+template and the secret bound to the variable, which the launch, like an
+endpoint's, refuses to go without). Before `run`, PCP reads which of the definition's
 volumes are on the SSH server already (`existingVolumes`: a service removed
 before with its data kept); a failure from `run` on (Docker's `run
 --detach` makes the container and its volumes before it starts it, so a
@@ -1218,7 +1221,16 @@ again. Making a container again (`recreateServiceOn`: an update, a changed
 secret, Start on a gone container) gets the image first, then removes the
 old container; when the new one does not start, the one made is removed
 (its volumes stay), the service's row is marked failed, and the error says
-that Start makes it again once what stopped it is fixed.
+that Start makes it again once what stopped it is fixed. Once the new
+container runs, an MCP server the service registered is given the header
+its definition's `auth` names now, with the secret bound to that variable
+now (`followRegisteredAuth`, `servers.ts setMcpHeaderCredential`): a
+definition that gained `auth` (a linked repository's, say) or a variable
+bound to another secret reaches the server with the remake that runs it,
+and its tools are read again. A definition with no `auth` leaves the
+server's credential as it is (the owner may have set one), and so does a
+server the owner moved to OAuth. An API endpoint keeps the header it was
+made with, since its header shapes its tools: relaunch it for another.
 
 **Status** is read only inside a request: the service's page when it opens
 (and on Check), `check_server` (for the service and for the server it
@@ -1691,6 +1703,11 @@ the GitHub client and sync itself build on it.
   services needed the new format, so every other kind is still written as
   format 2 (`FORMAT_OF_KIND`): a PCP that reads format 2 reads them, and
   leaves `services/` alone as it does any folder its layout has no kind for.
+  Format 4 added `auth` on a service's MCP server (`registers: {kind: mcp,
+…, auth}`). Only a service document that has one is written as format 4
+  (`serviceFormat`), so an older PCP reads every other one and refuses that
+  one as written by a newer PCP rather than failing on an unknown key; a
+  format-3 document that names one is refused here too.
 - **Versions.** Each document carries `version`, a whole number: a skill's
   own version; for a server, endpoint or wrapper, `mcp_server.sync_version`
   (null reads as 1), which applying an item sets to the document's. PCP's

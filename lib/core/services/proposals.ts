@@ -23,6 +23,7 @@ import {
   isLoopback,
   parsePublish,
   parseServiceDefinition,
+  registerAuth,
   type ServiceDefinition,
   type ServicePublish,
 } from "./definition"
@@ -242,8 +243,7 @@ export async function prepareServiceProposal(
     })
   }
 
-  const auth =
-    definition.registers.kind === "openapi" ? definition.registers.auth : null
+  const auth = registerAuth(definition.registers)
 
   // What it registers is read once it runs: its tools are named by
   // pattern. The service's own tools are the owner's to set.
@@ -259,7 +259,7 @@ export async function prepareServiceProposal(
 
   if (auth && !given.has(auth.env)) {
     throw invalid(
-      `The endpoint sends ${auth.env}'s secret in ${auth.header}: name it in env_secrets.`,
+      `The ${definition.registers.kind === "mcp" ? "MCP server" : "endpoint"} sends ${auth.env}'s secret in ${auth.header}: name it in env_secrets.`,
     )
   }
 
@@ -332,7 +332,7 @@ export function describeServiceAsk(ask: ServiceChangeAsk): {
     registers.kind === "openapi"
       ? `PCP adds an API endpoint from ${registers.specPath} on port ${registers.port}${registers.auth ? `, sending ${registers.auth.env}'s secret in ${registers.auth.header}` : ""}`
       : registers.kind === "mcp"
-        ? `PCP adds an MCP server at ${registers.path} on port ${registers.port}`
+        ? `PCP adds an MCP server at ${registers.path} on port ${registers.port}${registers.auth ? `, sending ${registers.auth.env}'s secret in ${registers.auth.header}` : ""}`
         : "PCP adds no server for it",
     ...(ask.instanceOf
       ? [

@@ -35,6 +35,7 @@ import {
   deleteServer,
   getServer,
   normalizeNameAndDescription,
+  setMcpHeaderCredential,
   setServerStatus,
   slugify,
   uniqueSlug,
@@ -53,6 +54,7 @@ import {
   readPublish,
   readReach,
   readServiceDefinition,
+  registerAuth,
   serviceDefinitionHash,
   serviceOrigin,
   tunnelAddress,
@@ -793,12 +795,22 @@ async function register(
     "tunnel",
   )!
 
+  const auth = registerAuth(registers)
+  const header = auth
+    ? {
+        authType: "header" as const,
+        authHeaderName: auth.header,
+        authValueTemplate: auth.template,
+        authSecretId: prepared.env[auth.env],
+      }
+    : { authType: "none" as const }
+
   if (registers.kind === "mcp") {
     const { id } = await createServer(ctx, {
       name: prepared.name,
       description: prepared.description,
       url: `${origin}${registers.path}`,
-      authType: "none",
+      ...header,
       // The owner's own machine: a private address is what it is.
       publicOnly: false,
     })
@@ -806,7 +818,6 @@ async function register(
     return { id, kind: "mcp" }
   }
 
-  const auth = registers.auth
   const { id, sync } = await createEndpoint(ctx, {
     name: prepared.name,
     description: prepared.description,
@@ -816,14 +827,7 @@ async function register(
     readOnly: false,
     publicOnly: false,
     reach: { dial: serviceDial(prepared.publish, sshHost, forwardOf(access)) },
-    ...(auth
-      ? {
-          authType: "header" as const,
-          authHeaderName: auth.header,
-          authValueTemplate: auth.template,
-          authSecretId: prepared.env[auth.env],
-        }
-      : { authType: "none" as const }),
+    ...header,
   })
 
   if (sync.status !== "ok") {
@@ -1403,6 +1407,8 @@ export async function recreateServiceOn(
     throw await failedRecreate(loaded, access, error)
   }
 
+  await followRegisteredAuth(loaded)
+
   const health = await waitHealthy(
     access.host,
     loaded.engine,
@@ -1429,6 +1435,40 @@ export async function recreateServiceOn(
   }
 
   return status
+}
+
+/**
+ * The MCP server a service registered sends the header its definition
+ * names now, with the secret bound to that variable now: a remake (an
+ * update to a definition that gained `auth`, a variable bound to another
+ * secret) brings one registered before in step with the container just
+ * made. A definition that names no header leaves the server's credential
+ * as it is (the owner may have set one), and so does a server the owner
+ * moved to OAuth. An API endpoint keeps the header it was made with: its
+ * header shapes its tools.
+ */
+async function followRegisteredAuth(loaded: LoadedService): Promise<void> {
+  const registers = loaded.definition.registers
+  const auth = registers.kind === "mcp" ? registers.auth : undefined
+  const secretId = auth ? loaded.env[auth.env] : undefined
+  const id = loaded.spec.registeredId
+
+  if (!auth || !secretId || !id) {
+    return
+  }
+
+  try {
+    await setMcpHeaderCredential(loaded.server.vaultId, id, {
+      headerName: auth.header,
+      valueTemplate: auth.template,
+      secretId,
+    })
+  } catch (error) {
+    throw new PcpError(
+      "state",
+      `${loaded.server.name} was made again, but the MCP server it serves still sends what it did: ${error instanceof Error ? error.message : String(error)}`,
+    )
+  }
 }
 
 /**

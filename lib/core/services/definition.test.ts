@@ -94,6 +94,36 @@ describe("parseServiceDefinition", () => {
       { registers: { kind: "exec", port: 5001 } },
     ],
     [
+      "an MCP server's secret from no variable",
+      {
+        registers: {
+          kind: "mcp",
+          port: 5001,
+          path: "/mcp",
+          auth: {
+            env: "NOPE",
+            header: "Authorization",
+            template: "Bearer {{secret}}",
+          },
+        },
+      },
+    ],
+    [
+      "an MCP server's header value without the secret",
+      {
+        registers: {
+          kind: "mcp",
+          port: 5001,
+          path: "/mcp",
+          auth: {
+            env: "DOCLING_API_KEY",
+            header: "X-Api-Key",
+            template: "key",
+          },
+        },
+      },
+    ],
+    [
       "an endpoint secret from no variable",
       {
         registers: {
@@ -198,6 +228,41 @@ describe("checkEnvBindings", () => {
     expect(() => checkEnvBindings({}, definition)).toThrow(/DOCLING_API_KEY/)
     expect(checkEnvBindings({ DOCLING_API_KEY: "s1" }, definition)).toEqual({
       DOCLING_API_KEY: "s1",
+    })
+  })
+
+  it("needs the variable an MCP server's header sends bound to a secret", () => {
+    const mcp = parseServiceDefinition({
+      ...BASE,
+      env: [{ name: "MCP_TOKEN" }],
+      registers: {
+        kind: "mcp",
+        port: 5001,
+        path: "/mcp",
+        auth: {
+          env: "MCP_TOKEN",
+          header: "Authorization",
+          template: "Bearer {{secret}}",
+        },
+      },
+    })
+
+    expect(mcp.registers).toEqual({
+      kind: "mcp",
+      port: 5001,
+      path: "/mcp",
+      auth: {
+        env: "MCP_TOKEN",
+        header: "Authorization",
+        template: "Bearer {{secret}}",
+      },
+    })
+    // Not required as a variable, but the MCP server sends it.
+    expect(() => checkEnvBindings({}, mcp)).toThrow(
+      /Choose the secret for MCP_TOKEN: the MCP server sends it in Authorization/,
+    )
+    expect(checkEnvBindings({ MCP_TOKEN: "s1" }, mcp)).toEqual({
+      MCP_TOKEN: "s1",
     })
   })
 

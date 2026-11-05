@@ -6,6 +6,19 @@ release, with a note in front of the answer ("addPatches was renamed to
 add_patches; use add_patches."); after that it is refused like any other
 unknown key.
 
+## Services: an MCP server a service registers can send a secret header
+
+No tool or argument was renamed. A service's definition (`register_server`
+with kind `service`) takes `auth` on `registers` of kind `mcp` as kind
+`openapi` has: `{"env", "header", "template"}`, the variable whose secret
+the MCP server sends, in that header, the value written with `{{secret}}`.
+The variable is named in `env_secrets` like any other, and the request
+shows the header. In a linked repository, a service's document that has
+one is written as `pcp_format: 4`; a PCP before this one refuses that
+document as written by a newer PCP (every other document is written as
+before). A running service's MCP server takes a definition's new `auth`
+when the service is updated or made again.
+
 ## Browser: time limits, a busy tab, and tabs that close themselves
 
 - `tabs` open, `navigate` and `snapshot` now wait 10 seconds in all unless
