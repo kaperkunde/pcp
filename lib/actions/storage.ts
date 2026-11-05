@@ -37,6 +37,8 @@ function inputFrom(formData: FormData): StorageRootInput {
     writeAs: field(formData, "writeAs"),
     umask: field(formData, "umask"),
     readOnly: field(formData, "readOnly") === "on",
+    // Adding one only; a saved folder keeps its mode.
+    mode: field(formData, "mode"),
   }
 }
 

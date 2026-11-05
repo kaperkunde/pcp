@@ -12,12 +12,20 @@ import {
 } from "@/components/server-form-parts"
 import { Input } from "@/components/ui/input"
 import { Field } from "@/components/ui/label"
+import { SegmentedControl } from "@/components/ui/segmented-control"
 import { SwitchRow } from "@/components/ui/switch"
 import type { ServerActionResult } from "@/lib/actions/servers"
 import {
   createStorageRootAction,
   updateStorageRootAction,
 } from "@/lib/actions/storage"
+
+type FolderMode = "encrypted" | "plain"
+
+const MODES: ReadonlyArray<{ value: FolderMode; label: string }> = [
+  { value: "encrypted", label: "Encrypted" },
+  { value: "plain", label: "Plain" },
+]
 
 export type StorageFolderFormValues = {
   id?: string
@@ -72,6 +80,9 @@ export function StorageFolderForm({
   const [writeAs, setWriteAs] = useState(initial.writeAs)
   const [umask, setUmask] = useState(initial.umask)
   const [readOnly, setReadOnly] = useState(initial.readOnly)
+  // Adding only: encrypted unless you choose plain. A saved folder changes
+  // its mode by converting it, on its page.
+  const [mode, setMode] = useState<FolderMode>("encrypted")
   const differs = writeAs.trim() !== "" && writeAs.trim() !== login
 
   const ownership = (
@@ -174,6 +185,26 @@ export function StorageFolderForm({
             className="font-mono"
           />
         </Field>
+        {editing ? null : (
+          <div className="flex flex-col gap-1.5" data-testid="storage-mode">
+            <span className="text-sm leading-none font-medium">
+              Files are kept
+            </span>
+            <SegmentedControl<FolderMode>
+              name="mode"
+              legend="Files are kept"
+              options={MODES}
+              value={mode}
+              onValueChange={setMode}
+              className="self-start"
+            />
+            <p className="text-xs text-muted-foreground">
+              {mode === "encrypted"
+                ? "Encrypted: the SSH server holds only unreadable objects, under .pcp-store in the folder, and their names stay in PCP. Files already in the folder are not shown; you can encrypt them later on the folder's page."
+                : "Plain: the files as they are, readable by other apps on the server, such as Samba or Finder, and the files already there are shown. You can encrypt the folder later on its page."}
+            </p>
+          </div>
+        )}
         {readOnlySwitch}
       </FormSection>
       {editing ? (

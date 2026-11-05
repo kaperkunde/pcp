@@ -330,7 +330,9 @@ so in the summary; the bump itself waits for the request.
   folder on an SSH server PCP holds (backend `sftp`), or PCP's own store in
   its data folder (backend `local`, `<data>/storage/<server id>/`, one per
   vault, made by `ensureOwnStore` at setup and on a vault's first request,
-  never removed). Each is `plain` (the files as they are, for other apps
+  never removed). A storage folder the owner adds is `encrypted` unless
+  they choose plain on its add form (`newStoreMode`); one from before
+  stores stays plain until converted. Each is `plain` (the files as they are, for other apps
   too) or `encrypted`: opaque objects (`.pcp-store/<xx>/<random id>`) and
   an index in `storage_entry` (names, folders, sizes, times encrypted under
   the vault key as `storage_entry:<id>`; a name found by a keyed hash).

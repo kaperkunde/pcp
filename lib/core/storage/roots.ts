@@ -76,6 +76,12 @@ export type StorageRootInput = {
   /** As an octal text ("002") or a number; empty is 002. */
   umask?: string | number | null
   readOnly: boolean
+  /**
+   * Adding one only: how its files are kept. A new folder is encrypted
+   * unless the owner chose plain (files other apps read, such as Samba or
+   * Finder); a folder's mode changes afterwards only by converting it.
+   */
+  mode?: StoreMode | string | null
 }
 
 export type LoadedStorage = {
@@ -158,7 +164,26 @@ async function sshHost(ctx: VaultContext, hostId: string): Promise<McpServer> {
   return host
 }
 
-/** Adds a folder on an SSH server as a storage root, with its tools. */
+/** A new folder's mode: encrypted unless plain was chosen. */
+export function newStoreMode(raw: StorageRootInput["mode"]): StoreMode {
+  const mode = (raw ?? "").trim()
+
+  if (mode === "" || mode === "encrypted") {
+    return "encrypted"
+  }
+
+  if (mode === "plain") {
+    return "plain"
+  }
+
+  throw invalid("A folder's files are kept encrypted or plain.")
+}
+
+/**
+ * Adds a folder on an SSH server as a storage root, with its tools:
+ * encrypted by default, with a store key of its own, or plain where the
+ * owner chose it.
+ */
 export async function createStorageRoot(
   ctx: VaultContext,
   hostId: string,
@@ -166,6 +191,7 @@ export async function createStorageRoot(
 ): Promise<{ id: string }> {
   const host = await sshHost(ctx, hostId)
   const data = normalize(input)
+  const mode = newStoreMode(input.mode)
   const id = newId()
 
   await db().mcpServer.create({
@@ -184,6 +210,10 @@ export async function createStorageRoot(
           path: data.path,
           writeAs: data.writeAs,
           umask: data.umask,
+          mode,
+          ...(mode === "encrypted"
+            ? { storeKey: newWrappedStoreKey(ctx, id) }
+            : {}),
         },
       },
     },

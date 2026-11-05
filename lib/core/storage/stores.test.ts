@@ -386,6 +386,8 @@ describe("converting a folder on an SSH server", () => {
       name: "Scans",
       path: top,
       readOnly: false,
+      // A folder from before, with its files as they are.
+      mode: "plain",
     })
     return id
   }

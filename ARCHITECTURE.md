@@ -992,7 +992,10 @@ keep files in: a storage folder on one of the owner's SSH servers (backend
 `sftp`), or PCP's own store in its data folder (backend `local`,
 `<data>/storage/<server id>/`). Each is plain (the files as they are, which
 other apps such as Samba, Finder or the Files app read too) or encrypted
-(below), and the owner converts one either way. Everything below about a
+(below), and the owner converts one either way. A storage folder the owner
+adds is encrypted unless they choose plain on its add form (`newStoreMode`,
+with a store key made with it); one from before stores stays plain until
+they convert it. Everything below about a
 storage folder's SFTP and confinement holds for both modes; an encrypted
 store adds a layer between the tools and those files.
 

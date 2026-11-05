@@ -26,7 +26,8 @@ import {
   withStorageFolder,
 } from "../upstream"
 import { setupVault } from "../vault"
-import { createStorageRoot, updateStorageRoot } from "./roots"
+import { OBJECTS_FOLDER } from "./limits"
+import { createStorageRoot, loadStorageRoot, updateStorageRoot } from "./roots"
 
 // Storage roots end to end in the core: an SSH server the owner added and
 // checked, a folder on it (a temporary directory, served by the test
@@ -77,6 +78,14 @@ afterEach(async () => {
   fs.rmSync(base, { recursive: true, force: true })
 })
 
+/** Every file under a folder, by its full path. */
+function filesUnder(folder: string): string[] {
+  return fs
+    .readdirSync(folder, { recursive: true, withFileTypes: true })
+    .filter((entry) => entry.isFile())
+    .map((entry) => path.join(entry.parentPath, entry.name))
+}
+
 /** An SSH server the owner added, put PCP's key on and checked. */
 async function pinnedHost({ check = true } = {}) {
   const { id } = await createSshServer(ctx, {
@@ -94,7 +103,13 @@ async function addRoot({
   readOnly = false,
   umask = "002",
   check = true,
-}: { readOnly?: boolean; umask?: string; check?: boolean } = {}) {
+  mode = "plain",
+}: {
+  readOnly?: boolean
+  umask?: string
+  check?: boolean
+  mode?: string | null
+} = {}) {
   const hostId = await pinnedHost({ check })
   const { id } = await createStorageRoot(ctx, hostId, {
     name: "Scans",
@@ -102,6 +117,8 @@ async function addRoot({
     writeAs: "badpirate",
     umask,
     readOnly,
+    // These tests read the folder's files as they are.
+    mode,
   })
   return id
 }
@@ -176,6 +193,55 @@ describe("adding a storage folder", () => {
       refusal(await call(id, "save_file", { path: "a.txt", text: "x" })),
     ).toMatch(/read-only in PCP/)
     expect(fs.readdirSync(top)).toEqual([])
+  })
+
+  it("keeps a new folder's files encrypted unless plain was chosen", async () => {
+    // No mode, as a form that sends none: encrypted, with a key of its own.
+    const id = await addRoot({ mode: null })
+    expect((await loadStorageRoot(ctx, id)).root).toMatchObject({
+      mode: "encrypted",
+      backend: "sftp",
+    })
+    expect((await loadStorageRoot(ctx, id)).root.storeKey).not.toBeNull()
+
+    const saved = await call(id, "save_file", {
+      path: "secret-plan.txt",
+      text: "for the owner only",
+    })
+    expect(saved.isError, JSON.stringify(saved.content)).toBeFalsy()
+    // The server holds only objects: no name, no text.
+    expect(fs.readdirSync(top)).toEqual([OBJECTS_FOLDER])
+    const onDisk = filesUnder(path.join(top, OBJECTS_FOLDER))
+    expect(onDisk.length).toBeGreaterThan(0)
+    for (const file of onDisk) {
+      expect(path.basename(file)).not.toContain("secret-plan")
+      expect(fs.readFileSync(file).toString("latin1")).not.toContain(
+        "for the owner only",
+      )
+    }
+
+    const listed = await call(id, "list_folder", {})
+    expect(JSON.stringify(listed.content)).toContain("secret-plan.txt")
+  })
+
+  it("keeps a plain folder's files as they are, and refuses a mode it does not know", async () => {
+    const id = await addRoot({ mode: "plain" })
+    expect((await loadStorageRoot(ctx, id)).root).toMatchObject({
+      mode: "plain",
+      storeKey: null,
+    })
+    await call(id, "save_file", { path: "a.txt", text: "as it is" })
+    expect(fs.readFileSync(path.join(top, "a.txt"), "utf8")).toBe("as it is")
+
+    const hostId = await pinnedHost()
+    await expect(
+      createStorageRoot(ctx, hostId, {
+        name: "x",
+        path: "/srv",
+        readOnly: false,
+        mode: "scrambled",
+      }),
+    ).rejects.toThrow(/encrypted or plain/)
   })
 
   it("refuses a folder on anything but an SSH server, and a relative path", async () => {
