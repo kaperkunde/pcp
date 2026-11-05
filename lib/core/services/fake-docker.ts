@@ -57,7 +57,18 @@ export type FakeDockerState = {
   calls: string[][]
   /** Env files read by `run`. */
   envFiles: string[]
+  /** Named volumes on the host, made by `run` (or a test). */
+  volumes: string[]
   volumesRemoved: string[]
+  /**
+   * `run` makes the container (and its volumes) and then fails to start
+   * it with this error, as Docker does when a port is taken.
+   */
+  runFailsAfterCreate: string | null
+  /** `rm` of a container that is there fails with this error. */
+  failRm: string | null
+  /** `volume rm` fails with this error. */
+  failVolumeRm: string | null
 }
 
 export type FakeDocker = {
@@ -111,6 +122,11 @@ if (command === "version") {
     at += word === "--detach" ? 1 : 2
   }
   const label = (option("--label") || "").replace(/^pcp\.service=/, "") || null
+  for (const mount of volumes) { const volume = mount.split(":")[0]; if (!state.volumes.includes(volume)) state.volumes.push(volume) }
+  if (state.runFailsAfterCreate) {
+    state.containers[name] = { name, image, label, state: "created", exitCode: 0, health: null, args: args.slice(at + 1), publish, volumes, capAdd, devices, env }
+    fail(state.runFailsAfterCreate + "\n", 125)
+  }
   state.containers[name] = { name, image, label, state: state.runState, exitCode: state.runState === "exited" ? 1 : 0, health: state.runHealth, args: args.slice(at + 1), publish, volumes, capAdd, devices, env }
   out("c0ffee\n")
 } else if (command === "inspect") {
@@ -133,9 +149,21 @@ if (command === "version") {
   if (!c) fail("Error: No such container\n")
   c.state = "exited"; c.exitCode = 0
 } else if (command === "rm") {
-  delete state.containers[args[args.length - 1]]
+  const name = args[args.length - 1]
+  if (!state.containers[name]) fail("Error: No such container: " + name + "\n")
+  if (state.failRm) fail(state.failRm + "\n")
+  delete state.containers[name]
 } else if (command === "volume" && args[1] === "rm") {
-  state.volumesRemoved.push(...args.slice(2))
+  if (state.failVolumeRm) fail(state.failVolumeRm + "\n")
+  for (const volume of args.slice(2)) {
+    if (!state.volumes.includes(volume)) fail("Error: No such volume: " + volume + "\n")
+    state.volumes = state.volumes.filter((each) => each !== volume)
+    state.volumesRemoved.push(volume)
+  }
+} else if (command === "volume" && args[1] === "inspect") {
+  const volume = args[args.length - 1]
+  if (!state.volumes.includes(volume)) fail("Error: No such volume: " + volume + "\n")
+  out(JSON.stringify([{ Name: volume }]) + "\n")
 } else {
   fail("unknown command " + command + "\n")
 }
@@ -179,7 +207,11 @@ export function startFakeDocker({
     failPull: [],
     calls: [],
     envFiles: [],
+    volumes: [],
     volumesRemoved: [],
+    runFailsAfterCreate: null,
+    failRm: null,
+    failVolumeRm: null,
   }
   writeFileSync(stateFile, JSON.stringify(initial))
 

@@ -503,6 +503,89 @@ describe("launching a service", { timeout: 30_000 }, () => {
     expect(await db().serviceSpec.count()).toBe(0)
   })
 
+  it("takes the container and the volumes it made back when the engine cannot start it", async () => {
+    const hostId = await pinnedHost()
+    docker.update((state) => {
+      state.runFailsAfterCreate =
+        "Error response from daemon: driver failed programming external connectivity: Bind for 127.0.0.1:5001 failed: port is already allocated"
+    })
+
+    const failure = await launchService(
+      ctx,
+      await launchInput(hostId),
+      FAST,
+    ).catch((error: Error) => error)
+
+    expect(failure).toBeInstanceOf(Error)
+    const message = (failure as Error).message
+    expect(message).toMatch(/port is already allocated/)
+    expect(message).toMatch(
+      /PCP removed the container pcp-docs and the volume pcp-docs-data it made from Build box\./,
+    )
+    expect(docker.state().containers).toEqual({})
+    expect(docker.state().volumes).toEqual([])
+    expect(docker.state().volumesRemoved).toEqual(["pcp-docs-data"])
+    expect(await db().serviceSpec.count()).toBe(0)
+  })
+
+  it("keeps a volume that was there before, and says so", async () => {
+    const hostId = await pinnedHost()
+    docker.update((state) => {
+      state.volumes = ["pcp-docs-data"]
+      state.runFailsAfterCreate = "Error: port is already allocated"
+    })
+
+    const failure = await launchService(
+      ctx,
+      await launchInput(hostId),
+      FAST,
+    ).catch((error: Error) => error)
+
+    expect((failure as Error).message).toMatch(
+      /removed the container pcp-docs from Build box and kept the volume pcp-docs-data, which was there before/,
+    )
+    expect(docker.state().volumes).toEqual(["pcp-docs-data"])
+    expect(docker.state().volumesRemoved).toEqual([])
+  })
+
+  it("says what is left on the SSH server when the engine will not remove it", async () => {
+    const hostId = await pinnedHost()
+    docker.update((state) => {
+      state.runState = "exited"
+      state.failRm = "Error response from daemon: device or resource busy"
+    })
+
+    const failure = await launchService(
+      ctx,
+      await launchInput(hostId),
+      FAST,
+    ).catch((error: Error) => error)
+
+    expect((failure as Error).message).toMatch(/exited with code 1/)
+    expect((failure as Error).message).toMatch(
+      /could not take everything back on Build box \(Build box did not remove the container pcp-docs: Error response from daemon: device or resource busy\): remove the container pcp-docs and the volume pcp-docs-data there by hand/,
+    )
+    expect(await db().serviceSpec.count()).toBe(0)
+  })
+
+  it("quotes the first and the last of a long log", async () => {
+    const hostId = await pinnedHost()
+    docker.update((state) => {
+      state.runState = "exited"
+      state.logs = Array.from({ length: 50 }, (_, at) => `line ${at + 1}`)
+        .join("\n")
+        .concat("\n")
+    })
+
+    const message = await launchService(ctx, await launchInput(hostId), FAST)
+      .then(() => "")
+      .catch((error: Error) => error.message)
+
+    expect(message).toMatch(/Its first lines:\nline 1\n/)
+    expect(message).toMatch(/line 10\n…\nIts last lines:\nline 41\n/)
+    expect(message).not.toContain("line 25\n")
+  })
+
   it("takes everything back when what it serves cannot be registered", async () => {
     const hostId = await pinnedHost()
     answers["/openapi.json"] = { status: 404, body: "missing" }
@@ -898,6 +981,38 @@ describe("a running service", { timeout: 30_000 }, () => {
     expect((await readServiceStatus(ctx, service.id, PUBLIC)).upToDate).toBe(
       true,
     )
+  })
+
+  it("marks the service failed when its container cannot be made again, and says how to retry", async () => {
+    const { service } = await launched()
+    docker.update((state) => {
+      state.runFailsAfterCreate = "Error: port is already allocated"
+    })
+
+    const failure = await updateService(ctx, service.id, FAST).catch(
+      (error: Error) => error,
+    )
+
+    expect((failure as Error).message).toMatch(
+      /Docs service could not be made again: .*port is already allocated/,
+    )
+    expect((failure as Error).message).toMatch(
+      /Its old container is gone; its volumes and settings stay\..*Start on its page or its start tool makes it again/s,
+    )
+    // The container it made is taken out; the data stays.
+    expect(docker.state().containers).toEqual({})
+    expect(docker.state().volumes).toEqual(["pcp-docs-data"])
+    const row = await getServer(ctx, service.id)
+    expect(row.status).toBe("error")
+    expect(row.statusMessage).toMatch(/Start makes it again/)
+
+    // Once the port is free, Start makes it again.
+    docker.update((state) => {
+      state.runFailsAfterCreate = null
+    })
+    const status = await runServiceAction(ctx, service.id, "start", FAST)
+    expect(status.state).toBe("running")
+    expect((await getServer(ctx, service.id)).status).toBe("ok")
   })
 
   it("is removed on its own page only, with its container and what it served", async () => {

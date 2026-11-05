@@ -6,7 +6,7 @@ import type { VaultContext } from "./context"
 import { decryptString } from "./crypto"
 import { db } from "./db"
 import { createEndpoint, storedSpec } from "./endpoints"
-import { invalid } from "./errors"
+import { invalid, PcpError } from "./errors"
 import {
   buildGatewayServer,
   buildInstructions,
@@ -1479,6 +1479,39 @@ describe("proposing a service", () => {
       'The service is \\"docling-service\\"',
     )
     expect(JSON.stringify(done)).not.toContain("dk-typed-by-the-owner")
+  })
+
+  it("keeps the secret the owner typed when the launch fails, and says so", async () => {
+    const host = await sshServer()
+    await connectSeeing()
+    await register({
+      name: "Docling",
+      service: DEFINITION,
+      ssh_server: host.slug,
+      env_secrets: [{ name: "DOCLING_SERVE_API_KEY", secret: "Docling key" }],
+    })
+    const launch = executor.launchService
+    executor.launchService = async () => {
+      throw new PcpError(
+        "upstream",
+        "Build box did not start pcp-docling: port is already allocated",
+      )
+    }
+
+    try {
+      const done = await approve("dk-typed-by-the-owner")
+
+      expect(done.isError).toBe(true)
+      expect(JSON.stringify(done)).toContain("port is already allocated")
+      expect(JSON.stringify(done)).toContain(
+        'The secret you entered is kept in PCP as \\"Docling key\\"',
+      )
+      expect(await db().secret.count({ where: { name: "Docling key" } })).toBe(
+        1,
+      )
+    } finally {
+      executor.launchService = launch
+    }
   })
 
   it("reuses a secret the owner stored, by its name", async () => {

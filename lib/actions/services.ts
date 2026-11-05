@@ -74,6 +74,8 @@ export async function launchServiceAction(
   })
 
   if (result.status !== "ok" || !result.id) {
+    // A secret typed in for a launch that failed is kept: listed to choose.
+    revalidatePath("/servers/services/new")
     return result
   }
 

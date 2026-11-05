@@ -385,7 +385,16 @@ export async function runContainer(
   }
 }
 
-/** Removes the container (never its volumes, but when asked to). */
+/** What an engine says of a container or volume that is not there. */
+const GONE =
+  /no such (container|volume|object)|no container with name or id|no volume with name|not found/i
+
+/**
+ * Removes the container, and the named volumes asked for (never one that
+ * was not). One that is gone already is what was asked for; anything else
+ * the engine refuses (a volume in use, a daemon that does not answer) is
+ * an EngineError naming what is left on the SSH server.
+ */
 export async function removeContainer(
   host: ServiceHost,
   engine: ServiceEngine,
@@ -394,16 +403,74 @@ export async function removeContainer(
 ): Promise<void> {
   const exe = program(engine)
   const name = checkName(containerName)
-  const parts = [`${commandLine([exe, "rm", "--force", name])} >/dev/null 2>&1`]
+  const removed = await run(
+    host,
+    `${commandLine([exe, "rm", "--force", name])} >/dev/null`,
+  )
 
-  if (volumes.length > 0) {
-    parts.push(
-      `${commandLine([exe, "volume", "rm", ...volumes.map((volume) => volumeOnHost(name, volume))])} >/dev/null 2>&1`,
+  if (failed(removed) && !GONE.test(text(removed.stderr))) {
+    throw new EngineError(
+      `${host.name} did not remove the container ${name}: ${removed.timedOut ? "it took too long" : said(removed, [])}`,
     )
   }
 
-  // Gone already is what was asked for.
-  await run(host, `${parts.join("; ")}; true`)
+  const left: string[] = []
+
+  // One at a time: a volume that is gone does not hide another's failure.
+  for (const volume of volumes) {
+    const onHost = volumeOnHost(name, volume)
+    const result = await run(
+      host,
+      `${commandLine([exe, "volume", "rm", onHost])} >/dev/null`,
+    )
+
+    if (failed(result) && !GONE.test(text(result.stderr))) {
+      left.push(
+        `${onHost} (${result.timedOut ? "it took too long" : said(result, [])})`,
+      )
+    }
+  }
+
+  if (left.length > 0) {
+    throw new EngineError(
+      `${host.name} removed the container ${name} but not the volume${left.length === 1 ? "" : "s"} ${left.join(", ")}`,
+    )
+  }
+}
+
+/**
+ * Which of a container's named volumes are on the SSH server already (a
+ * service removed before with its data kept): a launch that fails takes
+ * back only the volumes it made itself.
+ */
+export async function existingVolumes(
+  host: ServiceHost,
+  engine: ServiceEngine,
+  containerName: string,
+  volumes: string[],
+): Promise<string[]> {
+  if (volumes.length === 0) {
+    return []
+  }
+
+  const exe = program(engine)
+  const name = checkName(containerName)
+  const script = volumes
+    .map(
+      (volume, at) =>
+        `if ${commandLine([exe, "volume", "inspect", volumeOnHost(name, volume)])} >/dev/null 2>&1; then echo ${at}; fi`,
+    )
+    .join("\n")
+  const result = await run(host, script)
+
+  if (failed(result)) {
+    throw new EngineError(
+      `${host.name} could not list ${name}'s volumes: ${said(result, [])}`,
+    )
+  }
+
+  const found = new Set(text(result.stdout).trim().split(/\s+/))
+  return volumes.filter((_, at) => found.has(String(at)))
 }
 
 export type ContainerAction = "start" | "stop" | "restart"

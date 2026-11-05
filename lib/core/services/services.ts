@@ -53,6 +53,7 @@ import {
   serviceDefinitionHash,
   serviceOrigin,
   tunnelAddress,
+  volumeOnHost,
   type ServiceDefinition,
   type ServiceEnvBindings,
   type ServicePlainValues,
@@ -65,6 +66,7 @@ import {
   containerLogs,
   detectEngine,
   EngineError,
+  existingVolumes,
   inspectContainer,
   pullImage,
   removeContainer,
@@ -509,16 +511,31 @@ export async function launchServiceOn(
     publish: prepared.publish,
   }
 
+  // Nothing is on the SSH server yet that a failure here would leave.
   await engineCall(() =>
     pullImage(host, found.engine, prepared.definition.image),
   )
-  await engineCall(() => runContainer(host, found.engine, spec, env))
+
+  // Volumes there already (a service removed before, its data kept) stay
+  // whatever happens; only the ones this launch makes are taken back.
+  const volumeNames = prepared.definition.volumes.map((volume) => volume.name)
+  const kept = await engineCall(() =>
+    existingVolumes(host, found.engine, prepared.containerName, volumeNames),
+  )
+  const madeVolumes = volumeNames.filter((volume) => !kept.includes(volume))
 
   let registeredId: string | null = null
   let made = false
   let credentialId: string | null = null
+  // Whether the error already quotes the container's lines.
+  let quoted = false
 
   try {
+    // `run --detach` makes the container and then starts it: when the
+    // start fails (a port in use), the container and its volumes are
+    // there, and are taken back below with everything else.
+    await engineCall(() => runContainer(host, found.engine, spec, env))
+
     const health = await waitHealthy(
       host,
       found.engine,
@@ -528,8 +545,9 @@ export async function launchServiceOn(
     )
 
     if (!health.ok) {
+      quoted = true
       throw new EngineError(
-        `${prepared.name} did not become healthy: ${health.detail}${await lastLines(host, found.engine, prepared.containerName, env.redact)}`,
+        `${prepared.name} did not become healthy: ${health.detail}${await logExcerpt(host, found.engine, prepared.containerName, env.redact)}`,
       )
     }
 
@@ -619,15 +637,31 @@ export async function launchServiceOn(
       exitId,
     }
   } catch (error) {
-    const undone = [
-      `removed the container ${prepared.containerName}${prepared.definition.volumes.length > 0 ? " and its volumes" : ""} from ${host.name}`,
-    ]
+    // Read before the container goes: what it wrote is why, often.
+    const lines = quoted
+      ? ""
+      : await logExcerpt(host, found.engine, prepared.containerName, env.redact)
+    const undone: string[] = []
+    const name = prepared.containerName
+    const volumesWord = (list: string[]) =>
+      `the volume${list.length === 1 ? "" : "s"} ${list.map((volume) => volumeOnHost(name, volume)).join(", ")}`
 
-    await removeContainer(host, found.engine, prepared.containerName, {
-      volumes: prepared.definition.volumes.map((volume) => volume.name),
-    }).catch(() => {
-      undone[0] = `could not remove the container ${prepared.containerName} from ${host.name}: remove it there by hand`
-    })
+    try {
+      await removeContainer(host, found.engine, name, { volumes: madeVolumes })
+      undone.push(
+        `removed the container ${name}${madeVolumes.length > 0 ? ` and ${volumesWord(madeVolumes)} it made` : ""} from ${host.name}`,
+      )
+    } catch (removal) {
+      undone.push(
+        `could not take everything back on ${host.name} (${removal instanceof Error ? removal.message : String(removal)}): remove the container ${name}${madeVolumes.length > 0 ? ` and ${volumesWord(madeVolumes)}` : ""} there by hand`,
+      )
+    }
+
+    if (kept.length > 0) {
+      undone.push(
+        `kept ${volumesWord(kept)}, which ${kept.length === 1 ? "was" : "were"} there before`,
+      )
+    }
 
     if (registeredId) {
       await deleteServer(ctx, registeredId).catch(() => {})
@@ -645,12 +679,12 @@ export async function launchServiceOn(
     }
 
     const reason = makeRedactor(env.redact).text(
-      error instanceof Error ? error.message : String(error),
+      `${error instanceof Error ? error.message : String(error)}${lines}`,
     )
 
     throw new PcpError(
       isPcpError(error) ? error.code : "upstream",
-      `${reason}\nPCP ${undone.join(" and ")}.`.slice(0, 2000),
+      `${reason}\nPCP ${undone.join(" and ")}.`.slice(0, 4000),
     )
   }
 }
@@ -1047,7 +1081,12 @@ async function waitHealthy(
   }
 }
 
-async function lastLines(
+/**
+ * What the container wrote, for a message about why it failed: its first
+ * and last lines (scrubbed), or nothing when it wrote none or cannot be
+ * read. A container that was made and never started has none.
+ */
+async function logExcerpt(
   host: ServiceHost,
   engine: ServiceEngine,
   containerName: string,
@@ -1058,13 +1097,32 @@ async function lastLines(
       host,
       engine,
       containerName,
-      { lines: 20 },
+      { lines: EXCERPT_READ_LINES },
       redact,
     )
-    return text.trim() ? `. Its last lines:\n${text.trim().slice(-2000)}` : ""
+    return excerptOf(text)
   } catch {
     return ""
   }
+}
+
+/** Lines read for an excerpt, and how many of each end it shows. */
+const EXCERPT_READ_LINES = 200
+const EXCERPT_LINES = 10
+
+/** The first and last lines of what a container wrote, bounded. */
+export function excerptOf(text: string): string {
+  const lines = text.trim() ? text.trim().split(/\r?\n/) : []
+
+  if (lines.length === 0) {
+    return ""
+  }
+
+  if (lines.length <= EXCERPT_LINES * 2) {
+    return `. Its lines:\n${lines.join("\n").slice(-3000)}`
+  }
+
+  return `. Its first lines:\n${lines.slice(0, EXCERPT_LINES).join("\n").slice(0, 1500)}\n…\nIts last lines:\n${lines.slice(-EXCERPT_LINES).join("\n").slice(-1500)}`
 }
 
 export type ServiceHealth = "healthy" | "unhealthy" | "starting" | "unchecked"
@@ -1278,23 +1336,31 @@ export async function recreateServiceOn(
   const name = loaded.spec.containerName
   const reach: ServiceReach = access.forward ? "tunnel" : loaded.reach
 
-  await engineCall(async () => {
-    await pullImage(access.host, loaded.engine, loaded.definition.image)
-    await removeContainer(access.host, loaded.engine, name)
-    await runContainer(
-      access.host,
-      loaded.engine,
-      {
-        serviceId: loaded.server.id,
-        containerName: name,
-        definition: loaded.definition,
-        publish: loaded.publish,
-      },
-      access.env,
-    )
-  })
-
+  // The image first: when it cannot be had, the container runs on as it was.
+  await engineCall(() =>
+    pullImage(access.host, loaded.engine, loaded.definition.image),
+  )
+  await engineCall(() => removeContainer(access.host, loaded.engine, name))
   await recordIntent(loaded, "running")
+
+  try {
+    await engineCall(() =>
+      runContainer(
+        access.host,
+        loaded.engine,
+        {
+          serviceId: loaded.server.id,
+          containerName: name,
+          definition: loaded.definition,
+          publish: loaded.publish,
+        },
+        access.env,
+      ),
+    )
+  } catch (error) {
+    throw await failedRecreate(loaded, access, error)
+  }
+
   const health = await waitHealthy(
     access.host,
     loaded.engine,
@@ -1316,11 +1382,57 @@ export async function recreateServiceOn(
   if (!health.ok) {
     throw new PcpError(
       "upstream",
-      `${loaded.server.name} was made again but did not become healthy: ${health.detail}${await lastLines(access.host, loaded.engine, name, access.env.redact)}`,
+      `${loaded.server.name} was made again but did not become healthy: ${health.detail}${await logExcerpt(access.host, loaded.engine, name, access.env.redact)}`,
     )
   }
 
   return status
+}
+
+/**
+ * The old container is gone and the new one did not start (a port taken
+ * since, an engine that refused): the one made is taken out again (its
+ * volumes, the service's data, stay), the service is marked failed on its
+ * row, and the error says so and how to make it again.
+ */
+async function failedRecreate(
+  loaded: LoadedService,
+  access: ServiceAccess,
+  error: unknown,
+): Promise<PcpError> {
+  const name = loaded.spec.containerName
+  const lines = await logExcerpt(
+    access.host,
+    loaded.engine,
+    name,
+    access.env.redact,
+  )
+  const left = await removeContainer(access.host, loaded.engine, name).then(
+    () => "",
+    (removal: unknown) =>
+      ` PCP could not take out the container it made (${removal instanceof Error ? removal.message : String(removal)}): remove ${name} on ${access.host.name} by hand first.`,
+  )
+  const reason = makeRedactor(access.env.redact).text(
+    `${error instanceof Error ? error.message : String(error)}${lines}`,
+  )
+  const message =
+    `${loaded.server.name} could not be made again: ${reason}\nIts old container is gone; its volumes and settings stay.${left} Once what stopped it is fixed (a port in use on ${access.host.name}, say), Start on its page or its start tool makes it again.`.slice(
+      0,
+      4000,
+    )
+
+  // The row says it first, within what a status line keeps.
+  const said = makeRedactor(access.env.redact).text(
+    error instanceof Error ? error.message : String(error),
+  )
+  await setServerStatus(
+    loaded.server.id,
+    "error",
+    `${loaded.server.name} could not be made again and has no container now: Start makes it again once what stopped it is fixed. ${said}`,
+    { lastSyncedAt: new Date() },
+  ).catch(() => {})
+
+  return new PcpError(isPcpError(error) ? error.code : "upstream", message)
 }
 
 /**

@@ -1,6 +1,6 @@
 import type { VaultContext } from "@/lib/core/context"
-import { invalid } from "@/lib/core/errors"
-import { createSecret, deleteSecret } from "@/lib/core/secrets"
+import { invalid, isPcpError, PcpError } from "@/lib/core/errors"
+import { createSecret } from "@/lib/core/secrets"
 import { DEFAULT_PUBLISH_ADDRESS } from "@/lib/core/services/definition"
 
 import { field, fields } from "./action-state"
@@ -107,7 +107,9 @@ export function publishFrom(formData: FormData) {
 
 /**
  * Runs a launch with the new secrets typed in on its form saved first and
- * bound to their variables; when the launch fails, they are deleted again.
+ * bound to their variables. When the launch fails they are kept, and the
+ * error says under which name, so nothing the owner typed is dropped
+ * unseen: they choose it when they try again.
  */
 export async function withNewSecrets<T>(
   ctx: VaultContext,
@@ -115,26 +117,38 @@ export async function withNewSecrets<T>(
   env: Record<string, string>,
   launch: (env: Record<string, string>) => Promise<T>,
 ): Promise<T> {
-  const made: string[] = []
+  const bound = { ...env }
+  const made: Array<{ variable: string; name: string }> = []
+
+  for (const secret of newSecretsFrom(formData)) {
+    const { id } = await createSecret(ctx, {
+      name: secret.name,
+      value: secret.value,
+    })
+    made.push({ variable: secret.variable, name: secret.name.trim() })
+    bound[secret.variable] = id
+  }
 
   try {
-    const bound = { ...env }
-
-    for (const secret of newSecretsFrom(formData)) {
-      const { id } = await createSecret(ctx, {
-        name: secret.name,
-        value: secret.value,
-      })
-      made.push(id)
-      bound[secret.variable] = id
-    }
-
     return await launch(bound)
   } catch (error) {
-    for (const id of made) {
-      await deleteSecret(ctx, id).catch(() => {})
+    if (made.length === 0 || !isPcpError(error)) {
+      throw error
     }
 
-    throw error
+    throw new PcpError(error.code, `${error.message}\n${keptSecrets(made)}`)
   }
+}
+
+/** The secrets a failed launch kept, in words. */
+export function keptSecrets(
+  made: Array<{ variable: string; name: string }>,
+): string {
+  const named = made
+    .map((secret) => `"${secret.name}" (for ${secret.variable})`)
+    .join(" and ")
+
+  return made.length === 1
+    ? `The secret you typed is kept in PCP as ${named}: choose it when you try again, or delete it on the Secrets page.`
+    : `The secrets you typed are kept in PCP as ${named}: choose them when you try again, or delete them on the Secrets page.`
 }
