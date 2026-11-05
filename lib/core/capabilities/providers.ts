@@ -13,10 +13,22 @@ import { capability, type CapabilityId } from "./list"
  *   field does (a multipart upload's `files`): the handle goes in as it is;
  * - a string of base64 (`content_base64`, `image_base64`): the handle goes
  *   in where the string would, and PCP puts the file there as base64;
- * - a path in the provider's own folder (`pdf_path`, `input_path`), on a
- *   server that keeps files by the #92 convention: put_file(file_path,
- *   content_base64) first, the tool on that path, and get_file(file_path)
- *   for what it wrote (`output_path`), which comes back as a handle.
+ * - a path in the provider's own folder (`pdf_path`, `input_path`), through
+ *   a file step (`FileStep`): put the file there first, run the tool on
+ *   that path, and get what it wrote (`output_path`) back as a handle.
+ *
+ * The file step is found by its tools' shape, never by their names alone:
+ * - "service": the server was registered by a service whose definition
+ *   names a files folder, and the token sees that service's own put_file
+ *   (a kept file's handle, a `path` relative to the folder, `overwrite`)
+ *   and get_file (`path`): PCP copies the file in with the engine, nothing
+ *   goes through the MCP server as base64, and the path the provider's
+ *   tools take is the one put_file answers. Preferred where it is there.
+ * - "mcp": the server's own put_file(file_path, content_base64) and
+ *   get_file(file_path), the #92 convention.
+ * A tool by one of those names with any other shape is no file step. The
+ * service family's own tools (status, logs, put_file, …) only ever serve
+ * as a step: never a provider by themselves.
  */
 
 export type OperationId =
@@ -40,6 +52,8 @@ export type CandidateTool = {
   tier: ToolTier
   /** Its input schema, parsed; anything else counts as none. */
   schema: unknown
+  /** Its server's kind: a service's own tools ("service") are no provider. */
+  kind?: string
 }
 
 /** Where a file goes in a provider's call. */
@@ -48,8 +62,15 @@ export type FileSlot =
   | { kind: "base64"; path: string[] }
   | { kind: "path"; path: string[]; many: boolean }
 
-/** The file step on a provider's server: put_file and get_file. */
+/**
+ * The file step for a provider on paths: put_file and get_file, on its own
+ * server ("mcp", the #92 convention) or on the service that registered it
+ * ("service", PCP's own service family).
+ */
 export type FileStep = {
+  kind: "mcp" | "service"
+  /** The server put_file and get_file are on, by its short name. */
+  server: string
   put: string
   get: string
   /** put_file takes overwrite: a second run replaces what the first put. */
@@ -411,7 +432,21 @@ function slotsOf(props: Record<string, Prop>): Slots {
   return slots
 }
 
-/** The file step a server offers, when its tools follow the convention. */
+/** A property that is a string, by its schema. */
+function isString(prop: Prop | undefined): boolean {
+  return !!prop && typesOf(prop.schema).includes("string")
+}
+
+/** A property that is a boolean, by its schema. */
+function isBoolean(prop: Prop | undefined): boolean {
+  return !!prop && typesOf(prop.schema).includes("boolean")
+}
+
+/**
+ * The file step a server's own tools offer, by their shape: put_file
+ * (string file_path and content_base64) and get_file (string file_path),
+ * the #92 convention. A same-named pair of another shape is none.
+ */
 export function fileStepOf(tools: CandidateTool[]): FileStep | null {
   const put = tools.find((tool) => tool.tool === "put_file")
   const get = tools.find((tool) => tool.tool === "get_file")
@@ -423,12 +458,65 @@ export function fileStepOf(tools: CandidateTool[]): FileStep | null {
   const putProps = propsOf(put.schema).props
   const getProps = propsOf(get.schema).props
 
-  if (!putProps.file_path || !putProps.content_base64 || !getProps.file_path) {
+  if (
+    !isString(putProps.file_path) ||
+    !isString(putProps.content_base64) ||
+    !isString(getProps.file_path)
+  ) {
     return null
   }
 
-  return { put: put.tool, get: get.tool, overwrite: !!putProps.overwrite }
+  return {
+    kind: "mcp",
+    server: put.server,
+    put: put.tool,
+    get: get.tool,
+    overwrite: isBoolean(putProps.overwrite),
+  }
 }
+
+/**
+ * The file step a service's own tools offer (services/tools.ts), by their
+ * shape: put_file (a kept file's handle in `file`, a string `path` in its
+ * files folder, `overwrite`) and get_file (a string `path`). Only a
+ * service's tools count: another server's same-named pair is no such step.
+ */
+export function serviceFileStepOf(tools: CandidateTool[]): FileStep | null {
+  const put = tools.find(
+    (tool) => tool.tool === "put_file" && tool.kind === "service",
+  )
+  const get = tools.find(
+    (tool) => tool.tool === "get_file" && tool.kind === "service",
+  )
+
+  if (!put || !get) {
+    return null
+  }
+
+  const putProps = propsOf(put.schema).props
+  const getProps = propsOf(get.schema).props
+
+  if (
+    !putProps.file ||
+    !isHandleSchema(putProps.file.schema) ||
+    !isString(putProps.path) ||
+    !isBoolean(putProps.overwrite) ||
+    !isString(getProps.path)
+  ) {
+    return null
+  }
+
+  return {
+    kind: "service",
+    server: put.server,
+    put: put.tool,
+    get: get.tool,
+    overwrite: true,
+  }
+}
+
+/** The tools a file step uses, never a provider by themselves. */
+const FILE_STEP_TOOLS = new Set(["put_file", "get_file"])
 
 function textOf(tool: CandidateTool): string {
   return [tool.tool.replace(/_/g, " "), tool.title ?? "", tool.description]
@@ -536,12 +624,15 @@ function covers(path: string[], filled: string[][]): boolean {
 /**
  * The providers of one operation among the token's tools, best first: one
  * per server (its best tool), each with how to call it. `items` names the
- * common item each server was launched from, where it was.
+ * common item each server was launched from, where it was; `services` the
+ * service with a files folder that registered a server, by the server's id
+ * and the service's, whose own file step that server's tools then use.
  */
 export function findProviders(
   operation: OperationId,
   tools: CandidateTool[],
   items: ReadonlyMap<string, string> = new Map(),
+  services: ReadonlyMap<string, string> = new Map(),
 ): Provider[] {
   const op = OPERATIONS[operation]
   const itemNames = new Set(
@@ -556,10 +647,18 @@ export function findProviders(
   const best = new Map<string, Provider>()
 
   for (const [serverId, own] of byServer) {
-    const step = fileStepOf(own)
+    // A service's own tools are its family's: no capability's provider.
+    if (own.some((tool) => tool.kind === "service")) {
+      continue
+    }
+
+    const serviceId = services.get(serverId)
+    const step =
+      (serviceId ? serviceFileStepOf(byServer.get(serviceId) ?? []) : null) ??
+      fileStepOf(own)
 
     for (const tool of own) {
-      if (step && (tool.tool === step.put || tool.tool === step.get)) {
+      if (FILE_STEP_TOOLS.has(tool.tool)) {
         continue
       }
 
@@ -641,9 +740,13 @@ export function providersOf(
   id: CapabilityId,
   tools: CandidateTool[],
   items: ReadonlyMap<string, string> = new Map(),
+  services: ReadonlyMap<string, string> = new Map(),
 ): Partial<Record<OperationId, Provider[]>> {
   return Object.fromEntries(
-    operationsOf(id).map((op) => [op, findProviders(op, tools, items)]),
+    operationsOf(id).map((op) => [
+      op,
+      findProviders(op, tools, items, services),
+    ]),
   )
 }
 
@@ -652,8 +755,9 @@ export function hasProvider(
   id: CapabilityId,
   tools: CandidateTool[],
   items: ReadonlyMap<string, string> = new Map(),
+  services: ReadonlyMap<string, string> = new Map(),
 ): boolean {
-  return Object.values(providersOf(id, tools, items)).some(
+  return Object.values(providersOf(id, tools, items, services)).some(
     (found) => (found?.length ?? 0) > 0,
   )
 }

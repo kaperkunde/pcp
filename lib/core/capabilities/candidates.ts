@@ -13,8 +13,9 @@ import {
 
 /**
  * The token's tools as provider detection reads them (providers.ts): the
- * ones it can call or ask for, with their input schemas, and for each
- * server the common item it was launched from. The browser's own tools
+ * ones it can call or ask for, with their input schemas and their server's
+ * kind, and for each server the common item it was launched from and the
+ * service with a files folder that registered it. The browser's own tools
  * never count; a blocked tool is not there.
  */
 
@@ -69,20 +70,26 @@ export async function candidateTools(
       access: tool.access === "allowed" ? "allowed" : "ask",
       tier: tool.tier,
       schema,
+      kind: server.kind,
     }
   })
 }
 
 /**
- * The common item each of these servers was launched from, by the image
- * or source tag of the service that registered it: the second signal.
+ * What the services that registered these servers say of them: the common
+ * item each was launched from, by its image or source tag (the second
+ * signal), and the service whose definition names a files folder, by the
+ * server's id (its own put_file and get_file are the file step there).
  */
-export async function serverItems(
+export async function serverOrigins(
   ctx: VaultContext,
   serverIds: string[],
-): Promise<Map<string, string>> {
+): Promise<{ items: Map<string, string>; services: Map<string, string> }> {
+  const items = new Map<string, string>()
+  const services = new Map<string, string>()
+
   if (serverIds.length === 0) {
-    return new Map()
+    return { items, services }
   }
 
   const specs = await db().serviceSpec.findMany({
@@ -90,26 +97,33 @@ export async function serverItems(
       registeredId: { in: serverIds },
       server: { vaultId: ctx.vaultId },
     },
-    select: { registeredId: true, definition: true },
+    select: { serverId: true, registeredId: true, definition: true },
   })
-  const found = new Map<string, string>()
 
   for (const spec of specs) {
+    if (!spec.registeredId) {
+      continue
+    }
+
     try {
       const definition = readServiceDefinition(spec.definition)
       const item = itemOfImage(
         `${definition.image ?? ""} ${definition.source ?? ""}`,
       )
 
-      if (item && spec.registeredId) {
-        found.set(spec.registeredId, item.name)
+      if (item) {
+        items.set(spec.registeredId, item.name)
+      }
+
+      if (definition.files) {
+        services.set(spec.registeredId, spec.serverId)
       }
     } catch {
       // A stored definition that no longer reads says nothing.
     }
   }
 
-  return found
+  return { items, services }
 }
 
 /** A capability's providers among the token's servers, by operation. */
@@ -124,9 +138,9 @@ export async function capabilityProviders(
     return {}
   }
 
-  const items = await serverItems(ctx, [
+  const { items, services } = await serverOrigins(ctx, [
     ...new Set(tools.map((tool) => tool.serverId)),
   ])
 
-  return providersOf(id, tools, items)
+  return providersOf(id, tools, items, services)
 }

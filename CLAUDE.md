@@ -450,8 +450,10 @@ so in the summary; the bump itself waits for the request.
   provider's, a tool among the token's own found by words in its name,
   description or arguments (`providers.ts`, pure, never a vendor's name;
   the common item a server was launched from only ranks it), called how its
-  schema says (a handle, base64, or the #92 file step `put_file` → tool →
-  `get_file`). Every call goes through `gateway.ts forwardCall` (as
+  schema says (a handle, base64, or a file step `put_file` → tool →
+  `get_file`, found by its tools' shape, never their names: the service's
+  own when a service with `files` registered the server, else the #92
+  shape on the server itself; a service's own tools are never a provider). Every call goes through `gateway.ts forwardCall` (as
   run_code's): the token's own levels, the capability tool's own tier with
   a provider above it refused naming the entry that runs it, the one
   validator, `askCodeCall` where a level asks, paced, a request-log line

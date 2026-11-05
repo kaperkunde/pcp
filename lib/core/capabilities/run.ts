@@ -64,6 +64,13 @@ export type InputFile = { id: string; name: string | null; mediaType: string }
 /** Where the #92 file step puts files: the provider's own data folder. */
 export const PROVIDER_FILES = "/data/pcp"
 
+/**
+ * Where a service's file step puts them: this folder in the service's
+ * files folder (put_file takes a path relative to it, and answers the full
+ * path its tools take).
+ */
+export const SERVICE_FILES = "pcp"
+
 // ---- Schemas ---------------------------------------------------------------
 
 /** A kept result's handle, as PCP writes one into an answer. */
@@ -204,13 +211,27 @@ export function folderName(file: InputFile, index: number): string {
  * and operation: a call the owner allowed once and that is made again
  * names the same paths, so it is the call they allowed.
  */
-function folderFor(operation: OperationId, files: InputFile[]): string {
+function folderFor(
+  operation: OperationId,
+  files: InputFile[],
+  base: string,
+): string {
   const key = createHash("sha256")
     .update([operation, ...files.map((file) => file.id)].join("\n"))
     .digest("hex")
     .slice(0, 16)
 
-  return `${PROVIDER_FILES}/${key}`
+  return `${base}/${key}`
+}
+
+/** The path a service's put_file answered, where its tools take the file. */
+function placedPath(value: unknown): string | null {
+  const path =
+    value !== null && typeof value === "object" && !Array.isArray(value)
+      ? (value as Record<string, unknown>).path
+      : null
+
+  return typeof path === "string" && path.startsWith("/") ? path : null
 }
 
 function handleOf(id: string): Handle {
@@ -249,9 +270,13 @@ function errorOf(value: unknown): string | null {
 
 /**
  * One provider on the files: their handles where it takes handles, or the
- * file step (put_file, the tool on the paths, get_file of what it wrote).
+ * file step (put_file, the tool on the paths, get_file of what it wrote):
+ * on its own server, the file as base64 at a path PCP names in its data
+ * folder; on the service that registered it, the file's handle at a path
+ * relative to the service's files folder, its tools given the full path
+ * put_file answered.
  */
-async function runProvider(
+export async function runProvider(
   provider: Provider,
   files: { main: InputFile[]; image?: InputFile },
   options: Record<string, unknown>,
@@ -268,8 +293,15 @@ async function runProvider(
 
   const server = provider.tool.server
   const all = [...files.main, ...(files.image ? [files.image] : [])]
-  const folder = folderFor(provider.operation, all)
+  const viaService = provider.step?.kind === "service"
+  const folder = folderFor(
+    provider.operation,
+    all,
+    viaService ? SERVICE_FILES : PROVIDER_FILES,
+  )
   const args: Record<string, unknown> = {}
+  /** Where the provider's tools see `folder`: a service's put_file says. */
+  let seenFolder = viaService ? null : folder
 
   const place = async (
     slot: FileSlot,
@@ -290,15 +322,19 @@ async function runProvider(
     const paths: string[] = []
 
     for (const [index, file] of placed.entries()) {
-      const path = `${folder}/${folderName(file, offset + index)}`
+      const name = folderName(file, offset + index)
+      const path = `${folder}/${name}`
       const put = await bridge({
-        server,
+        server: step.server,
         tool: step.put,
-        args: {
-          file_path: path,
-          content_base64: handleOf(file.id),
-          ...(step.overwrite ? { overwrite: true } : {}),
-        },
+        args:
+          step.kind === "service"
+            ? { file: handleOf(file.id), path, overwrite: true }
+            : {
+                file_path: path,
+                content_base64: handleOf(file.id),
+                ...(step.overwrite ? { overwrite: true } : {}),
+              },
       })
 
       if ("owner" in put) {
@@ -306,16 +342,30 @@ async function runProvider(
       }
 
       if (!put.ok) {
-        return { ok: false, error: `${server}/${step.put}: ${put.error}` }
+        return { ok: false, error: `${step.server}/${step.put}: ${put.error}` }
       }
 
       const refused = errorOf(put.value)
 
       if (refused) {
-        return { ok: false, error: `${server}/${step.put}: ${refused}` }
+        return { ok: false, error: `${step.server}/${step.put}: ${refused}` }
       }
 
-      paths.push(path)
+      if (step.kind === "service") {
+        const answered = placedPath(put.value)
+
+        if (!answered || !answered.endsWith(`/${path}`)) {
+          return {
+            ok: false,
+            error: `${step.server}/${step.put} did not answer where it put the file.`,
+          }
+        }
+
+        seenFolder ??= answered.slice(0, -(name.length + 1))
+        paths.push(answered)
+      } else {
+        paths.push(path)
+      }
     }
 
     setAt(args, slot.path, slot.many ? paths : paths[0])
@@ -333,9 +383,12 @@ async function runProvider(
   }
 
   const op = OPERATIONS[provider.operation]
-  const output = provider.output
-    ? `${folder}/${provider.operation}.${op.output === "file" ? "pdf" : "md"}`
-    : null
+  // An output goes with the files the step put (an output is only asked of
+  // a provider on paths), in the folder as its tools see it.
+  const output =
+    provider.output && seenFolder
+      ? `${seenFolder}/${provider.operation}.${op.output === "file" ? "pdf" : "md"}`
+      : null
 
   if (provider.output && output) {
     setAt(args, provider.output, output)
@@ -377,10 +430,11 @@ async function runProvider(
     return { ok: true, value: answer.value, files: [] }
   }
 
+  const step = provider.step!
   const got = await bridge({
-    server,
-    tool: provider.step!.get,
-    args: { file_path: output },
+    server: step.server,
+    tool: step.get,
+    args: step.kind === "service" ? { path: output } : { file_path: output },
   })
 
   if ("owner" in got) {
@@ -388,7 +442,7 @@ async function runProvider(
   }
 
   if (!got.ok) {
-    return { ok: false, error: `${server}/${provider.step!.get}: ${got.error}` }
+    return { ok: false, error: `${step.server}/${step.get}: ${got.error}` }
   }
 
   const file = firstHandle(got.value)
@@ -397,7 +451,7 @@ async function runProvider(
     ? { ok: true, value: answer.value, files: [file] }
     : {
         ok: false,
-        error: `${server}/${provider.step!.get} did not answer with the file it wrote.`,
+        error: `${step.server}/${step.get} did not answer with the file it wrote.`,
       }
 }
 

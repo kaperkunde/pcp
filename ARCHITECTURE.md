@@ -4446,8 +4446,9 @@ count), by words in a tool's name and description, as search would (OCR,
 convert, fill and form, flatten, merge, signature and image), or a word in
 its arguments (`do_ocr`, `force_ocr`), never by a vendor's name; a server
 registered by a service launched from one of the capability's common items
-(its image or source tag, `candidates.ts serverItems`) ranks higher, an
-allowed tool above one that asks. One provider per server, its best tool.
+(its image or source tag, `candidates.ts serverOrigins`) ranks higher, an
+allowed tool above one that asks. One provider per server, its best tool;
+a service's own tools (status, logs, put_file, …) are never one.
 How to call it is read off its input schema: a kept result's handle where
 it takes one (an API endpoint's file field, as Docling's multipart
 `files`), the handle where it takes base64 (PCP puts the file there), or,
@@ -4457,6 +4458,14 @@ step: put each file at `/data/pcp/<key>/<name>` (the key a hash of the
 operation and the files, so a call the owner allowed once is the same call
 when it is made again), run the tool on the paths with its `output_path` in
 the same folder, and `get_file` what it wrote, which comes back as a handle.
+The step is found by its tools' shape, never by their names alone (a
+same-named tool of another shape is no step): where the server was
+registered by a service whose definition names a files folder and the
+token sees that service's own `put_file` (a handle, a `path` relative to
+the folder, `overwrite`) and `get_file` (`path`), those are the step
+instead, preferred: the handle goes in as it is, the file is copied in by
+the engine (`pcp/<key>/<name>` in the folder), nothing passes through the
+MCP server as base64, and its tools take the full path put_file answered.
 A required argument the operation has nothing for leaves the tool out; a
 file argument named for PDFs takes PDFs only. Options are set where the tool
 has them and their enum allows (OCR forced, confidence asked for, Markdown,
