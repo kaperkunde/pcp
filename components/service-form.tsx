@@ -405,7 +405,7 @@ export function ServiceLaunchForm({
           <Field
             label="Definition"
             htmlFor="service-definition"
-            hint="JSON: the image pinned by digest (repository@sha256:…), or a build of a public GitHub repository at a pinned commit (build: repository, commit, containerfile, and optionally context and args; built on the SSH server, never pulled), its ports, the names of its variables (plain ones are typed here, the rest take secrets), named volumes (never a folder of the server), a health check, and what PCP adds for it: an API endpoint from its schema (openapi), an MCP server (mcp), an exit from a VPN's proxy (exit, which alone may add NET_ADMIN and /dev/net/tun), or nothing (none)."
+            hint="JSON: the image pinned by digest (repository@sha256:…), or a build of a public GitHub repository at a pinned commit (build: repository, commit, containerfile, and optionally context and args; built on the SSH server, never pulled), its ports, the names of its variables (plain ones are typed here, the rest take secrets), named volumes (never a folder of the server), a files folder in one of them for its put_file and get_file (files: volume and path), a health check, and what PCP adds for it: an API endpoint from its schema (openapi), an MCP server (mcp), an exit from a VPN's proxy (exit, which alone may add NET_ADMIN and /dev/net/tun), or nothing (none)."
           >
             <Textarea
               id="service-definition"
@@ -642,7 +642,7 @@ export function ServiceSettingsForm({
           onDescriptionChange={setDescription}
           namePlaceholder="Docling service"
           descriptionHint="What it does, in a sentence."
-          slugHint="How an assistant refers to the service's own tools (status, logs, start, stop, restart)."
+          slugHint="How an assistant refers to the service's own tools (status, logs, start, stop, restart, and put_file and get_file with a files folder)."
         />
       </FormSection>
       {plain.length > 0 ? (

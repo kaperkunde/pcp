@@ -35,6 +35,10 @@ import {
  * - Volumes are named volumes only, named after the container
  *   (`pcp-<name>-<volume>`): never a path on the host, so a definition can
  *   neither read nor write the host's files.
+ * - `files` names a folder in one of those volumes that PCP copies a kept
+ *   file into, and back out of, with the engine's own `cp` (a tar stream
+ *   over standard input or output, engine.ts): for a service whose tools
+ *   take paths in its volume.
  * - Environment variables are names here; their values are the owner's
  *   secrets, bound per instance, or a fixed value that is no secret. Values
  *   reach the host over standard input only.
@@ -105,6 +109,18 @@ export function imageRepository(reference: string): string {
   return colon > slash ? base.slice(0, colon) : base
 }
 
+/** A container path without its trailing slashes ("/" stays "/"). */
+export function trimPath(path: string): string {
+  return path.replace(/\/+$/, "") || "/"
+}
+
+/** Whether `path` is `folder` or inside it, by their words alone. */
+export function pathWithin(path: string, folder: string): boolean {
+  const inner = trimPath(path)
+  const outer = trimPath(folder)
+  return inner === outer || inner.startsWith(outer === "/" ? "/" : `${outer}/`)
+}
+
 // ---- The definition ---------------------------------------------------------
 
 const port = z.number().int().min(1).max(65535)
@@ -159,6 +175,34 @@ const VolumeSchema = z.strictObject({
       { message: "A mount path cannot go up with .." },
     ),
 })
+
+/**
+ * The folder in one of its named volumes that PCP puts files into and gets
+ * them back from (the service's put_file and get_file tools, engine.ts
+ * copyIntoContainer): for a service whose own tools take paths in its
+ * volume (a PDF tool's /data). `path` is the volume's mount path or a
+ * folder inside it, so what PCP writes is the volume's, and stays when the
+ * container is made again.
+ */
+const FilesSchema = z.strictObject({
+  volume: z.string().regex(VOLUME_NAME, {
+    message: "The volume files go in: one of the service's volumes, by name.",
+  }),
+  path: z
+    .string()
+    .max(MAX_PATH_CHARS)
+    .regex(CONTAINER_PATH, {
+      message:
+        "Where files go: an absolute path in the container, in that volume.",
+    })
+    .refine(
+      (value) =>
+        !value.split("/").some((part) => part === ".." || part === "."),
+      { message: "The files' folder cannot go up with .." },
+    ),
+})
+
+export type ServiceFiles = z.output<typeof FilesSchema>
 
 const HealthSchema = z.discriminatedUnion("kind", [
   z.strictObject({ kind: z.literal("http"), port, path: httpPath }),
@@ -327,6 +371,11 @@ export const ServiceDefinitionSchema = z
       .default([]),
     health: HealthSchema.default({ kind: "none" }),
     registers: RegistersSchema.default({ kind: "none" }),
+    /**
+     * Where PCP puts files for the service's own tools, and gets them back
+     * from: a folder in one of its volumes. None: no put_file or get_file.
+     */
+    files: FilesSchema.optional(),
   })
   .superRefine((definition, issue) => {
     if (definition.build) {
@@ -412,6 +461,23 @@ export const ServiceDefinitionSchema = z
         message:
           "Only an exit's container (registers kind exit) is given a capability or a device.",
       })
+    }
+
+    if (definition.files) {
+      const { volume, path } = definition.files
+      const mounted = definition.volumes.find((entry) => entry.name === volume)
+
+      if (!mounted) {
+        issue.addIssue({
+          code: "custom",
+          message: `Files go in the volume ${volume}, which is not one of the service's volumes.`,
+        })
+      } else if (!pathWithin(path, mounted.path)) {
+        issue.addIssue({
+          code: "custom",
+          message: `Files go in ${path}, which is not in the volume ${volume} (mounted at ${mounted.path}).`,
+        })
+      }
     }
 
     if (definition.registers.kind === "exit" && definition.registers.auth) {

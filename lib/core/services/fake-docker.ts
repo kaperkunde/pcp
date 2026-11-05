@@ -90,6 +90,8 @@ export type FakeDockerState = {
   /** Images on the host by id (sha256:…), made by `build`. */
   images: string[]
   imagesRemoved: string[]
+  /** What `cp -` was handed: where to, and how many bytes of tar stream. */
+  copiedIn: Array<{ to: string; bytes: number }>
 }
 
 export type FakeDocker = {
@@ -100,6 +102,8 @@ export type FakeDocker = {
   leftovers: () => string[]
   /** The fake's own folder, for a test's repository tarball. */
   dir: string
+  /** Where a named volume's files are, in the fake's own folder. */
+  volumeDir: (volume: string) => string
   /** Takes curl or wget off the login's PATH. */
   withoutDownloader: (program: "curl" | "wget") => void
   /** Every process's command line PCP's commands ran with (as `ps` would show). */
@@ -173,7 +177,7 @@ if (command === "version") {
     at += word === "--detach" ? 1 : 2
   }
   const label = (option("--label") || "").replace(/^pcp\.service=/, "") || null
-  for (const mount of volumes) { const volume = mount.split(":")[0]; if (!state.volumes.includes(volume)) state.volumes.push(volume) }
+  for (const mount of volumes) { const volume = mount.split(":")[0]; if (!state.volumes.includes(volume)) state.volumes.push(volume); fs.mkdirSync(require("node:path").join(require("node:path").dirname(file), "volumes", volume), { recursive: true }) }
   if (state.runFailsAfterCreate) {
     state.containers[name] = { name, image, label, state: "created", exitCode: 0, health: null, args: args.slice(at + 1), publish, volumes, capAdd, devices, env }
     fail(state.runFailsAfterCreate + "\n", 125)
@@ -216,6 +220,45 @@ if (command === "version") {
   const volume = args[args.length - 1]
   if (!state.volumes.includes(volume)) fail("Error: No such volume: " + volume + "\n")
   out(JSON.stringify([{ Name: volume }]) + "\n")
+} else if (command === "cp") {
+  // A container's volumes are folders of the fake's own (volumes/<name>),
+  // and the tar streams the machine's own tar: what PCP builds and reads
+  // is tested against a real one.
+  const child = require("node:child_process")
+  const path = require("node:path")
+  const root = path.join(path.dirname(file), "volumes")
+  const resolve = (spec) => {
+    const at = spec.indexOf(":")
+    const name = spec.slice(0, at)
+    const inner = spec.slice(at + 1)
+    const c = state.containers[name]
+    if (!c) fail("Error: No such container: " + name + "\n")
+    for (const mount of c.volumes) {
+      const [volume, mounted] = mount.split(":")
+      if (inner === mounted || inner.startsWith(mounted + "/")) {
+        fs.mkdirSync(path.join(root, volume), { recursive: true })
+        return { name, inner, where: path.join(root, volume, inner.slice(mounted.length)) }
+      }
+    }
+    fail("Error: the fake keeps files in volumes only, not at " + inner + "\n")
+  }
+  const there = (where) => { try { fs.lstatSync(where); return true } catch { return false } }
+  if (args[1] === "-") {
+    const target = resolve(args[2])
+    if (!there(target.where) || !fs.statSync(target.where).isDirectory()) fail("Error: No such container:path: " + args[2] + "\n")
+    const input = fs.readFileSync(0)
+    state.copiedIn.push({ to: target.inner, bytes: input.length })
+    const made = child.spawnSync("tar", ["-x", "-f", "-", "-C", target.where, "--no-same-owner"], { input })
+    if (made.status !== 0) fail("Error: " + String(made.stderr))
+  } else {
+    const source = resolve(args[1])
+    if (!there(source.where)) fail("Error response from daemon: Could not find the file " + source.inner + " in container " + source.name + "\n")
+    const made = child.spawnSync("tar", ["-c", "-f", "-", "-C", path.dirname(source.where), path.basename(source.where)], { maxBuffer: 1024 * 1024 * 1024 })
+    if (made.status !== 0) fail("Error: " + String(made.stderr))
+    save()
+    process.stdout.write(made.stdout)
+    return
+  }
 } else {
   fail("unknown command " + command + "\n")
 }
@@ -349,6 +392,7 @@ export function startFakeDocker({
     failBuild: null,
     images: [],
     imagesRemoved: [],
+    copiedIn: [],
   }
   writeFileSync(stateFile, JSON.stringify(initial))
 
@@ -371,6 +415,8 @@ export function startFakeDocker({
           FAKE_DOCKER_STATE: stateFile,
         } as unknown as NodeJS.ProcessEnv,
         timeout: 20_000,
+        // A file copied out with cp comes back whole.
+        maxBuffer: 64 * 1024 * 1024,
       })
 
       return {
@@ -387,6 +433,7 @@ export function startFakeDocker({
     },
     leftovers: () => readdirSync(tmp),
     dir,
+    volumeDir: (volume) => path.join(dir, "volumes", volume),
     withoutDownloader: (program) => rmSync(path.join(bin, program)),
     close: () => rmSync(dir, { recursive: true, force: true }),
   }

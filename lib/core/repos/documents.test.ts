@@ -702,6 +702,54 @@ describe("a hostile repository", () => {
   })
 })
 
+describe("format 4: a service's files folder", () => {
+  const WITH_FILES = {
+    ...DOCLING,
+    volumes: [{ name: "data", path: "/data" }],
+    files: { volume: "data", path: "/data" },
+  }
+
+  it("writes a service with a files folder in format 4, and only that one", async () => {
+    const ctx = await freshVault()
+    const { id } = await addService(ctx, WITH_FILES)
+    const { document } = await localItem(ctx, "service", id)
+    const files = serializeItem(document)
+    const text = files["services/docling-service.yaml"]!
+
+    expect(text).toContain("pcp_format: 4\n")
+    expect(text).toMatch(/files:\n {2}volume: data\n {2}path: \/data\n/)
+    const read = await readRepo(files)
+    expect(read.problems).toEqual([])
+    expect(read.items).toEqual([document])
+    expect(serializeItem(read.items[0]!)).toEqual(files)
+  })
+
+  it("refuses a files folder in a format-3 document, as an older PCP would", async () => {
+    const read = await readRepo({
+      "services/docling.yaml": yamlText({
+        pcp_format: 3,
+        version: 1,
+        name: "Docling",
+        ...WITH_FILES,
+      }),
+    })
+    expect(read.problems[0]?.message).toMatch(/format 3, which has no files/)
+    const fine = await readRepo({
+      "services/docling.yaml": yamlText({
+        pcp_format: 4,
+        version: 1,
+        name: "Docling",
+        ...WITH_FILES,
+      }),
+    })
+    expect(fine.problems).toEqual([])
+    expect((fine.items[0] as ServiceDocument).definition.files).toEqual({
+      volume: "data",
+      path: "/data",
+    })
+  })
+})
+
 describe("format 3: services", () => {
   it("writes a service's definition as services/<name>.yaml in format 3, and reads it back the same", async () => {
     const ctx = await freshVault()

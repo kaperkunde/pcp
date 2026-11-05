@@ -11,14 +11,26 @@ import {
   volumeOnHost,
   type ServiceBuild,
   type ServiceDefinition,
+  type ServiceFiles,
   type ServicePublish,
 } from "./definition"
+import {
+  fileName,
+  filesFolder,
+  fileTar,
+  firstTarEntry,
+  TarError,
+  type TarEntryType,
+} from "./files"
 import {
   BUILD_LOG_TAIL_BYTES,
   BUILD_TIMEOUT_MS,
   ENGINE_COMMAND_TIMEOUT_MS,
   ENGINE_OUTPUT_BYTES,
   ENGINE_PULL_TIMEOUT_MS,
+  FILE_COPY_TIMEOUT_MS,
+  FILE_PROBE_BYTES,
+  FILE_TAR_OVERHEAD_BYTES,
   MAX_BUILD_SOURCE_BYTES,
   MAX_BUILT_IMAGE_BYTES,
   MAX_ENV_SECRET_BYTES,
@@ -847,5 +859,196 @@ export async function containerLogs(
       truncated: result.truncated,
     }),
     truncated: result.truncated,
+  }
+}
+
+// ---- Files in its files folder ----------------------------------------------
+
+/**
+ * What a container has at a name in its files folder: nothing, a file, a
+ * folder, a link or something else. The engine's own `cp` to standard
+ * output (a tar stream), of which PCP reads only the start: no program in
+ * the container runs, so an image without a shell works too.
+ */
+export async function probeContainerFile(
+  host: ServiceHost,
+  engine: ServiceEngine,
+  containerName: string,
+  files: ServiceFiles,
+  name: string,
+): Promise<TarEntryType | "none"> {
+  const { path } = fileName(files, name)
+  const result = await run(
+    host,
+    `${commandLine([program(engine), "cp", `${checkName(containerName)}:${path}`, "-"])} </dev/null`,
+    { maxOutputBytes: FILE_PROBE_BYTES, timeoutMs: ENGINE_COMMAND_TIMEOUT_MS },
+  )
+
+  if (result.stdout.length > 0) {
+    try {
+      return firstTarEntry(result.stdout)?.type ?? "none"
+    } catch (error) {
+      if (error instanceof TarError) {
+        throw new EngineError(
+          `${host.name}'s engine answered for ${path} with what is not a tar stream.`,
+        )
+      }
+
+      throw error
+    }
+  }
+
+  if (failed(result)) {
+    const words = text(result.stderr)
+
+    if (/no such container|no container with name or id/i.test(words)) {
+      throw new EngineError(
+        `${containerName} is not on ${host.name}: start the service, or the owner makes it again on its page.`,
+      )
+    }
+
+    if (
+      /could not find|could not be found|no such file|does not exist|not exist/i.test(
+        words,
+      )
+    ) {
+      return "none"
+    }
+
+    throw new EngineError(
+      `${host.name} could not look at ${path} in ${containerName}: ${result.timedOut ? "it took too long" : said(result, [])}`,
+    )
+  }
+
+  return "none"
+}
+
+/**
+ * Copies one file into the container's files folder with the engine's own
+ * `cp -`, a tar stream of that one file on standard input (built here, the
+ * name checked again): no shell in the container, no path on the SSH
+ * server, the bytes never on a command line. The engine makes the folders
+ * above it that are not there and writes it as the container's.
+ */
+export async function copyIntoContainer(
+  host: ServiceHost,
+  engine: ServiceEngine,
+  containerName: string,
+  files: ServiceFiles,
+  name: string,
+  bytes: Buffer,
+): Promise<string> {
+  const checked = fileName(files, name)
+  const folder = filesFolder(files)
+  const result = await run(
+    host,
+    `${commandLine([program(engine), "cp", "-", `${checkName(containerName)}:${folder}`])} >/dev/null`,
+    {
+      stdin: fileTar(checked.relative, bytes),
+      timeoutMs: FILE_COPY_TIMEOUT_MS,
+    },
+  )
+
+  if (failed(result)) {
+    throw new EngineError(
+      `${host.name} did not copy ${checked.path} into ${containerName}: ${result.timedOut ? "it took too long" : said(result, [])}`,
+    )
+  }
+
+  return checked.path
+}
+
+/** A file in the container is larger than PCP reads back. */
+export class ContainerFileTooLargeError extends Error {
+  constructor(readonly path: string) {
+    super(`${path} is larger than PCP keeps of one file.`)
+    this.name = "ContainerFileTooLargeError"
+  }
+}
+
+/**
+ * Reads one file out of the container's files folder with the engine's
+ * own `cp <container>:<path> -`: a tar stream on standard output, bounded
+ * by the largest file PCP keeps plus the stream's own bytes. Only a
+ * regular file: a folder, a link (never followed) or anything else is
+ * refused.
+ */
+export async function copyOutOfContainer(
+  host: ServiceHost,
+  engine: ServiceEngine,
+  containerName: string,
+  files: ServiceFiles,
+  name: string,
+  maxBytes: number,
+): Promise<{ path: string; name: string; bytes: Buffer } | null> {
+  const checked = fileName(files, name)
+  const result = await run(
+    host,
+    `${commandLine([program(engine), "cp", `${checkName(containerName)}:${checked.path}`, "-"])} </dev/null`,
+    {
+      maxOutputBytes: maxBytes + FILE_TAR_OVERHEAD_BYTES,
+      timeoutMs: FILE_COPY_TIMEOUT_MS,
+    },
+  )
+
+  if (result.truncated) {
+    throw new ContainerFileTooLargeError(checked.path)
+  }
+
+  if (failed(result)) {
+    const words = text(result.stderr)
+
+    if (
+      !/no such container|no container with name or id/i.test(words) &&
+      /could not find|could not be found|no such file|does not exist|not exist/i.test(
+        words,
+      )
+    ) {
+      return null
+    }
+
+    throw new EngineError(
+      `${host.name} could not copy ${checked.path} out of ${containerName}: ${result.timedOut ? "it took too long" : said(result, [])}`,
+    )
+  }
+
+  let entry: ReturnType<typeof firstTarEntry>
+
+  try {
+    entry = firstTarEntry(result.stdout)
+  } catch (error) {
+    if (error instanceof TarError) {
+      throw new EngineError(
+        `${host.name}'s engine answered for ${checked.path} with what is not a tar stream.`,
+      )
+    }
+
+    throw error
+  }
+
+  if (!entry) {
+    return null
+  }
+
+  if (entry.type !== "file") {
+    throw new EngineError(
+      `${checked.path} in ${containerName} is ${entry.type === "folder" ? "a folder" : entry.type === "link" ? "a link, which PCP does not follow" : "not a regular file"}: get_file reads one file.`,
+    )
+  }
+
+  if (entry.size > maxBytes) {
+    throw new ContainerFileTooLargeError(checked.path)
+  }
+
+  if (!entry.data) {
+    throw new EngineError(
+      `${host.name}'s engine ended ${checked.path}'s tar stream early.`,
+    )
+  }
+
+  return {
+    path: checked.path,
+    name: checked.relative.split("/").pop()!,
+    bytes: entry.data,
   }
 }

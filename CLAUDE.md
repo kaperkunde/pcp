@@ -222,8 +222,9 @@ so in the summary; the bump itself waits for the request.
   (a service's definition); every other kind is still written in the
   format that first held it (`FORMAT_OF_KIND`), so an older PCP reads them
   and leaves `services/` alone. Format 4 adds `auth` on a service's MCP
-  server, and only a service document that has one is written as 4
-  (`serviceFormat`). PCP's common items,
+  server and a service's `files`; only a service document that has either
+  is written as format 4 (`serviceFormat`), and a format-3 one naming
+  either is refused. PCP's common items,
   `kaperkunde/pcp-gg-common` (`repos/common.ts`), are offered in one click,
   linked read-only and untrusted (pinned imports), read without a sign-in.
   A push is one commit per item, fast-forward only, and
@@ -416,7 +417,14 @@ so in the summary; the bump itself waits for the request.
   through `after()` from `/mcp` and the owner's pages, throttled, never a
   timer or a stored key) bring it back up. Only the owner
   launches, changes, updates or removes one; an assistant gets `status`, `logs`, `start`, `stop`, `restart` at the
-  owner's levels, and proposes one only through `register_server` (kind
+  owner's levels, and with a files folder in the definition (`files`: a
+  volume of its own and a path in it) `put_file` and `get_file`, which copy
+  a kept file in and out with the engine's own `cp` and a tar stream PCP
+  builds and reads (`services/files.ts`), over standard input and output:
+  no program in the container, the name confined to that folder before
+  anything connects, a file replaced only with `overwrite` and a folder
+  never, bounded by `resourceLimits().fileBytes`, and a file holding a
+  value PCP handed the service never kept, and proposes one only through `register_server` (kind
   `service`, `services/proposals.ts`): a `service_change` request that shows
   everything it runs in full (image, ports and address, variables and their
   secrets by name, volumes, health, what it registers, the SSH server) and
@@ -462,7 +470,8 @@ embeddingProvider`, which hands `embeddings/provider.ts` the header;
   `tool_result:<id>`, readable by the token whose call produced them, gone
   after a day, never logged and never exported. A handle (`{"$result": id}`)
   in a call's arguments is replaced only in `upstream.ts`, `endpoints.ts`,
-  `mail/accounts.ts`, `storage/roots.ts` and `browser/call.ts`
+  `mail/accounts.ts`, `storage/roots.ts`, `services/services.ts` and
+  `browser/call.ts`
   (`lib/core/result-handles.ts`), with the token's own
   results, before anything is sent; a waiting request stores the handle,
   never the content. File links (`lib/core/file-links.ts`, only for a token

@@ -107,11 +107,15 @@ import { MAX_DOCUMENT_DEPTH } from "./limits"
  * published, which secret each variable takes, its container's name, what
  * it registered, the owner's note) is never in a document.
  *
- * Format 4 adds a secret header to an MCP server a service registers
- * (`registers: {kind: mcp, …, auth}`, as kind openapi has had since format
- * 3). Only a service document that has one is written as format 4
- * (`serviceFormat`); a format-3 document that names one is refused, as a
- * PCP that reads format 3 would.
+ * Format 4 adds two fields to a service's definition: a secret header on
+ * an MCP server it registers (`registers: {kind: mcp, …, auth}`, as kind
+ * openapi has had since format 3) and a files folder (`files: {volume,
+ * path}`, a folder in one of its volumes that put_file and get_file copy
+ * files into and out of). Only a service document that has either is
+ * written as format 4 (`serviceFormat`), so an older PCP reads every other
+ * document as before and refuses that one as written by a newer PCP rather
+ * than half-reading it; a format-3 document that names either is refused,
+ * as a PCP that reads format 3 would.
  */
 
 /** The newest document format this PCP reads and writes. */
@@ -133,14 +137,15 @@ export const FORMAT_OF_KIND: Record<ItemKind, number> = {
 }
 
 /**
- * The format of a service's document: 4 when what it registers is an MCP
- * server that sends a secret header (`registers.auth` on kind mcp, which
- * format 4 added), else 3. Only a document that holds the new field is
- * written in the new format, so an older PCP reads every other one, and
- * refuses that one as "written by a newer PCP" rather than half-reading it.
+ * The format of a service's document: 4 when it holds a field format 4
+ * added (`registers.auth` on kind mcp, or a files folder, `files`), else 3.
+ * Only a document that holds a new field is written in the new format, so
+ * an older PCP reads every other one, and refuses that one as "written by a
+ * newer PCP" rather than half-reading it.
  */
 export function serviceFormat(definition: ServiceDefinition): number {
-  return definition.registers.kind === "mcp" && definition.registers.auth
+  return (definition.registers.kind === "mcp" && definition.registers.auth) ||
+    definition.files
     ? 4
     : FORMAT_OF_KIND.service
 }
@@ -480,6 +485,14 @@ function serviceYaml(definition: ServiceDefinition): Record<string, unknown> {
                       : {}),
                   },
         }),
+    ...(definition.files
+      ? {
+          files: {
+            volume: definition.files.volume,
+            path: definition.files.path,
+          },
+        }
+      : {}),
   }
 }
 
@@ -1539,6 +1552,12 @@ function parseService(item: ItemFiles): ServiceDocument {
   ) {
     throw invalid(
       `${what} is in format ${format}, whose MCP server sends no secret header: write it as format 4 to have registers.auth.`,
+    )
+  }
+
+  if (format < 4 && definition.files) {
+    throw invalid(
+      `${what} is in format ${format}, which has no files folder: write it as format 4 to have files.`,
     )
   }
 

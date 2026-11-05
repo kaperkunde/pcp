@@ -333,6 +333,15 @@ function serviceFlags(
     )
   }
 
+  if (changed((definition) => definition.files ?? null)) {
+    flag(
+      "service",
+      after.files
+        ? `PCP puts files into it and gets them back (put_file, get_file) in ${after.files.path}, in its volume ${after.files.volume}.`
+        : "It has no files folder: no put_file or get_file.",
+    )
+  }
+
   if (changed((definition) => definition.args)) {
     flag(
       "service",

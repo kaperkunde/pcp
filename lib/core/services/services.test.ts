@@ -4,6 +4,7 @@ import {
   type Server,
   type ServerResponse,
 } from "node:http"
+import { mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs"
 import type { AddressInfo } from "node:net"
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
@@ -35,6 +36,12 @@ import {
   updateService,
 } from "../upstream"
 import { setupVault } from "../vault"
+import {
+  forgetResourceLimits,
+  getResourceConfig,
+  useResourceConfig,
+} from "../resources/state"
+import { keepBytes, resultKeepers, resultOpener } from "../tool-results"
 import { createApiToken, resolveApiToken } from "../api-tokens"
 import { decidePermission, getPermissionView, runCall } from "../permissions"
 import {
@@ -1322,6 +1329,301 @@ describe("a running service", { timeout: 30_000 }, () => {
         where: { serverId: service.id },
       }),
     ).toEqual(before)
+  })
+})
+
+describe("a service's files folder", { timeout: 30_000 }, () => {
+  beforeEach(() => setup())
+  afterEach(async () => {
+    forgetResourceLimits()
+    await teardown()
+  })
+
+  const PDF = Buffer.from("%PDF-1.7\n1 0 obj << >> endobj\n%%EOF\n")
+
+  async function launchedWithFiles(
+    files: ServiceDefinitionInput["files"] | null = {
+      volume: "data",
+      path: "/data",
+    },
+  ) {
+    const hostId = await pinnedHost()
+    const input = await launchInput(hostId, {
+      definition: definition(files ? { files } : {}),
+    })
+    const result = await launchService(ctx, input, FAST)
+    const { token } = await createApiToken(ctx, {
+      name: "Claude",
+      allowAllServers: true,
+    })
+    const tokenId = (await resolveApiToken(token))!.tokenId
+    return { service: await getServer(ctx, result.id), tokenId }
+  }
+
+  async function keep(tokenId: string, bytes = PDF, name = "report.pdf") {
+    return (
+      await keepBytes(ctx, {
+        tokenId,
+        serverId: null,
+        toolName: "test",
+        bytes,
+        mediaType: "application/pdf",
+        name,
+      })
+    ).id
+  }
+
+  function call(
+    service: Awaited<ReturnType<typeof launchedWithFiles>>["service"],
+    tokenId: string,
+    tool: string,
+    args: Record<string, unknown>,
+  ) {
+    return callServerTool(ctx, service, tool, args, {
+      ...PUBLIC,
+      tokenId,
+      keep: resultKeepers(ctx, tokenId).text,
+      keepBytes: resultKeepers(ctx, tokenId).bytes,
+      open: resultOpener(ctx, tokenId),
+    })
+  }
+
+  function textOf(result: { content: unknown }): string {
+    return (result.content as Array<{ text: string }>)
+      .map((part) => part.text)
+      .join("\n")
+  }
+
+  function codeOf(result: { _meta?: Record<string, unknown> }): unknown {
+    return (result._meta?.["gg.pcp/error"] as { code?: string })?.code
+  }
+
+  it("offers put_file and get_file only with a files folder in one of its volumes", async () => {
+    const { service } = await launchedWithFiles()
+    expect(service.tools.map((tool) => tool.name)).toEqual(
+      expect.arrayContaining(["put_file", "get_file"]),
+    )
+    expect(
+      service.tools.find((tool) => tool.name === "put_file")!.description,
+    ).toContain("/data")
+
+    expect(() =>
+      parseServiceDefinition(
+        definition({ files: { volume: "cache", path: "/data" } }),
+      ),
+    ).toThrow(/not one of the service's volumes/)
+    expect(() =>
+      parseServiceDefinition(
+        definition({ files: { volume: "data", path: "/etc" } }),
+      ),
+    ).toThrow(/not in the volume data/)
+    expect(() =>
+      parseServiceDefinition(
+        definition({ files: { volume: "data", path: "/data/../etc" } }),
+      ),
+    ).toThrow()
+    expect(
+      parseServiceDefinition(
+        definition({ files: { volume: "data", path: "/data/in" } }),
+      ).files,
+    ).toEqual({ volume: "data", path: "/data/in" })
+  })
+
+  it("puts a kept file into the volume with the engine's cp, and gets it back", async () => {
+    const { service, tokenId } = await launchedWithFiles()
+    const id = await keep(tokenId)
+    const before = docker.commands.length
+
+    const put = await call(service, tokenId, "put_file", {
+      file: { $result: id },
+      path: "in/report.pdf",
+    })
+    expect(put.isError, textOf(put)).toBeFalsy()
+    expect(put.structuredContent).toMatchObject({
+      path: "/data/in/report.pdf",
+      size: PDF.length,
+    })
+    // On the SSH server: the engine's own cp, the bytes on standard input.
+    const words = docker.state().calls.slice(-2)
+    expect(words).toEqual([
+      ["cp", "pcp-docs:/data/in/report.pdf", "-"],
+      ["cp", "-", "pcp-docs:/data"],
+    ])
+    expect(docker.commands.slice(before).join("\n")).not.toContain("PDF-1.7")
+    expect(
+      readFileSync(`${docker.volumeDir("pcp-docs-data")}/in/report.pdf`),
+    ).toEqual(PDF)
+
+    // What the service's tools wrote, read back by its full path.
+    writeFileSync(
+      `${docker.volumeDir("pcp-docs-data")}/in/report.txt`,
+      "the text",
+    )
+    const got = await call(service, tokenId, "get_file", {
+      path: "/data/in/report.txt",
+    })
+    expect(got.isError, textOf(got)).toBeFalsy()
+    const answer = got.structuredContent as {
+      result: { $result: string }
+      size: number
+      name: string
+    }
+    expect(answer).toMatchObject({ name: "report.txt", size: 8 })
+    const opened = await resultOpener(ctx, tokenId)(answer.result.$result)
+    expect(opened!.bytes().toString()).toBe("the text")
+
+    // And the PDF it was given, round trip.
+    const back = await call(service, tokenId, "get_file", {
+      path: "in/report.pdf",
+    })
+    const backId = (back.structuredContent as { result: { $result: string } })
+      .result.$result
+    expect((await resultOpener(ctx, tokenId)(backId))!.bytes()).toEqual(PDF)
+  })
+
+  it("replaces a file only with overwrite, and never a folder", async () => {
+    const { service, tokenId } = await launchedWithFiles()
+    const first = await keep(tokenId)
+    const second = await keep(tokenId, Buffer.from("second"))
+    await call(service, tokenId, "put_file", {
+      file: { $result: first },
+      path: "report.pdf",
+    })
+
+    const refused = await call(service, tokenId, "put_file", {
+      file: { $result: second },
+      path: "report.pdf",
+    })
+    expect(refused.isError).toBe(true)
+    expect(codeOf(refused)).toBe("conflict")
+    expect(textOf(refused)).toMatch(/already a file at \/data\/report\.pdf/)
+    const volume = docker.volumeDir("pcp-docs-data")
+    expect(readFileSync(`${volume}/report.pdf`)).toEqual(PDF)
+
+    const replaced = await call(service, tokenId, "put_file", {
+      file: { $result: second },
+      path: "report.pdf",
+      overwrite: true,
+    })
+    expect(replaced.structuredContent).toMatchObject({ replaced: true })
+    expect(readFileSync(`${volume}/report.pdf`, "utf8")).toBe("second")
+
+    mkdirSync(`${volume}/out`)
+    const folder = await call(service, tokenId, "put_file", {
+      file: { $result: second },
+      path: "out",
+      overwrite: true,
+    })
+    expect(codeOf(folder)).toBe("conflict")
+    expect(textOf(folder)).toMatch(/is a folder/)
+    expect(statSync(`${volume}/out`).isDirectory()).toBe(true)
+
+    const notAFile = await call(service, tokenId, "get_file", { path: "out" })
+    expect(notAFile.isError).toBe(true)
+    expect(textOf(notAFile)).toMatch(/a folder/)
+  })
+
+  it.each([
+    "../etc/passwd",
+    "/etc/passwd",
+    "/data",
+    "a/../../b",
+    "a;rm -rf x",
+    "a$(id)",
+  ])("refuses the name %j before anything connects", async (path) => {
+    const { service, tokenId } = await launchedWithFiles()
+    const id = await keep(tokenId)
+    const before = docker.commands.length
+
+    for (const [tool, args] of [
+      ["put_file", { file: { $result: id }, path }],
+      ["get_file", { path }],
+    ] as const) {
+      const refused = await call(service, tokenId, tool, args)
+      expect(refused.isError).toBe(true)
+      expect(codeOf(refused)).toBe("invalid_arguments")
+    }
+
+    expect(docker.commands.length).toBe(before)
+  })
+
+  it("refuses a file the token does not have before anything connects", async () => {
+    const { service, tokenId } = await launchedWithFiles()
+    const before = docker.commands.length
+    const refused = await call(service, tokenId, "put_file", {
+      file: { $result: "no-such-result" },
+      path: "a.pdf",
+    })
+    expect(refused.isError).toBe(true)
+    expect(docker.commands.length).toBe(before)
+  })
+
+  it("refuses a file larger than PCP keeps, either way", async () => {
+    const { service, tokenId } = await launchedWithFiles()
+    const big = Buffer.alloc(1024 * 1024 + 1, 1)
+    const id = await keep(tokenId, big, "big.bin")
+    useResourceConfig({ ...(await getResourceConfig()), fileMb: 1 })
+    const before = docker.commands.length
+
+    const put = await call(service, tokenId, "put_file", {
+      file: { $result: id },
+      path: "big.bin",
+    })
+    expect(put.isError).toBe(true)
+    expect(textOf(put)).toMatch(/more than PCP copies at once/)
+    expect(docker.commands.length).toBe(before)
+
+    writeFileSync(`${docker.volumeDir("pcp-docs-data")}/out.bin`, big)
+    const got = await call(service, tokenId, "get_file", { path: "out.bin" })
+    expect(got.isError).toBe(true)
+    expect(textOf(got)).toMatch(/larger than PCP keeps of one file/)
+
+    // One past what PCP reads of the stream at all: cut off, not read whole.
+    writeFileSync(
+      `${docker.volumeDir("pcp-docs-data")}/huge.bin`,
+      Buffer.alloc(2 * 1024 * 1024, 2),
+    )
+    const huge = await call(service, tokenId, "get_file", { path: "huge.bin" })
+    expect(huge.isError).toBe(true)
+    expect(textOf(huge)).toMatch(/larger than PCP keeps of one file/)
+  })
+
+  it("does not keep a file that holds a secret the service was given", async () => {
+    const { service, tokenId } = await launchedWithFiles()
+    writeFileSync(
+      `${docker.volumeDir("pcp-docs-data")}/env.txt`,
+      `API_KEY=${API_KEY}\n`,
+    )
+    const got = await call(service, tokenId, "get_file", { path: "env.txt" })
+    expect(got.isError).toBe(true)
+    expect(codeOf(got)).toBe("forbidden")
+    expect(textOf(got)).not.toContain(API_KEY)
+  })
+
+  it("says when there is no such file", async () => {
+    const { service, tokenId } = await launchedWithFiles()
+    const got = await call(service, tokenId, "get_file", { path: "nope.pdf" })
+    expect(got.isError).toBe(true)
+    expect(codeOf(got)).toBe("not_found")
+  })
+
+  it("is refused by a service without a files folder", async () => {
+    const { service, tokenId } = await launchedWithFiles(null)
+    expect(service.tools.map((tool) => tool.name)).not.toContain("put_file")
+    const id = await keep(tokenId)
+    const before = docker.commands.length
+
+    for (const [tool, args] of [
+      ["put_file", { file: { $result: id }, path: "a.pdf" }],
+      ["get_file", { path: "a.pdf" }],
+    ] as const) {
+      const refused = await call(service, tokenId, tool, args)
+      expect(refused.isError).toBe(true)
+      expect(codeOf(refused)).toBe("not_found")
+      expect(textOf(refused)).toMatch(/has no files folder/)
+    }
+
+    expect(docker.commands.length).toBe(before)
   })
 })
 
