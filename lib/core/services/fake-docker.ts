@@ -57,7 +57,39 @@ export type FakeDockerState = {
   calls: string[][]
   /** Env files read by `run`. */
   envFiles: string[]
+  /** Named volumes on the host, made by `run` (or a test). */
+  volumes: string[]
   volumesRemoved: string[]
+  /**
+   * `run` makes the container (and its volumes) and then fails to start
+   * it with this error, as Docker does when a port is taken.
+   */
+  runFailsAfterCreate: string | null
+  /** `rm` of a container that is there fails with this error. */
+  failRm: string | null
+  /** `volume rm` fails with this error. */
+  failVolumeRm: string | null
+  /** The tarball `curl` and `wget` hand over: a test's repository. */
+  tarball: string | null
+  /** Addresses downloaded, and with which program. */
+  downloads: Array<{ program: string; url: string; args: string[] }>
+  /** Builds, as the engine got them. */
+  builds: Array<{
+    file: string
+    containerfile: string
+    context: string
+    contextFiles: string[]
+    tag: string | null
+    buildArgs: string[]
+  }>
+  /** The image id a build makes (64 hex), and its size in bytes. */
+  buildId: string
+  imageSize: number
+  /** A build fails with this error. */
+  failBuild: string | null
+  /** Images on the host by id (sha256:…), made by `build`. */
+  images: string[]
+  imagesRemoved: string[]
 }
 
 export type FakeDocker = {
@@ -66,6 +98,10 @@ export type FakeDocker = {
   update: (change: (state: FakeDockerState) => void) => void
   /** Files left in the temporary directory commands use. */
   leftovers: () => string[]
+  /** The fake's own folder, for a test's repository tarball. */
+  dir: string
+  /** Takes curl or wget off the login's PATH. */
+  withoutDownloader: (program: "curl" | "wget") => void
   /** Every process's command line PCP's commands ran with (as `ps` would show). */
   commands: string[]
   close: () => void
@@ -89,6 +125,32 @@ if (command === "version") {
   const image = args[args.length - 1]
   if (state.failPull.includes(image)) fail("Error: pull access denied for " + image + "\n")
   out(image + "\n")
+} else if (command === "build") {
+  if (state.failBuild) fail(state.failBuild + "\n")
+  const file = option("--file")
+  const iid = option("--iidfile")
+  const context = args[args.length - 1]
+  if (!fs.existsSync(file)) fail("Error: no such file " + file + "\n")
+  if (!fs.statSync(context).isDirectory()) fail("Error: context is no folder\n")
+  const buildArgs = []
+  args.forEach((word, at) => { if (word === "--build-arg") buildArgs.push(args[at + 1]) })
+  const walk = (dir, prefix) => fs.readdirSync(dir, { withFileTypes: true }).flatMap((entry) => entry.isDirectory() ? walk(dir + "/" + entry.name, prefix + entry.name + "/") : [prefix + entry.name])
+  state.builds.push({ file, containerfile: fs.readFileSync(file, "utf8"), context, contextFiles: walk(context, "").sort(), tag: option("--tag"), buildArgs })
+  process.stdout.write("STEP 1/2: FROM scratch\n")
+  fs.writeFileSync(iid, "sha256:" + state.buildId)
+  if (!state.images.includes("sha256:" + state.buildId)) state.images.push("sha256:" + state.buildId)
+} else if (command === "rmi") {
+  const id = args[args.length - 1]
+  state.images = state.images.filter((each) => each !== id)
+  state.imagesRemoved.push(id)
+} else if (command === "image" && args[1] === "inspect" && args.includes("{{.Size}}")) {
+  const id = args[args.length - 1]
+  if (!state.images.includes(id)) fail("Error: No such image: " + id + "\n")
+  out(String(state.imageSize) + "\n")
+} else if (command === "image" && args[1] === "inspect" && args.includes("{{.Id}}")) {
+  const id = args[args.length - 1]
+  if (!state.images.includes(id)) fail("Error: No such image: " + id + "\n")
+  out(id + "\n")
 } else if (command === "image" && args[1] === "inspect") {
   const source = args[args.length - 1]
   const repo = source.replace(/:[^:/]+$/, "")
@@ -111,6 +173,11 @@ if (command === "version") {
     at += word === "--detach" ? 1 : 2
   }
   const label = (option("--label") || "").replace(/^pcp\.service=/, "") || null
+  for (const mount of volumes) { const volume = mount.split(":")[0]; if (!state.volumes.includes(volume)) state.volumes.push(volume) }
+  if (state.runFailsAfterCreate) {
+    state.containers[name] = { name, image, label, state: "created", exitCode: 0, health: null, args: args.slice(at + 1), publish, volumes, capAdd, devices, env }
+    fail(state.runFailsAfterCreate + "\n", 125)
+  }
   state.containers[name] = { name, image, label, state: state.runState, exitCode: state.runState === "exited" ? 1 : 0, health: state.runHealth, args: args.slice(at + 1), publish, volumes, capAdd, devices, env }
   out("c0ffee\n")
 } else if (command === "inspect") {
@@ -119,7 +186,8 @@ if (command === "version") {
   if (!c) fail("Error: No such object: " + name + "\n")
   const s = { Status: c.state, Running: c.state === "running", StartedAt: "2026-10-29T10:00:00Z", ExitCode: c.exitCode, Error: "" }
   if (c.health) s.Health = { Status: c.health }
-  out(JSON.stringify([s, c.image, c.label ? { "pcp.service": c.label } : {}]) + "\n")
+  const imageId = c.image.startsWith("sha256:") ? c.image : "sha256:" + "f".repeat(64)
+  out(JSON.stringify([s, c.image, c.label ? { "pcp.service": c.label } : {}, imageId]) + "\n")
 } else if (command === "logs") {
   const name = args[args.length - 1]
   if (!state.containers[name]) fail("Error: No such container: " + name + "\n")
@@ -133,14 +201,85 @@ if (command === "version") {
   if (!c) fail("Error: No such container\n")
   c.state = "exited"; c.exitCode = 0
 } else if (command === "rm") {
-  delete state.containers[args[args.length - 1]]
+  const name = args[args.length - 1]
+  if (!state.containers[name]) fail("Error: No such container: " + name + "\n")
+  if (state.failRm) fail(state.failRm + "\n")
+  delete state.containers[name]
 } else if (command === "volume" && args[1] === "rm") {
-  state.volumesRemoved.push(...args.slice(2))
+  if (state.failVolumeRm) fail(state.failVolumeRm + "\n")
+  for (const volume of args.slice(2)) {
+    if (!state.volumes.includes(volume)) fail("Error: No such volume: " + volume + "\n")
+    state.volumes = state.volumes.filter((each) => each !== volume)
+    state.volumesRemoved.push(volume)
+  }
+} else if (command === "volume" && args[1] === "inspect") {
+  const volume = args[args.length - 1]
+  if (!state.volumes.includes(volume)) fail("Error: No such volume: " + volume + "\n")
+  out(JSON.stringify([{ Name: volume }]) + "\n")
 } else {
   fail("unknown command " + command + "\n")
 }
 save()
 `
+
+/**
+ * curl and wget for tests: each records the address it was given and hands
+ * over the test's tarball (state.tarball), as GitHub would.
+ */
+const DOWNLOADER = String.raw`
+const fs = require("node:fs")
+const path = require("node:path")
+const file = process.env.FAKE_DOCKER_STATE
+const state = JSON.parse(fs.readFileSync(file, "utf8"))
+const args = process.argv.slice(2)
+const program = path.basename(process.argv[1])
+const url = args[args.length - 1]
+state.downloads.push({ program, url, args })
+fs.writeFileSync(file, JSON.stringify(state))
+const at = args.indexOf(program === "curl" ? "-o" : "-O")
+if (!state.tarball || !url.startsWith("https://")) { process.stderr.write(program + ": (22) The requested URL returned error: 404\n"); process.exit(22) }
+fs.copyFileSync(state.tarball, args[at + 1])
+`
+
+/**
+ * A repository's tarball at a commit as GitHub's codeload serves it: every
+ * file under one folder named after the repository and the commit. Made
+ * with the machine's own tar, for tests only.
+ */
+export function fakeRepositoryTarball(
+  dir: string,
+  files: Record<string, string>,
+  { links = {} }: { links?: Record<string, string> } = {},
+): string {
+  const root = path.join(dir, "repo-src")
+  const top = path.join(root, "repo-0123456789")
+
+  for (const [name, content] of Object.entries(files)) {
+    mkdirSync(path.dirname(path.join(top, name)), { recursive: true })
+    writeFileSync(path.join(top, name), content)
+  }
+
+  for (const [name, target] of Object.entries(links)) {
+    mkdirSync(path.dirname(path.join(top, name)), { recursive: true })
+    symlinkSync(target, path.join(top, name))
+  }
+
+  const tarball = path.join(dir, "repo.tar.gz")
+  const made = spawnSync("tar", [
+    "-czf",
+    tarball,
+    "-C",
+    root,
+    "repo-0123456789",
+  ])
+
+  if (made.status !== 0) {
+    throw new Error(`tar did not make the test's repository: ${made.stderr}`)
+  }
+
+  rmSync(root, { recursive: true, force: true })
+  return tarball
+}
 
 export function startFakeDocker({
   engine = "docker",
@@ -156,7 +295,18 @@ export function startFakeDocker({
 
   // Only what the scripts use, so an engine installed on the test machine
   // is never the one found.
-  for (const tool of ["sh", "cat", "rm", "mktemp", "true"]) {
+  for (const tool of [
+    "sh",
+    "cat",
+    "rm",
+    "mktemp",
+    "true",
+    "mkdir",
+    "wc",
+    "tail",
+    "tar",
+    "gzip",
+  ]) {
     const found = ["/bin", "/usr/bin"]
       .map((where) => path.join(where, tool))
       .find((candidate) => existsSync(candidate))
@@ -169,6 +319,13 @@ export function startFakeDocker({
   writeFileSync(script, `#!${process.execPath}\n${PROGRAM}`)
   chmodSync(script, 0o755)
 
+  // A test takes either away by deleting it (`withoutDownloader`).
+  for (const downloader of ["curl", "wget"]) {
+    const file = path.join(bin, downloader)
+    writeFileSync(file, `#!${process.execPath}\n${DOWNLOADER}`)
+    chmodSync(file, 0o755)
+  }
+
   const initial: FakeDockerState = {
     version: "27.3.1",
     containers: {},
@@ -179,7 +336,19 @@ export function startFakeDocker({
     failPull: [],
     calls: [],
     envFiles: [],
+    volumes: [],
     volumesRemoved: [],
+    runFailsAfterCreate: null,
+    failRm: null,
+    failVolumeRm: null,
+    tarball: null,
+    downloads: [],
+    builds: [],
+    buildId: "d".repeat(64),
+    imageSize: 50 * 1024 * 1024,
+    failBuild: null,
+    images: [],
+    imagesRemoved: [],
   }
   writeFileSync(stateFile, JSON.stringify(initial))
 
@@ -217,6 +386,8 @@ export function startFakeDocker({
       writeFileSync(stateFile, JSON.stringify(state))
     },
     leftovers: () => readdirSync(tmp),
+    dir,
+    withoutDownloader: (program) => rmSync(path.join(bin, program)),
     close: () => rmSync(dir, { recursive: true, force: true }),
   }
 }

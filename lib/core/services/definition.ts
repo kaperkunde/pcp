@@ -6,6 +6,7 @@ import { sha256Hex } from "../crypto"
 import { invalid } from "../errors"
 import { canonicalJson } from "../permission-rules"
 import {
+  MAX_BUILD_ARGS,
   MAX_ENV_DESCRIPTION_CHARS,
   MAX_ENV_VALUE_CHARS,
   MAX_IMAGE_CHARS,
@@ -27,6 +28,10 @@ import {
  *
  * - The image is pinned by digest (`repo@sha256:…`): what the owner approved
  *   is what runs. `source` is the tag an update resolves to a new digest.
+ *   Or, the owner's alone, it is built on the SSH server from a public
+ *   GitHub repository at a pinned commit (`build`), and the image id PCP
+ *   built is what it pins (`localhost/pcp-<repo>@sha256:<id>`), never
+ *   pulled.
  * - Volumes are named volumes only, named after the container
  *   (`pcp-<name>-<volume>`): never a path on the host, so a definition can
  *   neither read nor write the host's files.
@@ -63,6 +68,24 @@ export const IMAGE_BY_DIGEST = new RegExp(`^${NAME}@sha256:[a-f0-9]{64}$`)
 export const IMAGE_BY_TAG = new RegExp(
   `^${NAME}(?::[A-Za-z0-9_][A-Za-z0-9_.-]{0,127})?$`,
 )
+/**
+ * An image PCP built on the SSH server itself (`build`): its image id,
+ * named for the repository it came from. Never pulled from anywhere; a
+ * container runs it by that id (engine.ts runReference).
+ */
+export const LOCAL_IMAGE =
+  /^localhost\/pcp-[a-z0-9][a-z0-9-]{0,60}@sha256:[a-f0-9]{64}$/
+/** A GitHub repository, owner/name, as GitHub allows them. */
+export const GITHUB_REPOSITORY =
+  /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})\/(?!\.{1,2}$)[A-Za-z0-9._-]{1,100}$/
+/** A commit, by its full 40-hex id: what the owner approved is what builds. */
+export const COMMIT = /^[a-f0-9]{40}$/
+/**
+ * A path inside the repository: relative, letters, digits and ._-/ only,
+ * never `..`, `.` as a part, a leading dash or an empty part.
+ */
+export const REPOSITORY_PATH =
+  /^(?!-)(?!.*(?:^|\/)\.{1,2}(?:\/|$))[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)*$/
 /** A variable's name, as POSIX shells and env files take one. */
 export const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]{0,127}$/
 /** A volume's own name; on the host it is `<container>-<name>`. */
@@ -191,12 +214,65 @@ const RegistersSchema = z.discriminatedUnion("kind", [
   z.strictObject({ kind: z.literal("none") }),
 ])
 
+/** A build argument: a name and a value, no secret (it shows in the image). */
+const BuildArgSchema = z.strictObject({
+  name: envName,
+  value: z
+    .string()
+    .max(MAX_ENV_VALUE_CHARS)
+    .refine((value) => !/[\u0000-\u001f\u007f]/.test(value), {
+      message: "A build argument's value is one line, no control characters.",
+    }),
+})
+
+/**
+ * Where the owner's own image comes from: a public GitHub repository at a
+ * pinned commit, built on the SSH server with its engine (engine.ts
+ * buildImage). The owner's alone: an assistant never proposes one.
+ */
+const BuildSchema = z.strictObject({
+  /** owner/name on GitHub. */
+  repository: z.string().regex(GITHUB_REPOSITORY, {
+    message: "The repository on GitHub, as owner/name.",
+  }),
+  /** The commit, all 40 hex digits of it. */
+  commit: z.string().regex(COMMIT, {
+    message: "The commit, by its full id: 40 hex digits.",
+  }),
+  /** The Containerfile (or Dockerfile), relative to the repository's root. */
+  containerfile: z.string().max(MAX_PATH_CHARS).regex(REPOSITORY_PATH, {
+    message:
+      "The Containerfile's path in the repository, like Containerfile or docker/Dockerfile.",
+  }),
+  /** The build's context, relative to the repository's root; its root by default. */
+  context: z
+    .string()
+    .max(MAX_PATH_CHARS)
+    .refine((value) => value === "." || REPOSITORY_PATH.test(value), {
+      message: "The build's folder in the repository, like . or app.",
+    })
+    .default("."),
+  args: z.array(BuildArgSchema).max(MAX_BUILD_ARGS).default([]),
+})
+
+export type ServiceBuild = z.output<typeof BuildSchema>
+
 export const ServiceDefinitionSchema = z
   .strictObject({
-    image: z.string().max(MAX_IMAGE_CHARS).regex(IMAGE_BY_DIGEST, {
-      message:
-        "The image, pinned by digest: repository@sha256:<64 hex digits>.",
-    }),
+    /**
+     * The image, pinned by digest. For a `build`, the image PCP built (its
+     * id, LOCAL_IMAGE), written once it is built; absent before.
+     */
+    image: z
+      .string()
+      .max(MAX_IMAGE_CHARS)
+      .regex(IMAGE_BY_DIGEST, {
+        message:
+          "The image, pinned by digest: repository@sha256:<64 hex digits>.",
+      })
+      .optional(),
+    /** Built on the SSH server from a repository, in place of a pulled image. */
+    build: BuildSchema.optional(),
     /** The tag an update resolves to a new digest; none: updates by hand. */
     source: z
       .string()
@@ -245,6 +321,39 @@ export const ServiceDefinitionSchema = z
     registers: RegistersSchema.default({ kind: "none" }),
   })
   .superRefine((definition, issue) => {
+    if (definition.build) {
+      if (definition.source !== undefined) {
+        issue.addIssue({
+          code: "custom",
+          message:
+            "A service built from a repository updates to a new commit, not from a source tag: leave source out.",
+        })
+      }
+
+      if (
+        definition.image !== undefined &&
+        !LOCAL_IMAGE.test(definition.image)
+      ) {
+        issue.addIssue({
+          code: "custom",
+          message:
+            "A service built from a repository runs the image PCP built: leave image out.",
+        })
+      }
+    } else if (definition.image === undefined) {
+      issue.addIssue({
+        code: "custom",
+        message:
+          "The image, pinned by digest: repository@sha256:<64 hex digits> (or build, from a repository).",
+      })
+    } else if (LOCAL_IMAGE.test(definition.image)) {
+      issue.addIssue({
+        code: "custom",
+        message:
+          "localhost/pcp-… is an image PCP built from a repository: it comes with its build.",
+      })
+    }
+
     const ports = definition.ports.map((entry) => entry.container)
     const names = definition.env.map((entry) => entry.name)
     const volumes = definition.volumes.map((entry) => entry.name)

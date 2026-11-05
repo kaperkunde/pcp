@@ -516,7 +516,7 @@ export async function importServiceAction(
   const publicUrl = await publicUrlFor(ctx)
   const result = await guarded(async () => {
     const input = serviceInputFrom(formData)
-    // A launch that fails deletes the secrets typed in for it again.
+    // A launch that fails keeps the secrets typed in for it, and says so.
     const added = await withNewSecrets(
       ctx,
       formData,

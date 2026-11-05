@@ -21,6 +21,8 @@ export const MAX_ENV_VALUE_CHARS = 4000
 export const MAX_PATH_CHARS = 400
 /** A definition as JSON. */
 export const MAX_SERVICE_DEFINITION_BYTES = 64 * 1024
+/** Build arguments a definition built from a repository may name. */
+export const MAX_BUILD_ARGS = 32
 /** One environment variable's value, from a secret. */
 export const MAX_ENV_SECRET_BYTES = 32 * 1024
 
@@ -28,6 +30,14 @@ export const MAX_ENV_SECRET_BYTES = 32 * 1024
 export const ENGINE_COMMAND_TIMEOUT_MS = 60_000
 /** Pulling an image. */
 export const ENGINE_PULL_TIMEOUT_MS = 10 * 60_000
+/** Building one from a repository: the download, the build and its checks. */
+export const BUILD_TIMEOUT_MS = 30 * 60_000
+/** The repository's tarball at the commit, as GitHub serves it. */
+export const MAX_BUILD_SOURCE_BYTES = 256 * 1024 * 1024
+/** The image a build makes; a larger one is removed again. */
+export const MAX_BUILT_IMAGE_BYTES = 8 * 1024 * 1024 * 1024
+/** The build's last lines PCP keeps for an error. */
+export const BUILD_LOG_TAIL_BYTES = 3000
 /** What PCP reads back from one engine command. */
 export const ENGINE_OUTPUT_BYTES = 256 * 1024
 /** How long `stop` gives the container before the engine kills it. */

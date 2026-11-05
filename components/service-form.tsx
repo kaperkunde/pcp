@@ -69,6 +69,28 @@ export const EXAMPLE_DEFINITION = JSON.stringify(
 )
 
 /**
+ * A service built on the SSH server from a public GitHub repository at a
+ * pinned commit, in place of an image to pull: yours alone to set up.
+ */
+const EXAMPLE_BUILD_DEFINITION = JSON.stringify(
+  {
+    build: {
+      repository: "owner/name",
+      commit: "<the commit's 40 hex digits>",
+      containerfile: "Containerfile",
+      context: ".",
+      args: [],
+    },
+    ports: [{ container: 8000 }],
+    env: [],
+    health: { kind: "http", port: 8000, path: "/health" },
+    registers: { kind: "mcp", port: 8000, path: "/mcp" },
+  },
+  null,
+  2,
+)
+
+/**
  * A VPN container as an exit, to start from: gluetun's shape (an HTTP proxy
  * with a login PCP makes, NET_ADMIN and the tunnel device). PCP's common
  * items have it whole, pinned by digest.
@@ -383,7 +405,7 @@ export function ServiceLaunchForm({
           <Field
             label="Definition"
             htmlFor="service-definition"
-            hint="JSON: the image pinned by digest (repository@sha256:…), its ports, the names of its variables (plain ones are typed here, the rest take secrets), named volumes (never a folder of the server), a health check, and what PCP adds for it: an API endpoint from its schema (openapi), an MCP server (mcp), an exit from a VPN's proxy (exit, which alone may add NET_ADMIN and /dev/net/tun), or nothing (none)."
+            hint="JSON: the image pinned by digest (repository@sha256:…), or a build of a public GitHub repository at a pinned commit (build: repository, commit, containerfile, and optionally context and args; built on the SSH server, never pulled), its ports, the names of its variables (plain ones are typed here, the rest take secrets), named volumes (never a folder of the server), a health check, and what PCP adds for it: an API endpoint from its schema (openapi), an MCP server (mcp), an exit from a VPN's proxy (exit, which alone may add NET_ADMIN and /dev/net/tun), or nothing (none)."
           >
             <Textarea
               id="service-definition"
@@ -394,6 +416,15 @@ export function ServiceLaunchForm({
               className="min-h-72 font-mono text-xs"
               required
             />
+            {definition === EXAMPLE_DEFINITION ? (
+              <button
+                type="button"
+                className="mt-1 self-start text-xs text-primary underline-offset-4 hover:underline"
+                onClick={() => setDefinition(EXAMPLE_BUILD_DEFINITION)}
+              >
+                Build it from a GitHub repository instead
+              </button>
+            ) : null}
           </Field>
         )}
         {shape.problem ? (

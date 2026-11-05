@@ -7,7 +7,9 @@ import { invalid } from "@/lib/core/errors"
 import { renameServerSlug } from "@/lib/core/servers"
 import { saveServiceSettings } from "@/lib/core/services/services"
 import type { ServiceStatus } from "@/lib/core/services/services"
+import type { NewerImage } from "@/lib/core/services/updates"
 import {
+  checkServiceImage,
   launchService,
   readServiceLogs,
   readServiceStatus,
@@ -74,6 +76,8 @@ export async function launchServiceAction(
   })
 
   if (result.status !== "ok" || !result.id) {
+    // A secret typed in for a launch that failed is kept: listed to choose.
+    revalidatePath("/servers/services/new")
     return result
   }
 
@@ -168,23 +172,52 @@ export async function runServiceActionAction(
   return result
 }
 
+/**
+ * The owner's update: the newest image of its source (or, for a service
+ * built from a repository, the commit given, built on its SSH server), and
+ * its container made again.
+ */
 export async function updateServiceAction(
   id: string,
+  commit?: string,
 ): Promise<ServerActionResult> {
   const ctx = await requireContext()
   const result = await guarded(async () => {
-    const { image, changed } = await updateService(ctx, id, {
-      publicUrl: await publicUrlFor(ctx),
-    })
+    const { image, changed } = await updateService(
+      ctx,
+      id,
+      { publicUrl: await publicUrlFor(ctx) },
+      typeof commit === "string" && commit.trim()
+        ? { commit: commit.trim() }
+        : {},
+    )
     return {
       message: changed
         ? `Updated to ${image}.`
-        : "It already runs the newest image; PCP made its container again from it.",
+        : "It already runs that image; PCP made its container again from it.",
     }
   })
 
   revalidate(id)
   return result
+}
+
+export type ServiceImageResult = ActionState<{ image: NewerImage }>
+
+/**
+ * The owner's look for a newer image: its source's newest digest, read on
+ * its SSH server; nothing is made again.
+ */
+export async function checkServiceImageAction(
+  id: string,
+): Promise<ServiceImageResult> {
+  const ctx = await requireContext()
+
+  return guarded(async () => ({
+    image: await checkServiceImage(ctx, id, {
+      publicUrl: await publicUrlFor(ctx),
+    }),
+  }))
 }
 
 export async function removeServiceAction(

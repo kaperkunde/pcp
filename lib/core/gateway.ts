@@ -3149,7 +3149,7 @@ export function buildGatewayServer(
         .record(z.string(), z.unknown())
         .optional()
         .describe(
-          'For kind service: its definition, as PCP\'s own launch takes it: {"image": "ghcr.io/org/app@sha256:<64 hex>", "source": "ghcr.io/org/app:latest", "ports": [{"container": 5001}], "env": [{"name": "API_KEY", "required": true, "description": "…"}, {"name": "LOG_LEVEL", "value": "info"}], "volumes": [{"name": "data", "path": "/data"}], "args": [], "health": {"kind": "http", "port": 5001, "path": "/health"}, "registers": {"kind": "openapi", "port": 5001, "specPath": "/openapi.json", "auth": {"env": "API_KEY", "header": "X-Api-Key", "template": "{{secret}}"}}}. registers is {"kind": "mcp", "port", "path"} for an MCP server, or {"kind": "none"}. A fixed value is no secret; a secret goes to a variable through env_secrets.',
+          'For kind service: its definition, as PCP\'s own launch takes it: {"image": "ghcr.io/org/app@sha256:<64 hex>", "source": "ghcr.io/org/app:latest", "ports": [{"container": 5001}], "env": [{"name": "API_KEY", "required": true, "description": "…"}, {"name": "LOG_LEVEL", "value": "info"}], "volumes": [{"name": "data", "path": "/data"}], "args": [], "health": {"kind": "http", "port": 5001, "path": "/health"}, "registers": {"kind": "openapi", "port": 5001, "specPath": "/openapi.json", "auth": {"env": "API_KEY", "header": "X-Api-Key", "template": "{{secret}}"}}}. registers is {"kind": "mcp", "port", "path"} for an MCP server, or {"kind": "none"}. A fixed value is no secret; a secret goes to a variable through env_secrets. To move a service already running to a newer image, call that service\'s own update tool instead.',
         ),
       ssh_server: z
         .string()

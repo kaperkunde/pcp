@@ -741,6 +741,53 @@ describe("format 3: services", () => {
     expect(serializeItem(read.items[0]!)).toEqual(files)
   })
 
+  it("never shares a service built from a repository, and reads no build from a document", async () => {
+    const ctx = await freshVault()
+    const rest = Object.fromEntries(
+      Object.entries(DOCLING).filter(
+        ([key]) => key !== "image" && key !== "source",
+      ),
+    )
+    const { id } = await addService(ctx, {
+      ...rest,
+      build: {
+        repository: "kaperkunde/docling",
+        commit: "a".repeat(40),
+        containerfile: "Containerfile",
+      },
+      image: `localhost/pcp-docling@sha256:${"d".repeat(64)}`,
+    })
+    const skipped: Array<{ id: string; name: string; message: string }> = []
+
+    expect(
+      (await localItems(ctx, skipped)).map((item) => item.id),
+    ).not.toContain(id)
+    expect(skipped).toEqual([
+      expect.objectContaining({
+        id,
+        message: expect.stringMatching(/not shared through a repository/),
+      }),
+    ])
+
+    const read = await readRepo({
+      "services/docling.yaml": yamlText({
+        pcp_format: 3,
+        version: 1,
+        name: "Docling",
+        ...rest,
+        build: {
+          repository: "kaperkunde/docling",
+          commit: "a".repeat(40),
+          containerfile: "Containerfile",
+        },
+      }),
+    })
+    expect(read.items).toEqual([])
+    expect(read.problems.map((problem) => problem.message).join(" ")).toMatch(
+      /only the owner sets up on PCP's launch page/,
+    )
+  })
+
   it("shares a service as the service: what it registered is not an item of its own", async () => {
     const ctx = await freshVault()
     const { id, registeredId } = await addService(ctx)
