@@ -3,7 +3,14 @@ import { hkdfSync } from "node:crypto"
 import type { FileLink } from "@/lib/generated/prisma/client"
 
 import type { VaultContext } from "./context"
-import { asBytes, decrypt, encrypt, randomSecret, sha256Hex } from "./crypto"
+import {
+  asBytes,
+  decrypt,
+  encrypt,
+  encryptString,
+  randomSecret,
+  sha256Hex,
+} from "./crypto"
 import { db } from "./db"
 import { invalid, notFound } from "./errors"
 import { newId } from "./ids"
@@ -91,12 +98,17 @@ export function keyAad(id: string): string {
   return `file_link_key:${id}`
 }
 
+/** An upload's store folder, then its path there (store-uploads.ts). */
+export function storePathAad(id: string): string {
+  return `file_link_store_path:${id}`
+}
+
 /** Where a link is fetched or sent: under PCP's public address. */
 export function fileLinkUrl(publicUrl: string, secret: string): string {
   return `${publicUrl.replace(/\/+$/, "")}/api/files/${secret}`
 }
 
-async function roomForLink(
+export async function roomForLink(
   ctx: VaultContext,
   tokenId: string,
   now: Date,
@@ -205,6 +217,8 @@ export async function receiveFile(
     publicUrl: string
     name?: string | null
     type?: string | null
+    /** A store to save the file in too (store-uploads.ts). */
+    destination?: { storeId: string; folder: string } | null
   },
   now = new Date(),
 ): Promise<UploadLink> {
@@ -229,6 +243,18 @@ export async function receiveFile(
       maxUses: 1,
       createdAt: now,
       expiresAt,
+      ...(input.destination
+        ? {
+            storeId: input.destination.storeId,
+            storePath: asBytes(
+              encryptString(
+                ctx.dek,
+                input.destination.folder,
+                storePathAad(id),
+              ),
+            ),
+          }
+        : {}),
     },
   })
 

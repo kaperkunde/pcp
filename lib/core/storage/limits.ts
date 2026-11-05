@@ -65,3 +65,13 @@ export const CONVERT_BUDGET_MS = 20_000
 export const CONVERT_BATCH_FILES = 200
 /** A part file in PCP's own store older than this is a write cut off. */
 export const PART_FILE_AGE_MS = 24 * 60 * 60_000
+
+/** A public link to a store's file (share_file, store-links.ts): its time
+ * in minutes when the assistant does not say, at least, and at most (a
+ * week). */
+export const DEFAULT_STORE_LINK_MINUTES = 60
+export const MIN_STORE_LINK_MINUTES = 5
+export const MAX_STORE_LINK_MINUTES = 7 * 24 * 60
+/** Whole downloads it serves when the assistant does not say, and at most. */
+export const DEFAULT_STORE_LINK_DOWNLOADS = 5
+export const MAX_STORE_LINK_DOWNLOADS = 100

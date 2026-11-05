@@ -120,7 +120,7 @@ describe("PCP's own store", () => {
     expect(loaded.host).toBeNull()
     expect(
       (await db().mcpTool.findMany({ where: { serverId: a } })).length,
-    ).toBe(7)
+    ).toBe(8)
     expect(await listStores(ctx)).toEqual([
       expect.objectContaining({ id: a, backend: "local", mode: "encrypted" }),
     ])

@@ -30,6 +30,8 @@ import {
 } from "../servers"
 import { SshAuthError, SshHostKeyError } from "../ssh/client"
 import { validateLogin } from "../ssh/hosts"
+import { roomForLink } from "../file-links"
+import { shareRefusal, shareStoreFile } from "../store-links"
 import { handleOf, type BytesKeeper, type ResultOpener } from "../tool-results"
 import {
   argumentsResult,
@@ -588,11 +590,14 @@ export async function callStorageTool(
   {
     connect,
     publicUrl,
+    tokenId,
     keepBytes,
     open,
   }: {
     connect: StorageConnect
     publicUrl: string
+    /** The token calling: share_file's link is its own. */
+    tokenId?: string
     keepBytes?: BytesKeeper
     open?: ResultOpener
   },
@@ -638,6 +643,17 @@ export async function callStorageTool(
       matcher = globMatcher(String(a.name), {
         caseSensitive: a.case_sensitive === true,
       })
+    }
+
+    // A link only for a token that moves files by link, with room for one.
+    if (toolName === "share_file") {
+      const refused = await shareRefusal(ctx, tokenId)
+
+      if (refused) {
+        return familyError(refused, "forbidden", { notes })
+      }
+
+      await roomForLink(ctx, tokenId!, new Date())
     }
 
     // Read before anything connects: an unknown id writes nothing.
@@ -695,12 +711,18 @@ export async function callStorageTool(
 
   try {
     const value = await withFolder(ctx, loaded, connect, (folder) =>
-      runTool(folder, loaded, toolName, a, {
-        matcher,
-        upload,
-        fileBytes,
-        keepBytes,
-      }),
+      toolName === "share_file"
+        ? shareFile(ctx, folder, loaded, a, {
+            tokenId: tokenId!,
+            publicUrl,
+            fileBytes,
+          })
+        : runTool(folder, loaded, toolName, a, {
+            matcher,
+            upload,
+            fileBytes,
+            keepBytes,
+          }),
     )
 
     if (server.status !== "ok") {
@@ -739,6 +761,49 @@ export async function callStorageTool(
     }
 
     throw new PcpError("upstream", failed.message)
+  }
+}
+
+/** share_file: a public link to one file (store-links.ts). */
+async function shareFile(
+  ctx: VaultContext,
+  folder: StorageFolder,
+  loaded: LoadedStorage,
+  a: Record<string, unknown>,
+  {
+    tokenId,
+    publicUrl,
+    fileBytes,
+  }: { tokenId: string; publicUrl: string; fileBytes: number },
+): Promise<unknown> {
+  const link = await shareStoreFile(ctx, {
+    tokenId,
+    publicUrl,
+    storeId: loaded.server.id,
+    folder,
+    // PCP's own store, encrypted: read in place with the file's key alone.
+    // Anywhere else only a request with PCP's key reaches it: copied now.
+    direct: isLocalStore(loaded.root) && isEncryptedStore(loaded.root),
+    path: typeof a.path === "string" ? a.path : "",
+    minutes:
+      typeof a.expires_in_minutes === "number"
+        ? a.expires_in_minutes
+        : undefined,
+    downloads:
+      typeof a.max_downloads === "number" ? a.max_downloads : undefined,
+    maxBytes: fileBytes,
+  })
+
+  return {
+    url: link.url,
+    name: link.name,
+    type: link.mediaType,
+    size: link.size,
+    expiresAt: link.expiresAt.toISOString(),
+    downloads: link.maxDownloads,
+    note: link.copied
+      ? "Anyone holding the link can download the file until it expires: give it only to whom it is for. PCP copied the file for the link, so later changes to it do not reach the link."
+      : "Anyone holding the link can download the file until it expires: give it only to whom it is for. The link ends early if the file is changed or deleted.",
   }
 }
 

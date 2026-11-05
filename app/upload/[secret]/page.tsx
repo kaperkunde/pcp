@@ -72,6 +72,21 @@ export default async function UploadPage({
           <p className="mt-2 text-[15px] break-words text-foreground">
             {view.purpose}
           </p>
+          {view.destination ? (
+            <p className="mt-2 break-words">
+              They are saved in{" "}
+              <span className="text-foreground">{view.destination.store}</span>
+              {view.destination.folder ? (
+                <>
+                  , in{" "}
+                  <span className="text-foreground">
+                    {view.destination.folder}
+                  </span>
+                </>
+              ) : null}
+              , in your PCP.
+            </p>
+          ) : null}
         </>
       }
     >

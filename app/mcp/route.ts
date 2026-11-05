@@ -24,7 +24,7 @@ import { checkRateLimit } from "@/lib/core/rate-limit"
 import { publicUrlFor, publicUrlWithoutSession } from "@/lib/server/public-url"
 import { loadResourceLimits } from "@/lib/core/resources/state"
 import { runDueSyncs } from "@/lib/core/repos/sync"
-import { reconcileServices } from "@/lib/core/upstream"
+import { deliverUploads, reconcileServices } from "@/lib/core/upstream"
 import { ensureOwnStore } from "@/lib/core/storage/roots"
 
 /**
@@ -237,6 +237,13 @@ async function handle(request: Request): Promise<Response> {
   // Services the owner left running whose container stopped are started
   // again the same way, throttled: never on a timer.
   after(() => reconcileServices(resolved.ctx, { publicUrl: scope.publicUrl }))
+  // Files that arrived by an upload link for a store are saved there the
+  // same way: the link holds no key that opens the store.
+  after(() =>
+    deliverUploads(resolved.ctx, { publicUrl: scope.publicUrl }).catch(
+      (error) => console.error("[uploads] saving into a store failed", error),
+    ),
+  )
 
   return withCors(response)
 }

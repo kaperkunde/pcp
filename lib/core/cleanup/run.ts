@@ -7,6 +7,7 @@ import { pruneOAuthCredentials } from "../oauth-server/tokens"
 import { prunePermissionRequests, pruneReusableAnswers } from "../permissions"
 import { pruneRequestLog } from "../request-log"
 import { pruneLocalStores } from "../storage/cleanup"
+import { pruneLinkCopies } from "../store-links"
 import { pruneExpiredSessions } from "../sessions"
 import { pruneToolResults } from "../tool-results"
 import { pruneUploadLinks } from "../upload-links"
@@ -61,12 +62,19 @@ const PARTS: Part[] = [
   {
     key: "results",
     label: "kept results past their day",
-    // With the links that move them, which last an hour, and the upload
-    // pages the owner sends them from, kept a day for check_upload.
-    run: async (_, now) =>
-      (await pruneToolResults(now)) +
-      (await pruneFileLinks(now)) +
-      (await pruneUploadLinks(now)),
+    // With the links that move them, which last an hour (a store's file's
+    // up to a week), and the upload pages the owner sends them from, kept
+    // a day for check_upload.
+    run: async (_, now, freed) => {
+      const rows =
+        (await pruneToolResults(now)) +
+        (await pruneFileLinks(now)) +
+        (await pruneUploadLinks(now))
+      // The copies share_file made, once no link names them.
+      const copies = await pruneLinkCopies(now)
+      freed.bytes += copies.freedBytes
+      return rows + copies.removed
+    },
   },
   {
     key: "allowances",

@@ -44,6 +44,7 @@ import {
   type SshIdentity,
 } from "./ssh/client"
 import { convertStoreStep, type ConversionStep } from "./storage/convert"
+import { deliverStoreUploads, type Delivery } from "./store-uploads"
 import { type OpenedFile, type StorageFolder } from "./storage/files"
 import {
   callStorageTool,
@@ -1489,6 +1490,39 @@ export async function withStorageFolder<T>(
 }
 
 /**
+ * Saves files that arrived by upload links made with a store as their
+ * destination (store-uploads.ts), each store opened as the owner's file
+ * browser opens it, with the key this request holds. Run by check_upload
+ * and, after the answer, by any request that brings the vault's key.
+ */
+export function deliverUploads(
+  ctx: VaultContext,
+  {
+    publicUrl,
+    ...options
+  }: {
+    publicUrl: string
+    tokenId?: string
+    uploadLinkId?: string
+    retryNow?: boolean
+  },
+): Promise<Delivery[]> {
+  return deliverStoreUploads(ctx, {
+    ...options,
+    open: (storeId, run) =>
+      withStorageFolder(ctx, storeId, { publicUrl }, (folder, loaded) => {
+        if (loaded.server.readOnly) {
+          throw new PcpError(
+            "state",
+            `${loaded.server.name} is read-only in PCP now, so nothing is saved there.`,
+          )
+        }
+        return run(folder)
+      }),
+  })
+}
+
+/**
  * One batch of the owner's conversion of a store, encrypted or plain
  * (storage/convert.ts), on its backend opened for this request.
  */
@@ -2517,6 +2551,7 @@ async function dispatchKind(
     return callStorageTool(ctx, loaded, toolName, args, {
       connect: storageConnect(ctx, loaded),
       publicUrl,
+      tokenId,
       keepBytes,
       open,
     })

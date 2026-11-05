@@ -1,10 +1,13 @@
+import { Readable } from "node:stream"
+
 import { asBytes } from "@/lib/core/crypto"
-import {
-  downloadByLink,
-  uploadByLink,
-  type LinkRefusal,
-} from "@/lib/core/file-links"
+import { downloadByLink, uploadByLink } from "@/lib/core/file-links"
 import { checkRateLimit } from "@/lib/core/rate-limit"
+import {
+  openStoreLink,
+  type StoreLinkFile,
+  type StoreLinkRefusal,
+} from "@/lib/core/store-links"
 import { closeUploadPage, uploadToPage } from "@/lib/core/upload-links"
 import { UNEXPECTED_ERROR } from "@/lib/server/action-state"
 import { clientIp } from "@/lib/server/client-ip"
@@ -14,8 +17,10 @@ export const dynamic = "force-dynamic"
 
 /**
  * A file link (lib/core/file-links.ts): GET downloads the kept result a
- * share_result link names, PUT (or POST) sends the file a receive_file link
- * waits for, as the request's body. An assistant's own computer calls it
+ * share_result link names, or the store's file a share_file link names
+ * (lib/core/store-links.ts, whole or one Range, streamed and decrypted as
+ * it is read), PUT (or POST) sends the file a receive_file link waits for,
+ * as the request's body. An assistant's own computer calls it
  * with curl, so there is no session, no page and no origin to check: the
  * link's secret is the credential, for that one file. A route handler, not
  * an action: a file needs Content-Disposition, and a body of its own.
@@ -31,7 +36,16 @@ const RATE_LIMIT = { max: 60, windowMs: 60_000 }
 
 type Params = { params: Promise<{ secret: string }> }
 
-export async function GET(_request: Request, { params }: Params) {
+const FILE_HEADERS = {
+  "Cache-Control": "no-store",
+  "X-Content-Type-Options": "nosniff",
+  // A file is the assistant's, not PCP's page: opened in a browser,
+  // nothing in it runs under PCP's address.
+  "Content-Security-Policy": "sandbox",
+  "Referrer-Policy": "no-referrer",
+}
+
+export async function GET(request: Request, { params }: Params) {
   const limited = await rateLimited()
 
   if (limited) {
@@ -39,7 +53,14 @@ export async function GET(_request: Request, { params }: Params) {
   }
 
   try {
-    const file = await downloadByLink((await params).secret)
+    const secret = (await params).secret
+    const stored = await openStoreLink(secret, request.headers.get("range"))
+
+    if (stored) {
+      return stored.ok ? storeFile(stored) : problem(stored)
+    }
+
+    const file = await downloadByLink(secret)
 
     if (!file.ok) {
       return problem(file)
@@ -51,18 +72,34 @@ export async function GET(_request: Request, { params }: Params) {
         "Content-Type": file.mediaType || "application/octet-stream",
         "Content-Disposition": disposition(file.name),
         "Content-Length": String(file.bytes.length),
-        "Cache-Control": "no-store",
-        "X-Content-Type-Options": "nosniff",
-        // A file is the assistant's, not PCP's page: opened in a browser,
-        // nothing in it runs under PCP's address.
-        "Content-Security-Policy": "sandbox",
-        "Referrer-Policy": "no-referrer",
+        ...FILE_HEADERS,
       },
     })
   } catch (error) {
     console.error("[files] download failed", error)
     return problem({ ok: false, status: 500, message: UNEXPECTED_ERROR })
   }
+}
+
+/** A store link's file (lib/core/store-links.ts), whole or a range. */
+function storeFile(file: StoreLinkFile): Response {
+  const body = Readable.toWeb(file.stream) as ReadableStream<Uint8Array>
+
+  return new Response(body, {
+    status: file.partial ? 206 : 200,
+    headers: {
+      ...FILE_HEADERS,
+      "Content-Type": file.mediaType || "application/octet-stream",
+      "Content-Disposition": disposition(file.name),
+      "Content-Length": String(file.length),
+      "Accept-Ranges": "bytes",
+      ...(file.partial
+        ? {
+            "Content-Range": `bytes ${file.offset}-${file.offset + file.length - 1}/${file.size}`,
+          }
+        : {}),
+    },
+  })
 }
 
 async function receive(request: Request, { params }: Params) {
@@ -174,9 +211,17 @@ function disposition(name: string | null): string {
     : `attachment; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(file).replace(/['()*]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`)}`
 }
 
-function problem(refusal: LinkRefusal): Response {
+function problem(refusal: StoreLinkRefusal): Response {
   return Response.json(
     { error: refusal.message },
-    { status: refusal.status, headers: { "Cache-Control": "no-store" } },
+    {
+      status: refusal.status,
+      headers: {
+        "Cache-Control": "no-store",
+        ...(refusal.status === 416 && refusal.size !== undefined
+          ? { "Content-Range": `bytes */${refusal.size}` }
+          : {}),
+      },
+    },
   )
 }
