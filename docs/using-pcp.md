@@ -508,7 +508,9 @@ allow** (which also adds the site to the secret's sites). Only a field of the
 page's own site takes it, not one in a frame from another site. Afterwards the
 field reads as `[secret: name]` in every answer, any password field's value is
 hidden, and screenshots of the tab are refused until the field changes or the
-page moves on. A secret an API endpoint uses is not allowed in the browser by
+page moves on. Wherever a page of that tab repeats the secret later, even
+written its own way (an IBAN in groups of four, in capitals, on the next
+page), it reads as `[secret: name]` too, for as long as the tab is open. A secret an API endpoint uses is not allowed in the browser by
 that. Under **Secrets**, add one as **One-time codes (TOTP)** with the seed or
 `otpauth://` link a site shows when you set up its codes: PCP types the code
 of the moment, and **Code** shows it to you. **Browser** on a secret's row

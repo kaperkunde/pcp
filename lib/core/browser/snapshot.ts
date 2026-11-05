@@ -85,6 +85,8 @@ const FIELD_ROLES = new Set(["textbox", "searchbox", "combobox", "spinbutton"])
  * The snapshot with each field whose value is one of `masks`' showing its
  * mask instead (`- textbox "Password" [ref=e3]: [password]`). Only a
  * field's own value is touched: the same text elsewhere on the page stays.
+ * A field with more to say (a placeholder) writes its value as a child,
+ * `- text: …` under it, which is masked the same way.
  */
 export function maskFields(
   tree: string,
@@ -93,6 +95,9 @@ export function maskFields(
   if (masks.size === 0) {
     return tree
   }
+
+  // The indent of the field whose children the lines are in; -1 for none.
+  let field = -1
 
   return tree
     .split("\n")
@@ -103,11 +108,21 @@ export function maskFields(
         return line
       }
 
+      const indent = match[1]!.length
       const entry = match[2]!.trimEnd()
       const { key, value } = splitEntry(entry.trim())
       const role = key.match(/^[a-zA-Z][\w-]*/)?.[0]
+      const inField = field >= 0 && indent > field
 
-      if (value === null || !role || !FIELD_ROLES.has(role)) {
+      if (!inField) {
+        field = role && FIELD_ROLES.has(role) && value === null ? indent : -1
+      }
+
+      if (
+        value === null ||
+        !role ||
+        !(FIELD_ROLES.has(role) || (inField && key === "text"))
+      ) {
         return line
       }
 

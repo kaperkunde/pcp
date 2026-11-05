@@ -129,6 +129,20 @@ describe("a tab's refs", () => {
     expect(refs.playwrightRef(first['button "Save"']!)).toBeNull()
   })
 
+  it("give the page's own elements no frame mark, though Playwright marks a main frame that replaced another", () => {
+    const refs = new TabRefs()
+    const marked = PAGE.replace(/\[ref=e(\d+)\]/g, "[ref=f3e$1]").replace(
+      "[ref=f1e2]",
+      "[ref=f4e2]",
+    )
+    const written = refsIn(refs.adopt(marked, "doc2"))
+
+    expect(written['button "Save"']).toMatch(/^e\d+$/)
+    expect(written['heading "Inbox"']).toMatch(/^e\d+$/)
+    expect(written['button "Inner"']).toMatch(/^f4e\d+$/)
+    expect(refs.playwrightRef(written['button "Save"']!)).toBe("f3e8")
+  })
+
   it("tells a ref it gave from one it never did", () => {
     const refs = new TabRefs()
     refs.adopt(PAGE, null)

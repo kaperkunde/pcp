@@ -2521,7 +2521,10 @@ per tab and never reused, so an answer tells a ref whose element has gone
 (or is hidden or covered: Playwright gives such an element no ref) from
 one the tab never gave. A new document in the tab (its `performance.timeOrigin`,
 read in PCP's own world) starts the matching afresh; a frame's elements keep
-its mark (`f1e12`). The map holds the latest snapshot's elements
+its mark (`f1e12`), and the page's own never have one, though Playwright
+marks the main frame too once a navigation to another site replaced it
+(an element with no `iframe` above it in the tree is the page's; the number
+alone keeps refs apart). The map holds the latest snapshot's elements
 (`MAX_PAGE_REFS`) and the last `MAX_GONE_REFS` out of it for now, which get
 their refs back when they show again (a dialog over them closed); it goes
 with the tab. A screenshot steps its quality, then its size, down
@@ -2613,7 +2616,8 @@ are masked, in the entry and in `Referer`, `Location` and `Origin`.
 their handles, never inline. Every text there, and `evaluate`'s result,
 shows a secret PCP typed into the tab as `[secret: name]`: `held.ts`
 remembers the keyed hash of each for the page's life (`typedInto`), and
-`maskTyped` hashes each word (and its URL-decoded form) against them. A
+`maskTyped` hashes each word (and its URL-decoded form) against them, then
+looks for it as a page may write it its own way (below). A
 request a page sent after PCP typed a secret into it gives no body, since
 the body could carry the secret encoded.
 
@@ -2641,15 +2645,30 @@ That an API endpoint sends the secret never counts. Past the gate,
 `secrets.ts readTypedValue` decrypts it (a TOTP secret's code of the moment,
 RFC 6238 in `totp.ts`, the seed never leaving `secrets.ts`); the browser
 clears and focuses the field, checks again that the page, the frame and the
-focus (in the field's frame and each frame around it) are where they were,
-and types it with CDP `Input.insertText`. The page then holds it (`held.ts`:
-the secret's name and an HMAC of the field's value under a key of the
-process, never the value, by page, in memory): while any field of the page
-has that value, every answer to the token shows it as `[secret: name]`
-(the snapshot's field line, and the value wherever else it appears, a title
-included), and `screenshot` is refused (a tool error). It lets go when no
-field has the value any more: the field changed, or a new document does not
-have it. Every password field's value reads as `[password]` in a snapshot,
+focus (in the field's frame and each frame around it, and in each shadow
+root around it, whose `activeElement` it must be: a web component's field)
+are where they were, and types it with CDP `Input.insertText`. The page then
+holds it (`held.ts`: the secret's name and HMACs under a key of the process
+of the value as typed and as the field has it, each also normalised, white
+space and separators out and upper case, with that form's length; never the
+value, by page, in memory): while any field of the page has that value, as
+it is or reformatted (a bank writes an IBAN in groups of four), every answer
+to the token shows it as `[secret: name]` (the snapshot's field line, its
+`- text:` child where the field has a placeholder, and the value wherever
+else it appears, a title included), and `screenshot` is refused (a tool
+error). It lets go when no field has the value any more: the field changed,
+or a new document does not have it. For as long as the tab lives, whatever
+document it shows, every answer to the token (`callBrowserTool`'s
+`maskHeld`, so the snapshot, `find`, `read_page`, the logs and `evaluate`
+alike) also masks each secret PCP typed into any of its tabs wherever the
+text has it once normalised, within a word or across several (a summary
+page's "NL91 ABNA 0417 …"): a window of the normalised form's length slides
+over the normalised text, a keyed rolling fingerprint (a random base, a
+prime under 2^25) picks the places worth an HMAC, and a match masks the
+original text it came from. That is arithmetic per character, so it has no
+cap to leave text unmasked past; a value shorter than
+`MIN_NORMALISED_MASK_CHARS` once normalised is masked as a whole word only.
+Every password field's value reads as `[password]` in a snapshot,
 typed by anyone. `upstream.ts` scrubs the value from the answer and any error
 too, and the request log notes the secret's name and the origin on the
 call's line (`noteSecretTyped`; a use the owner's answer made gets a line of
