@@ -1077,7 +1077,7 @@ export async function setMcpHeaderCredential(
     )
   ) {
     throw invalid(
-      `${row.name} sends ${headerName} as a further header already: take that out on its page first.`,
+      `${row.name} sends ${headerName} as a further header already: take that one out on its page and update the service again, or set the header there yourself.`,
     )
   }
 

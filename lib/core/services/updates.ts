@@ -266,5 +266,5 @@ export async function applyServiceUpdate(
       ? ` ${ask.instances.join(", ")} share${ask.instances.length === 1 ? "s" : ""} its definition and run${ask.instances.length === 1 ? "s" : ""} the older image until the owner updates ${ask.instances.length === 1 ? "it" : "each"}.`
       : ""
 
-  return `${ask.name} (${ask.slug}) now runs ${ask.to}: PCP pinned it on its definition and made its container again, which is ${status.state}${status.health === "healthy" ? " and healthy" : ""}.${others}`
+  return `${ask.name} (${ask.slug}) now runs ${ask.to}: PCP pinned it on its definition and made its container again, which is ${status.state}${status.health === "healthy" ? " and healthy" : ""}.${others}${status.note ? ` ${status.note}` : ""}`
 }

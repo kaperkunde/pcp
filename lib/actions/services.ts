@@ -111,8 +111,15 @@ export async function saveServiceSettingsAction(
     }
 
     // The container keeps the values it was made with.
-    await recreateService(ctx, id, { publicUrl: await publicUrlFor(ctx) })
-    return { message: "Saved, and the service was restarted with them." }
+    const status = await recreateService(ctx, id, {
+      publicUrl: await publicUrlFor(ctx),
+    })
+    return {
+      message: withNote(
+        "Saved, and the service was restarted with them.",
+        status,
+      ),
+    }
   })
 
   revalidate(id)
@@ -146,6 +153,11 @@ export async function serviceLogsAction(
   )
 }
 
+/** A remake's message, with what went wrong beside it (ServiceStatus.note). */
+function withNote(message: string, status: { note?: string }): string {
+  return status.note ? `${message} ${status.note}` : message
+}
+
 const DONE: Record<"start" | "stop" | "restart", string> = {
   start: "Started.",
   stop: "Stopped.",
@@ -162,10 +174,10 @@ export async function runServiceActionAction(
       throw invalid("Start, stop or restart.")
     }
 
-    await runServiceAction(ctx, id, action, {
+    const status = await runServiceAction(ctx, id, action, {
       publicUrl: await publicUrlFor(ctx),
     })
-    return { message: DONE[action] }
+    return { message: withNote(DONE[action], status) }
   })
 
   revalidate(id)
@@ -183,7 +195,7 @@ export async function updateServiceAction(
 ): Promise<ServerActionResult> {
   const ctx = await requireContext()
   const result = await guarded(async () => {
-    const { image, changed } = await updateService(
+    const { image, changed, status } = await updateService(
       ctx,
       id,
       { publicUrl: await publicUrlFor(ctx) },
@@ -192,9 +204,12 @@ export async function updateServiceAction(
         : {},
     )
     return {
-      message: changed
-        ? `Updated to ${image}.`
-        : "It already runs that image; PCP made its container again from it.",
+      message: withNote(
+        changed
+          ? `Updated to ${image}.`
+          : "It already runs that image; PCP made its container again from it.",
+        status,
+      ),
     }
   })
 

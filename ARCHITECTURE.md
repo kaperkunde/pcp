@@ -1229,8 +1229,13 @@ definition that gained `auth` (a linked repository's, say) or a variable
 bound to another secret reaches the server with the remake that runs it,
 and its tools are read again. A definition with no `auth` leaves the
 server's credential as it is (the owner may have set one), and so does a
-server the owner moved to OAuth. An API endpoint keeps the header it was
-made with, since its header shapes its tools: relaunch it for another.
+server the owner moved to OAuth. A server that cannot take the header (a
+further header of its own has that name) does not undo the remake, whose
+container runs: the server's row is marked failed with what went wrong and
+how to fix it, and the same words come back with the remake's status
+(`ServiceStatus.note`, in `statusWords` and the owner's messages). An API
+endpoint keeps the header it was made with, since its header shapes its
+tools: relaunch it for another.
 
 **Status** is read only inside a request: the service's page when it opens
 (and on Check), `check_server` (for the service and for the server it

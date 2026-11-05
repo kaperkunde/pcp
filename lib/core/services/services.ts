@@ -1171,6 +1171,12 @@ export type ServiceStatus = {
   url: string | null
   /** Through the SSH connection, or directly from PCP's machine. */
   reach: ServiceReach
+  /**
+   * What went wrong beside a remake that worked: the MCP server it
+   * registered could not take the header its definition names
+   * (followRegisteredAuth). Said with the status (statusWords).
+   */
+  note?: string
 }
 
 /** The service's state on its SSH server now, read through the engine. */
@@ -1245,6 +1251,11 @@ function runsImage(state: ContainerState, image: string | undefined): boolean {
 
 /** The status in words, for the server's row and an assistant. */
 export function statusWords(name: string, status: ServiceStatus): string {
+  const words = stateWords(name, status)
+  return status.note ? `${words} ${status.note}` : words
+}
+
+function stateWords(name: string, status: ServiceStatus): string {
   if (status.foreign) {
     return `The container named for ${name} on its SSH server is not the one PCP started.`
   }
@@ -1407,7 +1418,7 @@ export async function recreateServiceOn(
     throw await failedRecreate(loaded, access, error)
   }
 
-  await followRegisteredAuth(loaded)
+  const note = await followRegisteredAuth(loaded)
 
   const health = await waitHealthy(
     access.host,
@@ -1430,11 +1441,11 @@ export async function recreateServiceOn(
   if (!health.ok) {
     throw new PcpError(
       "upstream",
-      `${loaded.server.name} was made again but did not become healthy: ${health.detail}${await logExcerpt(access.host, loaded.engine, name, access.env.redact)}`,
+      `${loaded.server.name} was made again but did not become healthy: ${health.detail}${note ? ` ${note}` : ""}${await logExcerpt(access.host, loaded.engine, name, access.env.redact)}`,
     )
   }
 
-  return status
+  return note ? { ...status, note } : status
 }
 
 /**
@@ -1446,15 +1457,22 @@ export async function recreateServiceOn(
  * as it is (the owner may have set one), and so does a server the owner
  * moved to OAuth. An API endpoint keeps the header it was made with: its
  * header shapes its tools.
+ *
+ * The container is up by now, so a server that cannot take the header (one
+ * of its further headers has that name) does not undo the remake: that
+ * server's row says what failed and how to fix it, and the same words come
+ * back as the remake's note. Null when nothing went wrong.
  */
-async function followRegisteredAuth(loaded: LoadedService): Promise<void> {
+async function followRegisteredAuth(
+  loaded: LoadedService,
+): Promise<string | null> {
   const registers = loaded.definition.registers
   const auth = registers.kind === "mcp" ? registers.auth : undefined
   const secretId = auth ? loaded.env[auth.env] : undefined
   const id = loaded.spec.registeredId
 
   if (!auth || !secretId || !id) {
-    return
+    return null
   }
 
   try {
@@ -1463,11 +1481,16 @@ async function followRegisteredAuth(loaded: LoadedService): Promise<void> {
       valueTemplate: auth.template,
       secretId,
     })
+    return null
   } catch (error) {
-    throw new PcpError(
-      "state",
-      `${loaded.server.name} was made again, but the MCP server it serves still sends what it did: ${error instanceof Error ? error.message : String(error)}`,
-    )
+    const registered = await db().mcpServer.findUnique({
+      where: { id },
+      select: { name: true },
+    })
+    const note = `${loaded.server.name} was made again, but the MCP server it registered${registered ? ` (${registered.name})` : ""} could not take ${auth.env}'s secret in ${auth.header} and sends what it did before: ${error instanceof Error ? error.message : String(error)}`
+
+    await setServerStatus(id, "error", note).catch(() => {})
+    return note
   }
 }
 

@@ -51,6 +51,7 @@ import {
   serviceDial,
   serviceOfDefinition,
   serviceView,
+  statusWords,
   writeServiceDefinition,
   type ServiceLaunchInput,
 } from "./services"
@@ -1142,6 +1143,67 @@ describe("a running service", { timeout: 30_000 }, () => {
       authType: "oauth",
       authSecretId: null,
     })
+  })
+
+  it("keeps a remake that worked when the MCP server it registered cannot take the header, and says so there and in the answer", async () => {
+    const hostId = await pinnedHost()
+    const launched = await launchService(
+      ctx,
+      await launchInput(hostId, {
+        definition: definition({ registers: MCP }),
+      }),
+      FAST,
+    )
+    const secret = await db().secret.findFirstOrThrow({
+      where: { name: "docs-key" },
+    })
+    // The owner's own header, with a further one named as the definition's
+    // header will be.
+    await db().mcpServer.update({
+      where: { id: launched.registeredId! },
+      data: {
+        authType: "header",
+        authHeaderName: "X-Owner",
+        authValueTemplate: "{{secret}}",
+        authSecretId: secret.id,
+      },
+    })
+    await db().serverAuthHeader.create({
+      data: {
+        id: "extra-authorization",
+        serverId: launched.registeredId!,
+        position: 0,
+        headerName: "authorization",
+        valueTemplate: "Bearer {{secret}}",
+        secretId: secret.id,
+      },
+    })
+    await writeServiceDefinition(
+      launched.id,
+      parseServiceDefinition(definition({ registers: MCP_WITH_AUTH })),
+    )
+
+    const { status } = await updateService(ctx, launched.id, FAST)
+
+    // The container was made again and runs: the remake worked.
+    expect(status.state).toBe("running")
+    expect(docker.state().containers["pcp-docs"]!.state).toBe("running")
+    expect(status.note).toMatch(
+      /could not take API_KEY's secret in Authorization and sends what it did before: .* sends Authorization as a further header already: take that one out on its page and update the service again, or set the header there yourself\./,
+    )
+    expect(statusWords("Docs", status)).toContain(status.note)
+
+    // The server it registered says what failed, and keeps its header.
+    expect(await getServer(ctx, launched.registeredId!)).toMatchObject({
+      authType: "header",
+      authHeaderName: "X-Owner",
+      status: "error",
+      statusMessage: status.note,
+    })
+
+    // Made again later, it says the same.
+    const again = await recreateService(ctx, launched.id, FAST)
+    expect(again.note).toBe(status.note)
   })
 
   it("names the service among what uses its secret, which cannot be deleted under it", async () => {
