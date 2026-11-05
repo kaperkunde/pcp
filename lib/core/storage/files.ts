@@ -1,3 +1,5 @@
+import type { Readable } from "node:stream"
+
 import { PcpError } from "../errors"
 import {
   MAX_DELETE_ENTRIES,
@@ -80,12 +82,27 @@ export type StorageFolder = {
     path: string,
     maxBytes: number,
   ): Promise<{ path: string; name: string; bytes: Buffer; modified: string }>
-  /** A file's size and where it is, for a download that streams it. */
-  file(path: string): Promise<{ real: string; name: string; size: number }>
+  /**
+   * A file as a stream, whole or a range of it (`offset`, `length`), for a
+   * download or a conversion: nothing is held but what is being read.
+   */
+  open(
+    path: string,
+    range?: { offset?: number; length?: number },
+  ): Promise<OpenedFile>
   save(
     path: string,
     bytes: Buffer,
     options: { overwrite: boolean },
+  ): Promise<{ path: string; size: number; replaced: boolean }>
+  /**
+   * The same from a stream, as it arrives; past `maxBytes` it stops,
+   * keeps nothing of it and refuses (FileTooLargeError).
+   */
+  saveFrom(
+    path: string,
+    source: AsyncIterable<Buffer> | Iterable<Buffer>,
+    options: { overwrite: boolean; maxBytes?: number },
   ): Promise<{ path: string; size: number; replaced: boolean }>
   makeFolder(
     path: string,
@@ -102,7 +119,31 @@ export type StorageFolder = {
   ): Promise<{ path: string; type: EntryType; removed: number }>
   /** Whether PCP can write here: a part file made and removed. */
   probeWrite(): Promise<void>
-  stat(path: string): Promise<RemoteStat>
+}
+
+export type OpenedFile = {
+  path: string
+  name: string
+  /** The whole file's size. */
+  size: number
+  modified: string
+  /** The range asked for, cut to the file. */
+  offset: number
+  length: number
+  stream: Readable
+}
+
+/** The range asked of a file of `size` bytes, cut to it. */
+export function clampRange(
+  size: number,
+  range: { offset?: number; length?: number } = {},
+): { offset: number; length: number } {
+  const offset = Math.min(size, Math.max(0, Math.floor(range.offset ?? 0)))
+  const length = Math.min(
+    size - offset,
+    Math.max(0, Math.floor(range.length ?? size - offset)),
+  )
+  return { offset, length }
 }
 
 function iso(mtime: number): string {
@@ -269,14 +310,14 @@ export async function openFolder(
     }
   }
 
-  /** Writes `bytes` under a part name next to `own`, then renames it. */
+  /** Writes under a part name next to `own` (`write`), then renames it. */
   async function writeInPlace(
     parent: string,
     own: string,
     leaf: string,
-    bytes: Buffer,
+    write: (part: string, mode: number) => Promise<number>,
     overwrite: boolean,
-  ): Promise<boolean> {
+  ): Promise<{ replaced: boolean; size: number }> {
     const before = await lstatOrNull(own).catch((error) =>
       refusalFromSftp(error, relative(own)),
     )
@@ -296,9 +337,10 @@ export async function openFolder(
     }
 
     const part = under(parent, [`${leaf}${partSuffix()}${PART_SUFFIX}`])
+    let size = 0
 
     try {
-      await fs.writeNew(part, bytes, fileMode)
+      size = await write(part, fileMode)
       // The server's own umask had its say on create: the root's wins.
       await fs.chmod(part, fileMode)
 
@@ -328,7 +370,60 @@ export async function openFolder(
       refusalFromSftp(error, relative(own))
     }
 
-    return before !== null
+    return { replaced: before !== null, size }
+  }
+
+  /** A file the call names, following a link only into the root. */
+  async function fileAt(
+    raw: string,
+  ): Promise<{ real: string; name: string; size: number }> {
+    const { own, leaf, names } = await place(raw)
+
+    if (names.length === 0) {
+      throw new PcpError("validation", "Name a file, not the folder itself.")
+    }
+
+    let stat: RemoteStat | null
+
+    try {
+      stat = await lstatOrNull(own)
+    } catch (error) {
+      refusalFromSftp(error, raw)
+    }
+
+    if (!stat) {
+      throw new PcpError("not_found", `${joinRelative(names)} is not there.`)
+    }
+
+    let real = own
+
+    if (stat.type === "link") {
+      const link = await linkPoints(own)
+
+      if (link.points !== "inside" || !link.real) {
+        throw new PcpError(
+          "forbidden",
+          `${joinRelative(names)} is a link that leads ${link.points === "nowhere" ? "nowhere" : "out of the folder"}, so PCP does not follow it.`,
+        )
+      }
+
+      real = link.real
+
+      try {
+        stat = await fs.stat(real)
+      } catch (error) {
+        refusalFromSftp(error, raw)
+      }
+    }
+
+    if (stat.type !== "file") {
+      throw new PcpError(
+        "validation",
+        `${joinRelative(names)} is ${stat.type === "folder" ? "a folder: list_folder lists it" : "not a file"}.`,
+      )
+    }
+
+    return { real, name: leaf, size: stat.size }
   }
 
   const folder: StorageFolder = {
@@ -425,58 +520,8 @@ export async function openFolder(
       }
     },
 
-    async file(raw) {
-      const { own, leaf, names } = await place(raw)
-
-      if (names.length === 0) {
-        throw new PcpError("validation", "Name a file, not the folder itself.")
-      }
-
-      let stat: RemoteStat | null
-
-      try {
-        stat = await lstatOrNull(own)
-      } catch (error) {
-        refusalFromSftp(error, raw)
-      }
-
-      if (!stat) {
-        throw new PcpError("not_found", `${joinRelative(names)} is not there.`)
-      }
-
-      let real = own
-
-      if (stat.type === "link") {
-        const link = await linkPoints(own)
-
-        if (link.points !== "inside" || !link.real) {
-          throw new PcpError(
-            "forbidden",
-            `${joinRelative(names)} is a link that leads ${link.points === "nowhere" ? "nowhere" : "out of the folder"}, so PCP does not follow it.`,
-          )
-        }
-
-        real = link.real
-
-        try {
-          stat = await fs.stat(real)
-        } catch (error) {
-          refusalFromSftp(error, raw)
-        }
-      }
-
-      if (stat.type !== "file") {
-        throw new PcpError(
-          "validation",
-          `${joinRelative(names)} is ${stat.type === "folder" ? "a folder: list_folder lists it" : "not a file"}.`,
-        )
-      }
-
-      return { real, name: leaf, size: stat.size }
-    },
-
     async read(raw, maxBytes) {
-      const found = await folder.file(raw)
+      const found = await fileAt(raw)
 
       if (found.size > maxBytes) {
         throw new FileTooLargeError(found.size)
@@ -500,7 +545,36 @@ export async function openFolder(
       }
     },
 
-    async save(raw, bytes, { overwrite }) {
+    save(raw, bytes, { overwrite }) {
+      return folder.saveFrom(raw, [bytes], { overwrite })
+    },
+
+    async open(raw, range) {
+      const found = await fileAt(raw)
+      const { offset, length } = clampRange(found.size, range)
+      let modified: string
+
+      try {
+        modified = iso((await fs.stat(found.real)).mtime)
+      } catch (error) {
+        refusalFromSftp(error, raw)
+      }
+
+      return {
+        path: joinRelative(splitPath(raw)),
+        name: found.name,
+        size: found.size,
+        modified,
+        offset,
+        length,
+        stream: fs.readStream(found.real, {
+          start: offset,
+          end: offset + length,
+        }),
+      }
+    },
+
+    async saveFrom(raw, source, { overwrite, maxBytes }) {
       const { names, parent, own, leaf } = await place(raw)
 
       if (names.length === 0) {
@@ -517,8 +591,14 @@ export async function openFolder(
         )
       }
 
-      const replaced = await writeInPlace(parent, own, leaf, bytes, overwrite)
-      return { path: relative(own), size: bytes.length, replaced }
+      const { replaced, size } = await writeInPlace(
+        parent,
+        own,
+        leaf,
+        (part, mode) => fs.writeNewFrom(part, source, mode, maxBytes),
+        overwrite,
+      )
+      return { path: relative(own), size, replaced }
     },
 
     async makeFolder(raw, { parents }) {
@@ -711,16 +791,6 @@ export async function openFolder(
       }
 
       await fs.unlink(part).catch(() => {})
-    },
-
-    async stat(raw) {
-      const { own } = await place(raw)
-
-      try {
-        return await fs.lstat(own)
-      } catch (error) {
-        refusalFromSftp(error, raw)
-      }
     },
   }
 

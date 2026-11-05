@@ -244,24 +244,26 @@ export function isStorageWrite(name: string): boolean {
   return (STORAGE_WRITE_TOOLS as readonly string[]).includes(name)
 }
 
-/** The catalogue's tools for one root, in words that name it. */
+/** The catalogue's tools for one store, in words that name it. */
 export function storageTools({
-  folder,
-  host,
+  where,
+  encrypted,
   readOnly,
 }: {
-  /** The root's path on the server. */
-  folder: string
-  /** The SSH server's name. */
-  host: string
+  /** Where its files are, in words: "the folder /srv/scans on nas". */
+  where: string
+  /** Its files are kept encrypted (names too). */
+  encrypted: boolean
   readOnly: boolean
 }): CatalogueTool[] {
-  const where = `the folder ${folder} on ${host}`
+  const kept = encrypted
+    ? " PCP keeps them encrypted there, names and folders too, and decrypts them only for a call."
+    : ""
   const words: Record<StorageToolName, string> = {
-    list_folder: `Lists the files and folders in ${where}, or a folder inside it: each one's name, path, type, size and when it changed, folders first. Paths are relative to the top of the folder; nothing outside it is reached.`,
+    list_folder: `Lists the files and folders in ${where}, or a folder inside it: each one's name, path, type, size and when it changed, folders first. Paths are relative to the top of the folder; nothing outside it is reached.${kept}`,
     find_files: `Finds files and folders by name in ${where} (or a folder inside it) and every folder under it, with * and ? in the name. Answers with each match's path, size and when it changed. Symbolic links are not followed.`,
     get_file: `Gets one file from ${where} as a kept result's handle, {"$result": "<id>"}, to pass on whole to another tool (send_email's attachments, save_file on another folder, an API's file field) without reading it yourself; a text file's start comes back as text too. A file larger than PCP keeps is refused.`,
-    save_file: `Saves a file in ${where}: a kept result's handle (file, {"$result": "<id>"}: a mail attachment, a scan, a converted document) or text. It is written under a temporary name and renamed into place when whole, with the folder's permissions. A file already there is replaced only with overwrite: true.`,
+    save_file: `Saves a file in ${where}: a kept result's handle (file, {"$result": "<id>"}: a mail attachment, a scan, a converted document) or text. It is written whole before it takes its name, so a file is never half there. A file already there is replaced only with overwrite: true.${kept}`,
     make_folder: `Makes a folder in ${where}, with parents: true also the folders above it. A folder already there is left as it is.`,
     move: `Moves or renames a file or folder within ${where}: from and to are both full paths inside it. A file at to is replaced only with overwrite: true; a folder never.`,
     delete: `Deletes a file or folder in ${where} for good: there is no Trash. A folder must be empty unless recursive: true. A symbolic link is deleted itself, never what it points to.`,
@@ -271,3 +273,20 @@ export function storageTools({
     .filter((name) => !readOnly || !isStorageWrite(name))
     .map((name) => TOOLS[name].listed(words[name]))
 }
+
+/**
+ * The store tools' inputs, for PCP's own top-level tools of the same names
+ * (gateway.ts), which take a store beside them: one set of arguments, so a
+ * call reads the same either way in.
+ */
+export const STORAGE_INPUTS = {
+  list_folder: listFolder,
+  find_files: findFiles,
+  get_file: getFile,
+  save_file: saveFile,
+  make_folder: makeFolder,
+  move,
+  delete: remove,
+} as const satisfies Record<StorageToolName, InnerTool>
+
+export const STORAGE_TOOL_NAMES = Object.keys(TOOLS) as StorageToolName[]

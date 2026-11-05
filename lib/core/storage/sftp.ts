@@ -101,13 +101,26 @@ export type RemoteFs = {
   chmod(path: string, mode: number): Promise<void>
   /** The whole file, read in turn; past `maxBytes` it stops and refuses. */
   readFile(path: string, maxBytes: number): Promise<Buffer>
-  /** A file's bytes as a stream, for the owner's download. */
-  readStream(path: string): Readable
+  /**
+   * A file's bytes as a stream, from `start` up to but not at `end` when
+   * given (a range of the owner's download, the chunks of a sealed object).
+   */
+  readStream(path: string, range?: { start?: number; end?: number }): Readable
   /**
    * Writes a new file that must not be there yet (exclusive create), in
    * chunks, with `mode`.
    */
   writeNew(path: string, bytes: Buffer, mode: number): Promise<void>
+  /**
+   * The same from a stream, as it arrives (a sealed object, a converted
+   * file): what it wrote, in bytes. Past `maxBytes` it stops and refuses.
+   */
+  writeNewFrom(
+    path: string,
+    source: AsyncIterable<Buffer> | Iterable<Buffer>,
+    mode: number,
+    maxBytes?: number,
+  ): Promise<number>
   /** Ends the session. */
   end(): void
 }
@@ -285,15 +298,16 @@ export function remoteFs(sftp: SFTPWrapper, release: () => void): RemoteFs {
       return Buffer.concat(chunks)
     },
 
-    readStream(path) {
+    readStream(path, range = {}) {
       return Readable.from(
         (async function* () {
           const handle = await open(path, "r")
-          let position = 0
+          let position = range.start ?? 0
+          const end = range.end ?? Number.POSITIVE_INFINITY
 
           try {
-            for (;;) {
-              const buffer = Buffer.alloc(64 * 1024)
+            while (position < end) {
+              const buffer = Buffer.alloc(Math.min(64 * 1024, end - position))
               const read = await timed<number>(`reading ${path}`, (done) =>
                 sftp.read(
                   handle,
@@ -317,6 +331,32 @@ export function remoteFs(sftp: SFTPWrapper, release: () => void): RemoteFs {
           }
         })(),
       )
+    },
+
+    async writeNewFrom(path, source, mode, maxBytes) {
+      const handle = await open(path, "wx", mode)
+      let at = 0
+
+      try {
+        for await (const chunk of source) {
+          if (maxBytes !== undefined && at + chunk.length > maxBytes) {
+            throw new FileTooLargeError(at + chunk.length)
+          }
+
+          for (let from = 0; from < chunk.length; from += WRITE_CHUNK_BYTES) {
+            const length = Math.min(WRITE_CHUNK_BYTES, chunk.length - from)
+            const position = at + from
+            await timed<void>(`writing ${path}`, (done) =>
+              sftp.write(handle, chunk, from, length, position, done),
+            )
+          }
+          at += chunk.length
+        }
+      } finally {
+        await close(handle)
+      }
+
+      return at
     },
 
     async writeNew(path, bytes, mode) {
