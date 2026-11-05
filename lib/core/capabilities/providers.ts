@@ -485,19 +485,22 @@ function inputsOf(
   step: FileStep | null,
 ): { input: FileSlot; image: FileSlot | null; pdfOnly: boolean } | null {
   const usablePaths = step ? slots.paths : []
+  // One file goes where one goes, or as a list of one where only a list
+  // does (an upload's `files`); several go only where a list does.
   const pick = (many: boolean, image: boolean) => {
-    const fits = (entry: { name: string; slot: FileSlot }) =>
-      (entry.slot.kind === "base64"
-        ? !many
-        : (entry.slot.many ?? false) === many) &&
-      IMAGE_NAME.test(entry.name) === image
-
-    return (
-      slots.handles.find(fits) ??
-      slots.base64.find(fits) ??
-      usablePaths.find(fits) ??
+    const fits =
+      (manyWanted: boolean) => (entry: { name: string; slot: FileSlot }) =>
+        (entry.slot.kind === "base64"
+          ? !manyWanted
+          : entry.slot.many === manyWanted) &&
+        IMAGE_NAME.test(entry.name) === image
+    const find = (manyWanted: boolean) =>
+      slots.handles.find(fits(manyWanted)) ??
+      slots.base64.find(fits(manyWanted)) ??
+      usablePaths.find(fits(manyWanted)) ??
       null
-    )
+
+    return many ? find(true) : (find(false) ?? find(true))
   }
   const main =
     op.inputs === "many"
@@ -521,12 +524,13 @@ function inputsOf(
   }
 }
 
+/** A required path is filled when it, or a part of it, or a part in it is. */
 function covers(path: string[], filled: string[][]): boolean {
-  return filled.some(
-    (entry) =>
-      entry.length <= path.length &&
-      entry.every((part, index) => part === path[index]),
-  )
+  const prefix = (short: string[], long: string[]) =>
+    short.length <= long.length &&
+    short.every((part, index) => part === long[index])
+
+  return filled.some((entry) => prefix(entry, path) || prefix(path, entry))
 }
 
 /**
