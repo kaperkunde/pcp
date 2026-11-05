@@ -64,6 +64,9 @@ test("a folder is added on its SSH server's page and browsed there", async ({
     .getByTestId("ssh-storage")
     .getByRole("link", { name: "Add a folder" })
     .click()
+  // The SSH server's page has Name fields of its own (the server, an exit):
+  // fill in the folder's once its page is open.
+  await expect(page).toHaveURL(/\/servers\/storage\/new\?/)
   await page.getByLabel("Name", { exact: true }).fill(FOLDER)
   await page.getByLabel("Folder", { exact: true }).fill(top)
   await page.getByRole("button", { name: "Add folder" }).click()
@@ -85,7 +88,8 @@ test("a folder is added on its SSH server's page and browsed there", async ({
     mimeType: "text/plain",
     buffer: Buffer.from("uploaded"),
   })
-  await page.getByRole("button", { name: "Upload" }).click()
+  // Exact: the file field ("Files to upload") is a button by role too.
+  await page.getByRole("button", { name: "Upload", exact: true }).click()
   await expect(entries).toContainText("note.txt")
   expect(fs.readFileSync(path.join(top, "note.txt"), "utf8")).toBe("uploaded")
 

@@ -103,7 +103,10 @@ test("a one-time codes secret takes only a seed, shows its code of the moment, a
   await expect(
     row.getByText("https://waternet.nl", { exact: true }),
   ).toBeVisible()
-  await expect(row.getByText("and its subdomains")).toBeVisible()
+  // Exact: the checkbox's own label starts "And its subdomains" too.
+  await expect(
+    row.getByText("and its subdomains", { exact: true }),
+  ).toBeVisible()
 
   acceptNextDialog(page)
   await row.getByRole("button", { name: "Delete" }).click()
