@@ -5,6 +5,7 @@ import { useActionState, useEffect, useState, useTransition } from "react"
 
 import { AnsweredBefore } from "@/components/answer-queue"
 import { BrowserDescribeForm } from "@/components/browser-describe-form"
+import { BrowserSignInImport } from "@/components/browser-sign-in-import"
 import { BrowserTabView } from "@/components/browser-tab-view"
 import { BrowserTabs } from "@/components/browser-tabs"
 import { FormError } from "@/components/form-status"
@@ -162,7 +163,7 @@ export function BrowserManager({
 
       <ListSection
         title="Sign-ins"
-        footer="The browser keeps the cookies, local storage and IndexedDB of the sites it visits, encrypted with your vault, so a sign-in lasts between conversations. Where you have signed in, an assistant with the browser acts as you. It cannot read them: no tool hands back a cookie or runs a script."
+        footer="The browser keeps the cookies, local storage and IndexedDB of the sites it visits, encrypted with your vault, so a sign-in lasts between conversations: one you make in a tab of your own, or one you import from another browser. Where you have signed in, an assistant with the browser acts as you. It cannot read them: no tool hands back a cookie or runs a script."
       >
         <List>
           <ListRow
@@ -202,6 +203,13 @@ export function BrowserManager({
               >
                 Forget all sites
               </Button>
+            }
+          />
+          <BrowserSignInImport
+            onDone={() =>
+              void browserOverviewAction().then(
+                (next) => next && setOverview(next),
+              )
             }
           />
         </List>

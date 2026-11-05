@@ -2286,7 +2286,15 @@ Chromium's own, with its complete client hints, when there is a window (on
 the virtual display or in the desktop app); headless, its `platformVersion`
 hint stays blank. The locale and time zone are the container process's
 (`LANG` and `TZ`, which the installer passes in from the host; Compose users
-set them), and the viewport is 1280 by 800. Service workers are refused, not
+set them), and the viewport is 1280 by 800. The locale is Chromium's own
+languages, not Playwright's `locale` (which sends the bare locale as
+`Accept-Language` and lists it alone in `navigator.languages`, as no
+person's Chrome does): Chromium starts with `--lang=<locale>` and
+`--accept-lang=<locale>,<language>` (`launch.ts browserLanguages`), so it
+sends `en-US,en;q=0.9` and lists `["en-US", "en"]`, in pages and workers,
+in every mode; the pages' `Intl` locale follows `LANG`, as Node's does.
+Media devices are what the machine has: in the container image none (no
+sound server, no camera), so a page counts no speaker or microphone. Service workers are refused, not
 by an option (a service worker could answer a navigation without the network,
 around the gate): the gate refuses a service worker's script request itself
 (one marked `Service-Worker: script`), so registration fails, and no script is
@@ -2424,6 +2432,26 @@ the browser. The idle close has no key and saves nothing, so what a page
 changed on its own since the last save is lost. Counts (sites, cookies,
 size) are kept in the clear for the page. An export carries the row as
 ciphertext; Forget all sites closes the browser unsaved and deletes it.
+
+Sign-ins come from the browser's own use (a tab the owner signs in on, or
+an assistant's) or from the owner's import of one made elsewhere
+(`sign-in-import.ts`, the Browser page's Sign-ins section; never a tool, and
+nothing of it reaches an assistant). The owner pastes or chooses
+Playwright's storage state, a JSON cookie list (the `chrome.cookies` shape
+extensions such as Cookie-Editor save) or a Netscape cookies.txt, at most
+8 MB and 3,000 cookies. Each cookie is checked as Chromium would take it
+(name, value, domain, path, prefixes, SameSite=None only with Secure), since
+one Chromium refuses would keep the context from starting; expired ones,
+IP addresses, `localhost`, and PCP's own host with its subdomains and the
+domains above it are left out, and IndexedDB is not imported (local storage
+is). The preview names the sites and counts, what is left out and why, and
+what the profile holds for those sites now. Confirm sends the text again
+with the preview's `basis` (its SHA-256), and the import writes only that:
+inside `withBrowserClosed` (the browser's profile saved, then closed, so it
+cannot save over the import), each site the import names (its host, its
+subdomains and the domains above it) loses what the profile held, cookies
+and storage alike, and takes the import's; every other site stays. It is
+written through `writeProfile`, encrypted as any save is.
 Starting the browser for a page read for web_fetch loads the profile into the
 vault's own context as any start does; the read happens in a context of its
 own, which never touches the profile and is never saved.
