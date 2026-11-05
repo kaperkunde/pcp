@@ -1,3 +1,7 @@
+import { createHash } from "node:crypto"
+
+import { parse as parseHost } from "tldts"
+
 import { requireToken } from "./api-tokens"
 import {
   MAX_SECRET_PURPOSE_CHARS,
@@ -5,15 +9,21 @@ import {
 } from "./browser/limits"
 import {
   OwnerNeeded,
+  type ProposedSecretSite,
+  type SecretPart,
   type SecretRequestAsk,
+  type SecretSitesChangeAsk,
   type SecretUseContext,
 } from "./browser/types"
 import { SECRET_ALLOW_MINUTES } from "./constants"
 import type { VaultContext } from "./context"
 import { db } from "./db"
 import { invalid, notFound, PcpError } from "./errors"
+import { checkPasswordRecipe } from "./generate-password"
+import { lookalikeReason } from "./lookalike-sites"
 import { hiddenCharacter, withoutPresentation } from "./memories"
 import {
+  checkLoginName,
   createSecret,
   findOwnerSecretByName,
   isOwnerSecretKind,
@@ -67,6 +77,18 @@ export const MAX_SECRET_PURPOSE = MAX_SECRET_PURPOSE_CHARS
 export type SecretUseLevel = "once" | "hour" | "always"
 
 export type TypableSecret = { id: string; name: string; kind: OwnerSecretKind }
+
+/**
+ * One of a secret's sites: an origin, and with `subdomains` every origin at
+ * the same scheme and port whose host is under this one's, within its
+ * registrable domain (siteCovers).
+ */
+export type SecretSite = { origin: string; subdomains: boolean }
+
+/** What the secret's page and an assistant read for a site. */
+export function siteLabel(site: SecretSite): string {
+  return site.subdomains ? `${site.origin} and its subdomains` : site.origin
+}
 
 /**
  * A page's origin, https://host[:port] as URL.origin writes it; null for
@@ -137,6 +159,121 @@ export function parseOrigins(list: readonly string[]): string[] {
   return origins
 }
 
+// ---- Subdomains ----------------------------------------------------------------
+
+/**
+ * A host's registrable domain by the public suffix list, its private part
+ * too (github.io's users, a cloud's buckets are each their own): example.com
+ * for login.example.com, example.co.uk for www.example.co.uk. Null for an
+ * IP address, a name with no registrable domain (localhost) or a public
+ * suffix itself (co.uk, github.io).
+ */
+export function registrableDomain(host: string): string | null {
+  const parsed = parseHost(host, { allowPrivateDomains: true })
+
+  return parsed.isIp ? null : (parsed.domain ?? null)
+}
+
+function originParts(origin: string): URL | null {
+  try {
+    return new URL(origin)
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Whether a site may stand for its subdomains too: its host has a
+ * registrable domain, so "its subdomains" stay within one owner's names.
+ * Never an IP address, localhost or a public suffix (co.uk, github.io).
+ */
+export function canCoverSubdomains(origin: string): boolean {
+  const url = originParts(origin)
+  return url !== null && registrableDomain(url.hostname) !== null
+}
+
+/**
+ * Whether a secret's site covers a page's origin: the same origin, or, for a
+ * site with subdomains, one at the same scheme and port whose host ends in
+ * the site's host and has the same registrable domain. A host under another
+ * registrable domain never matches (amazonaws.com does not cover
+ * bucket.s3.amazonaws.com, a public suffix of its own), and neither does a
+ * name that only ends in the same letters (notexample.com).
+ */
+export function siteCovers(site: SecretSite, origin: string): boolean {
+  if (site.origin === origin) {
+    return true
+  }
+
+  if (!site.subdomains) {
+    return false
+  }
+
+  const own = originParts(site.origin)
+  const page = originParts(origin)
+
+  if (
+    !own ||
+    !page ||
+    own.protocol !== page.protocol ||
+    own.port !== page.port
+  ) {
+    return false
+  }
+
+  const domain = registrableDomain(own.hostname)
+
+  return (
+    domain !== null &&
+    page.hostname.endsWith(`.${own.hostname}`) &&
+    registrableDomain(page.hostname) === domain
+  )
+}
+
+/**
+ * The origins a site with subdomains could have been written as to cover
+ * this one: each of its host's parents down to its registrable domain, at
+ * the same scheme and port. Empty for a host with no registrable domain.
+ */
+export function coveringOrigins(origin: string): string[] {
+  const url = originParts(origin)
+  const domain = url ? registrableDomain(url.hostname) : null
+
+  if (!url || !domain || !url.hostname.endsWith(domain)) {
+    return []
+  }
+
+  const labels = url.hostname.split(".")
+  const port = url.port ? `:${url.port}` : ""
+  const parents: string[] = []
+
+  for (let i = 1; i < labels.length; i++) {
+    const host = labels.slice(i).join(".")
+
+    if (host.length < domain.length) {
+      break
+    }
+
+    parents.push(`${url.protocol}//${host}${port}`)
+  }
+
+  return parents
+}
+
+/** The rows that could cover an origin: its own, and its parents' with subdomains. */
+function coveringWhere(origin: string) {
+  const parents = coveringOrigins(origin)
+
+  return {
+    OR: [
+      { origin },
+      ...(parents.length > 0
+        ? [{ origin: { in: parents }, includeSubdomains: true }]
+        : []),
+    ],
+  }
+}
+
 /** A secret the browser can type, by its name: one the owner entered. */
 export async function findTypableSecret(
   ctx: VaultContext,
@@ -163,23 +300,87 @@ async function requireTypable(
 
 // ---- The secret's origins ---------------------------------------------------
 
+/** The most sites one secret has. */
+export const MAX_SITES_PER_SECRET = 50
+
+/**
+ * Whether the origin is one of the secret's sites: its own, or under one
+ * with subdomains (siteCovers).
+ */
 export async function isBoundOrigin(
   secretId: string,
   origin: string,
 ): Promise<boolean> {
-  return (
-    (await db().secretBrowserOrigin.findUnique({
-      where: { secretId_origin: { secretId, origin } },
-      select: { origin: true },
-    })) !== null
+  const rows = await db().secretBrowserOrigin.findMany({
+    where: { secretId, ...coveringWhere(origin) },
+    select: { origin: true, includeSubdomains: true },
+  })
+
+  return rows.some((row) =>
+    siteCovers(
+      { origin: row.origin, subdomains: row.includeSubdomains },
+      origin,
+    ),
   )
 }
 
-/** Adds a site where the browser may type the secret. */
+/** A secret's sites, as they are now. */
+export async function sitesOf(secretId: string): Promise<SecretSite[]> {
+  const rows = await db().secretBrowserOrigin.findMany({
+    where: { secretId },
+    orderBy: [{ origin: "asc" }],
+    select: { origin: true, includeSubdomains: true },
+  })
+
+  return rows.map((row) => ({
+    origin: row.origin,
+    subdomains: row.includeSubdomains,
+  }))
+}
+
+/**
+ * Every token's allowance for the secret at origins that `before` covered
+ * and `after` does not, gone: a site taken away, or one that no longer
+ * stands for its subdomains, asks the owner again there.
+ */
+async function dropUncoveredAllowances(
+  secretId: string,
+  before: SecretSite[],
+  after: SecretSite[],
+): Promise<void> {
+  const allowances = await db().apiTokenSecretAllowance.findMany({
+    where: { secretId },
+    select: { origin: true },
+  })
+  const gone = [
+    ...new Set(
+      allowances
+        .map((allowance) => allowance.origin)
+        .filter(
+          (origin) =>
+            before.some((site) => siteCovers(site, origin)) &&
+            !after.some((site) => siteCovers(site, origin)),
+        ),
+    ),
+  ]
+
+  if (gone.length > 0) {
+    await db().apiTokenSecretAllowance.deleteMany({
+      where: { secretId, origin: { in: gone } },
+    })
+  }
+}
+
+/**
+ * Adds a site where the browser may type the secret. `subdomains` makes it
+ * stand for its subdomains too (only where it has a registrable domain), or
+ * no longer; left out, a site it has keeps what it had.
+ */
 export async function bindOrigin(
   ctx: VaultContext,
   secretId: string,
   rawOrigin: string,
+  { subdomains }: { subdomains?: boolean } = {},
 ): Promise<string> {
   await requireTypable(ctx, secretId)
   const [origin] = parseOrigins([rawOrigin])
@@ -188,25 +389,36 @@ export async function bindOrigin(
     throw invalid("Enter the site's address, like https://example.com.")
   }
 
-  const count = await db().secretBrowserOrigin.count({ where: { secretId } })
-  const known = await isBoundOrigin(secretId, origin)
+  if (subdomains && !canCoverSubdomains(origin)) {
+    throw invalid(
+      `${origin} cannot stand for its subdomains: that is for a site's own domain (example.com), never an IP address, localhost or a suffix shared by many owners (co.uk, github.io).`,
+    )
+  }
 
-  if (!known && count >= 50) {
-    throw invalid("A secret has at most 50 sites.")
+  const before = await sitesOf(secretId)
+  const known = before.find((site) => site.origin === origin)
+
+  if (!known && before.length >= MAX_SITES_PER_SECRET) {
+    throw invalid(`A secret has at most ${MAX_SITES_PER_SECRET} sites.`)
   }
 
   await db().secretBrowserOrigin.upsert({
     where: { secretId_origin: { secretId, origin } },
-    create: { secretId, origin },
-    update: {},
+    create: { secretId, origin, includeSubdomains: subdomains === true },
+    update: subdomains === undefined ? {} : { includeSubdomains: subdomains },
   })
+
+  if (known?.subdomains && subdomains === false) {
+    await dropUncoveredAllowances(secretId, before, await sitesOf(secretId))
+  }
 
   return origin
 }
 
 /**
  * Takes a site away from the secret, and every token's allowance for it
- * there: its next use there asks the owner again.
+ * there (and at its subdomains, where it stood for them and no other site
+ * does): its next use there asks the owner again.
  */
 export async function unbindOrigin(
   ctx: VaultContext,
@@ -214,27 +426,30 @@ export async function unbindOrigin(
   origin: string,
 ): Promise<void> {
   await requireTypable(ctx, secretId)
+  const before = await sitesOf(secretId)
+
   await db().$transaction([
     db().secretBrowserOrigin.deleteMany({ where: { secretId, origin } }),
     db().apiTokenSecretAllowance.deleteMany({ where: { secretId, origin } }),
   ])
+  await dropUncoveredAllowances(secretId, before, await sitesOf(secretId))
 }
 
 /** Each of the vault's secrets' sites, by secret id. */
 export async function listBrowserOrigins(
   ctx: VaultContext,
-): Promise<Map<string, string[]>> {
+): Promise<Map<string, SecretSite[]>> {
   const rows = await db().secretBrowserOrigin.findMany({
     where: { secret: { vaultId: ctx.vaultId } },
     orderBy: [{ origin: "asc" }],
-    select: { secretId: true, origin: true },
+    select: { secretId: true, origin: true, includeSubdomains: true },
   })
-  const bySecret = new Map<string, string[]>()
+  const bySecret = new Map<string, SecretSite[]>()
 
   for (const row of rows) {
     bySecret.set(row.secretId, [
       ...(bySecret.get(row.secretId) ?? []),
-      row.origin,
+      { origin: row.origin, subdomains: row.includeSubdomains },
     ])
   }
 
@@ -271,7 +486,7 @@ export async function signInsAt(
     where: {
       vaultId: ctx.vaultId,
       kind: { in: ["text", "totp"] },
-      browserOrigins: { some: { origin } },
+      browserOrigins: { some: coveringWhere(origin) },
     },
     orderBy: [{ kind: "asc" }, { name: "asc" }],
     select: {
@@ -479,7 +694,15 @@ export async function admitSecretUse(
     serverId,
     name,
     use,
-  }: { tokenId: string; serverId: string; name: string; use: SecretUseContext },
+    part = "password",
+  }: {
+    tokenId: string
+    serverId: string
+    name: string
+    use: SecretUseContext
+    /** The login name goes through the same gate as the value. */
+    part?: SecretPart
+  },
   now = new Date(),
 ): Promise<TypableSecret> {
   const secret = await findTypableSecret(ctx, name)
@@ -515,6 +738,7 @@ export async function admitSecretUse(
       title: use.title,
       field: use.field,
       call: use.call,
+      ...(part === "username" ? { part } : {}),
     },
   })
 }
@@ -530,7 +754,14 @@ export async function admitSecretUse(
 export async function checkSecretRequest(
   ctx: VaultContext,
   serverId: string,
-  args: { name: string; purpose: string; origins: string[]; kind?: string },
+  args: {
+    name: string
+    purpose: string
+    origins: string[]
+    kind?: string
+    username?: string
+    generate?: unknown
+  },
 ): Promise<SecretRequestAsk> {
   const name = args.name.trim()
   const nameProblem = validateSecretName(name)
@@ -562,6 +793,18 @@ export async function checkSecretRequest(
     throw invalid("Name the sites the secret is typed at, in origins.")
   }
 
+  const kind = args.kind === "totp" ? "totp" : "text"
+
+  if (kind === "totp" && (args.username || args.generate)) {
+    throw invalid(
+      "A one-time codes secret takes neither username nor generate: its seed comes from the site.",
+    )
+  }
+
+  const username = checkLoginName(args.username)
+  const generate =
+    args.generate === undefined ? null : checkPasswordRecipe(args.generate)
+
   const existing = await db().secret.findUnique({
     where: { vaultId_name: { vaultId: ctx.vaultId, name } },
     select: { kind: true },
@@ -581,7 +824,9 @@ export async function checkSecretRequest(
     name,
     purpose,
     origins,
-    kind: args.kind === "totp" ? "totp" : "text",
+    kind,
+    ...(username ? { username } : {}),
+    ...(generate ? { generate } : {}),
   }
 }
 
@@ -594,7 +839,11 @@ export async function checkSecretRequest(
 export async function checkSecretAnswer(
   ctx: VaultContext,
   ask: SecretRequestAsk,
-  { value, origins }: { value?: string; origins?: string[] },
+  {
+    value,
+    origins,
+    loginName,
+  }: { value?: string; origins?: string[]; loginName?: string },
 ): Promise<string | null> {
   let parsed: string[]
 
@@ -627,6 +876,18 @@ export async function checkSecretAnswer(
     return `A secret called "${ask.name}" exists now that the browser does not type, so this one cannot be saved by that name.`
   }
 
+  if (ask.kind === "text") {
+    try {
+      checkLoginName(loginName)
+    } catch (error) {
+      if (error instanceof PcpError) {
+        return error.message
+      }
+
+      throw error
+    }
+  }
+
   return validateSecretValue(value ?? "", ask.kind)
 }
 
@@ -644,7 +905,17 @@ export async function applySecretRequest(
     value,
     origins: chosen,
     level,
-  }: { value?: string; origins?: string[]; level: SecretUseLevel },
+    loginName,
+    generated = false,
+  }: {
+    value?: string
+    origins?: string[]
+    level: SecretUseLevel
+    /** The login name the owner left on the page (a text secret's). */
+    loginName?: string
+    /** The value is one PCP made, on the owner's Generate. */
+    generated?: boolean
+  },
 ): Promise<string> {
   const origins = parseOrigins(chosen ?? ask.origins)
 
@@ -653,6 +924,7 @@ export async function applySecretRequest(
   }
 
   let secret = await findTypableSecret(ctx, ask.name)
+  let login: string | null = null
 
   if (secret) {
     if (value) {
@@ -673,8 +945,10 @@ export async function applySecretRequest(
       value: value!,
       description: ask.purpose.slice(0, MAX_SECRET_PURPOSE),
       kind: ask.kind,
+      ...(ask.kind === "text" ? { loginName: loginName ?? null } : {}),
     })
     secret = { id, name: ask.name, kind: ask.kind }
+    login = ask.kind === "text" ? checkLoginName(loginName) : null
   }
 
   for (const origin of origins) {
@@ -690,5 +964,315 @@ export async function applySecretRequest(
         ? "This token may have it typed there for the next hour; after that each use asks the owner."
         : "This token may have it typed there once; after that each use asks the owner."
 
-  return `The owner saved the secret "${secret.name}"${secret.kind === "totp" ? " (one-time codes: the code of the moment is typed)" : ""} for ${where}. Type it with type's text {"$secret": "${secret.name}"} into a field on a page there; you never see its value. ${uses}`
+  const made = generated
+    ? " PCP made its value itself (a new password, which the owner can see on the Secrets page); use it where the site asks for a new password."
+    : ""
+  const withLogin = login
+    ? ` Its login name, ${login}, is kept with it: type that with {"$secret": "${secret.name}", "part": "username"}.`
+    : ""
+
+  return `The owner saved the secret "${secret.name}"${secret.kind === "totp" ? " (one-time codes: the code of the moment is typed)" : ""} for ${where}. Type it with type's text {"$secret": "${secret.name}"} into a field on a page there; you never see its value.${made}${withLogin} ${uses}`
+}
+
+// ---- update_secret_sites ------------------------------------------------------
+
+/**
+ * A key for a secret's sites as the owner read them, so their answer to a
+ * change applies only to the list they saw (applySecretSitesChange).
+ */
+export function sitesBasis(sites: readonly SecretSite[]): string {
+  return createHash("sha256")
+    .update(
+      JSON.stringify(
+        [...sites]
+          .sort((a, b) => a.origin.localeCompare(b.origin))
+          .map((site) => [site.origin, site.subdomains]),
+      ),
+    )
+    .digest("base64url")
+    .slice(0, 22)
+}
+
+function hostOf(origin: string): string {
+  return originParts(origin)?.hostname ?? origin
+}
+
+/**
+ * update_secret_sites's arguments, checked before the owner is asked: one of
+ * the owner's secrets the browser types, a reason in plain text, sites to
+ * add (each with subdomains only where that can be) and sites it has to
+ * take away, and at least one of them a change.
+ */
+export async function checkSecretSitesChange(
+  ctx: VaultContext,
+  serverId: string,
+  args: {
+    name: string
+    reason: string
+    add?: Array<{ origin: string; subdomains?: boolean }>
+    remove?: string[]
+  },
+): Promise<SecretSitesChangeAsk> {
+  const secret = await findTypableSecret(ctx, args.name.trim())
+
+  if (!secret) {
+    throw new PcpError(
+      "not_found",
+      `There is no secret called "${args.name.trim()}" that the browser types. request_secret asks the owner for a new one.`,
+    )
+  }
+
+  const reason = withoutPresentation(args.reason).trim()
+  const hidden = hiddenCharacter(reason)
+
+  if (!reason) {
+    throw invalid("Say why the sites should change, in reason.")
+  }
+
+  if (hidden) {
+    throw invalid(
+      `The reason has a character that does not show on screen (${hidden}); write it in plain text.`,
+    )
+  }
+
+  if (reason.length > MAX_SECRET_PURPOSE) {
+    throw invalid(`Keep the reason under ${MAX_SECRET_PURPOSE} characters.`)
+  }
+
+  const current = await sitesOf(secret.id)
+  const add: ProposedSecretSite[] = []
+
+  for (const entry of args.add ?? []) {
+    const [origin] = parseOrigins([entry.origin])
+
+    if (!origin) {
+      throw invalid("Each site to add is an address, like https://example.com.")
+    }
+
+    const subdomains = entry.subdomains === true
+
+    if (subdomains && !canCoverSubdomains(origin)) {
+      throw invalid(
+        `${origin} cannot stand for its subdomains: only a site's own domain can (example.com), never an IP address, localhost or a suffix many owners share (co.uk, github.io).`,
+      )
+    }
+
+    if (add.some((site) => site.origin === origin)) {
+      throw invalid(`${origin} is named twice in add.`)
+    }
+
+    add.push({ origin, subdomains })
+  }
+
+  const remove = parseOrigins(args.remove ?? [])
+
+  for (const origin of remove) {
+    if (!current.some((site) => site.origin === origin)) {
+      throw invalid(
+        `${origin} is not one of the sites of "${secret.name}"${current.length > 0 ? `: they are ${current.map(siteLabel).join(", ")}` : ", which has none"}.`,
+      )
+    }
+
+    if (add.some((site) => site.origin === origin)) {
+      throw invalid(`${origin} is both added and taken away.`)
+    }
+  }
+
+  const changes = add.filter(
+    (site) =>
+      !current.some(
+        (known) =>
+          known.origin === site.origin && known.subdomains === site.subdomains,
+      ),
+  )
+
+  if (changes.length === 0 && remove.length === 0) {
+    throw invalid(
+      `Nothing would change: "${secret.name}" is typed at ${current.map(siteLabel).join(", ") || "no site yet"}.`,
+    )
+  }
+
+  const after =
+    current.length -
+    remove.length +
+    changes.filter(
+      (site) => !current.some((known) => known.origin === site.origin),
+    ).length
+
+  if (after > MAX_SITES_PER_SECRET) {
+    throw invalid(`A secret has at most ${MAX_SITES_PER_SECRET} sites.`)
+  }
+
+  return { serverId, secretName: secret.name, reason, add: changes, remove }
+}
+
+/** One change on the request's page, for the owner to tick or leave. */
+export type SecretSiteChangeShown = {
+  /** "add:<origin>" or "remove:<origin>": what the owner's answer names. */
+  key: string
+  action: "add" | "remove"
+  origin: string
+  subdomains: boolean
+  label: string
+  /** Why it looks like one of the secret's sites without being it. */
+  lookalike: string | null
+  /** A registrable domain none of the secret's sites has. */
+  newDomain: boolean
+  /** Already so (a site added since, or one taken away since). */
+  noop: boolean
+}
+
+export type SecretSitesShown = {
+  secretName: string
+  /** False once the secret is gone: nothing can be applied. */
+  exists: boolean
+  current: SecretSite[]
+  changes: SecretSiteChangeShown[]
+  /** The sites as shown (sitesBasis), which the owner's answer sends back. */
+  basis: string
+}
+
+/** A site change as the owner reads it: the sites now, and each change. */
+export async function showSecretSitesChange(
+  ctx: VaultContext,
+  ask: SecretSitesChangeAsk,
+): Promise<SecretSitesShown> {
+  const secret = await findTypableSecret(ctx, ask.secretName)
+  const current = secret ? await sitesOf(secret.id) : []
+  const known = current.map((site) => {
+    const host = hostOf(site.origin)
+    return { host, domain: registrableDomain(host) }
+  })
+
+  return {
+    secretName: ask.secretName,
+    exists: secret !== null,
+    current,
+    basis: sitesBasis(current),
+    changes: [
+      ...ask.add.map((site): SecretSiteChangeShown => {
+        const host = hostOf(site.origin)
+        const domain = registrableDomain(host)
+        const now = current.find((known) => known.origin === site.origin)
+
+        return {
+          key: `add:${site.origin}`,
+          action: "add",
+          origin: site.origin,
+          subdomains: site.subdomains,
+          label: siteLabel(site),
+          lookalike: lookalikeReason(host, domain, known),
+          newDomain:
+            known.length > 0 &&
+            !known.some(
+              (other) => (other.domain ?? other.host) === (domain ?? host),
+            ),
+          noop: now !== undefined && now.subdomains === site.subdomains,
+        }
+      }),
+      ...ask.remove.map((origin): SecretSiteChangeShown => ({
+        key: `remove:${origin}`,
+        action: "remove",
+        origin,
+        subdomains: false,
+        label: origin,
+        lookalike: null,
+        newDomain: false,
+        noop: !current.some((known) => known.origin === origin),
+      })),
+    ],
+  }
+}
+
+/**
+ * What is wrong with the owner's answer to update_secret_sites before
+ * anything is written, so they can read the page again or tick something:
+ * the secret gone, its sites changed since they were shown (`basis`), a
+ * change that was not asked for, or none ticked. Null when it will do.
+ */
+export async function checkSecretSitesAnswer(
+  ctx: VaultContext,
+  ask: SecretSitesChangeAsk,
+  { basis, keep }: { basis?: string; keep?: string[] },
+): Promise<string | null> {
+  const secret = await findTypableSecret(ctx, ask.secretName)
+
+  if (!secret) {
+    return `The secret "${ask.secretName}" is no longer in PCP, so there is nothing to change.`
+  }
+
+  if (basis !== sitesBasis(await sitesOf(secret.id))) {
+    return `The sites of "${secret.name}" changed since this page was opened, so nothing was changed. Read it again, then answer.`
+  }
+
+  const chosen = keep ?? []
+
+  if (
+    chosen.some(
+      (key) =>
+        !ask.add.some((site) => `add:${site.origin}` === key) &&
+        !ask.remove.some((origin) => `remove:${origin}` === key),
+    )
+  ) {
+    return "That is not one of the changes asked for."
+  }
+
+  return chosen.length === 0
+    ? "Tick at least one change, or answer Not now."
+    : null
+}
+
+/**
+ * The owner's answer to update_secret_sites: the changes they ticked
+ * (`keep`, by key), made to the secret's sites as they were shown them
+ * (`basis`); refused, with nothing written, when the sites changed since.
+ * A site taken away takes every token's allowance there with it. Says what
+ * was done; the value is never part of it.
+ */
+export async function applySecretSitesChange(
+  ctx: VaultContext,
+  ask: SecretSitesChangeAsk,
+  answer: { basis?: string; keep?: string[] },
+): Promise<string> {
+  const problem = await checkSecretSitesAnswer(ctx, ask, answer)
+
+  if (problem) {
+    throw new PcpError("conflict", problem)
+  }
+
+  const secret = (await findTypableSecret(ctx, ask.secretName))!
+  const chosen = new Set(answer.keep ?? [])
+  const added: string[] = []
+  const removed: string[] = []
+  const left: string[] = []
+
+  for (const origin of ask.remove) {
+    if (chosen.has(`remove:${origin}`)) {
+      await unbindOrigin(ctx, secret.id, origin)
+      removed.push(origin)
+    } else {
+      left.push(`taking away ${origin}`)
+    }
+  }
+
+  for (const site of ask.add) {
+    if (chosen.has(`add:${site.origin}`)) {
+      await bindOrigin(ctx, secret.id, site.origin, {
+        subdomains: site.subdomains,
+      })
+      added.push(siteLabel(site))
+    } else {
+      left.push(`adding ${siteLabel(site)}`)
+    }
+  }
+
+  const now = (await sitesOf(secret.id)).map(siteLabel)
+
+  return [
+    `The owner changed where "${secret.name}" is typed.`,
+    ...(added.length > 0 ? [`Added: ${added.join(", ")}.`] : []),
+    ...(removed.length > 0 ? [`Taken away: ${removed.join(", ")}.`] : []),
+    ...(left.length > 0 ? [`Not done: ${left.join("; ")}.`] : []),
+    `Its sites now: ${now.join(", ") || "none"}. A token's first use at a site still asks the owner, unless it may already type it there.`,
+  ].join(" ")
 }

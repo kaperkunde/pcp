@@ -273,6 +273,7 @@ export default async function PermissionPage({
               }
               privateAddresses={view.offersPrivateAddresses}
               access={view.proposedAccess}
+              sites={view.secretSites}
             />
           </>
         ) : (
@@ -348,6 +349,7 @@ function RequestTile({ view }: { view: PermissionView }) {
       return <IconTile size="lg" icon={Globe} className={tile} />
     case "secret_use":
     case "secret_request":
+    case "secret_sites_change":
       return <IconTile size="lg" icon={KeyRound} className={tile} />
     case "script_use":
       return <IconTile size="lg" icon={SquareCode} className={tile} />
@@ -458,6 +460,19 @@ function PendingNote({ view }: { view: PermissionView }) {
           with these sites. Allow one use lets this token have it typed once;
           the others let it, at these sites, for an hour or until you end it.
           Any other use asks you first.
+        </p>
+      )
+    case "secret_sites_change":
+      return (
+        <p className={note}>
+          Applying makes only the changes you ticked, to the sites as shown
+          here; the secret&apos;s value stays as it is. A site you take away
+          ends every token&apos;s allowance there. You can change its sites any
+          time under{" "}
+          <Link href="/secrets" className="underline">
+            Secrets
+          </Link>
+          .
         </p>
       )
     case "skill_change":

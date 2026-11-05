@@ -24,7 +24,7 @@ import { storeTools, type SyncResult } from "./catalogue"
 import type { VaultContext } from "./context"
 import { asBytes, decryptString, encryptString } from "./crypto"
 import { db } from "./db"
-import { admitSecretUse } from "./browser-secrets"
+import { admitSecretUse, findTypableSecret } from "./browser-secrets"
 import { callBrowserTool } from "./browser/call"
 import { syncBrowserTools } from "./browser/server"
 import { isOwnerNeeded, type SecretTyper } from "./browser/types"
@@ -119,6 +119,7 @@ import {
 import {
   deleteManagedSecret,
   readSecretValue,
+  readTypedLogin,
   readTypedValue,
   revealSecret,
   writeManagedSecret,
@@ -2098,17 +2099,41 @@ async function callBrowser(
     throw new PcpError("state", "The browser is used through a token.")
   }
 
-  const name = found[0]!.name
+  const { name, part } = found[0]!
   const typed: string[] = []
   const secret: SecretTyper = {
     name,
+    part,
     async value(use) {
+      if (part === "username") {
+        // Refused before the owner is asked when there is none to type.
+        const named = await findTypableSecret(ctx, name)
+        if (named) await readTypedLogin(ctx, named.id)
+      }
+
       const admitted = await admitSecretUse(ctx, {
         tokenId,
         serverId: server.id,
         name,
         use,
+        part,
       })
+
+      // The login name is no secret from the assistant (the page's sign-in
+      // note names it), so it is typed through the same gate but not
+      // scrubbed from the answer.
+      if (part === "username") {
+        const login = await readTypedLogin(ctx, admitted.id)
+        noteSecretTyped({
+          vaultId: ctx.vaultId,
+          tokenId,
+          server: server.slug,
+          secret: admitted.name,
+          origin: use.origin,
+        })
+        return login
+      }
+
       const value = await readTypedValue(ctx, admitted.id)
       typed.push(value)
       noteSecretTyped({
@@ -2177,6 +2202,12 @@ async function placeSecrets(
 
   if (server.kind === "browser" || server.kind === "wrapper") {
     throw invalid(`A secret cannot go to ${kindNoun(server.kind)}.`)
+  }
+
+  if (found.some((placeholder) => placeholder.part === "username")) {
+    throw invalid(
+      'A secret\'s login name ("part": "username") goes only into a page, as the browser\'s type text.',
+    )
   }
 
   const bindings = matchGrant(found, grant, `${server.slug}/${toolName}`)

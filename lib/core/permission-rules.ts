@@ -410,6 +410,11 @@ const DECISION_LABELS: Record<PermissionKind, Record<string, string>> = {
     always: "Save, always allow",
     decline: "Not now",
   },
+  // An assistant's change to a secret's sites: the ticked changes, made.
+  secret_sites_change: {
+    allow_once: "Apply ticked changes",
+    decline: "Not now",
+  },
 }
 
 /** The answers the owner is offered, in order, with their labels. */

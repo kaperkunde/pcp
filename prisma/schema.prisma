@@ -576,6 +576,10 @@ model SecretBrowserOrigin {
   secret    Secret   @relation(fields: [secretId], references: [id], onDelete: Cascade)
   /// https://host[:port], as URL.origin writes it.
   origin    String
+  /// The site and its subdomains: an origin at the same scheme and port
+  /// whose host ends in this one's, within the same registrable domain
+  /// (the public suffix list, browser-secrets.ts). Never another domain.
+  includeSubdomains Boolean @default(false) @map("include_subdomains")
   createdAt DateTime @default(now()) @map("created_at")
 
   @@id([secretId, origin])

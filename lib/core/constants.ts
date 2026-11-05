@@ -117,6 +117,36 @@ export const DEFAULT_ALLOW_FOR_MINUTES: AllowForMinutes = 60
  */
 export const SECRET_ALLOW_MINUTES = 60
 
+/**
+ * A password PCP makes for a secret (lib/core/generate-password.ts), from
+ * request_secret's `generate` or the Generate switch on its page: how long,
+ * which kinds of character, and which characters to leave out.
+ */
+export type PasswordRecipe = {
+  length: number
+  lowercase: boolean
+  uppercase: boolean
+  digits: boolean
+  symbols: boolean
+  /** Characters left out, for a site that refuses some. */
+  exclude: string
+}
+
+export const MIN_GENERATED_LENGTH = 8
+export const MAX_GENERATED_LENGTH = 128
+export const MAX_GENERATE_EXCLUDE = 64
+/** The symbols a made password draws from: printable ASCII, no quote, backslash or space. */
+export const PASSWORD_SYMBOLS = "!#$%&()*+,-./:;<=>?@[]^_{|}~"
+
+export const DEFAULT_PASSWORD_RECIPE: PasswordRecipe = {
+  length: 24,
+  lowercase: true,
+  uppercase: true,
+  digits: true,
+  symbols: true,
+  exclude: "",
+}
+
 export function allowForLabel(minutes: number): string {
   return minutes < 60
     ? `${minutes} minutes`
@@ -137,6 +167,7 @@ export type PermissionKind =
   | "browser_handover"
   | "secret_use"
   | "secret_request"
+  | "secret_sites_change"
   | "exit_use"
   | "script_use"
   | "wrapper_change"

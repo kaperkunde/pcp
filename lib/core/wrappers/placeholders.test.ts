@@ -4,6 +4,7 @@ import {
   findPlaceholders,
   matchGrant,
   parseSecretPlaceholder,
+  parseSecretRef,
   placeValues,
   scrubResult,
   type SecretGrant,
@@ -31,9 +32,23 @@ describe("finding placeholders", () => {
         plain: "x",
       }),
     ).toEqual([
-      { pointer: "/auth/key", name: "Key" },
-      { pointer: "/a~1b/0", name: "Other" },
+      { pointer: "/auth/key", name: "Key", part: "password" },
+      { pointer: "/a~1b/0", name: "Other", part: "password" },
     ])
+  })
+
+  it("reads which part a placeholder names: the value, or the login name", () => {
+    expect(
+      findPlaceholders({ text: { $secret: "Shop", part: "username" } }),
+    ).toEqual([{ pointer: "/text", name: "Shop", part: "username" }])
+    expect(parseSecretRef({ $secret: "Shop", part: "password" })).toEqual({
+      name: "Shop",
+      part: "password",
+    })
+    expect(parseSecretRef({ $secret: "Shop", part: "seed" })).toBeNull()
+    expect(() =>
+      findPlaceholders({ text: { $secret: "Shop", part: "login" } }),
+    ).toThrow(/"part": "username"/)
   })
 
   it("refuses an object that only looks like one", () => {
@@ -48,16 +63,32 @@ describe("finding placeholders", () => {
 describe("matching them to bindings", () => {
   it("needs a binding for the exact place and name", () => {
     expect(
-      matchGrant([{ pointer: "/auth/key", name: "Key" }], GRANT, "api/call"),
+      matchGrant(
+        [{ pointer: "/auth/key", name: "Key", part: "password" }],
+        GRANT,
+        "api/call",
+      ),
     ).toEqual(GRANT)
     expect(() =>
-      matchGrant([{ pointer: "/q", name: "Key" }], GRANT, "api/call"),
+      matchGrant(
+        [{ pointer: "/q", name: "Key", part: "password" }],
+        GRANT,
+        "api/call",
+      ),
     ).toThrow(/has not allowed the secret "Key" in api\/call at \/q/)
     expect(() =>
-      matchGrant([{ pointer: "/auth/key", name: "Else" }], GRANT, "api/call"),
+      matchGrant(
+        [{ pointer: "/auth/key", name: "Else", part: "password" }],
+        GRANT,
+        "api/call",
+      ),
     ).toThrow()
     expect(() =>
-      matchGrant([{ pointer: "/auth/key", name: "Key" }], undefined, "x"),
+      matchGrant(
+        [{ pointer: "/auth/key", name: "Key", part: "password" }],
+        undefined,
+        "x",
+      ),
     ).toThrow()
   })
 
