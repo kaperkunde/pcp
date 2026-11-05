@@ -484,6 +484,38 @@ describe("unsupported features", () => {
     expect(required.skipped[0]!.reason).toBe("it needs a file upload")
   })
 
+  it("names the file answers in the plan and says describe answers a file handle", () => {
+    const { tools } = one({
+      responses: {
+        "200": {
+          description: "The export",
+          content: {
+            "application/pdf": {},
+            "text/csv": { schema: { type: "string", format: "binary" } },
+            "text/plain": { schema: { type: "string" } },
+            "*/*": {},
+          },
+        },
+      },
+    })
+
+    expect(tools[0]!.operation.fileAnswers).toEqual([
+      "application/pdf",
+      "text/csv",
+    ])
+    expect(tools[0]!.output).toMatch(/^\{file: \{\$result: string/)
+
+    const plain = one({
+      responses: {
+        "200": {
+          description: "ok",
+          content: { "application/json": { schema: { type: "object" } } },
+        },
+      },
+    })
+    expect(plain.tools[0]!.operation.fileAnswers).toBeUndefined()
+  })
+
   it("takes a binary body as one kept file", () => {
     const { tools } = one({
       requestBody: {

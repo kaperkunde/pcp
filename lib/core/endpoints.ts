@@ -17,7 +17,7 @@ import {
 } from "./definition-rows"
 import { invalid, isPcpError, PcpError } from "./errors"
 import { newId } from "./ids"
-import { executeCall } from "./openapi/call"
+import { executeCall, type FileKeeper } from "./openapi/call"
 import { fetchSpec } from "./openapi/fetch-spec"
 import type { SendOptions } from "./openapi/transport"
 import {
@@ -43,7 +43,9 @@ import {
   parseUploadHandle,
   resolveHandles,
 } from "./result-handles"
-import type { ResultOpener } from "./tool-results"
+import { MAX_FILE_RESPONSE_BYTES } from "./openapi/limits"
+import { loadResourceLimits } from "./resources/state"
+import { handleOf, type BytesKeeper, type ResultOpener } from "./tool-results"
 import { lintDocument } from "./openapi/lint"
 import { validateBaseUrl, validateSpecUrl } from "./openapi/urls"
 import { deleteManagedSecret } from "./secrets"
@@ -1533,9 +1535,15 @@ export async function callEndpointTool(
     redact,
     renew,
     open,
+    keepBytes,
     reach,
   }: {
     authHeaders: Record<string, string>
+    /**
+     * Keeps a file the API answers (a PDF, an image) as the token's result,
+     * answered as its handle. Without it a file is only described.
+     */
+    keepBytes?: BytesKeeper
     /**
      * How the request leaves when that is not from PCP's machine: a
      * service's endpoint, through its SSH server (upstream.ts serviceTunnel).
@@ -1578,6 +1586,22 @@ export async function callEndpointTool(
   // Before anything is sent: an unknown id or a bad file argument sends
   // nothing.
   const prepared = await openUploads(plan, args, open)
+  const keepFile: FileKeeper | undefined = keepBytes
+    ? async (file) =>
+        handleOf(
+          await keepBytes({
+            ...file,
+            serverId: server.id,
+            toolName,
+          }),
+        )
+    : undefined
+  // The smaller of the two: what an API may hand PCP, and the largest file
+  // PCP keeps at all.
+  const maxFileBytes = Math.min(
+    MAX_FILE_RESPONSE_BYTES,
+    (await loadResourceLimits()).fileBytes,
+  )
 
   const attempt = async (
     headers: Record<string, string>,
@@ -1595,6 +1619,9 @@ export async function callEndpointTool(
         {
           redact: secrets,
           publicOnly: server.publicOnly,
+          maxFileBytes,
+          fileTypes: plan.fileAnswers ?? [],
+          ...(keepFile ? { keepFile } : {}),
           ...reach,
         },
       )

@@ -16,7 +16,7 @@ import {
   REF_MAX_NODES,
 } from "./limits"
 import { readOAuth, type OAuthReading } from "./oauth"
-import { outlineAnswer } from "./outline"
+import { fileAnswerTypes, outlineAnswer } from "./outline"
 import type { OpenApiDocument } from "./parse"
 import type { BodyPlan, CallPlan, ParamPlan } from "./plan"
 import {
@@ -587,6 +587,11 @@ function buildTool(
     params,
     body: body?.plan ?? null,
     accept: acceptFor(doc, operation),
+  }
+  const fileAnswers = fileAnswerTypes(doc, operation)
+
+  if (fileAnswers.length > 0) {
+    plan.fileAnswers = fileAnswers
   }
 
   return {
