@@ -358,8 +358,16 @@ so in the summary; the bump itself waits for the request.
   with PCP's key, only on a pinned host), and reach the engine over standard
   input as an env file the same command deletes, never on a command line;
   they are scrubbed from logs and errors, and `inspect` reads only state,
-  image and labels. Images are pinned by digest; volumes are named volumes,
-  never a host path. A container gets nothing beyond the engine's default
+  image (and its id) and labels. Images are pinned by digest; volumes are named volumes,
+  never a host path. The owner (never an assistant, a `register_server`
+  proposal or a linked repository's document) can have one built instead
+  (`build`: a public GitHub repository, a 40-hex commit, a Containerfile
+  path and context matched by patterns, build arguments as checked fields):
+  `engine.ts buildScript` downloads the tarball at that commit over HTTPS
+  with the host's curl or wget into a `mktemp -d` folder it removes, keeps
+  the Containerfile and context inside the repository, builds with the
+  engine and pins the image id (`localhost/pcp-<repo>@sha256:…`), which is
+  never pulled; time and sizes in `services/limits.ts`. A container gets nothing beyond the engine's default
   but an exit's, which may get NET_ADMIN and /dev/net/tun only (`cap_add`
   and `devices`, allow-lists in `definition.ts`, checked again in
   `engine.ts`); a variable marked `plain` takes a value the owner types per
@@ -385,9 +393,20 @@ so in the summary; the bump itself waits for the request.
   everything it runs in full (image, ports and address, variables and their
   secrets by name, volumes, health, what it registers, the SSH server) and
   launches only that once the owner agrees; a new secret is typed in on
-  PCP's page; never one that adds an exit. Status is read only inside a request (page, `check_server`, a failing call), never
+  PCP's page; never one that adds an exit or builds. It proposes an image
+  update through the service's `update` tool (`services/updates.ts`): a
+  `service_change` request showing the image it runs and the one it would
+  (the newest of its source tag, or a digest it names in the same
+  repository), both by digest, applied only to the definition as it was
+  (`basis`); never for a built one. The owner's "Check for a newer image"
+  resolves the source's digest on their click only, never polled. Status is read only inside a request (page, `check_server`, a failing call), never
   polled; a saved secret remakes the services that take it through
-  `after()`. A launch that fails takes back everything it did. Limits go in
+  `after()`. A launch that fails takes back everything it did: the
+  container (also one `run` made but could not start) and only the volumes
+  it made, `removeContainer` reporting what the engine would not remove, the
+  container's first and last lines in the error; a secret the owner typed
+  for it is kept and the error names it. A failed remake marks the service
+  failed and says that Start makes it again. Limits go in
   `services/limits.ts`; a new command, tool or argument gets a test against
   the fake engine (`services/fake-docker.ts`, `services.test.ts`).
 - Search (`lib/core/search.ts`, pure) finds a tool by keywords with no

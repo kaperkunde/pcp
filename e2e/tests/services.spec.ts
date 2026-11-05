@@ -103,6 +103,7 @@ test("a service launches on an SSH server and registers its API endpoint", async
   await page.getByLabel("Definition").fill(
     JSON.stringify({
       image: `ghcr.io/example/docs@sha256:${"a".repeat(64)}`,
+      source: "ghcr.io/example/docs:latest",
       ports: [{ container: 5001 }],
       env: [{ name: "API_KEY", required: true }],
       health: { kind: "http", port: 5001, path: "/health" },
@@ -132,6 +133,17 @@ test("a service launches on an SSH server and registers its API endpoint", async
   await expect(card).toContainText("Stopped")
   await clickHydrated(card.getByRole("button", { name: "Start" }))
   await expect(card).toContainText("Running and healthy")
+
+  // A newer image is looked for on a click, and nothing is made again.
+  await clickHydrated(
+    card.getByRole("button", { name: "Check for a newer image" }),
+  )
+  await expect(card.getByTestId("newer-image")).toContainText(
+    `A newer image of ghcr.io/example/docs:latest: ghcr.io/example/docs@sha256:${"b".repeat(64)}`,
+  )
+  expect(docker.state().containers[`pcp-docs-${RUN}`]?.image).toBe(
+    `ghcr.io/example/docs@sha256:${"a".repeat(64)}`,
+  )
 
   // The endpoint it serves is a server of its own.
   await card.getByRole("link", { name: /Serves/ }).click()

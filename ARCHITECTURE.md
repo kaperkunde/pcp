@@ -967,9 +967,10 @@ already runs on one of their SSH servers, Coolify-style: by running the
 engine's own command line over SSH `exec` (`lib/core/services/`). PCP never
 installs an engine, never reaches its socket (on the SSH server or its own
 machine), and starts no child process: the commands run on the SSH server,
-through the ssh module's client. Only the owner launches, changes and removes
-one (Servers → Add → Service); an assistant uses its tools at the owner's
-levels, and proposes one as a permission request (below).
+through the ssh module's client. Only the owner launches, changes, updates
+and removes one (Servers → Add → Service), and only the owner has one built
+from a repository; an assistant uses its tools at the owner's levels, and
+proposes one, or an image update, as a permission request (below).
 
 **Rows.** A service is a server row of kind `service` (`url` the fixed
 `pcp:service`), an instance of a definition of kind `service`, with a
@@ -977,7 +978,8 @@ levels, and proposes one as a permission request (below).
 
 - `definition` (shared, JSON, `services/definition.ts`): the image pinned by
   digest (`repository@sha256:…`) and optionally the `source` tag an update
-  resolves to a new digest; its container `ports`; its variables (`env`: a
+  resolves to a new digest, or, the owner's alone, a `build` (below) and
+  the image id PCP built from it (`localhost/pcp-<repo>@sha256:<id>`); its container `ports`; its variables (`env`: a
   name, a description, whether it is required, whether the owner types its
   value per instance (`plain`: a provider, a country; no secret), and
   optionally a fixed value that is no secret); its `volumes`, named volumes only, made on the host as
@@ -1019,12 +1021,45 @@ after it. The variables' values go over standard input: the script sets
 deletes it on exit, so a value is never on a command line (where `ps` shows
 it) and a value with a line break is refused (an env file cannot carry
 one). State is read with `inspect --format` naming only the state, the
-image and the labels, never the whole inspect (which holds the
+image, its id and the labels, never the whole inspect (which holds the
 environment). Logs are `logs --timestamps --tail N [--since]`, bounded
 (`services/limits.ts`), and every secret value is scrubbed from them and
 from every engine error. Start, stop (with a grace time) and restart are the
 engine's own; a container whose `pcp.service` label is not the service's is
 left alone.
+
+**Built from a repository** (`build`, the owner's alone). Instead of an
+image to pull, the owner's definition can name a public GitHub repository
+(`owner/name`), a commit by its full 40-hex id, the Containerfile's path
+and the build's folder in it (`REPOSITORY_PATH`: relative, no `..`, no
+leading dash) and build arguments (a variable's name and one line, no
+secret: they show in the image). `engine.ts buildScript` is one script over
+`exec`: a folder of its own (`mktemp -d`, removed on exit, hang-up or
+interrupt), the tarball at the commit from
+`https://codeload.github.com/<repo>/tar.gz/<commit>` with curl
+(`--proto =https`, bounded in time and size, no redirect followed) or else
+wget, whichever the login has (neither is said so), its size checked
+against `MAX_BUILD_SOURCE_BYTES`, unpacked with tar (`--no-same-owner`),
+the Containerfile and the build's folder resolved with `pwd -P` and refused
+when they lead out of the unpacked repository (a link to `/` would make the
+SSH server's own files the build's context) or the Containerfile is a link,
+then `<engine> build --file … --iidfile … --tag
+localhost/pcp-<repo>:<commit12> [--build-arg …] <context>`, its output kept
+to a bounded tail for an error, within `BUILD_TIMEOUT_MS`. The image id is
+read back, an image larger than `MAX_BUILT_IMAGE_BYTES` is removed again
+and refused, and the definition pins `localhost/pcp-<repo>@sha256:<id>`:
+`pullImage` refuses it, `run` names it by its id (`runReference`), and the
+status compares the container's image id with it. A launch, a remake or
+another instance on a host without that image builds it again from the
+same commit (`ensureImage`) and pins what it built (every instance's
+definition, `writeServiceDefinition`). Update is a new commit, typed on the
+service's page. An assistant's `register_server` refuses a definition with
+a `build`, its `update` refuses a built service, and a linked repository
+never shares one (`repos/local.ts` lists it as skipped, and a document
+with `build` is refused, so format 3 stays as it was). Private
+repositories and Compose files are not supported yet. The engine pulls
+what the Containerfile's `FROM` names by its own tag: pin it there by
+digest for a build that stays the same.
 
 **Secrets.** Decrypted only in `upstream.ts`, which builds a `ServiceAccess`
 for the services module: a `ServiceHost` (runs one command on the SSH server
@@ -1074,10 +1109,23 @@ serves at `http://127.0.0.1:<port>` (as the SSH server reaches it): an API
 endpoint (`createEndpoint` with the schema at `specPath`, the base URL at
 `basePath`, `publicOnly` off, since it is the owner's own machine, and the
 `auth` variable's secret as its header) or an MCP server (`createServer`,
-its tools read at once). A failure past starting the container removes the
-container and its volumes and whatever was made, and the error says what was
-taken back, with the container's last lines (scrubbed) when it did not
-become healthy.
+its tools read at once). Before `run`, PCP reads which of the definition's
+volumes are on the SSH server already (`existingVolumes`: a service removed
+before with its data kept); a failure from `run` on (Docker's `run
+--detach` makes the container and its volumes before it starts it, so a
+port in use leaves both) removes the container and only the volumes this
+launch made, and whatever was made in PCP, and the error says what was
+taken back and what was kept, with the container's first and last lines
+(scrubbed). `removeContainer` takes a container or volume that is gone as
+removed and reports anything else the engine refused, which the error then
+names as left on the SSH server to remove by hand. A secret the owner typed
+for the launch (on the launch form, or on an assistant's request) is kept
+when it fails, and the error names it, so they choose it when they try
+again. Making a container again (`recreateServiceOn`: an update, a changed
+secret, Start on a gone container) gets the image first, then removes the
+old container; when the new one does not start, the one made is removed
+(its volumes stay), the service's row is marked failed, and the error says
+that Start makes it again once what stopped it is fixed.
 
 **Status** is read only inside a request: the service's page when it opens
 (and on Check), `check_server` (for the service and for the server it
@@ -1112,11 +1160,25 @@ unit, which a Podman service's page says.
 **Tools** (`services/tools.ts`, on the service's own server): `status` and
 `logs` (read-only; `lines` 1 to 500, `since_minutes` up to a week), `start`
 (makes the container again from the definition when it is gone), `stop` and
-`restart`, their arguments checked before anything connects. None takes a
-command, an image or a variable. **Update** (the owner's) resolves the
-definition's `source` to its newest digest, pins it on the definition and
-makes this instance's container again; other instances show that they run an
-older image. **Remove** (the owner's, on the service's page; `deleteServer`
+`restart`, their arguments checked before anything connects, and `update`
+(below), which only proposes. None takes a command or a variable.
+**Update** (the owner's) resolves the definition's `source` to its newest
+digest, pins it on the definition and makes this instance's container
+again; other instances show that they run an older image. **Check for a
+newer image** on the page resolves the same digest (a pull and the digest
+the engine names, `updates.ts newerImageOn`) without making anything again,
+on the owner's click only, and shows both digests. **An assistant's
+`update`** (`services/updates.ts`) resolves the newest digest of the source
+(or takes a `digest` it names, which must be in the repository the service
+runs) and, when it differs, throws `OwnerNeeded` with a `service_change`
+request (`action: "update"`; the request's server is the service, its tool
+`update`) that shows the image it runs and the one it would run, both by
+digest, the tag it came from, and the other instances that share the
+definition; "Update it" runs `updateServiceOn` with that image and the
+definition's hash as it was (`basis`): changed since, nothing is updated.
+It is the service's own tool rather than `register_server` because the
+digest is resolved on the service's SSH server, which the call to the
+service already reaches, and `register_server` is for something new. **Remove** (the owner's, on the service's page; `deleteServer`
 refuses a service) removes the container first, its volumes and the server
 it serves as chosen.
 
@@ -1145,14 +1207,19 @@ every variable with its secret by name or fixed value, the volumes,
 arguments, health check, what PCP adds, the note and the definition in
 full; the owner launches it as shown or declines (they change nothing on
 the page). `applyServiceChange` launches exactly that through
-`launchService`, removing a typed secret again when the launch fails, and
+`launchService`, keeping a typed secret when the launch fails (the error
+names it), and
 gives a token scoped to chosen servers the service and what it serves.
 With `definition` it is another of a service definition the token sees,
-its own part only, launched while `definitionBasis` holds.
+its own part only, launched while `definitionBasis` holds. A definition
+with a `build` is refused: a build is the owner's alone.
 
 The test engine (`services/fake-docker.ts`) is a Node program on the PATH of
 a real sh that the test SSH server runs each command in, recording the
-words it got and the env file it read.
+words it got and the env file it read; it keeps named volumes, fails `run`
+after making the container when asked, and builds (checking the
+Containerfile and context the script hands it) from a test's tarball that
+its own curl and wget hand over.
 
 ## Exits
 

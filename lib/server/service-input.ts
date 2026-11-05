@@ -120,16 +120,16 @@ export async function withNewSecrets<T>(
   const bound = { ...env }
   const made: Array<{ variable: string; name: string }> = []
 
-  for (const secret of newSecretsFrom(formData)) {
-    const { id } = await createSecret(ctx, {
-      name: secret.name,
-      value: secret.value,
-    })
-    made.push({ variable: secret.variable, name: secret.name.trim() })
-    bound[secret.variable] = id
-  }
-
   try {
+    for (const secret of newSecretsFrom(formData)) {
+      const { id } = await createSecret(ctx, {
+        name: secret.name,
+        value: secret.value,
+      })
+      made.push({ variable: secret.variable, name: secret.name.trim() })
+      bound[secret.variable] = id
+    }
+
     return await launch(bound)
   } catch (error) {
     if (made.length === 0 || !isPcpError(error)) {
