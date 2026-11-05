@@ -62,6 +62,14 @@ const ALL_TOOLS = [
   "run_code_write",
   "run_code_destructive",
   "check_run",
+  // PCP's own store, and the others by store (#90).
+  "list_folder",
+  "find_files",
+  "get_file",
+  "save_file",
+  "make_folder",
+  "move",
+  "delete",
 ]
 
 /** Proposals: nothing happens until the owner agrees, and each is new. */
@@ -244,7 +252,7 @@ describe("PCP's own tools", () => {
       const first = tool.description!.slice(0, 25)
 
       expect(first, tool.name).toMatch(
-        /^(START HERE: |(Search|List|Get|Call|Run|Check|Withdraw|Read|Share|Receive|Propose|Change|Fetch|Save) )/,
+        /^(START HERE: |(Search|List|Get|Call|Run|Check|Withdraw|Read|Share|Receive|Propose|Change|Fetch|Save|Find|Make|Move|Delete) )/,
       )
       // A verb and an object, not a verb alone.
       expect(first.trim().split(/\s+/).length, tool.name).toBeGreaterThan(2)
@@ -282,6 +290,13 @@ describe("PCP's own tools", () => {
       propose_tool_access: /tool/,
       list_tools: /tool/,
       web_fetch: /web/,
+      list_folder: /^List files in a store/,
+      find_files: /^Find files in a store/,
+      get_file: /^Get a file from a store/,
+      save_file: /^Save a file to a store/,
+      make_folder: /^Make a folder in a store/,
+      move: /^Move or rename/,
+      delete: /^Delete a file or folder/,
     }
 
     expect(Object.keys(keywords).sort()).toEqual([...ALL_TOOLS].sort())

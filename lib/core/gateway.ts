@@ -209,6 +209,7 @@ import {
 } from "./secret-uses"
 import { findTextSecretByName, validateSecretName } from "./secrets"
 import {
+  isStorageKind,
   normalizeNameAndDescription,
   validateServerUrl,
   validateUsername,
@@ -268,6 +269,12 @@ import {
   MAX_SECRET_BINDINGS,
   MAX_WRAPPER_TOOLS,
 } from "./wrappers/limits"
+import { ensureOwnStore } from "./storage/roots"
+import {
+  STORAGE_INPUTS,
+  STORAGE_TOOL_NAMES,
+  type StorageToolName,
+} from "./storage/tools"
 import { findPlaceholders } from "./wrappers/placeholders"
 import { withWrappers } from "./wrappers/run"
 import {
@@ -2217,11 +2224,51 @@ export function buildGatewayServer(
       string,
       unknown
     >
-    const found = await resolveCall(
+
+    return callResolved(
       handled.server.slug,
       handled.tool.name,
+      handled.row,
       callArgs,
+      {
+        tier: entryTier,
+        fields,
+        decode,
+        keep,
+        fix: "Fix them and call again with the same call_handle.",
+        ...(signal ? { signal } : {}),
+      },
     )
+  }
+
+  /**
+   * A call of a server's tool, by name, once the way in has named it: at
+   * the token's level, refused above the entry's tier, its arguments
+   * checked, the owner asked where the level says so. What call_tool_<tier>
+   * runs for a call_handle, and PCP's own store tools for a store.
+   */
+  async function callResolved(
+    slug: string,
+    name: string,
+    row: Pick<ToolRow, "inputSchema">,
+    callArgs: Record<string, unknown>,
+    {
+      tier: entryTier,
+      fields,
+      decode,
+      keep,
+      fix,
+      signal,
+    }: {
+      tier: ToolTier
+      fields: ReturnType<typeof readFields>
+      decode: ReturnType<typeof readFields>
+      keep: ReturnType<typeof readFields>
+      fix: string
+      signal?: AbortSignal
+    },
+  ): Promise<Outcome> {
+    const found = await resolveCall(slug, name, callArgs)
 
     if ("refused" in found) {
       return failure(found.refused, "forbidden")
@@ -2233,13 +2280,9 @@ export function buildGatewayServer(
       return failure(tierRefusal(target.slug, tool), "forbidden")
     }
 
-    const unfit = await argumentsUnfit(
-      target,
-      tool.name,
-      handled.row,
-      callArgs,
-      { fix: "Fix them and call again with the same call_handle." },
-    )
+    const unfit = await argumentsUnfit(target, tool.name, row, callArgs, {
+      fix,
+    })
     // An endpoint whose schema no longer builds says how to fix it, with
     // whatever its call comes to.
     const migration = await endpointMigration(target)
@@ -2344,6 +2387,129 @@ export function buildGatewayServer(
           signal: ctx.signal,
           logAs: ctx.logAs,
         }),
+    })
+  }
+
+  /**
+   * The server of the store a call names: by short name or name among the
+   * stores this token reaches, or PCP's own when it names none (made here
+   * for a vault from before stores, which then reads its servers again).
+   */
+  async function storeServer(
+    named: string | undefined,
+  ): Promise<GatewayServer | { refused: string }> {
+    const stores = () =>
+      [...bySlug.values()].filter((entry) => isStorageKind(entry.kind))
+    const names = () =>
+      stores()
+        .map((entry) => entry.slug)
+        .join(", ") || "none"
+
+    if (named !== undefined) {
+      const wanted = named.trim().toLowerCase()
+      const found = stores().find(
+        (entry) => entry.slug === wanted || entry.name.toLowerCase() === wanted,
+      )
+
+      return (
+        found ?? {
+          refused: `There is no store called ${named} for this token. Stores: ${names()}; leave store out for PCP's own.`,
+        }
+      )
+    }
+
+    const own = await ensureOwnStore(scope.ctx)
+    let found = stores().find((entry) => entry.id === own)
+
+    if (!found && (!scope.serverIds || scope.serverIds.includes(own))) {
+      const fresh = (await loadGatewayServers(scope)).find(
+        (entry) => entry.id === own,
+      )
+
+      if (fresh) {
+        bySlug.set(fresh.slug, fresh)
+        found = fresh
+      }
+    }
+
+    return (
+      found ?? {
+        refused: `This token does not reach PCP's own store: the owner adds it to the token in PCP, or name another store. Stores: ${names()}.`,
+      }
+    )
+  }
+
+  /** The words of PCP's own store tools, each opening with what it does. */
+  const STORE_TOOL_WORDS: Record<StorageToolName, string> = {
+    list_folder:
+      "List files in a store: the files and folders in a folder of one, each with its name, path, type, size and when it changed, folders first.",
+    find_files:
+      "Find files in a store by name, with * and ? in the name, in a folder and every folder under it.",
+    get_file:
+      "Get a file from a store as a kept result's handle, {\"$result\": \"<id>\"}, to pass on whole to another tool (send_email's attachments, save_file, an API's file field) without reading it yourself; a text file's start comes back as text too.",
+    save_file:
+      'Save a file to a store, to keep it for good: a kept result\'s handle (file, {"$result": "<id>"}: a mail attachment, a download, an upload) or text. It is written whole before it takes its name; a file already there is replaced only with overwrite: true.',
+    make_folder:
+      "Make a folder in a store, with parents: true also the folders above it.",
+    move: "Move or rename a file or folder in a store: from and to are both full paths inside it. A file at to is replaced only with overwrite: true; a folder never.",
+    delete:
+      "Delete a file or folder in a store for good: there is no Trash. A folder must be empty unless recursive: true.",
+  }
+  const STORE_LEAD =
+    "Without store, PCP's own store, which keeps files encrypted on the machine PCP runs on; store names another the owner added (a folder on one of their SSH servers), by its short name. The owner's levels for that store's tool apply, as for call_tool."
+
+  for (const name of STORAGE_TOOL_NAMES) {
+    const inner = STORAGE_INPUTS[name]
+    const ownTier = ownTiers[name] ?? tierFromAnnotations(inner.annotations)
+
+    register({
+      name,
+      title: `${inner.title} in a store`,
+      description: `${STORE_TOOL_WORDS[name]} ${STORE_LEAD}`,
+      input: inner.input.extend({
+        store: z
+          .string()
+          .min(1)
+          .max(128)
+          .optional()
+          .describe(
+            "The store, by its short name (a server of kind storage); left out, PCP's own store.",
+          ),
+      }),
+      annotations: inner.annotations,
+      async run(args: Record<string, unknown>, ctx) {
+        const { store, ...rest } = args
+        const target = await storeServer(
+          typeof store === "string" ? store : undefined,
+        )
+
+        if ("refused" in target) {
+          return failure(target.refused, "not_found")
+        }
+
+        ctx.logAs({ server: target.slug, upstreamTool: name })
+
+        const row = await db().mcpTool.findFirst({
+          where: { serverId: target.id, name },
+          select: { inputSchema: true },
+        })
+
+        if (!row) {
+          return failure(
+            `${target.name} has no ${name}${target.readOnly ? ": it is read-only in PCP" : ""}.`,
+            target.readOnly ? "forbidden" : "not_found",
+          )
+        }
+
+        return callResolved(target.slug, name, row, rest, {
+          tier: ownTier,
+          fields: readFields(undefined),
+          decode: readFields(undefined, "decode"),
+          keep: readFields(undefined, "keep"),
+          fix: "Fix them and call again.",
+          ...(ctx.signal ? { signal: ctx.signal } : {}),
+        })
+      },
     })
   }
 
