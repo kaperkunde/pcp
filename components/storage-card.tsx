@@ -7,10 +7,17 @@ import type { StorageRootView } from "@/lib/core/storage/roots"
 
 /**
  * A store's own card on its page: where its files are, whether PCP keeps
- * them encrypted, whose files PCP writes, the way to its file browser, and
- * the conversion either way.
+ * them encrypted, whose files PCP writes, the way to its file browser
+ * (left out on the browser itself, `browse` false), and the conversion
+ * either way.
  */
-export function StorageCard({ view }: { view: StorageRootView }) {
+export function StorageCard({
+  view,
+  browse = true,
+}: {
+  view: StorageRootView
+  browse?: boolean
+}) {
   const login = view.host?.login ?? ""
   const local = view.backend === "local"
   const reachable = local || view.host !== null
@@ -50,9 +57,9 @@ export function StorageCard({ view }: { view: StorageRootView }) {
             )
           }
           trailing={
-            reachable && !view.converting ? (
+            browse && reachable && !view.converting ? (
               <ButtonLink
-                href={`/servers/${view.id}/files`}
+                href={`/files/${view.id}`}
                 variant="secondary"
                 size="sm"
               >

@@ -204,6 +204,15 @@ export default defineConfig({
       use: signedIn("storage"),
     },
     {
+      // The Files section: every store listed, PCP's own browsed, files
+      // uploaded (picked and dropped), previewed, read in a range,
+      // downloaded and deleted.
+      name: "files",
+      testMatch: /files\.spec\.ts/,
+      dependencies: ["setup"],
+      use: signedIn("files"),
+    },
+    {
       // A service on an SSH server: launched from its page with a secret
       // for its variable, its API endpoint registered in the same step,
       // stopped and started again. The engine is a fake docker run by a

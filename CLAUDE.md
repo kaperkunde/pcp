@@ -373,8 +373,12 @@ storageConnect`), never in the background, and SFTP for nothing else;
   (`save_file`'s `file`, read before anything connects). A read-only folder
   offers and runs the reading tools only; `delete` is Destructive. Only
   the owner adds one (on the SSH server's page) or changes it;
-  `register_server` has no kind for it. Its file browser
-  (`/servers/<id>/files`) goes through the same confinement. Limits go in
+  `register_server` has no kind for it. The owner's Files pages
+  (`/files`, every store with its mode and reach; `/files/<id>`, a store's
+  file browser) go through the same confinement, and a preview goes out
+  only as `storage/browse.ts` decides: an image (never SVG), a PDF, a sound
+  or a video as itself only when its first bytes agree, text as plain text,
+  anything else as a download. Limits go in
   `storage/limits.ts`, and a new tool, argument or way a path is resolved
   gets a test against the test server's SFTP (`storage/storage.test.ts`)
   or a temporary data folder (`storage/stores.test.ts`); a change to the
@@ -785,11 +789,12 @@ embeddingProvider`, which hands `embeddings/provider.ts` the header;
   the browser's live view
   (`app/api/browser/tabs/[id]/`: a stream of a tab's pictures and the
   owner's input, which an action cannot carry; the same origin check and
-  session), a store's download
+  session), a store's download and preview
   (`app/api/storage/[id]/download/`: a file needs `Content-Disposition` and
-  can be larger than an action's answer; streamed from the SSH server or
-  the data folder, decrypted as it is read, kept nowhere; the same origin
-  check and session), and the files a waiting call
+  can be larger than an action's answer, a sound or a video a byte range;
+  streamed from the SSH server or the data folder, decrypted as it is read,
+  kept nowhere; `?inline=1` as `storage/browse.ts servedPreview` says,
+  sandboxed and nosniff; the same origin check and session), and the files a waiting call
   carries (`app/api/permissions/[id]/files/[result]/`: a preview or download
   needs Content-Type and Content-Disposition; the same origin check and
   session).

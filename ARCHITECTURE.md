@@ -18,6 +18,7 @@ app/                 Routes and pages (Next.js App Router)
   api/files/…        File links: an assistant's own computer downloads or sends one file
   api/health/…       The health check; in the desktop app, the version and an install request
   api/browser/…      A browser tab's live view: its pictures out, the owner's input in
+  api/storage/…      A store's file for the Files pages: downloaded, or previewed in a range
 components/          React components; forms call Server Actions
 lib/actions/         Server Actions: read the session, call lib/core, return a state
 lib/server/          Next-specific glue: cookies, request headers, public URL
@@ -1121,15 +1122,40 @@ SSH server's page; a server that cannot be reached is an error. Limits are
 in `storage/limits.ts`; the test server answers SFTP on the machine's own
 file system (`ssh/fake-server.ts`, `storage/storage.test.ts`).
 
-**The file browser** (`/servers/<id>/files`) is the owner's: one folder at a
-time, read over SFTP when the page loads, with sizes and dates, upload (a
-Server Action), a new folder, rename or move, and delete with a confirm, all
-through the same confinement, and none of them on a read-only folder.
-Download is a route handler (`app/api/storage/[id]/download`), like the
-export's, because a file needs `Content-Disposition` and may be larger than
-an action's answer: it checks the request came from PCP's own page and the
-owner's session, and streams the file from the SSH server as it is read,
-keeping nothing.
+**The Files pages** are the owner's. `/files` lists every store, PCP's own
+first (made there too if the vault has none yet): where it is (this machine,
+or a folder on an SSH server), plain or encrypted (or being converted), how
+much of its quota PCP's own holds (`storage/quota.ts storeUsage` against
+`resourceLimits().storeBytes`), and why PCP cannot reach a storage folder
+now (its SSH server gone, its host key not pinned, the last check failing),
+read from rows only: nothing connects to an SSH server to draw the list. Its
+caption says that an export carries stores' keys and index, not their files.
+`/files/<id>` is a store's file browser (the old `/servers/<id>/files`
+redirects there): one folder at a time, read when the page loads (over SFTP,
+or from the data folder, decrypted in that request for an encrypted store),
+folders first, with sizes and dates, upload (a Server Action, several files
+picked or dropped on the browser, up to `PAGE_UPLOAD_BYTES` at once), a new
+folder, rename or move, and delete with a confirm, all through the same
+confinement and none of them on a read-only store; under the files, the
+store's own card with its conversion either way.
+
+Download and preview are one route handler (`app/api/storage/[id]/download`),
+like the export's, because a file needs `Content-Disposition` and may be
+larger than an action's answer: it checks the request came from PCP's own
+page and the owner's session, and streams the file as it is read, keeping
+nothing. A Range header (one range) gets that part with 206, so a sound or a
+video seeks and a text preview reads only its first 64 KiB; an encrypted
+store opens only the chunks the range covers. With `?inline=1` it is a
+preview, decided in `storage/browse.ts` (pure): the name offers one (images
+but SVG, PDF, text of common kinds with SVG and HTML among them, sounds,
+videos), and the file's first bytes, read first, decide how it goes: an
+image, a sound or a video as the type its bytes name, under a sandboxing
+policy (a sound or a video may load itself again from PCP, as a media
+document does); a PDF as itself to the browser's own viewer in a tab of its
+own, its policy only `frame-ancestors 'none'` (PCP's pages are never
+framed); text as `text/plain`; anything whose bytes disagree, or with no
+preview, as the download. Every answer is nosniff, same-origin only
+(`Cross-Origin-Resource-Policy`) and never cached.
 
 ## Services
 
