@@ -34,7 +34,8 @@ import {
  * authenticated to. A server is an MCP server, an API endpoint (kind
  * "openapi", lib/core/endpoints.ts), a mail account (kinds "jmap" and
  * "imap", lib/core/mail/), a calendar account (kind "caldav",
- * lib/core/caldav/) or an SSH server (kind "ssh", lib/core/ssh/).
+ * lib/core/caldav/), an SSH server (kind "ssh", lib/core/ssh/) or a storage
+ * root, a folder on an SSH server (kind "storage", lib/core/storage/).
  * Talking to them is lib/core/upstream.ts.
  */
 
@@ -57,6 +58,7 @@ export type ServerKind =
   | "browser"
   | "wrapper"
   | "service"
+  | "storage"
 
 export type MailKind = Extract<ServerKind, "jmap" | "imap">
 
@@ -70,6 +72,7 @@ const SERVER_KINDS: readonly ServerKind[] = [
   "browser",
   "wrapper",
   "service",
+  "storage",
 ]
 
 /**
@@ -92,6 +95,17 @@ export function isWrapperKind(kind: string): kind is "wrapper" {
 /** The vault's own headless browser, rather than something PCP reaches. */
 export function isBrowserKind(kind: string): kind is "browser" {
   return kind === "browser"
+}
+
+/**
+ * A storage root's url: the folder and its SSH server are in storage_root
+ * (lib/core/storage/), reached over that server's SSH connection.
+ */
+export const STORAGE_URL = "pcp:storage"
+
+/** A folder on one of the owner's SSH servers, read and written over SFTP. */
+export function isStorageKind(kind: string): kind is "storage" {
+  return kind === "storage"
 }
 
 /** A mail account rather than an MCP server or an API endpoint. */
@@ -132,6 +146,8 @@ export function kindNoun(kind: string): string {
       return "a wrapper"
     case "service":
       return "a service"
+    case "storage":
+      return "a storage folder"
     default:
       return "an MCP server"
   }

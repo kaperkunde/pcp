@@ -2,6 +2,7 @@ import {
   Box,
   Braces,
   CalendarDays,
+  FolderOpen,
   Globe,
   Layers,
   Mail,
@@ -56,6 +57,11 @@ const KINDS: Record<
     icon: Layers,
     className: "bg-tile-wrapper text-tile-wrapper-foreground",
     label: "Wrapper",
+  },
+  storage: {
+    icon: FolderOpen,
+    className: "bg-tile-ssh text-tile-ssh-foreground",
+    label: "Storage folder",
   },
   service: {
     icon: Box,

@@ -5,9 +5,16 @@ import { browserToolSpec } from "./browser/tools"
 import { calendarToolSpec } from "./caldav/tools"
 import type { VaultContext } from "./context"
 import { mailTool } from "./mail/tools"
-import { isCalendarKind, isMailKind, isServiceKind, isSshKind } from "./servers"
+import {
+  isCalendarKind,
+  isMailKind,
+  isServiceKind,
+  isSshKind,
+  isStorageKind,
+} from "./servers"
 import { serviceTool } from "./services/tools"
 import { runCommandTool, RUN_COMMAND } from "./ssh/tools"
+import { storageTool } from "./storage/tools"
 import { applyAliases } from "./tools/define"
 import type { InnerTool, Rename } from "./tools/family"
 import { validate } from "./tools/validate"
@@ -17,7 +24,8 @@ import { validate } from "./tools/validate"
  * asked, for every way a call reaches a tool: call_tool_<tier>,
  * run_code_<tier>'s pcp.call, a wrapper's program and a
  * browser flow (wrappers/run.ts). A tool of PCP's own families (the
- * browser, mail and calendar accounts, SSH servers, services) is checked by
+ * browser, mail and calendar accounts, SSH servers, services, storage
+ * roots) is checked by
  * its definition (tools/family.ts): old argument names renamed, its rules,
  * what only zod can say. Any other tool (an MCP server's, an API
  * endpoint's, a wrapper's) against the inputSchema its catalogue row
@@ -65,6 +73,10 @@ export function familyTool(
 
   if (isServiceKind(server.kind)) {
     return serviceTool(toolName)
+  }
+
+  if (isStorageKind(server.kind)) {
+    return storageTool(toolName)
   }
 
   return undefined
