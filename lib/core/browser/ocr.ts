@@ -108,5 +108,5 @@ export async function ocrToolFor(
 export function ocrHint(tool: OcrTool | null): string {
   return tool
     ? `pass its handle to ${tool.name}${tool.forceOcr ? " with force_ocr: true" : ""} (an OCR tool this token can call)`
-    : 'pass its handle to an OCR tool, if the owner has added one (search for "ocr")'
+    : "pass its handle to read_image, which runs the OCR providers this token may use or answers with a link to set one up"
 }

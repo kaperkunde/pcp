@@ -2754,8 +2754,12 @@ the viewport or of one element, and the tab's address, title and the link
 to it in PCP. A screenshot's answer says how to read the text in it: pass
 its handle to an OCR tool, naming one the token can call when it has one
 (`ocr.ts`: found by its words, OCR in its name, description or arguments,
-or a `force_ocr` argument, never by vendor), since `read_result` does not
-show an image. What the tree cannot read is named (`unseen.ts`, in PCP's
+or a `force_ocr` argument, never by vendor), and `read_image` otherwise
+(see Capabilities), since `read_result` does not show an image. A tab whose
+main document is a PDF or a picture (its Content-Type as Chromium reported
+the response, `challenge.ts watchDocuments`, never page script) says so,
+with the read path: `download` its address, then `convert_document` or
+`read_image` with the handle (`call.ts fileShownLine`). What the tree cannot read is named (`unseen.ts`, in PCP's
 own world: Playwright's handles and the tab's DevTools session, never page
 script): an iframe the snapshot shows empty (by its ref, and whether it is
 cross-origin), a closed shadow root (`DOM.getDocument` with `pierce`), a
@@ -4085,9 +4089,9 @@ accepted for one release with a note (`aliases`). `serve.ts` runs a call:
 it renames, checks the arguments with `validate.ts` in PCP's words (a tool
 error, logged as "did not fit", never quoting them), runs it, and maps its
 outcome (`outcome.ts`): `ok`, `toolError` (isError, the code in
-`_meta["gg.pcp/error"]`), `needsOwner` (a permission request or a server to
-connect, as `structuredContent` `{kind: "needs_owner", …}` with the link
-last in the text), or an answer made elsewhere passed on, in which a
+`_meta["gg.pcp/error"]`), `needsOwner` (a permission request, a server to
+connect, an upload link, or a capability to set up, as `structuredContent`
+`{kind: "needs_owner", reason, …}` with the link last in the text), or an answer made elsewhere passed on, in which a
 permission link is recognised and marked the same way.
 
 The families behind call_tool are written to the same interface
@@ -4425,6 +4429,76 @@ ask, the page and the route share the file links' rate limit, and the page
 sends no referrer and is not indexed. The row is kept a day past its last
 file time for `check_upload`; the cleanup removes it then, and the empty
 rows when the link stops taking files. Not exported, wiped with the vault.
+
+### Capabilities
+
+Some work an assistant asks for by what it is, not by a tool's name: read
+the text in a picture or a scan, fill in or merge a PDF, turn a document
+into Markdown. Each is a capability (`lib/core/capabilities/list.ts`, a
+typed list: `read_image`, `pdf_edit`, `convert_document`) and one of PCP's
+own tools that every token has (`read_image`, `edit_pdf`,
+`convert_document`). The tool does no work itself: a provider does, one of
+the token's own tools.
+
+**Providers** (`providers.ts`, pure) are found among the tools the token
+can call or ask for (blocked ones are not there; the browser's never
+count), by words in a tool's name and description, as search would (OCR,
+convert, fill and form, flatten, merge, signature and image), or a word in
+its arguments (`do_ocr`, `force_ocr`), never by a vendor's name; a server
+registered by a service launched from one of the capability's common items
+(its image or source tag, `candidates.ts serverItems`) ranks higher, an
+allowed tool above one that asks. One provider per server, its best tool.
+How to call it is read off its input schema: a kept result's handle where
+it takes one (an API endpoint's file field, as Docling's multipart
+`files`), the handle where it takes base64 (PCP puts the file there), or,
+for a tool that takes a path on a server with the #92 file convention
+(`put_file(file_path, content_base64)` and `get_file(file_path)`), the file
+step: put each file at `/data/pcp/<key>/<name>` (the key a hash of the
+operation and the files, so a call the owner allowed once is the same call
+when it is made again), run the tool on the paths with its `output_path` in
+the same folder, and `get_file` what it wrote, which comes back as a handle.
+A required argument the operation has nothing for leaves the tool out; a
+file argument named for PDFs takes PDFs only. Options are set where the tool
+has them and their enum allows (OCR forced, confidence asked for, Markdown,
+images as placeholders).
+
+**Calls** go through `gateway.ts forwardCall`, which run_code's `pcp.call`
+uses too: `resolveCall` (blocked, a secret, a handle that is not the
+token's), the capability tool's own tier (the owner's choice for it, else
+its annotations: Write, since a converter's POST is), a provider tool above
+it refused before anything is checked or asked and named with the entry
+that runs it, the arguments checked by the one validator, the owner asked
+where the level asks (`askCodeCall`, which hands a call they allowed once
+its answer), and `runCodeCall` otherwise, paced, its answer a value with
+files as handles. Each call is a request-log line of its own under the
+capability tool's name. A provider that asks stops the tool: its permission
+answer is passed on, with a line saying to call the tool again once the
+owner answered.
+
+`read_image` runs every provider (at most `MAX_READ_PROVIDERS`), keeps each
+reading with its confidence (`readings.ts`: the text and confidence read off
+the answer without knowing the provider), and flags where they disagree
+(their words overlap less than `AGREEMENT_MIN`, or they read different
+numbers) and a reading below `LOW_CONFIDENCE`; every answer says to check
+digits and meter readings against the picture. `convert_document` and
+`edit_pdf` (`form_fields`, `fill_form`, `flatten`, `merge`, `sign` with a
+picture of a signature; a digital signature needs a certificate and is the
+provider's own tool) try providers best first until one does it, and answer
+the text, or the PDF it made, as a handle.
+
+**No provider**: the answer is `needs_owner` with reason `setup` and the
+capability, a markdown link labelled with the capability's own words, last,
+to `/plugins/<id>`, and `noteOwnerAsked`; the assistant calls the tool again
+once the owner launched one. That page (`setup.ts capabilityOffers`) says
+what the capability is and offers its common items: "Add PCP's common items"
+when the vault does not link them (`addCommonRepoAction` with the capability,
+which comes back to the page), then "Launch <item>" to the repository's
+import page at the common repository's head commit, read on the page's load
+(where the owner reads the item whole, picks the SSH server and its secrets),
+or a link to the service they have. Search adds a "not installed" line for a
+capability its query names (`capabilitiesNamed`) with no provider, describe
+of a capability tool lists its providers or says there is none, and
+read_result's answer for a picture or a PDF names the tool that reads it.
 
 ### Descriptions read in a few words, and client profiles
 

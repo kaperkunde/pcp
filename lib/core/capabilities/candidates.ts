@@ -1,0 +1,132 @@
+import type { VaultContext } from "../context"
+import { db } from "../db"
+import { visibleTools, type GatewayServer } from "../gateway-servers"
+import { readServiceDefinition } from "../services/definition"
+import { itemOfImage, type CapabilityId } from "./list"
+import { MAX_SCHEMAS_READ } from "./limits"
+import {
+  providersOf,
+  type CandidateTool,
+  type OperationId,
+  type Provider,
+} from "./providers"
+
+/**
+ * The token's tools as provider detection reads them (providers.ts): the
+ * ones it can call or ask for, with their input schemas, and for each
+ * server the common item it was launched from. The browser's own tools
+ * never count; a blocked tool is not there.
+ */
+
+/** Words that make a tool worth reading the schema of. */
+const WORTH_READING =
+  /ocr|optical|tesseract|convert|export|markdown|text|form|flatten|merge|combine|sign|pdf|document|image|scan|read|extract|file/i
+
+export async function candidateTools(
+  servers: GatewayServer[],
+): Promise<CandidateTool[]> {
+  const listed = servers
+    .filter((server) => server.kind !== "browser")
+    .flatMap((server) =>
+      visibleTools(server)
+        .filter((tool) =>
+          WORTH_READING.test(
+            `${tool.name} ${tool.title ?? ""} ${tool.descriptionOverride ?? tool.description ?? ""}`,
+          ),
+        )
+        .map((tool) => ({ server, tool })),
+    )
+    .slice(0, MAX_SCHEMAS_READ)
+
+  if (listed.length === 0) {
+    return []
+  }
+
+  const schemas = new Map(
+    (
+      await db().mcpTool.findMany({
+        where: { id: { in: listed.map(({ tool }) => tool.id) } },
+        select: { id: true, inputSchema: true },
+      })
+    ).map((row) => [row.id, row.inputSchema]),
+  )
+
+  return listed.map(({ server, tool }) => {
+    let schema: unknown = null
+
+    try {
+      schema = JSON.parse(schemas.get(tool.id) ?? "null")
+    } catch {
+      schema = null
+    }
+
+    return {
+      serverId: server.id,
+      server: server.slug,
+      tool: tool.name,
+      title: tool.title,
+      description: tool.descriptionOverride ?? tool.description ?? "",
+      access: tool.access === "allowed" ? "allowed" : "ask",
+      tier: tool.tier,
+      schema,
+    }
+  })
+}
+
+/**
+ * The common item each of these servers was launched from, by the image
+ * or source tag of the service that registered it: the second signal.
+ */
+export async function serverItems(
+  ctx: VaultContext,
+  serverIds: string[],
+): Promise<Map<string, string>> {
+  if (serverIds.length === 0) {
+    return new Map()
+  }
+
+  const specs = await db().serviceSpec.findMany({
+    where: {
+      registeredId: { in: serverIds },
+      server: { vaultId: ctx.vaultId },
+    },
+    select: { registeredId: true, definition: true },
+  })
+  const found = new Map<string, string>()
+
+  for (const spec of specs) {
+    try {
+      const definition = readServiceDefinition(spec.definition)
+      const item = itemOfImage(
+        `${definition.image ?? ""} ${definition.source ?? ""}`,
+      )
+
+      if (item && spec.registeredId) {
+        found.set(spec.registeredId, item.name)
+      }
+    } catch {
+      // A stored definition that no longer reads says nothing.
+    }
+  }
+
+  return found
+}
+
+/** A capability's providers among the token's servers, by operation. */
+export async function capabilityProviders(
+  ctx: VaultContext,
+  servers: GatewayServer[],
+  id: CapabilityId,
+): Promise<Partial<Record<OperationId, Provider[]>>> {
+  const tools = await candidateTools(servers)
+
+  if (tools.length === 0) {
+    return {}
+  }
+
+  const items = await serverItems(ctx, [
+    ...new Set(tools.map((tool) => tool.serverId)),
+  ])
+
+  return providersOf(id, tools, items)
+}

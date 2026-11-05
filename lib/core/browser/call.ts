@@ -653,6 +653,7 @@ async function report(
     `The owner can watch it or take over: ${markdownLink(`Watch tab ${title || tab.id}`, tabLink(scope.publicUrl, tab.id))}`,
     ...(await blockedNote(scope, tab)),
     ...(hint && !hint.loud ? [hint.line] : []),
+    ...fileShownLine(tab),
   ]
   const dialog = dialogNote(tab)
 
@@ -680,6 +681,33 @@ async function report(
   return text(lines.join("\n"))
 }
 
+/**
+ * A tab showing a PDF or a picture rather than a page: its tree has little
+ * or nothing of what it shows, so the line says how to read it, through
+ * download and the capability tools (capabilities/). Read off the main
+ * document's Content-Type as Chromium reported it, never page script.
+ */
+export function fileShownLine(tab: Pick<Tab, "id" | "documents">): string[] {
+  const line = fileShownWords(tab.id, tab.documents.contentType())
+  return line ? [line] : []
+}
+
+/** fileShownLine's words for a tab and its document's media type. */
+export function fileShownWords(
+  tabId: string,
+  type: string | null,
+): string | null {
+  if (type === "application/pdf") {
+    return `Tab ${tabId} shows a PDF, which its snapshot cannot read. To read it, call download with its address to keep the file, then pass the handle to convert_document (read_image for a scan); edit_pdf fills in, flattens, merges or signs it.`
+  }
+
+  if (type?.startsWith("image/")) {
+    return `Tab ${tabId} shows a picture, which its snapshot cannot read. To read the text in it, call download with its address to keep the file, then pass the handle to read_image.`
+  }
+
+  return null
+}
+
 /** Waits briefly for what an action started to load, and for its check. */
 async function settle(tab: Tab): Promise<void> {
   await tab.page
@@ -704,7 +732,7 @@ function navigationFailure(
 
   if (/Download is starting/.test(firstLine(error))) {
     tab.offeredFile = null
-    return `${host} answered with a file to download, not a page, so the tab stayed where it was. Call download with that address to keep the file.`
+    return `${host} answered with a file to download, not a page, so the tab stayed where it was. Call download with that address to keep the file; then convert_document reads a document, read_image a picture or scan.`
   }
 
   const refusal = vault.proxy.refusal(url.hostname, since)
