@@ -3,7 +3,11 @@ import type { Locator, Page } from "patchright-core"
 
 import type { McpServer } from "@/lib/generated/prisma/client"
 
-import { checkSecretRequest, originOf } from "../browser-secrets"
+import {
+  checkSecretRequest,
+  checkSecretSitesChange,
+  originOf,
+} from "../browser-secrets"
 import type { VaultContext } from "../context"
 import { db } from "../db"
 import { invalid, PcpError } from "../errors"
@@ -33,7 +37,7 @@ import {
   withNotes,
 } from "../tools/family"
 import { decideSite, loadFetchRules } from "../web-fetch"
-import { parseSecretPlaceholder, scrubResult } from "../wrappers/placeholders"
+import { parseSecretRef, scrubResult } from "../wrappers/placeholders"
 import { consoleLog, networkLog } from "./devtools"
 import { catchDownload, offeredName, tabOwnsFrame } from "./downloads"
 import { evaluateInTab } from "./evaluate"
@@ -1418,16 +1422,21 @@ async function typeSecret(
       ACTION_TIMEOUT_MS,
       "Input.insertText",
     )
-    // As the field has it (the page may have cut or reformatted it), and
-    // as it was typed, which a later page may repeat.
-    holdSecret(
-      tab.page,
-      typer.name,
-      await handle
-        .inputValue({ timeout: ACTION_TIMEOUT_MS })
-        .catch(() => value),
-    )
-    holdSecret(tab.page, typer.name, value)
+
+    // A login name is typed through the same gate but is no secret from
+    // the assistant (the page's sign-in note names it): not held. A
+    // password is held as the field has it (the page may have cut or
+    // reformatted it), and as it was typed, which a later page may repeat.
+    if (typer.part !== "username") {
+      holdSecret(
+        tab.page,
+        typer.name,
+        await handle
+          .inputValue({ timeout: ACTION_TIMEOUT_MS })
+          .catch(() => value),
+      )
+      holdSecret(tab.page, typer.name, value)
+    }
 
     if (args.submit) {
       await locator.press("Enter", { timeout: ACTION_TIMEOUT_MS })
@@ -1439,7 +1448,9 @@ async function typeSecret(
   await settle(tab)
   return report(scope, tab, {
     lead: [
-      `Typed the secret "${typer.name}" into ${label}. It shows as ${secretMask(typer.name)}, and the tab takes no screenshots while a field holds it.`,
+      typer.part === "username"
+        ? `Typed the login name of "${typer.name}" into ${label}.`
+        : `Typed the secret "${typer.name}" into ${label}. It shows as ${secretMask(typer.name)}, and the tab takes no screenshots while a field holds it.`,
     ],
   })
 }
@@ -2094,6 +2105,7 @@ async function runBrowserTool(
   }
   const listsOrOpens =
     spec.name === "request_secret" ||
+    spec.name === "update_secret_sites" ||
     (spec.name === "tabs" &&
       (rawArgs.action === "open" || rawArgs.action === "list"))
 
@@ -2278,9 +2290,13 @@ async function runCheckedTool(
         })
       })
     case "type": {
-      const named = parseSecretPlaceholder(args.text)
+      const ref = parseSecretRef(args.text)
+      const named = ref?.name ?? null
 
-      if (named !== null && secret?.name !== named) {
+      if (
+        ref !== null &&
+        (secret?.name !== ref.name || secret.part !== ref.part)
+      ) {
         throw invalid(
           'A secret goes into a page only through PCP: {"$secret": …} was not placed.',
         )
@@ -2479,6 +2495,8 @@ async function runCheckedTool(
           purpose: args.purpose as string,
           origins: args.origins as string[],
           kind: args.kind as string | undefined,
+          username: args.username as string | undefined,
+          generate: args.generate,
         })
       } catch (error) {
         // Its refusals can name a site: a tool error, out of the log.
@@ -2490,6 +2508,29 @@ async function runCheckedTool(
       }
 
       throw new OwnerNeeded({ kind: "secret_request", input })
+    }
+    case "update_secret_sites": {
+      let input
+
+      try {
+        input = await checkSecretSitesChange(ctx, server.id, {
+          name: args.name as string,
+          reason: args.reason as string,
+          add: args.add as
+            Array<{ origin: string; subdomains?: boolean }> | undefined,
+          remove: args.remove as string[] | undefined,
+        })
+      } catch (error) {
+        // Its refusals name sites: a tool error, out of the log.
+        if (error instanceof PcpError) {
+          return text(error.message, true)
+        }
+
+        throw error
+      }
+
+      // Always the owner's, whatever the token's levels.
+      throw new OwnerNeeded({ kind: "secret_sites_change", input })
     }
     case "evaluate":
       return onTab(scope, tab, spec, (current) =>

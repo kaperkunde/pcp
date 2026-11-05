@@ -289,6 +289,8 @@ const SecretRow = z.strictObject({
 const SecretBrowserOriginRow = z.strictObject({
   secretId: id,
   origin: str,
+  // "This domain and its subdomains": absent from older files.
+  includeSubdomains: z.boolean().default(false),
   createdAt: date,
 })
 

@@ -26,7 +26,11 @@ import {
 } from "./access-requests"
 import { allowSiteFor, allowToolFor, parseAllowForMinutes } from "./allowances"
 import type { SyncResult } from "./catalogue"
-import type { PermissionDecision, PermissionKind } from "./constants"
+import type {
+  PasswordRecipe,
+  PermissionDecision,
+  PermissionKind,
+} from "./constants"
 import type { VaultContext } from "./context"
 import { asBytes, decryptString, encryptString } from "./crypto"
 import { db } from "./db"
@@ -144,6 +148,7 @@ import {
   describeBrowseAsk,
   describeHandoverAsk,
   describeSecretRequestAsk,
+  describeSecretSitesChangeAsk,
   describeSecretUseAsk,
   describeScriptUseAsk,
 } from "./browser/describe"
@@ -155,6 +160,7 @@ import {
   type HandoverAsk,
   type ScriptUseAsk,
   type SecretRequestAsk,
+  type SecretSitesChangeAsk,
   type SecretUseAsk,
 } from "./browser/types"
 import {
@@ -165,13 +171,18 @@ import {
 } from "./browser-scripts"
 import {
   applySecretRequest,
+  applySecretSitesChange,
   checkSecretAnswer,
+  checkSecretSitesAnswer,
   dropOnceAllowance,
   findTypableSecret,
   grantSecretUse,
   isBoundOrigin,
+  showSecretSitesChange,
+  type SecretSitesShown,
   type SecretUseLevel,
 } from "./browser-secrets"
+import { checkPasswordRecipe, generatePassword } from "./generate-password"
 import { resourceLimits } from "./resources/state"
 import {
   askFirstLine,
@@ -328,6 +339,7 @@ export type PermissionAsk =
   | { kind: "browser_handover"; input: HandoverAsk }
   | { kind: "secret_use"; input: SecretUseAsk }
   | { kind: "secret_request"; input: SecretRequestAsk }
+  | { kind: "secret_sites_change"; input: SecretSitesChangeAsk }
   | { kind: "exit_use"; input: ExitUseAsk }
   | { kind: "script_use"; input: ScriptUseAsk }
 
@@ -443,7 +455,18 @@ export type PermissionView = {
      */
     kind?: "text" | "totp"
     origins?: string[]
+    /** request_secret: the login name it goes with, which the owner can change. */
+    username?: string | null
+    /** request_secret: the password the assistant asked PCP to make. */
+    generate?: PasswordRecipe | null
   } | null
+  /**
+   * update_secret_sites: the secret's sites now and each change asked for,
+   * with lookalikes flagged, for the owner to tick; `basis` goes back with
+   * the answer (decidePermission's `sites`). Null for other requests and
+   * once answered.
+   */
+  secretSites: SecretSitesShown | null
   /**
    * A new or changed server's levels and tiers the assistant proposed
    * (proposed-access.ts), for the page to show filled in and editable
@@ -837,6 +860,11 @@ function describeAsk(ask: PermissionAsk): {
         target: `secret_request:${ask.input.name}`,
         args: ask.input as Record<string, unknown>,
       }
+    case "secret_sites_change":
+      return {
+        target: `secret_sites:${ask.input.secretName}`,
+        args: ask.input as Record<string, unknown>,
+      }
     case "script_use":
       return {
         target: `script_use:${ask.input.site}\n${ask.input.tabId}\n${scriptDigest(ask.input.script)}`,
@@ -881,6 +909,8 @@ function toolNameOf(ask: PermissionAsk): string {
       return "type"
     case "secret_request":
       return "request_secret"
+    case "secret_sites_change":
+      return "update_secret_sites"
     case "exit_use":
       return ask.input.via === "web_fetch" ? "web_fetch" : "tabs"
     case "script_use":
@@ -1124,6 +1154,16 @@ async function summarizeRow(
 
   if (row.kind === "secret_request") {
     const asked = describeSecretRequestAsk(args as SecretRequestAsk)
+
+    return { ...asked, lines: [...asked.lines, asker] }
+  }
+
+  if (row.kind === "secret_sites_change") {
+    const ask = args as SecretSitesChangeAsk
+    const asked = describeSecretSitesChangeAsk(
+      ask,
+      await showSecretSitesChange(ctx, ask),
+    )
 
     return { ...asked, lines: [...asked.lines, asker] }
   }
@@ -1574,6 +1614,13 @@ async function toView(
         ? connectLinks(row.server, publicUrl)
         : null,
     secretToEnter: await secretToEnter(ctx, row),
+    secretSites:
+      kind === "secret_sites_change" && status === "pending"
+        ? await showSecretSitesChange(
+            ctx,
+            readArgs(ctx, row) as SecretSitesChangeAsk,
+          )
+        : null,
     offersPrivateAddresses:
       kind === "register" &&
       registersPrivateAddress(readArgs(ctx, row) as RegisterArgs),
@@ -1676,6 +1723,8 @@ function newSecretOf(
   login: string | null
   kind?: "text" | "totp"
   origins?: string[]
+  username?: string | null
+  generate?: PasswordRecipe | null
 } | null {
   if (row.kind === "secret_request") {
     const asked = readArgs(ctx, row) as SecretRequestAsk
@@ -1687,6 +1736,8 @@ function newSecretOf(
       login: null,
       kind: asked.kind,
       origins: asked.origins,
+      username: asked.username ?? null,
+      generate: asked.generate ?? null,
     }
   }
 
@@ -1910,6 +1961,7 @@ export async function withPermission(
                 ask.kind === "browser_handover" ||
                 ask.kind === "secret_use" ||
                 ask.kind === "secret_request" ||
+                ask.kind === "secret_sites_change" ||
                 ask.kind === "script_use"
               ? ask.input.serverId
               : ask.kind === "exit_use"
@@ -2203,6 +2255,9 @@ export async function decidePermission(
     always,
     minutes,
     origins,
+    loginName,
+    generate,
+    sites,
     revision,
     allowPrivate,
     access,
@@ -2224,6 +2279,18 @@ export async function decidePermission(
     secretValue?: string
     /** request_secret: the sites the owner left in, on PCP's page. */
     origins?: string[]
+    /** request_secret: the login name the owner left on PCP's page. */
+    loginName?: string
+    /**
+     * request_secret: the owner's Generate, a password PCP makes here in
+     * place of a typed value (generate-password.ts); never sent back.
+     */
+    generate?: unknown
+    /**
+     * update_secret_sites: the changes the owner ticked, by key, and the
+     * sites as the page showed them (SecretSitesShown `basis`).
+     */
+    sites?: { basis?: string; keep?: string[] }
     /** A memory to share: read it in every conversation, ticked on the page. */
     always?: boolean
     /** "Allow for": how long, one of ALLOW_FOR_MINUTES. */
@@ -2405,11 +2472,43 @@ export async function decidePermission(
   // A secret for the browser: its value (or one the owner added since) and
   // the sites, checked before anything is written, so a mistyped seed can
   // be typed again.
+  // Generate makes the value here, on PCP's machine: it is stored and never
+  // passes through the page or the assistant.
+  let typedValue = secretValue
+
+  if (
+    kind === "secret_request" &&
+    generate !== undefined &&
+    generate !== null
+  ) {
+    try {
+      typedValue = generatePassword(checkPasswordRecipe(generate))
+    } catch (error) {
+      if (isPcpError(error)) {
+        return text(error.message, true)
+      }
+
+      throw error
+    }
+  }
+
+  if (kind === "secret_sites_change") {
+    const problem = await checkSecretSitesAnswer(
+      ctx,
+      readArgs(ctx, row) as SecretSitesChangeAsk,
+      sites ?? {},
+    )
+
+    if (problem) {
+      return text(problem, true)
+    }
+  }
+
   if (kind === "secret_request") {
     const problem = await checkSecretAnswer(
       ctx,
       readArgs(ctx, row) as SecretRequestAsk,
-      { value: secretValue, origins },
+      { value: typedValue, origins, loginName },
     )
 
     if (problem) {
@@ -2570,21 +2669,34 @@ export async function decidePermission(
                                         row.tokenId,
                                         readArgs(ctx, row) as SecretRequestAsk,
                                         {
-                                          value: secretValue,
+                                          value: typedValue,
                                           origins,
                                           level: secretLevel(choice),
+                                          loginName,
+                                          generated: typedValue !== secretValue,
                                         },
                                       ),
                                     )
-                                  : await executeRegister(
-                                      ctx,
-                                      row,
-                                      publicUrl,
-                                      executor,
-                                      secretValue,
-                                      allowPrivate === true,
-                                      chosenAccess,
-                                    )
+                                  : kind === "secret_sites_change"
+                                    ? text(
+                                        await applySecretSitesChange(
+                                          ctx,
+                                          readArgs(
+                                            ctx,
+                                            row,
+                                          ) as SecretSitesChangeAsk,
+                                          sites ?? {},
+                                        ),
+                                      )
+                                    : await executeRegister(
+                                        ctx,
+                                        row,
+                                        publicUrl,
+                                        executor,
+                                        secretValue,
+                                        allowPrivate === true,
+                                        chosenAccess,
+                                      )
   } catch (error) {
     if (!isPcpError(error)) {
       console.error("[permissions] running an allowed request failed", {
@@ -2792,7 +2904,13 @@ async function executeSecretUse(
       ctx,
       row.server,
       "type",
-      { ...asked.call, text: { $secret: secret.name } },
+      {
+        ...asked.call,
+        text: {
+          $secret: secret.name,
+          ...(asked.part === "username" ? { part: "username" } : {}),
+        },
+      },
       { publicUrl, tokenId: row.tokenId, ownerAllowed: true, executor },
     )
   } finally {

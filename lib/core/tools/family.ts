@@ -144,12 +144,15 @@ function valueAt(root: unknown, path: readonly PropertyKey[]): unknown {
   return node
 }
 
-/** {"$secret": name}: a secret's placeholder. */
+/** {"$secret": name}, with "part" if it says which: a secret's placeholder. */
 function isSecret(value: unknown): boolean {
   return (
     isRecord(value) &&
     typeof value.$secret === "string" &&
-    Object.keys(value).length === 1
+    Object.keys(value).every((key) => key === "$secret" || key === "part") &&
+    (value.part === undefined ||
+      value.part === "password" ||
+      value.part === "username")
   )
 }
 

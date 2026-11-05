@@ -1089,6 +1089,7 @@ describe("restoring", { timeout: 60_000 }, () => {
     const { ctx, secretId, token } = await populate()
     const tokenId = (await resolveApiToken(token))!.tokenId
     await bindOrigin(ctx, secretId, "https://shop.example")
+    await bindOrigin(ctx, secretId, "https://waternet.nl", { subdomains: true })
     await grantSecretUse(ctx, {
       tokenId,
       secretId,
@@ -1098,7 +1099,8 @@ describe("restoring", { timeout: 60_000 }, () => {
     const file = await exportVault(ctx, EXPORT_PASSWORD)
     const raw = await openRaw(file, EXPORT_PASSWORD)
     expect(raw.tables.secretBrowserOrigins).toMatchObject([
-      { secretId, origin: "https://shop.example" },
+      { secretId, origin: "https://shop.example", includeSubdomains: false },
+      { secretId, origin: "https://waternet.nl", includeSubdomains: true },
     ])
     expect(JSON.stringify(raw)).not.toContain("api_token_secret_allowance")
 
@@ -1109,9 +1111,38 @@ describe("restoring", { timeout: 60_000 }, () => {
       { restoreHostSettings: false },
     )
     expect(await listBrowserOrigins(ctx)).toEqual(
-      new Map([[secretId, ["https://shop.example"]]]),
+      new Map([
+        [
+          secretId,
+          [
+            { origin: "https://shop.example", subdomains: false },
+            { origin: "https://waternet.nl", subdomains: true },
+          ],
+        ],
+      ]),
     )
     expect(await db().apiTokenSecretAllowance.count()).toBe(0)
+
+    // A file from before subdomains: each site its own host only.
+    const flagless = structuredClone(raw)
+    for (const site of flagless.tables.secretBrowserOrigins ?? []) {
+      delete (site as Record<string, unknown>).includeSubdomains
+    }
+    await restoreExport(
+      (
+        await readExport(
+          await encodeExport(flagless, EXPORT_PASSWORD),
+          EXPORT_PASSWORD,
+        )
+      ).payload,
+      { into: "vault", ctx },
+      { restoreHostSettings: false },
+    )
+    expect(
+      (await listBrowserOrigins(ctx))
+        .get(secretId)
+        ?.map((site) => site.subdomains),
+    ).toEqual([false, false])
 
     const older = structuredClone(raw)
     delete (older.tables as Record<string, unknown>).secretBrowserOrigins

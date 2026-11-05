@@ -8,8 +8,8 @@ import { SubmitButton } from "@/components/submit-button"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card } from "@/components/ui/card"
-import { Input, Select, Textarea } from "@/components/ui/input"
-import { Field } from "@/components/ui/label"
+import { Checkbox, Input, Select, Textarea } from "@/components/ui/input"
+import { Field, Label } from "@/components/ui/label"
 import { List, ListRow, ListSection } from "@/components/ui/list"
 import {
   addSecretOriginAction,
@@ -21,6 +21,7 @@ import {
   updateSecretAction,
   type SecretActionResult,
 } from "@/lib/actions/secrets"
+import type { SecretSite } from "@/lib/core/browser-secrets"
 import type { SecretSummary } from "@/lib/core/secrets"
 
 /** A token's allowance to have the secret typed at a site. */
@@ -34,8 +35,8 @@ export type SecretAllowanceItem = {
 }
 
 export type SecretItem = SecretSummary & {
-  /** The sites the browser may type it at. */
-  browserOrigins: string[]
+  /** The sites the browser may type it at, each maybe with its subdomains. */
+  browserOrigins: SecretSite[]
   allowances: SecretAllowanceItem[]
 }
 
@@ -438,15 +439,23 @@ function SecretBrowser({
       </p>
       {secret.browserOrigins.length > 0 ? (
         <ul className="m-0 flex list-none flex-col gap-1.5 p-0">
-          {secret.browserOrigins.map((origin) => (
-            <li key={origin} className="flex items-center gap-2">
-              <code className="min-w-0 flex-1 break-all">{origin}</code>
+          {secret.browserOrigins.map((site) => (
+            <li key={site.origin} className="flex items-center gap-2">
+              <span className="min-w-0 flex-1 break-all">
+                <code>{site.origin}</code>
+                {site.subdomains ? (
+                  <span className="text-sm text-muted-foreground">
+                    {" "}
+                    and its subdomains
+                  </span>
+                ) : null}
+              </span>
               <Button
                 type="button"
                 variant="ghost"
                 size="sm"
                 disabled={pending}
-                onClick={() => onRemoveOrigin(origin)}
+                onClick={() => onRemoveOrigin(site.origin)}
               >
                 Remove
               </Button>
@@ -473,6 +482,13 @@ function SecretBrowser({
         <SubmitButton size="sm" pendingText="Adding…">
           Add
         </SubmitButton>
+        <Label className="w-full font-normal">
+          <Checkbox name="subdomains" />
+          <span>
+            And its subdomains (www., login., mijn.…), within the same domain
+            only. Adding a site again sets this anew.
+          </span>
+        </Label>
       </form>
       <FormError error={state.status === "error" ? state.error : null} />
       {secret.allowances.length > 0 ? (

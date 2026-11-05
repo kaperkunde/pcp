@@ -87,7 +87,8 @@ export const PACING_DEFAULTS: Record<PacingClass, PacingPolicy> = {
  * Browser tools that are never paced: they read the page the tab already
  * has (or wait on it, or list tabs) and send the site nothing it would not
  * get anyway. `tabs` opening a page is a navigation, paced as one; the
- * owner's hand_over is theirs, and request_secret asks only the owner.
+ * owner's hand_over is theirs, and request_secret and update_secret_sites
+ * ask only the owner.
  */
 export const UNPACED_BROWSER_TOOLS: ReadonlySet<string> = new Set([
   "snapshot",
@@ -100,6 +101,7 @@ export const UNPACED_BROWSER_TOOLS: ReadonlySet<string> = new Set([
   "tabs",
   "hand_over",
   "request_secret",
+  "update_secret_sites",
 ])
 
 /**

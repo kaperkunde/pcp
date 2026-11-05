@@ -2474,9 +2474,10 @@ Hosts are never logged.
 **What an assistant gets.** The tools are `tabs`, `navigate`, `back`,
 `snapshot`, `read_page`, `find`, `click`, `drag`, `type`, `press_key`,
 `select_option`, `upload_file`, `scroll`, `wait_for`, `screenshot`,
-`download`, `handle_dialog`, `hand_over`, `request_secret`, `evaluate`,
-`console_log` and `network_log`. Every one but
-`tabs`' open and list and `request_secret` names its tab (below). An assistant reads a snapshot (Playwright's
+`download`, `handle_dialog`, `hand_over`, `request_secret`,
+`update_secret_sites`, `evaluate`, `console_log` and `network_log`. Every one
+but `tabs`' open and list, `request_secret` and `update_secret_sites` names
+its tab (below). An assistant reads a snapshot (Playwright's
 accessibility tree, with PCP's refs, below), `find`'s elements of it as JSON (role, name,
 ref, states, and the landmark or region each is in, which tells two lines
 that read the same apart; `within` searches one element; `query` is taken
@@ -2673,13 +2674,73 @@ typed by anyone. `upstream.ts` scrubs the value from the answer and any error
 too, and the request log notes the secret's name and the origin on the
 call's line (`noteSecretTyped`; a use the owner's answer made gets a line of
 its own), never the value. `request_secret` (name, purpose, origins, kind
-text or totp) checks its arguments and refuses a name PCP holds (no
-assistant writes over a secret), then throws `OwnerNeeded` for a
-`secret_request`: the owner types the value (or the seed) on PCP's page, may
-change the origins, and saves it with the requesting token's allowance at
-each (one use, an hour, or always); the assistant hears the name. Origins
-are exported; allowances are not, are listed with End on the token's page
-and on the secret's row under Secrets, and are pruned once run out.
+text or totp, and for a text secret `username` and `generate`) checks its
+arguments and refuses a name PCP holds (no assistant writes over a secret),
+then throws `OwnerNeeded` for a `secret_request`: the owner types the value
+(or the seed) on PCP's page, or turns on Generate, ticks the origins asked
+for and may add more, and saves it with the requesting token's allowance at
+each (one use, an hour, or always); the assistant hears the name. The page
+is marked up for password managers: a text secret's login name
+(`autocomplete="username"`, filled in from `username`) and its value
+(`autocomplete="new-password"`) sit in a form of their own, so a password a
+manager suggests is saved with the right login, and the sites are checkboxes
+and a box outside it (`autocomplete="off"`, `data-1p-ignore`,
+`data-lpignore`), so autofill has nothing of theirs to write over; the
+origins are parsed again before anything is saved. Generate
+(`generate-password.ts`) makes the password in `decidePermission`, on PCP's
+machine, from the recipe on the page (length 8 to 128, the kinds of
+character, characters to leave out; the assistant's `generate` only fills it
+in): `crypto.randomInt` for every draw, one character of every kind chosen,
+the rest from all of them, shuffled. It is stored at once as the secret's
+value and never sent to the page or the assistant; the owner reveals it
+under Secrets like any other. Origins are exported; allowances are not, are
+listed with End on the token's page and on the secret's row under Secrets,
+and are pruned once run out.
+
+A secret's **login name** is typed as `{"$secret": name, "part": "username"}`
+(`"password"`, the value, is the default), one credential with its password:
+the placeholder's `part` is read by `wrappers/placeholders.ts`,
+`tools/validate.ts` and the family's check alike, and `upstream.ts` refuses it
+anywhere but the browser's `type`. It passes the same gate as the value
+(`admitSecretUse` with `part`; its `secret_use` request says it is the login
+name), and `secrets.ts readTypedLogin`
+opens it, refused before the owner is asked when the secret keeps none. It
+is no secret from the assistant (the sign-in note names it), so it is not
+held, masked or scrubbed, and screenshots go on. The login name and the
+password are one credential, so a once allowance is one sign-in: the part
+typed on it opens a window in memory (by token, secret, origin and tab, for
+`SECRET_SIGN_IN_WINDOW_MS`) that lets the other part through once; the same
+part again, another tab, a late one or a second sign-in asks the owner, and
+the owner ending the allowance or taking the site away ends the window.
+
+A **site** of a secret (`SecretBrowserOrigin`) is an origin, or with
+`include_subdomains` that origin and its subdomains: every origin at the
+same scheme and port whose host ends in the site's host and has the same
+registrable domain by the public suffix list, its private section included
+(`tldts`, `siteCovers`). `canCoverSubdomains` refuses the flag for an IP
+address, localhost or a public suffix itself (co.uk, github.io,
+s3.amazonaws.com), so a site never stands for another owner's names
+(amazonaws.com does not cover a bucket under s3.amazonaws.com). The gate,
+`isBoundOrigin` and `signInsAt` look up the page's origin and, flagged, each
+of its parents down to its registrable domain (`coveringOrigins`). Taking a
+site away, or its flag, drops every token's allowance at the origins it no
+longer covers. The owner sets the flag on the secret's row ("And its
+subdomains").
+
+`update_secret_sites` (name, reason, `add` with `subdomains`, `remove`) is an
+assistant's way to fix a secret's sites (a misspelled domain, another
+subdomain): checked first (a secret the browser types, plain text, sites to
+remove that it has, something that changes), it always throws `OwnerNeeded`
+for a `secret_sites_change`, whatever the token's levels. Its page shows the
+sites now and each change with a box, a site under a registrable domain
+none of them has is noted, and a lookalike (`lookalike-sites.ts`: an IDN in
+punycode, the same name under another ending, a confusable spelling, one or
+two edits from a site's domain name, or a site's name inside another
+domain) is flagged and left unticked. The answer carries the keys ticked and
+the sites as shown (`sitesBasis`): `checkSecretSitesAnswer` refuses before
+anything is written when the sites changed since, and
+`applySecretSitesChange` makes only the ticked changes through `bindOrigin`
+and `unbindOrigin`. The value never changes, and is never shown.
 
 **Sign-ins at a page's site** (`sign-in-hint.ts`). So an assistant types a
 password rather than asking the owner for it in the conversation, the

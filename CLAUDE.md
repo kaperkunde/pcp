@@ -572,27 +572,44 @@ embeddingProvider`, which hands `embeddings/provider.ts` the header;
   browser's `type` text `{"$secret": name}` (from an assistant's call,
   run_code or a wrapper's binding), never in another tool or argument, and
   only through `upstream.ts callBrowser`, which hands the browser a typer,
-  never a value. The browser asks for it only at the moment of typing, for
+  never a value. `"part": "username"` types the login name the owner keeps
+  with it instead (`secrets.ts readTypedLogin`), through the same gate,
+  refused anywhere but the browser and not held, since the assistant may
+  read it; a once allowance is one sign-in, both parts in the same tab
+  within `SECRET_SIGN_IN_WINDOW_MS`, never more. The browser asks for it only at the moment of typing, for
   an input or textarea whose frame is the page's own origin; the typer lets
   it through only where the token has an allowance for that secret at that
-  origin (once, an hour, or always while the origin is the secret's
-  `SecretBrowserOrigin`), or else asks the owner (`secret_use`, with
+  origin (once, an hour, or always while the origin is one of the secret's
+  `SecretBrowserOrigin` sites), or else asks the owner (`secret_use`, with
   `noteOwnerAsked`), whose answer never changes a tool's level; an API
-  endpoint's use of the secret never counts. It is typed with CDP
-  `Input.insertText` once the field has the focus (in its frame, each frame
-  around it and each shadow root around it). While a field holds it, as
-  typed or as the page reformatted it (`browser/held.ts`, keyed hashes of
-  the value and of its normalised form, white space and separators out and
-  upper case, never the value), every answer shows it as `[secret: name]`
-  and `screenshot` is refused; a password field's value never shows, its
-  snapshot `- text:` child included. For the life of the tab, every answer
-  to the token masks each secret typed into any of its tabs wherever the
-  text has it once normalised (`maskTyped`: a keyed rolling fingerprint,
-  then an HMAC), whatever document the tab shows now. The value is
-  scrubbed from answers and errors, and the request log has the secret's
-  name and origin, never the value.
-  `request_secret` asks the owner to type a new one on PCP's page and never
-  writes over a name PCP holds. Allowances are not exported; origins are.
+  endpoint's use of the secret never counts. A site may stand for its
+  subdomains (`include_subdomains`): only within its own registrable
+  domain by the public suffix list (`tldts`, `siteCovers`), never for an IP
+  address, localhost or a public suffix, never across domains. It is typed
+  with CDP `Input.insertText` once the field has the focus (in its frame,
+  each frame around it and each shadow root around it). While a field holds
+  it, as typed or as the page reformatted it (`browser/held.ts`, keyed
+  hashes of the value and of its normalised form, white space and
+  separators out and upper case, never the value), every answer shows it as
+  `[secret: name]` and `screenshot` is refused; a password field's value
+  never shows, its snapshot `- text:` child included. For the life of the
+  tab, every answer to the token masks each secret typed into any of its
+  tabs wherever the text has it once normalised (`maskTyped`: a keyed
+  rolling fingerprint, then an HMAC), whatever document the tab shows now.
+  The value is scrubbed from answers and errors, and the request log has
+  the secret's name and origin, never the value.
+  `request_secret` asks the owner to type a new one on PCP's page (with its
+  login name, `username`), or to have PCP make a password there
+  (`generate`: `generate-password.ts`, a CSPRNG, in `decidePermission`,
+  stored at once and never handed back; the owner reveals it under
+  Secrets), and never writes over a name PCP holds. Its page keeps the
+  sites out of a password manager's reach (boxes outside the login form,
+  `data-1p-ignore`). An assistant changes a secret's sites only by
+  proposing it (`update_secret_sites`, a `secret_sites_change` request that
+  always asks, whatever the levels): the page shows the sites now, each
+  change and lookalikes flagged unticked (`lookalike-sites.ts`), and makes
+  only what the owner ticked, to the sites as shown (`sitesBasis`).
+  Allowances are not exported; origins are, with their flag.
   `navigate`, `snapshot` and `tabs` open name the owner's secrets bound to
   the page's origin (`browser/sign-in-hint.ts`, louder at a password
   field) with the login name, note and TOTP companion the owner gave each

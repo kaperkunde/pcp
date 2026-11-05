@@ -644,6 +644,36 @@ export async function readTypedValue(
   return totpCode(seed, now).code
 }
 
+/**
+ * The login name the owner keeps with one of their secrets, for the browser
+ * to type ({"$secret": name, "part": "username"}): opened here, as every
+ * detail of a secret is. Refused when it has none.
+ */
+export async function readTypedLogin(
+  ctx: VaultContext,
+  id: string,
+): Promise<string> {
+  const row = await db().secret.findFirst({
+    where: { id, vaultId: ctx.vaultId },
+    select: { id: true, name: true, kind: true, loginName: true, note: true },
+  })
+
+  if (!row || !isOwnerSecretKind(row.kind)) {
+    throw notFound("That secret")
+  }
+
+  const { loginName } = openSecretDetails(ctx, row)
+
+  if (!loginName) {
+    throw new PcpError(
+      "not_found",
+      `The owner keeps no login name with the secret "${row.name}", so nothing was typed. Type the login name as plain text, or ask the owner to add it to the secret on the Secrets page.`,
+    )
+  }
+
+  return loginName
+}
+
 /** A TOTP secret's code of the moment, for the owner's own screen. */
 export async function revealTotpCode(
   ctx: VaultContext,

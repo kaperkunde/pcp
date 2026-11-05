@@ -1,3 +1,4 @@
+import { siteLabel } from "./browser-secrets"
 import type { VaultContext } from "./context"
 import { db } from "./db"
 import { openSecretDetails, type SecretKind } from "./secrets"
@@ -168,7 +169,10 @@ export type ListedSecret = {
   usedBy: SecretUse[]
   /** Further uses past MAX_LISTED_USES. */
   moreUses?: number
-  /** The sites the browser may type it at (SecretBrowserOrigin). */
+  /**
+   * The sites the browser may type it at (SecretBrowserOrigin): an origin,
+   * or "<origin> and its subdomains".
+   */
   sites?: string[]
   /** The owner's login name for the sign-in it is the password of. */
   login_name?: string
@@ -200,7 +204,7 @@ export async function listSecretNames(
         note: true,
         totpCompanion: { select: { name: true } },
         browserOrigins: {
-          select: { origin: true },
+          select: { origin: true, includeSubdomains: true },
           orderBy: { origin: "asc" },
         },
       },
@@ -223,7 +227,9 @@ export async function listSecretNames(
       const usedBy = uses.get(row.id) ?? []
       const kind = (row.kind in KIND_SHOWN ? row.kind : "text") as SecretKind
       const { loginName, note } = openSecretDetails(ctx, row)
-      const sites = row.browserOrigins.map((site) => site.origin)
+      const sites = row.browserOrigins.map((site) =>
+        siteLabel({ origin: site.origin, subdomains: site.includeSubdomains }),
+      )
 
       return {
         name: row.name,

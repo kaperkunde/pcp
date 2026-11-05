@@ -96,6 +96,15 @@ test("a one-time codes secret takes only a seed, shows its code of the moment, a
   await row.getByRole("button", { name: "Remove" }).click()
   await expect(row.getByText("No sites yet.")).toBeVisible()
 
+  // A site with its subdomains, within its own domain.
+  await row.getByLabel("Add a site").fill("waternet.nl")
+  await row.getByRole("checkbox", { name: /And its subdomains/ }).check()
+  await row.getByRole("button", { name: "Add", exact: true }).click()
+  await expect(
+    row.getByText("https://waternet.nl", { exact: true }),
+  ).toBeVisible()
+  await expect(row.getByText("and its subdomains")).toBeVisible()
+
   acceptNextDialog(page)
   await row.getByRole("button", { name: "Delete" }).click()
   await expect(row).toHaveCount(0)

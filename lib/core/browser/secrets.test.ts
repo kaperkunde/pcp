@@ -496,6 +496,48 @@ describe.skipIf(!executable)("typing a secret", { timeout: 90_000 }, () => {
     expect(textOf(typed)).not.toContain(SEED)
   })
 
+  it("types the login name kept with a secret through the same gate, and leaves it readable", async () => {
+    await updateSecret(ctx, secretId, { loginName: "ada@example.com" })
+    const { tab, opened } = await open("/login")
+    const email = refOf(opened, /textbox "Email"/)
+    const args = {
+      tab,
+      ref: email,
+      text: { $secret: "Shop password", part: "username" },
+    }
+
+    // No allowance at the site yet: the owner is asked, told it is the login name.
+    const ask = await owner(call("type", args))
+    expect(ask).toMatchObject({
+      kind: "secret_use",
+      input: { secretName: "Shop password", part: "username" },
+    })
+    expect(await fieldValue(tab, "#email")).toBe("")
+
+    await always()
+    const typed = await call("type", args)
+
+    expect(typed.isError, textOf(typed)).toBeUndefined()
+    expect(textOf(typed)).toContain('Typed the login name of "Shop password"')
+    expect(await fieldValue(tab, "#email")).toBe("ada@example.com")
+    expect(textOf(typed)).not.toContain(VALUE)
+    // Not a secret from the assistant: no mask, and screenshots go on.
+    expect(textOf(typed)).not.toContain("[secret: Shop password]")
+    expect((await call("screenshot", { tab })).isError).toBeUndefined()
+  })
+
+  it("refuses the login name of a secret that keeps none, before the owner is asked", async () => {
+    const { tab, opened } = await open("/login")
+    const typed = call("type", {
+      tab,
+      ref: refOf(opened, /textbox "Email"/),
+      text: { $secret: "Shop password", part: "username" },
+    })
+
+    await expect(typed).rejects.toThrow(/keeps no login name/)
+    expect(await db().permissionRequest.count()).toBe(0)
+  })
+
   it("takes a secret only as type's text, and from a wrapper only where it is bound", async () => {
     await always()
     const { tab, opened } = await open("/login")

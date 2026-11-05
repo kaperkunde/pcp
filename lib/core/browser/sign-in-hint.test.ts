@@ -58,5 +58,12 @@ describe("the sign-in note", () => {
     expect(hint?.line).toMatch(/^This page has a password field/)
     expect(hint?.line).toContain('{"$secret": "Shop password"}')
     expect(hint?.line).toContain("Do not ask the owner for it")
+    // Its login name is typed through PCP too, as one credential.
+    expect(hint?.line).toContain(
+      'Type the login name with {"$secret": "Shop password", "part": "username"}',
+    )
+    expect(
+      signInLine(SHOP, [{ ...password, loginName: null }], true)?.line,
+    ).toContain("Type the login name as plain text")
   })
 })
