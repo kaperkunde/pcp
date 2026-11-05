@@ -435,6 +435,23 @@ so in the summary; the bump itself waits for the request.
   failed and says that Start makes it again. Limits go in
   `services/limits.ts`; a new command, tool or argument gets a test against
   the fake engine (`services/fake-docker.ts`, `services.test.ts`).
+- Capabilities (`lib/core/capabilities/`): `read_image`, `edit_pdf` and
+  `convert_document` are PCP's own tools for every token; the work is a
+  provider's, a tool among the token's own found by words in its name,
+  description or arguments (`providers.ts`, pure, never a vendor's name;
+  the common item a server was launched from only ranks it), called how its
+  schema says (a handle, base64, or the #92 file step `put_file` → tool →
+  `get_file`). Every call goes through `gateway.ts forwardCall` (as
+  run_code's): the token's own levels, the capability tool's own tier with
+  a provider above it refused naming the entry that runs it, the one
+  validator, `askCodeCall` where a level asks, paced, a request-log line
+  each. With no provider the answer is `needs_owner` reason `setup`: a
+  markdown link, last, to `/plugins/<capability>`, `noteOwnerAsked`, and the
+  tool called again once the owner launched one; that page offers the
+  capability's common items (add PCP's common items first if needed, then
+  the import page at the common repository's head). A new capability is a
+  row in `list.ts`, its operations in `providers.ts`, and a test against
+  fake providers (`capabilities.test.ts`).
 - Search (`lib/core/search.ts`, pure) finds a tool by keywords with no
   provider: stems, a short synonym table, and for PCP's own tools what
   their description's lead says they are for (task phrases there, in a
