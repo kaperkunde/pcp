@@ -2667,7 +2667,19 @@ web_fetch's Markdown is unchanged. A page whose HTML holds next to no text,
 does, is read from the tab's snapshot instead, `snapshotText`, and the answer
 says so; a page with no words at all answers "(no text)"), a screenshot of
 the viewport or of one element, and the tab's address, title and the link
-to it in PCP. It acts by ref, or by a target
+to it in PCP. A screenshot's answer says how to read the text in it: pass
+its handle to an OCR tool, naming one the token can call when it has one
+(`ocr.ts`: found by its words, OCR in its name, description or arguments,
+or a `force_ocr` argument, never by vendor), since `read_result` does not
+show an image. What the tree cannot read is named (`unseen.ts`, in PCP's
+own world: Playwright's handles and the tab's DevTools session, never page
+script): an iframe the snapshot shows empty (by its ref, and whether it is
+cross-origin), a closed shadow root (`DOM.getDocument` with `pierce`), a
+canvas at least `MIN_UNSEEN_SIZE_PX` square, with the screenshot and OCR
+route; on `navigate`, `tabs` open and `snapshot`, on `read_page`'s whole
+page (whose HTML is the main frame's, so every iframe counts there), and on
+a `find` that matches nothing (its `unseen`, which for a form-like query
+says the form may be in one of them). It acts by ref, or by a target
 (`target.ts`: a role and a name, as Playwright's `getByRole` finds them,
 optionally `exact`, the `nth` of several, `within` an element), which a
 program can name without a snapshot; a target that is not exactly one
@@ -2957,6 +2969,29 @@ tab; another meanwhile is told to try again. Profile saves run one at a
 time, and none once the browser has closed, so a call that finished past
 its deadline cannot write over a restore.
 
+**Time limits and a busy tab** (`clock.ts`, `queue.ts`). Every tool but
+`hand_over` and `request_secret` takes `timeout_ms` (`MIN_CALL_TIMEOUT_MS`
+to `MAX_CALL_TIMEOUT_MS`): how long the call waits in all, its turn on the
+tab included. `tabs` open, `navigate` and `snapshot` wait
+`DEFAULT_CALL_TIMEOUT_MS` (10 seconds) unless it says otherwise, lengthened
+once by `CHALLENGE_WAIT_MS` while a site's check is up (a limit the call gave
+is kept to), and starting Chromium does not count; the other tools wait for
+their tab's deadline alone. The call notes its step as it goes (waiting for
+its turn, loading the site, waiting for its check, reading the tab for the
+answer), and when the time runs out it is answered at once with a `timeout`
+tool error naming that step and whether what it was asked may have
+happened. A call still waiting for its turn leaves the queue (`giveUp`) and
+did nothing; one whose turn had come keeps it and finishes alone, so the
+tab's next call waits for it rather than racing it; a tab opened for a call
+that was answered meanwhile is closed. A lane keeps how many calls it holds
+and how long its turns took lately (a moving average), and a call that can
+expect to wait longer than it would (its time left, else
+`MAX_QUEUE_WAIT_MS`), or that would queue behind `MAX_LANE_QUEUE` others,
+is refused at once with `browser_busy` and `retryAfterMs` in
+`_meta["gg.pcp/error"]` (`tools/outcome.ts`); the browser's own lock
+(`withVault`, opening a tab) is bounded the same way. A program sees both
+as an error with those words.
+
 **Files** (`downloads.ts`, `call.ts`). A file crosses the browser only as a
 result kept for the token (see Long answers and kept results): never a path on the
 machine, and its bytes never pass through the assistant. `upload_file` names
@@ -3007,8 +3042,23 @@ token's lines as they are now (`mayOpen`, as the gate does): a page at a
 site it may no longer open (its line changed since, or the tab's history
 went back to a page the owner opened there) is refused, though the tab can
 still be sent elsewhere or closed. The tabs share one profile, so the
-sign-ins are every token's; the eight tabs are shared too, and a token
-told the browser is full learns only how many are its own.
+sign-ins are every token's; the eight tabs (`MAX_TABS`) are shared too,
+and every `tabs` answer says how many are open and how many of them are the
+token's ("5 of 8 tabs open in the browser, 2 of them this token's"), never
+more of the others. `tabs` list names, for each of the token's tabs, the
+run that opened it (`Tab.openedIn`: run_code's, or a wrapper's by its tool,
+`code/runs.ts labelRun`) and how long it has been idle.
+
+**Tabs that are done with** (`sweep.ts`). A tab belongs to the run whose
+call used it last (`Tab.run`, from the call's `runId` and the run's signal,
+which aborts when the run is over); a call outside any run takes it out of
+runs. At each browser call, inside its request, the tabs nobody used for
+`TAB_IDLE_TTL_MS` and those whose run ended `RUN_TAB_GRACE_MS` ago with no
+use since are closed, and the profile is saved with the call's key; when a
+tab is wanted and the browser is full, a tab whose run has ended goes at
+once. Never a tab a call holds, one being reopened, one the owner holds, the
+owner's own, or the one the call names. The token is told of its own tabs
+closed so in the answer's first lines; there is no timer.
 
 **The tabs view** (`app/(dashboard)/browser/page.tsx`,
 `components/browser-tabs.tsx`, `browserOverview` in `owner.ts`). The

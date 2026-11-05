@@ -335,9 +335,15 @@ export function textAnswer(text: string): CallToolResult {
 export function familyError(
   message: string,
   code: ToolErrorCode,
-  { hint, notes = [] }: { hint?: string; notes?: string[] } = {},
+  {
+    hint,
+    notes = [],
+    retryAfterMs,
+  }: { hint?: string; notes?: string[]; retryAfterMs?: number } = {},
 ): CallToolResult {
-  return toCallToolResult(toolError(message, { code, hint }), { notes })
+  return toCallToolResult(toolError(message, { code, hint, retryAfterMs }), {
+    notes,
+  })
 }
 
 /** Arguments that do not fit: every problem, and that nothing was done. */

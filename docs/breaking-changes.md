@@ -6,6 +6,25 @@ release, with a note in front of the answer ("addPatches was renamed to
 add_patches; use add_patches."); after that it is refused like any other
 unknown key.
 
+## Browser: time limits, a busy tab, and tabs that close themselves
+
+- `tabs` open, `navigate` and `snapshot` now wait 10 seconds in all unless
+  `timeout_ms` says otherwise (longer while a site's check is up); every
+  browser tool but `hand_over` and `request_secret` takes `timeout_ms`
+  (1,000 to 120,000). Past it the call answers with a tool error, code
+  `timeout`, naming the step it was at. A page that takes longer to load
+  needs a `timeout_ms`.
+- A call that would wait behind more than its tab takes is refused at once
+  with code `browser_busy` and `retryAfterMs` in `_meta["gg.pcp/error"]`.
+- A tab nobody used for 30 minutes, or whose run (run_code's or a wrapper's)
+  has ended and that nothing used for two minutes since, is closed at the
+  next browser call. A flow that leaves a tab for the assistant to go on
+  with should have the assistant use it soon: a call outside the run keeps
+  it.
+- Every `tabs` answer says how many tabs are open ("5 of 8 tabs open in the
+  browser, 2 of them this token's"); `Opened a new tab: <id>` is now
+  followed by that in brackets, then the full stop.
+
 ## Services: published on the SSH server's loopback, started on demand
 
 No tool or argument was renamed. `register_server` with kind `service`
@@ -223,7 +242,10 @@ Passing an old name and its new one together is refused.
   text alone is the answer.
 - A refusal PCP writes carries its code in `_meta["gg.pcp/error"]`
   (`{"code": "not_found" | "forbidden" | "invalid_arguments" |
-"rate_limited" | "internal" | …, "hint"?}`).
+"rate_limited" | "timeout" | "browser_busy" | "internal" | …, "hint"?,
+"retryAfterMs"?}`). The browser's `timeout` (a call past its `timeout_ms`,
+  or the 10 seconds `tabs` open, `navigate` and `snapshot` now wait by
+  default) and `browser_busy` (with `retryAfterMs`) are new.
 
 ### Stricter arguments
 

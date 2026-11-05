@@ -614,7 +614,14 @@ embeddingProvider`, which hands `embeddings/provider.ts` the header;
   about only for the address in the call's arguments, so a call the owner
   allowed opens it without a second ask. `navigate` waits for a check that
   passes on its own; one that does not is the owner's, through `hand_over`,
-  and nothing asks them by itself. Pages read for web_fetch are not tabs. The
+  and nothing asks them by itself. A call waits its turn per tab and
+  within its own time (`timeout_ms`, `clock.ts`): past it, a `timeout` tool
+  error naming the step; a lane too full for it, `browser_busy` with
+  `retryAfterMs`. Tabs that are done with (idle past a TTL, or their run
+  ended) are closed by the next browser call inside its request
+  (`sweep.ts`), never by a timer. What the tree cannot read (empty iframes,
+  closed shadow roots, canvases, `unseen.ts`) is found through Playwright
+  and DevTools in PCP's own world, never page script. Pages read for web_fetch are not tabs. The
   limits go in `browser/limits.ts`; the Dockerfile's Chromium is the version
   `patchright-core` drives (`scripts/docker.test.ts`). Chromium is installed
   only by the owner's click (`browser/install.ts`), only from the addresses
