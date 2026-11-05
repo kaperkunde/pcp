@@ -246,12 +246,13 @@ export function previewArgs(
  * The arguments whole, one part each (text as text, with its newlines;
  * anything else as indented JSON), when `previewArgs` cut a value or wrote
  * something in one out, or when `extra` (what a tool adds about its own
- * arguments) has something to show. Null when the lines say it all.
+ * arguments) has something to show, or `always`. Null when the lines say
+ * it all.
  */
 export function argsInFull(
   args: Record<string, unknown>,
   extra: ShownText[] = [],
-  max = 800,
+  { max = 800, always = false }: { max?: number; always?: boolean } = {},
 ): ShownText[] | null {
   const entries = argEntries(args)
   const whole = entries.every(([key, value]) => {
@@ -264,7 +265,7 @@ export function argsInFull(
     )
   })
 
-  if (whole && extra.length === 0) {
+  if (whole && extra.length === 0 && !always) {
     return null
   }
 

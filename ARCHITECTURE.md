@@ -4252,7 +4252,29 @@ with `as`. Only the token's own results resolve; an unknown or expired id is
 refused by name before anything is sent, and the gateway checks the ids
 before it asks the owner. A request
 waiting for the owner stores the handle, never the content, and its page
-shows each one's name, type, size and the tool that kept it.
+shows each one as a file chip: its name, type, size, the tool that kept it
+and until when (`lib/core/permission-files.ts requestFiles`, found at any
+depth in any tool's arguments, an attachment's `{"$result", name, type}`
+included), with the arguments themselves folded under them as they are.
+
+While the request waits, the owner can look at a file before answering, and
+download it: `app/api/permissions/[id]/files/[result]` is a route handler (a
+file needs Content-Type and Content-Disposition, which an action cannot
+send) that checks the request came from PCP's own page
+(`lib/server/same-origin.ts`) and the owner's session, and serves only a
+result that waiting call's arguments name, of the request's own token
+(`openRequestFile`: pending and not expired, `requestServes`; then
+`openResult` with the request's token, which also checks the day it is kept
+for), decrypted with the owner's key in that request. Once the request is
+answered or expires, nothing serves it. What goes out is decided by
+`servedFile`: a PDF goes as itself to the browser's own viewer and an image
+(PNG, JPEG, GIF, WebP, AVIF; never SVG) as itself, each only when its first
+bytes say it is what it claims; text, HTML and SVG among it, goes as
+`text/plain`; anything else, and every download, as an
+`application/octet-stream` attachment. Every answer carries `nosniff`, no
+caching, and a Content-Security-Policy that loads nothing and lets nothing
+frame it (sandboxed, but for a PDF, whose viewer does not open in a sandbox).
+Nothing of the file is logged.
 
 **File links** (`lib/core/file-links.ts`, `app/api/files/[secret]/`) move a
 kept file between PCP and the assistant's own computer (a sandbox or a
@@ -4486,7 +4508,10 @@ says to end the reply with the link (`owner-link.ts: linkLastText`, the link
 on its own last line as a markdown link whose label names the action, such
 as `[Allow gmail-imap/send_email?](…)`: an app that reads the reply aloud
 says the label rather than an address of ids, so the bare address is never
-to be pasted) and to call `check_permission` on the owner's next message,
+to be pasted). An assistant may keep working after a call that asks, and
+gather several links in one reply: it puts every one of them at the end,
+each on a line of its own, and calls no tool after them (`OWNER_LINK_RULE`).
+The result also says to call `check_permission` on the owner's next message,
 whatever it says, before sending the link again or assuming the request is
 still open (`owner-link.ts: nextMessageCheck`): the owner's words rarely say
 whether they answered, and an assistant that waited to be told sent links

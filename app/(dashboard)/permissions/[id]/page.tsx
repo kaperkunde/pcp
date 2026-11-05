@@ -23,6 +23,7 @@ import { PageHeader } from "@/components/page-header"
 import { PageColumn } from "@/components/page-column"
 import { PermissionConflicts } from "@/components/permission-conflicts"
 import { PermissionDecision } from "@/components/permission-decision"
+import { PermissionFiles } from "@/components/permission-files"
 import { PermissionLines } from "@/components/permission-lines"
 import { PermissionOutcome } from "@/components/permission-outcome"
 import { RepoReview } from "@/components/repo-review"
@@ -198,6 +199,13 @@ export default async function PermissionPage({
         ) : (
           <PermissionLines lines={view.lines} />
         )}
+        {view.files.length > 0 ? (
+          <PermissionFiles
+            requestId={view.id}
+            files={view.files}
+            pending={pending}
+          />
+        ) : null}
         {view.skill ? <SkillReview skill={view.skill} /> : null}
         {view.full ? (
           <ShownInFull parts={view.full} open={view.kind === "script_use"} />

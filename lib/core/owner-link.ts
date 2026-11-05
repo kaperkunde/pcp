@@ -1,9 +1,10 @@
 /**
  * How an assistant hands the owner a link to PCP's page: a markdown link
- * with a few words naming the action, last in its reply. Last, because some
- * apps fold away what an assistant wrote before a tool call, and the owner
- * never sees it; a markdown link, because an app that reads the reply aloud
- * says the label and not a long address of ids.
+ * with a few words naming the action, last in its reply. It may keep
+ * working first and hand over several, each on a line of its own at the end.
+ * Last, because some apps fold away what an assistant wrote before a tool
+ * call, and the owner never sees it; a markdown link, because an app that
+ * reads the reply aloud says the label and not a long address of ids.
  *
  * Pure: the instructions, tool descriptions and every answer that asks the
  * owner use it, so nothing here may import more than this.
@@ -11,7 +12,7 @@
 
 /** The rule, in the words instructions and tool descriptions use. */
 export const OWNER_LINK_RULE =
-  "End your reply with the link as a markdown link with a short label naming the action, on a line of its own; never paste the bare address, and call no tool after it in this reply."
+  "You may keep working and gather several links to PCP: end your reply with every one of them, each as a markdown link with a short label naming the action, on a line of its own; never paste the bare address, and call no tool after them in this reply, as some apps hide the text written before a tool call."
 
 /**
  * When to check on what the owner was handed a link for: on their next
@@ -86,5 +87,5 @@ export function markdownLink(label: string, url: string): string {
  * itself as the last line, labelled with what the owner does there.
  */
 export function linkLastText(url: string, label: string): string {
-  return `${OWNER_LINK_RULE} Hand it over as it is below: some apps hide the text written before a tool call, and the owner would never see the link.\n${markdownLink(label, url)}`
+  return `${OWNER_LINK_RULE} Hand this one over as it is below.\n${markdownLink(label, url)}`
 }
