@@ -15,8 +15,8 @@ importers:
         specifier: 0.32.0
         version: 0.32.0
       '@kaperkunde/mcp':
-        specifier: 0.1.1
-        version: 0.1.1(@modelcontextprotocol/server@2.2.0)(zod@4.6.5)
+        specifier: 0.2.0
+        version: 0.2.0(@modelcontextprotocol/server@2.2.0)(zod@4.6.5)
       '@kaperkunde/next-kit':
         specifier: 0.1.1
         version: 0.1.1(react@19.2.8)
@@ -24,8 +24,8 @@ importers:
         specifier: 0.1.1
         version: 0.1.1
       '@kaperkunde/security':
-        specifier: 0.2.0
-        version: 0.2.0
+        specifier: 0.3.0
+        version: 0.3.0
       '@kaperkunde/ui':
         specifier: 0.1.1
         version: 0.1.1(@types/react@19.2.18)(next@16.3.6(@babel/core@7.29.7)(@playwright/test@1.63.0)(@types/node@24.19.1)(react-dom@19.2.8(react@19.2.8))(react@19.2.8))(react-dom@19.2.8(react@19.2.8))(react@19.2.8)(tailwindcss@4.3.3)
@@ -503,8 +503,8 @@ packages:
       vitest:
         optional: true
 
-  '@kaperkunde/mcp@0.1.1':
-    resolution: {integrity: sha512-KrQbtVgTiZJD9mpf9UMCbCag2AE1keHOkjfpXBNcPMVj5TB4My5fHcagCchd9ktqqvJJ14g0daxk69W7AH5zHQ==}
+  '@kaperkunde/mcp@0.2.0':
+    resolution: {integrity: sha512-zyvwCfK+Yzu9nBwkWnooSCBE5qyQykfNCZTOqePNayHqc9NfyTF2IrcEP7EQ4eua6U1eoEQWbiYi8tojqNa1Xw==}
     engines: {node: '>=22'}
     peerDependencies:
       '@modelcontextprotocol/server': ^2.2.0
@@ -525,8 +525,8 @@ packages:
     resolution: {integrity: sha512-MFzCqbuppP19cWoDhRMKyIDsJW2oDz2MXknsx2U2tvS0xyEo0bPETHS/0//LsNle6ZncGi4tuwF6NllMcm8smA==}
     engines: {node: '>=24'}
 
-  '@kaperkunde/security@0.2.0':
-    resolution: {integrity: sha512-eb4he2SEO0HJEJ891NRQ5wu8QMpD7cTXrGXqRLsaeRiKwGAXSq1vw6/g7Vj4GDgsYC8Fbxk7DbiJMIPG6i6jBQ==}
+  '@kaperkunde/security@0.3.0':
+    resolution: {integrity: sha512-8VXofg2VuJcFfVS6TaN5YtIJq5EhBj+UvCXIQlGGXC3GSGij7tFQmd13eUHMdq2jMZADPF7N5M9ICpCLS6bodg==}
     engines: {node: '>=22'}
 
   '@kaperkunde/ui@0.1.1':
@@ -4640,7 +4640,7 @@ snapshots:
       eslint-config-prettier: 10.1.8(eslint@9.39.5(jiti@2.7.0))
       vitest: 5.0.2(@types/node@24.19.1)(vite@8.3.1(@types/node@24.19.1)(jiti@2.7.0)(yaml@2.9.1))
 
-  '@kaperkunde/mcp@0.1.1(@modelcontextprotocol/server@2.2.0)(zod@4.6.5)':
+  '@kaperkunde/mcp@0.2.0(@modelcontextprotocol/server@2.2.0)(zod@4.6.5)':
     dependencies:
       zod: 4.6.5
     optionalDependencies:
@@ -4657,7 +4657,7 @@ snapshots:
       - bufferutil
       - utf-8-validate
 
-  '@kaperkunde/security@0.2.0':
+  '@kaperkunde/security@0.3.0':
     dependencies:
       undici: 7.30.0
 
