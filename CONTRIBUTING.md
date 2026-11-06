@@ -30,9 +30,17 @@ pnpm test:e2e        # Playwright: a production build, then a fresh e2e database
 shellcheck --shell=sh install.sh   # the install script, which the tests run
 ```
 
-Husky runs lint-staged (eslint --fix + prettier on the staged files) on every
-commit, then `pnpm typecheck` and `pnpm format:check` over the whole tree.
-Fix what the hook reports; `pnpm format` settles the formatting ones.
+Husky runs lint-staged (eslint --fix + prettier on the staged files, refusing
+any warning left) on every commit, then `pnpm typecheck` and
+`pnpm format:check` over the whole tree. Fix what the hook reports;
+`pnpm format` settles the formatting ones.
+
+The ESLint, Prettier, TypeScript, Vitest, Playwright and lint-staged settings
+are the shared presets of `@kaperkunde/config` (kaperkunde/common-public).
+`eslint.config.mjs` adds PCP's own rules to it (`lib/core` kept free of the
+Next.js host, and a few rules off with the reason beside them), and
+`vitest.config.mts` and `playwright.config.ts` add PCP's tests and projects;
+a change every app should have goes upstream.
 
 GitHub Actions runs the checks on pull requests only
 (`.github/workflows/ci.yml`), in four jobs side by side: lint, format,

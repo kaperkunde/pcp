@@ -624,6 +624,7 @@ function RenewalNotice({
   // load, as the route redirects to the server's sign-in page.
   useEffect(() => {
     if (state.status === "ok") {
+      // eslint-disable-next-line @next/next/no-location-assign-relative-destination -- a full load on purpose
       window.location.assign(start)
     }
   }, [state, start])

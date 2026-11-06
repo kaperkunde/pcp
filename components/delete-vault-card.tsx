@@ -36,6 +36,7 @@ export function DeleteVaultCard({ username }: { username: string }) {
   useEffect(() => {
     if (state.status === "ok") {
       // A full load: nothing of the deleted vault stays on the page.
+      // eslint-disable-next-line @next/next/no-location-assign-relative-destination -- a full load on purpose
       void touchIdForget().then(() => window.location.assign("/setup"))
     }
   }, [state])
