@@ -17,6 +17,9 @@ importers:
       '@jitl/quickjs-singlefile-cjs-release-sync':
         specifier: 0.32.0
         version: 0.32.0
+      '@kaperkunde/mcp':
+        specifier: 0.1.1
+        version: 0.1.1(@modelcontextprotocol/server@2.2.0)(zod@4.6.5)
       '@kaperkunde/pcpgg-protocol':
         specifier: 0.1.1
         version: 0.1.1
@@ -504,6 +507,16 @@ packages:
       eslint-config-prettier:
         optional: true
       vitest:
+        optional: true
+
+  '@kaperkunde/mcp@0.1.1':
+    resolution: {integrity: sha512-KrQbtVgTiZJD9mpf9UMCbCag2AE1keHOkjfpXBNcPMVj5TB4My5fHcagCchd9ktqqvJJ14g0daxk69W7AH5zHQ==}
+    engines: {node: '>=22'}
+    peerDependencies:
+      '@modelcontextprotocol/server': ^2.2.0
+      zod: ^4.6.0
+    peerDependenciesMeta:
+      '@modelcontextprotocol/server':
         optional: true
 
   '@kaperkunde/pcpgg-protocol@0.1.1':
@@ -4613,6 +4626,12 @@ snapshots:
       eslint-config-next: 16.3.6(@typescript-eslint/parser@8.72.1(eslint@9.39.5(jiti@2.7.0))(typescript@5.9.3))(eslint@9.39.5(jiti@2.7.0))(typescript@5.9.3)
       eslint-config-prettier: 10.1.8(eslint@9.39.5(jiti@2.7.0))
       vitest: 5.0.2(@types/node@24.19.1)(vite@8.3.1(@types/node@24.19.1)(jiti@2.7.0)(yaml@2.9.1))
+
+  '@kaperkunde/mcp@0.1.1(@modelcontextprotocol/server@2.2.0)(zod@4.6.5)':
+    dependencies:
+      zod: 4.6.5
+    optionalDependencies:
+      '@modelcontextprotocol/server': 2.2.0
 
   '@kaperkunde/pcpgg-protocol@0.1.1':
     dependencies:

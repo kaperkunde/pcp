@@ -4198,7 +4198,10 @@ checks the token on every request, so a revoked one stops at once.
 ## The gateway's tools
 
 Every one of PCP's own tools is written to one interface
-(`lib/core/tools/`): `defineTool` with a zod input published as JSON
+(`lib/core/tools/`, PCP's layer over `@kaperkunde/mcp`, which holds the
+factory, the validator, the outcomes and serving a call; PCP adds its meta
+keys, error codes, placeholders, owner reasons, permission links and the
+lead in front of an answer): `defineTool` with a zod input published as JSON
 Schema 2020-12, every object closed (`additionalProperties: false`) and
 every property described (refused otherwise), all four annotations, an
 output schema when every answer is one shape, and old argument names
@@ -4862,7 +4865,7 @@ whatever it says, before sending the link again or assuming the request is
 still open (`owner-link.ts: nextMessageCheck`): the owner's words rarely say
 whether they answered, and an assistant that waited to be told sent links
 again for requests already decided. In case they are still on it, the check holds the call while
-the request is open (`lib/core/owner-wait.ts`: up to 45 seconds, under the
+the request is open (`waitForOwner`, `@kaperkunde/mcp/owner`: up to 45 seconds, under the
 minute at which clients and proxies give up, checking every second, and
 dropping out when the client goes away) and answers as soon as they have.
 Which app is on the other end decides whether a link may come before a

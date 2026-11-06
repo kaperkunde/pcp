@@ -1,53 +1,55 @@
+import {
+  ownerLinkIn,
+  serveTool as kitServeTool,
+  type CallLine as KitCallLine,
+  type ServeEvent,
+  type ServeOptions,
+} from "@kaperkunde/mcp"
 import type {
   CallToolResult,
   McpServer,
   ServerContext,
 } from "@modelcontextprotocol/server"
 
-import { isPcpError } from "../errors"
 import { withLogNote, type LogNote } from "../request-log"
+import { publishedSchema, type Tool } from "./define"
 import {
-  applyAliases,
-  publishedSchema,
-  type LogNames,
-  type Tool,
-} from "./define"
-import {
-  errorOutcome,
+  expectedPcpError,
+  INTERNAL_MESSAGE,
   NOTES_META_KEY,
-  passOn,
-  toCallToolResult,
-  toolError,
+  PCP_META,
   type NeedsOwner,
-  type Outcome,
 } from "./outcome"
-import { argumentsRefusal, sameJson, validate, zodProblems } from "./validate"
+import { RESULT_HANDLE } from "./validate"
 
 /**
- * How a call of a tool defined with defineTool runs, from the arguments as
- * the client sent them to the result it gets back, with its line in the
- * request log: old names renamed, the arguments checked, the run, and its
- * outcome mapped to a result.
+ * How a call of a tool defined with defineTool runs is @kaperkunde/mcp's
+ * serveTool: old names renamed, the arguments checked, the run, its outcome
+ * mapped to a result and checked against the output the tool declares, and
+ * its line in the request log. What PCP adds:
+ *
+ * - its meta keys, its words for a fault ("Something went wrong inside
+ *   PCP."), and a PcpError as a refusal in its own words;
+ * - a kept result's handle standing for a string in the arguments;
+ * - its permission links recognised in an answer passed on, and marked as
+ *   needsOwner's are (permissionLinkIn);
+ * - the request log's note for the call (withLogNote: an ask, a secret
+ *   typed);
+ * - a lead in front of the answer once it is made (what the session has
+ *   not heard of yet: the owner's answers to its requests), which the
+ *   package has no hook for.
  */
 
-/** What the request log keeps for arguments that did not fit. */
-export const ARGUMENTS_DID_NOT_FIT =
-  "The arguments did not fit the tool's input schema."
-/** What it keeps for a refusal it may not quote, or another tool's error. */
-export const TOOL_REPORTED_ERROR = "The tool reported an error."
+export {
+  ARGUMENTS_DID_NOT_FIT,
+  fitForClients,
+  TOOL_REPORTED_ERROR,
+} from "@kaperkunde/mcp"
+
 /** The few words of a permission request's link. */
 export const PERMISSION_LINK_LABEL = "Answer the request in PCP"
 
-export type CallLine = {
-  tool: string
-  names: LogNames
-  ok: boolean
-  ms: number
-  /** Why it failed, in words the log may keep. */
-  error?: string
-  /** What the code under the call noted: an ask, a secret typed. */
-  note: LogNote
-}
+export type CallLine = KitCallLine<LogNote>
 
 export type ServeHooks = {
   /** PCP's address, to know its permission links by. */
@@ -62,10 +64,6 @@ export type ServeHooks = {
   lead?: () => Promise<string | null>
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === "object" && !Array.isArray(value)
-}
-
 /**
  * The permission request a result asks the owner about: its link, the last
  * line of its text, on PCP's own address. Null when it asks nothing.
@@ -74,114 +72,46 @@ export function permissionLinkIn(
   result: CallToolResult,
   publicUrl: string,
 ): NeedsOwner | null {
-  const texts = result.content.filter((part) => part.type === "text")
-  const last = texts.at(-1)?.text.trimEnd().split("\n").at(-1)?.trim() ?? ""
-  const base = publicUrl.replace(/\/+$/, "")
-  const prefix = `${base}/permissions/`
-  // The link alone, or as a Markdown link: [label](url), whose label it
-  // keeps (linkLastText's: the request's title).
-  const markdown = /^\[([^\]]*)\]\((.*)\)$/.exec(last)
-  const url = markdown?.[2] ?? last
-  const label = markdown?.[1]?.trim() || PERMISSION_LINK_LABEL
-
-  if (!url.startsWith(prefix) || /\s/.test(url)) {
-    return null
-  }
-
-  let request: string
-
-  try {
-    request = decodeURIComponent(url.slice(prefix.length))
-  } catch {
-    return null
-  }
-
-  return request && !request.includes("/")
-    ? {
-        kind: "needs_owner",
-        reason: "permission",
-        url,
-        label,
-        request,
-      }
-    : null
+  return ownerLinkIn(result, {
+    prefix: `${publicUrl.replace(/\/+$/, "")}/permissions/`,
+    label: PERMISSION_LINK_LABEL,
+  }) as NeedsOwner | null
 }
 
-/** An answer made elsewhere that asks the owner, marked as needsOwner's are. */
-function markOwner(outcome: Outcome, publicUrl: string): Outcome {
-  if (
-    outcome.type !== "result" ||
-    outcome.result.isError === true ||
-    outcome.result.structuredContent !== undefined
-  ) {
-    return outcome
-  }
-
-  const owner = permissionLinkIn(outcome.result, publicUrl)
-
-  return owner
-    ? passOn({ ...outcome.result, structuredContent: owner })
-    : outcome
-}
-
-/** A result's text, its text blocks one after another. */
-function textOfResult(result: CallToolResult): string {
-  return result.content
-    .flatMap((part) => (part.type === "text" ? [part.text] : []))
-    .join("\n\n")
-}
-
-/** Whether a result's text is its structuredContent's JSON and nothing more. */
-function textIsStructured(result: CallToolResult): boolean {
-  const texts = result.content.filter((part) => part.type === "text")
-
-  if (texts.length !== 1 || result.content.length !== 1) {
-    return false
-  }
-
-  try {
-    return sameJson(JSON.parse(texts[0].text), result.structuredContent)
-  } catch {
-    return false
+/** What PCP's server log says of what no client hears. */
+function report(event: ServeEvent): void {
+  switch (event.kind) {
+    case "threw":
+      console.error("[gateway] tool failed", {
+        tool: event.tool,
+        error: event.error,
+      })
+      break
+    case "output_mismatch":
+      console.error("[gateway] answer does not fit the output schema", {
+        tool: event.tool,
+        problems: event.problems,
+      })
+      break
+    case "finished_late":
+      console.info(
+        `[gateway] ${event.tool} finished after answering that it was still going: ${event.ok ? "done" : `failed (${event.code ?? "error"})`}`,
+      )
   }
 }
 
-/**
- * The result as every client reads it whole. Some clients show
- * structuredContent in place of the text, so what the text says must be
- * there too: a needs_owner answer carries its text as `message`, and a tool
- * that declares no output schema sends structuredContent only when its text
- * is that value's JSON and nothing more (a note, a lead or a preview that
- * the value does not hold would be lost otherwise; the text alone is a
- * whole answer).
- */
-export function fitForClients(
-  result: CallToolResult,
-  declared: boolean,
-): CallToolResult {
-  const structured = result.structuredContent as
-    { kind?: unknown; message?: unknown } | undefined
-
-  if (structured === undefined || result.isError === true) {
-    return result
+/** The package's options for PCP's hooks. */
+function serveOptions(hooks: ServeHooks): ServeOptions<unknown, LogNote> {
+  return {
+    meta: PCP_META,
+    expectedError: expectedPcpError,
+    internalMessage: INTERNAL_MESSAGE,
+    placeholders: [RESULT_HANDLE],
+    ownerLink: (result) => permissionLinkIn(result, hooks.publicUrl),
+    log: hooks.log,
+    scope: withLogNote,
+    report,
   }
-
-  if (structured.kind === "needs_owner") {
-    return typeof structured.message === "string"
-      ? result
-      : {
-          ...result,
-          structuredContent: { ...structured, message: textOfResult(result) },
-        }
-  }
-
-  if (declared || textIsStructured(result)) {
-    return result
-  }
-
-  const rest: CallToolResult = { ...result }
-  delete rest.structuredContent
-  return rest
 }
 
 /**
@@ -213,145 +143,35 @@ export function withLeadText(
   }
 }
 
-/** What a tool names for its log line, from arguments not yet checked. */
-function logNames(tool: Tool, args: Record<string, unknown>): LogNames {
-  try {
-    const names = tool.log?.(args) ?? {}
-
-    return Object.fromEntries(
-      Object.entries(names).filter(([, value]) => typeof value === "string"),
-    )
-  } catch {
-    return {}
-  }
-}
-
 /** One call of a tool, start to end. */
-export function serveTool(
+export async function serveTool(
   tool: Tool,
   sent: unknown,
   request: ServerContext,
   hooks: ServeHooks,
 ): Promise<CallToolResult> {
-  return withLogNote(async (note) => {
-    const started = Date.now()
-    const names: LogNames = {}
-    let notes: string[] = []
-    let outcome: Outcome
+  const result = await kitServeTool(tool, sent, request, serveOptions(hooks))
 
-    try {
-      const renamed = applyAliases(isRecord(sent) ? sent : {}, tool.aliases)
-      notes = renamed.notes
-      Object.assign(names, logNames(tool, renamed.args))
-
-      const problems = renamed.conflict
-        ? [renamed.conflict]
-        : validate(tool.inputSchema(), renamed.args)
-
-      if (problems.length > 0) {
-        outcome = toolError(
-          argumentsRefusal(tool.name, problems, {
-            lead: "nothing was done",
-            hint: tool.invalidHint?.(renamed.args),
-          }),
-          { code: "invalid_arguments", logAs: ARGUMENTS_DID_NOT_FIT },
-        )
-      } else {
-        const parsed = tool.input.safeParse(renamed.args)
-
-        outcome = parsed.success
-          ? await tool.run(parsed.data, {
-              signal: request.mcpReq.signal,
-              request,
-              logAs: (more) => Object.assign(names, more),
-            })
-          : toolError(
-              argumentsRefusal(tool.name, zodProblems(parsed.error.issues), {
-                lead: "nothing was done",
-              }),
-              { code: "invalid_arguments", logAs: ARGUMENTS_DID_NOT_FIT },
-            )
-      }
-    } catch (error) {
-      if (!isPcpError(error)) {
-        console.error("[gateway] tool failed", { tool: tool.name, error })
-      }
-
-      outcome = errorOutcome(error)
-    }
-
-    outcome = markOwner(outcome, hooks.publicUrl)
-    let result = fitForClients(
-      toCallToolResult(outcome, {
-        structured: tool.output !== undefined,
-        notes,
-      }),
-      tool.output !== undefined,
-    )
-
-    // What a tool declares it answers, it answers: anything else is a bug.
-    // Checked against the schema as published, by the same check as
-    // arguments: an extra key is as wrong as a missing one.
-    if (tool.output && result.isError !== true) {
-      const problems = validate(tool.outputSchema(), result.structuredContent, {
-        schemaName: "outputSchema",
-        whole: "The answer",
-        arguments: false,
-        handles: false,
-      })
-
-      if (problems.length > 0) {
-        console.error("[gateway] answer does not fit the output schema", {
-          tool: tool.name,
-          problems,
-        })
-        outcome = toolError("Something went wrong inside PCP.", {
-          code: "internal",
-        })
-        result = toCallToolResult(outcome, { notes })
-      }
-    }
-
-    if (hooks.lead) {
-      const lead = await hooks.lead().catch((error: unknown) => {
-        console.error("[gateway] an answer's lead failed", {
-          tool: tool.name,
-          error,
-        })
-        return null
-      })
-
-      if (lead) {
-        result = withLeadText(result, lead)
-      }
-    }
-
-    const failed = result.isError === true
-
-    hooks.log({
-      tool: tool.name,
-      names,
-      ok: !failed,
-      ms: Date.now() - started,
-      ...(failed
-        ? {
-            error:
-              outcome.type === "error"
-                ? (outcome.logAs ??
-                  (tool.quiet
-                    ? TOOL_REPORTED_ERROR
-                    : outcome.message.slice(0, 200)))
-                : TOOL_REPORTED_ERROR,
-          }
-        : {}),
-      note,
-    })
-
+  if (!hooks.lead) {
     return result
+  }
+
+  const lead = await hooks.lead().catch((error: unknown) => {
+    console.error("[gateway] an answer's lead failed", {
+      tool: tool.name,
+      error,
+    })
+    return null
   })
+
+  return lead ? withLeadText(result, lead) : result
 }
 
-/** Registers a tool on an MCP server, served as above. */
+/**
+ * Registers a tool on an MCP server, served as above: the package's
+ * registerTool, but for its handler, which is PCP's serveTool so the lead
+ * goes in front of the answer.
+ */
 export function registerTool(
   server: McpServer,
   tool: Tool,
@@ -369,6 +189,7 @@ export function registerTool(
       inputSchema: publishedSchema(() => tool.inputSchema()),
       ...(output ? { outputSchema: output } : {}),
       annotations: tool.annotations,
+      ...(tool.meta ? { _meta: tool.meta } : {}),
     },
     (args, ctx) => serveTool(tool, args, ctx, hooks),
   )

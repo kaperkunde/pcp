@@ -371,7 +371,7 @@ describe("validate: references", () => {
         pet: {},
       }),
     ).toEqual([
-      'The inputSchema refers to "https://example.com/pet.json", outside itself; PCP never fetches another document, so it cannot check these arguments. The tool\'s schema needs its definitions inside it (#/$defs/…).',
+      'The inputSchema refers to "https://example.com/pet.json", outside itself; nothing here fetches another document, so these arguments cannot be checked. The tool\'s schema needs its definitions inside it (#/$defs/…).',
     ])
     expect(
       validate(object({ pet: { $ref: "#/$defs/missing" } }), { pet: {} }),
@@ -482,7 +482,7 @@ describe("validate: bounds", () => {
     })
 
     expect(problems).toEqual([
-      "The arguments are too large for PCP to check against the inputSchema: send fewer or smaller values.",
+      "The arguments are too large to check against the inputSchema: send fewer or smaller values.",
     ])
   })
 

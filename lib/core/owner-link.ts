@@ -7,8 +7,15 @@
  * reads the reply aloud says the label and not a long address of ids.
  *
  * Pure: the instructions, tool descriptions and every answer that asks the
- * owner use it, so nothing here may import more than this.
+ * owner use it, so nothing here may import more than this and
+ * @kaperkunde/mcp/owner, whose label and link rules these are; the words
+ * are PCP's.
  */
+
+import {
+  linkLabel as kitLinkLabel,
+  markdownLink as kitMarkdownLink,
+} from "@kaperkunde/mcp/owner"
 
 /** The rule, in the words instructions and tool descriptions use. */
 export const OWNER_LINK_RULE =
@@ -34,8 +41,7 @@ export const CHECK_PERMISSION_NEXT = nextMessageCheck(
   "check_permission with its id",
 )
 
-/** The longest label, in characters. */
-export const MAX_LINK_LABEL = 60
+export { MAX_LINK_LABEL } from "@kaperkunde/mcp/owner"
 
 /** What a link is called when its label has nothing left to show. */
 const FALLBACK_LABEL = "Open in PCP"
@@ -44,27 +50,10 @@ const FALLBACK_LABEL = "Open in PCP"
  * A label fit for a markdown link: one line, nothing that would end the
  * link's text or start markup (brackets, backslashes, backticks, angle
  * brackets), no characters that do not show, and at most MAX_LINK_LABEL
- * characters.
+ * characters; "Open in PCP" when nothing is left.
  */
 export function linkLabel(label: string): string {
-  const plain = label
-    .replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, " ")
-    .replace(/[[\]\\`<>]/g, "")
-    .replace(/\s+/g, " ")
-    .trim()
-
-  if (!plain) {
-    return FALLBACK_LABEL
-  }
-
-  const chars = [...plain]
-
-  return chars.length <= MAX_LINK_LABEL
-    ? plain
-    : `${chars
-        .slice(0, MAX_LINK_LABEL - 1)
-        .join("")
-        .trimEnd()}…`
+  return kitLinkLabel(label, { fallback: FALLBACK_LABEL })
 }
 
 /**
@@ -73,18 +62,14 @@ export function linkLabel(label: string): string {
  * same.
  */
 export function markdownLink(label: string, url: string): string {
-  const href = url.replace(
-    /[\s()<>]/g,
-    (char) =>
-      `%${char.charCodeAt(0).toString(16).toUpperCase().padStart(2, "0")}`,
-  )
-
-  return `[${linkLabel(label)}](${href})`
+  return kitMarkdownLink(label, url, { fallback: FALLBACK_LABEL })
 }
 
 /**
- * What an answer that needs the owner ends with: the rule, then the link
- * itself as the last line, labelled with what the owner does there.
+ * What an answer that needs the owner ends with: PCP's rule (several links
+ * may wait for the end of a reply, which the package's own rule does not
+ * say), then the link itself as the last line, labelled with what the owner
+ * does there.
  */
 export function linkLastText(url: string, label: string): string {
   return `${OWNER_LINK_RULE} Hand this one over as it is below.\n${markdownLink(label, url)}`

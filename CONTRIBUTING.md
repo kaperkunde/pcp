@@ -240,7 +240,6 @@ A bug that regressed gets a test that fails before the fix and passes after
 | `lib/core/access-requests.ts`        | Tool levels an assistant proposes; the owner's save                   |
 | `lib/core/permissions.ts`            | Asking the owner before a call runs; running it once                  |
 | `lib/core/request-log.ts`            | One line per gateway call, never its arguments or results             |
-| `lib/core/owner-wait.ts`             | Holding a check while the owner answers or signs in                   |
 | `lib/core/connect.ts`                | The link an assistant hands over to connect an OAuth server           |
 | `lib/core/migrate.ts`                | Boot-time migrations                                                  |
 | `lib/core/backup.ts`                 | Export to one file and restore from one; backup-format.ts             |

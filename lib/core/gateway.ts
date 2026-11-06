@@ -104,7 +104,7 @@ import {
   nextMessageCheck,
   OWNER_LINK_RULE,
 } from "./owner-link"
-import { waitForOwner } from "./owner-wait"
+import { waitForOwner } from "@kaperkunde/mcp/owner"
 import {
   MAX_CALLS_PER_RUN,
   MAX_CODE_CHARS,
@@ -316,6 +316,7 @@ import {
 } from "./clients/sessions"
 import {
   defineTool,
+  type LogNames,
   type Tool,
   type ToolAnnotations,
   type ToolSpec,
@@ -1936,7 +1937,7 @@ export function buildGatewayServer(
     }),
     annotations: READS,
     // A skill's name and a memory's path stay out of the log, refusals too.
-    log: (args) => {
+    log: (args): LogNames => {
       const tool = namedTool(args as DescribeArgs)
       return tool ? { server: tool.server, upstreamTool: tool.tool } : {}
     },

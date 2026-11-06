@@ -82,7 +82,7 @@ import {
   WAITING_ORDER,
   waitingRequestsWhere,
 } from "./owner-queue"
-import { waitForOwner } from "./owner-wait"
+import { waitForOwner } from "@kaperkunde/mcp/owner"
 import { foldedText, isFoldingKind, targetKey } from "./permission-fold"
 import {
   ANSWERED_STATUSES,

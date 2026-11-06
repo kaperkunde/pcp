@@ -141,7 +141,9 @@ so in the summary; the bump itself waits for the request.
   with `share` (renaming it out of `/skills/mine/`), written as shown. A
   deleted token's stay, the owner's alone. A change to the SKILL.md shape
   stays backward compatible.
-- Every tool PCP exposes is defined through `lib/core/tools/`: PCP's own
+- Every tool PCP exposes is defined through `lib/core/tools/` (PCP's
+  layer over `@kaperkunde/mcp`: its meta keys, error codes, placeholders,
+  owner reasons and permission links): PCP's own
   at `/mcp` with `defineTool`, the families behind call_tool (browser, mail,
   calendar, SSH, services, storage folders) with `defineInnerTool`
   (`tools/family.ts`); a
@@ -827,8 +829,8 @@ embeddingProvider`, which hands `embeddings/provider.ts` the header;
   `owner-link.ts` holds the label rules and the wording instructions and
   descriptions use), and a check to call on the owner's next message,
   whatever it says, before the link is sent again (`nextMessageCheck`;
-  `check_permission`, `check_server`, `check_upload`,
-  `lib/core/owner-wait.ts`). In a session, the next answer of any of PCP's
+  `check_permission`, `check_server`, `check_upload`, `waitForOwner` from
+  `@kaperkunde/mcp/owner`). In a session, the next answer of any of PCP's
   own tools names the token's requests answered since, once each, and
   `check_permission` with no id lists the last hour's. The header's bell lists what is waiting. No client prompts (elicitation) and no MCP Apps
   panel: Claude's apps stalled on the one and rebuilt the other stale (see
