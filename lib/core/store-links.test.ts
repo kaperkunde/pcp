@@ -202,9 +202,13 @@ describe("a link to a file of PCP's own store", () => {
       linkFileKeyAad(row.id),
     )
     expect(fileKey).toHaveLength(32)
+    // Another secret, one character off: never the same one, whatever the
+    // last character was.
+    const wrong = `${secret.slice(0, -1)}${secret.endsWith("A") ? "B" : "A"}`
+    expect(wrong).not.toBe(secret)
     expect(() =>
       decrypt(
-        linkKey(`${secret.slice(0, -1)}A`, row.id),
+        linkKey(wrong, row.id),
         Buffer.from(row.fileKey!),
         linkFileKeyAad(row.id),
       ),

@@ -28,7 +28,10 @@ import {
 // machine left out, merged per site, written only as previewed.
 
 const NOW = Date.UTC(2026, 10, 5)
-const LATER = NOW / 1000 + 86_400
+// A cookie's expiry in the future both for the reads pinned to NOW and for
+// the import into the vault, which reads the clock: a month from now, so it
+// does not run out the day after NOW.
+const LATER = Math.floor(Math.max(NOW, Date.now()) / 1000) + 30 * 86_400
 const PUBLIC_URL = "https://ada.pcp.gg"
 
 const executable = await chromiumExecutable()
