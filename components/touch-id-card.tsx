@@ -14,13 +14,13 @@ import {
   touchIdSave,
   useTouchId,
 } from "@/components/desktop-bridge"
-import { FormError } from "@/components/form-status"
+import { FormError } from "@kaperkunde/ui/form-status"
 import { LocalDate } from "@/components/local-date"
-import { SubmitButton } from "@/components/submit-button"
+import { SubmitButton } from "@kaperkunde/ui/submit-button"
 import { SettingsItem } from "@/components/settings-item"
-import { Button } from "@/components/ui/button"
-import { Input } from "@/components/ui/input"
-import { Field } from "@/components/ui/label"
+import { Button } from "@kaperkunde/ui/button"
+import { Input } from "@kaperkunde/ui/input"
+import { Field } from "@kaperkunde/ui/label"
 import { UsernameField } from "@/components/username-field"
 import {
   disableTouchIdAction,

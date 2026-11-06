@@ -27,9 +27,9 @@ import {
   type LucideIcon,
 } from "lucide-react"
 
-import { FormError, FormNote } from "@/components/form-status"
-import { SubmitButton } from "@/components/submit-button"
-import { Button, buttonVariants } from "@/components/ui/button"
+import { FormError, FormNote } from "@kaperkunde/ui/form-status"
+import { SubmitButton } from "@kaperkunde/ui/submit-button"
+import { Button, buttonVariants } from "@kaperkunde/ui/button"
 import {
   Dialog,
   DialogClose,
@@ -37,9 +37,9 @@ import {
   DialogDescription,
   DialogFooter,
   DialogTitle,
-} from "@/components/ui/dialog"
-import { Input } from "@/components/ui/input"
-import { List, ListSection } from "@/components/ui/list"
+} from "@kaperkunde/ui/dialog"
+import { Input } from "@kaperkunde/ui/input"
+import { List, ListSection } from "@kaperkunde/ui/list"
 import {
   deleteEntryAction,
   makeFolderAction,

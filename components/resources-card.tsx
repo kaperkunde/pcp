@@ -3,11 +3,11 @@
 import { Gauge } from "lucide-react"
 import { useActionState } from "react"
 
-import { FormError, FormNote } from "@/components/form-status"
+import { FormError, FormNote } from "@kaperkunde/ui/form-status"
 import { SettingsItem } from "@/components/settings-item"
-import { SubmitButton } from "@/components/submit-button"
-import { Input } from "@/components/ui/input"
-import { Field } from "@/components/ui/label"
+import { SubmitButton } from "@kaperkunde/ui/submit-button"
+import { Input } from "@kaperkunde/ui/input"
+import { Field } from "@kaperkunde/ui/label"
 import {
   type ResourcesResult,
   saveResourcesAction,

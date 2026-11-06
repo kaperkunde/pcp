@@ -2,8 +2,8 @@
 
 import { useActionState } from "react"
 
-import { FormError, FormNote } from "@/components/form-status"
-import { Button } from "@/components/ui/button"
+import { FormError, FormNote } from "@kaperkunde/ui/form-status"
+import { Button } from "@kaperkunde/ui/button"
 import {
   convertStoreAction,
   type ConvertStoreResult,

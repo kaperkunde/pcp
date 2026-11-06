@@ -1,11 +1,11 @@
 import { ListChecks } from "lucide-react"
 import type { Metadata } from "next"
 
-import { PageHeader } from "@/components/page-header"
+import { PageHeader } from "@kaperkunde/ui/page"
 import { SkillAddDialog } from "@/components/skill-add-dialog"
-import { Badge } from "@/components/ui/badge"
+import { Badge } from "@kaperkunde/ui/badge"
 import { IconTile } from "@/components/ui/icon-tile"
-import { List, ListRow, ListSection, RowValue } from "@/components/ui/list"
+import { List, ListRow, ListSection, RowValue } from "@kaperkunde/ui/list"
 import { listSkills } from "@/lib/core/skills"
 import { requireContext } from "@/lib/server/session"
 
@@ -55,7 +55,7 @@ export default async function SkillsPage() {
                   skill.visibility === "private" ? (
                     <span className="flex flex-wrap items-center gap-2">
                       {skill.name}
-                      <Badge variant="outline">
+                      <Badge variant="secondary">
                         {skill.tokenName
                           ? `${skill.tokenName}'s own`
                           : "From a deleted token"}

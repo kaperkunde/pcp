@@ -2,10 +2,10 @@
 
 import { useActionState, useState } from "react"
 
-import { FormError, FormNote } from "@/components/form-status"
+import { FormError, FormNote } from "@kaperkunde/ui/form-status"
 import { describePace, PaceFields } from "@/components/pacing-fields"
-import { SubmitButton } from "@/components/submit-button"
-import { SegmentedControl } from "@/components/ui/segmented-control"
+import { SubmitButton } from "@kaperkunde/ui/submit-button"
+import { SegmentedControl } from "@kaperkunde/ui/segmented-control"
 import { type PacingResult, saveServerPacingAction } from "@/lib/actions/pacing"
 import type { PacingOverride, PacingPolicy } from "@/lib/core/pacing/limits"
 

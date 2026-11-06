@@ -4,13 +4,13 @@ import { Eraser } from "lucide-react"
 import Link from "next/link"
 import { useActionState, useState } from "react"
 
-import { FormError, FormNote } from "@/components/form-status"
+import { FormError, FormNote } from "@kaperkunde/ui/form-status"
 import { LocalDate } from "@/components/local-date"
 import { SettingsItem } from "@/components/settings-item"
-import { SubmitButton } from "@/components/submit-button"
-import { Badge } from "@/components/ui/badge"
-import { Input, Select } from "@/components/ui/input"
-import { Field } from "@/components/ui/label"
+import { SubmitButton } from "@kaperkunde/ui/submit-button"
+import { Badge } from "@kaperkunde/ui/badge"
+import { Input, Select } from "@kaperkunde/ui/input"
+import { Field } from "@kaperkunde/ui/label"
 import {
   cleanUpNowAction,
   type CleanupResult,
@@ -78,7 +78,7 @@ function CleanupStatusLine({ overview }: { overview: CleanupOverview }) {
         ) : status.lastRunAt ? (
           <Badge>Healthy</Badge>
         ) : (
-          <Badge variant="outline">Not run yet</Badge>
+          <Badge variant="secondary">Not run yet</Badge>
         )}
         {status.lastRunAt ? (
           <span>

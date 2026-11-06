@@ -3,18 +3,18 @@
 import { Download } from "lucide-react"
 import { useActionState, useRef, useTransition } from "react"
 
-import { CopyableValue } from "@/components/copyable-value"
-import { FormError, FormNote } from "@/components/form-status"
+import { CopyableValue } from "@kaperkunde/ui/copy-button"
+import { FormError, FormNote } from "@kaperkunde/ui/form-status"
 import { LocalDate } from "@/components/local-date"
-import { SubmitButton } from "@/components/submit-button"
+import { SubmitButton } from "@kaperkunde/ui/submit-button"
 import { SettingsItem } from "@/components/settings-item"
-import { Badge } from "@/components/ui/badge"
-import { List } from "@/components/ui/list"
+import { Badge } from "@kaperkunde/ui/badge"
+import { List } from "@kaperkunde/ui/list"
 import {
   SegmentedControl,
   type SegmentedOption,
-} from "@/components/ui/segmented-control"
-import { SwitchRow } from "@/components/ui/switch"
+} from "@kaperkunde/ui/segmented-control"
+import { SwitchRow } from "@kaperkunde/ui/switch"
 import {
   checkForUpdatesAction,
   requestInstallAction,
@@ -203,9 +203,9 @@ function UpdateStatusLine({ overview }: { overview: UpdatesOverview }) {
         ) : latest ? (
           <Badge>Up to date</Badge>
         ) : check ? (
-          <Badge variant="outline">Not checked yet</Badge>
+          <Badge variant="secondary">Not checked yet</Badge>
         ) : (
-          <Badge variant="outline">Checking is off</Badge>
+          <Badge variant="secondary">Checking is off</Badge>
         )}
         <span>
           {available && latest ? (

@@ -1,7 +1,7 @@
 "use client"
 
 import { ToolTierSelect } from "@/components/tool-tier-select"
-import { List, ListSection } from "@/components/ui/list"
+import { List, ListSection } from "@kaperkunde/ui/list"
 import { setOwnToolTierAction } from "@/lib/actions/tool-tiers"
 import type { OwnToolTier } from "@/lib/core/own-tool-tiers"
 

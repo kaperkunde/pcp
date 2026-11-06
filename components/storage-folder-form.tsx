@@ -10,10 +10,10 @@ import {
   ServerFormFrame,
   SwitchGroup,
 } from "@/components/server-form-parts"
-import { Input } from "@/components/ui/input"
-import { Field } from "@/components/ui/label"
-import { SegmentedControl } from "@/components/ui/segmented-control"
-import { SwitchRow } from "@/components/ui/switch"
+import { Input } from "@kaperkunde/ui/input"
+import { Field } from "@kaperkunde/ui/label"
+import { SegmentedControl } from "@kaperkunde/ui/segmented-control"
+import { SwitchRow } from "@kaperkunde/ui/switch"
 import type { ServerActionResult } from "@/lib/actions/servers"
 import {
   createStorageRootAction,

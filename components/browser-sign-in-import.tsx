@@ -2,11 +2,11 @@
 
 import { useState, useTransition } from "react"
 
-import { FormError, FormNote } from "@/components/form-status"
-import { Button } from "@/components/ui/button"
-import { Disclosure } from "@/components/ui/disclosure"
-import { Input, Textarea } from "@/components/ui/input"
-import { Field } from "@/components/ui/label"
+import { FormError, FormNote } from "@kaperkunde/ui/form-status"
+import { Button } from "@kaperkunde/ui/button"
+import { Disclosure } from "@kaperkunde/ui/disclosure"
+import { Input, Textarea } from "@kaperkunde/ui/input"
+import { Field } from "@kaperkunde/ui/label"
 import {
   importSignInsAction,
   previewSignInImportAction,

@@ -18,14 +18,14 @@ import {
   whenFocused,
 } from "@/components/desktop-bridge"
 import { AuthLink } from "@/components/auth-link"
-import { FormError, FormNote } from "@/components/form-status"
-import { SubmitButton } from "@/components/submit-button"
-import { Button } from "@/components/ui/button"
-import { Card } from "@/components/ui/card"
-import { Input } from "@/components/ui/input"
-import { Field } from "@/components/ui/label"
-import { List } from "@/components/ui/list"
-import { SwitchRow } from "@/components/ui/switch"
+import { FormError, FormNote } from "@kaperkunde/ui/form-status"
+import { SubmitButton } from "@kaperkunde/ui/submit-button"
+import { Button } from "@kaperkunde/ui/button"
+import { Card } from "@kaperkunde/ui/card"
+import { Input } from "@kaperkunde/ui/input"
+import { Field } from "@kaperkunde/ui/label"
+import { List } from "@kaperkunde/ui/list"
+import { SwitchRow } from "@kaperkunde/ui/switch"
 import { UsernameField } from "@/components/username-field"
 import {
   loginAction,

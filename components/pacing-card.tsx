@@ -3,13 +3,13 @@
 import { Timer } from "lucide-react"
 import { useActionState } from "react"
 
-import { FormError, FormNote } from "@/components/form-status"
+import { FormError, FormNote } from "@kaperkunde/ui/form-status"
 import { describePace, PaceFields } from "@/components/pacing-fields"
 import { SettingsItem } from "@/components/settings-item"
-import { SubmitButton } from "@/components/submit-button"
-import { Disclosure } from "@/components/ui/disclosure"
-import { Checkbox, Input } from "@/components/ui/input"
-import { Field } from "@/components/ui/label"
+import { SubmitButton } from "@kaperkunde/ui/submit-button"
+import { Disclosure } from "@kaperkunde/ui/disclosure"
+import { Checkbox, Input } from "@kaperkunde/ui/input"
+import { Field } from "@kaperkunde/ui/label"
 import {
   type PacingResult,
   removePacingSiteAction,

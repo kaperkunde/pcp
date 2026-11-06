@@ -1,142 +1,36 @@
 @import "tailwindcss";
 @import "tw-animate-css";
 @import "shadcn/tailwind.css";
+/*
+ * The token contract and PCP's palette come from @kaperkunde/ui
+ * (kaperkunde/common-public): base.css maps the names to Tailwind and keeps
+ * the rules every site shares, themes/pcp.css holds the values DESIGN.md ›
+ * Look lists. A colour changes there, not here.
+ */
+@import "@kaperkunde/ui/base.css";
+@import "@kaperkunde/ui/themes/pcp.css";
 
 @custom-variant dark (&:is(.dark *));
 
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-sans);
-  --font-mono: var(--font-mono);
-  --font-heading: var(--font-sans);
-  --color-ring: var(--ring);
-  --color-input: var(--input);
-  --color-border: var(--border);
-  --color-destructive: var(--destructive);
-  --color-warning: var(--warning);
-  --color-warning-foreground: var(--warning-foreground);
-  --color-success: var(--success);
-  --color-accent-foreground: var(--accent-foreground);
-  --color-accent: var(--accent);
-  --color-muted-foreground: var(--muted-foreground);
-  --color-muted: var(--muted);
-  --color-secondary-foreground: var(--secondary-foreground);
-  --color-secondary: var(--secondary);
-  --color-primary-foreground: var(--primary-foreground);
-  --color-primary: var(--primary);
-  --color-popover-foreground: var(--popover-foreground);
-  --color-popover: var(--popover);
-  --color-card-foreground: var(--card-foreground);
-  --color-card: var(--card);
-  --color-sidebar: var(--sidebar);
-  --color-field: var(--field);
-  --color-separator: var(--separator);
-  --color-row-hover: var(--row-hover);
-  --color-tile-mcp: var(--tile-mcp);
-  --color-tile-mcp-foreground: var(--tile-mcp-foreground);
-  --color-tile-api: var(--tile-api);
-  --color-tile-api-foreground: var(--tile-api-foreground);
-  --color-tile-mail: var(--tile-mail);
-  --color-tile-mail-foreground: var(--tile-mail-foreground);
-  --color-tile-calendar: var(--tile-calendar);
-  --color-tile-calendar-foreground: var(--tile-calendar-foreground);
-  --color-tile-browser: var(--tile-browser);
-  --color-tile-browser-foreground: var(--tile-browser-foreground);
-  --color-tile-ssh: var(--tile-ssh);
-  --color-tile-ssh-foreground: var(--tile-ssh-foreground);
-  --color-tile-wrapper: var(--tile-wrapper);
-  --color-tile-wrapper-foreground: var(--tile-wrapper-foreground);
-  --radius-sm: calc(var(--radius) * 0.6);
-  --radius-md: calc(var(--radius) * 0.8);
-  --radius-lg: var(--radius);
-  --radius-xl: calc(var(--radius) * 1.33);
-  --radius-2xl: calc(var(--radius) * 1.8);
-  --radius-3xl: calc(var(--radius) * 2.2);
-  --radius-4xl: calc(var(--radius) * 2.6);
+/*
+ * The extra-small button's line height, as Tailwind's text-xs has it: the
+ * package's --text-control-xs sets the size alone, and the label then sits
+ * a fraction of a pixel lower. Belongs in @kaperkunde/ui's base.css.
+ */
+@theme {
+  --text-control-xs--line-height: calc(1 / 0.75);
 }
 
-/* The palette, type and spacing are written down in DESIGN.md. */
-:root {
-  color-scheme: dark;
-
-  /* The system's own type, as on a Mac: no web font to download. */
-  --font-sans:
-    -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue",
-    system-ui, sans-serif;
-  --font-mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
-
-  /* Dark only: a control panel that is open in a side window. */
-  --background: #0f1217;
-  --foreground: #e8eaee;
-  --sidebar: #14181e;
-  --card: #181c23;
-  --card-foreground: #e8eaee;
-  --popover: #20252e;
-  --popover-foreground: #e8eaee;
-  --field: #11151b;
-  --primary: #5ed3c3;
-  --primary-foreground: #0b1014;
-  --secondary: #262c37;
-  --secondary-foreground: #e8eaee;
-  --muted: #232933;
-  --muted-foreground: #9aa3b2;
-  --accent: #1c3532;
-  --accent-foreground: #8fe4d8;
-  --destructive: #ff8a8a;
-  --warning: #f5b544;
-  --warning-foreground: #1a1306;
-  --success: #5ed3c3;
-  --separator: color-mix(in srgb, #ffffff 6.5%, transparent);
-  --row-hover: #1d222a;
-  --border: color-mix(in srgb, #ffffff 9%, transparent);
-  --input: color-mix(in srgb, #ffffff 12%, transparent);
-  --ring: #5ed3c3;
-  --radius: 0.5625rem;
-
-  /* One tint per kind of server, for its icon tile. */
-  --tile-mcp: #24303f;
-  --tile-mcp-foreground: #9cc3ff;
-  --tile-api: #3a2f22;
-  --tile-api-foreground: #ffc58a;
-  --tile-mail: #33263b;
-  --tile-mail-foreground: #e0a8ff;
-  --tile-calendar: #3b2526;
-  --tile-calendar-foreground: #ffa8a3;
-  --tile-browser: #1f3437;
-  --tile-browser-foreground: #8fe4d8;
-  --tile-ssh: #2a2f3a;
-  --tile-ssh-foreground: #d6dbe3;
-  --tile-wrapper: #23332a;
-  --tile-wrapper-foreground: #a6e3b8;
-}
-
-@layer base {
-  * {
-    @apply border-border outline-ring/50;
-  }
-  body {
-    @apply bg-background text-foreground;
-  }
-  html {
-    @apply font-sans;
-  }
-  h1,
-  h2,
-  h3,
-  h4 {
-    @apply font-semibold tracking-[-0.015em] text-foreground;
-  }
-  code,
-  kbd,
-  pre {
-    @apply font-mono;
-  }
-  /* A disclosure's own marker is drawn by the component instead. */
-  summary {
-    list-style: none;
-  }
-  summary::-webkit-details-marker {
-    display: none;
+/*
+ * base.css sets every field to 16px under 560px, so iOS does not zoom in on
+ * it. PCP's fields already are (text-base md:text-sm); the few drawn small
+ * on purpose (a tool's tier, a row's compact select) keep their own size, as
+ * before the move: revert-layer hands each back what its classes say.
+ */
+@media (max-width: 560px) {
+  input:not([type="checkbox"], [type="radio"], [type="range"]),
+  select,
+  textarea {
+    font-size: revert-layer;
   }
 }

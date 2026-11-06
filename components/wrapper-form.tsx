@@ -7,8 +7,8 @@ import {
   FormSection,
   ServerFormFrame,
 } from "@/components/server-form-parts"
-import { Input, Select, Textarea } from "@/components/ui/input"
-import { Field } from "@/components/ui/label"
+import { Input, Select, Textarea } from "@kaperkunde/ui/input"
+import { Field } from "@kaperkunde/ui/label"
 import type { ServerActionResult } from "@/lib/actions/servers"
 import {
   createWrapperAction,

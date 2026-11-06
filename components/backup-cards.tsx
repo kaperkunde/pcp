@@ -11,14 +11,14 @@ import {
   type FormEvent,
 } from "react"
 
-import { FormError, FormNote } from "@/components/form-status"
+import { FormError, FormNote } from "@kaperkunde/ui/form-status"
 import { LocalDate } from "@/components/local-date"
 import { OwnerConfirmFields } from "@/components/owner-confirm-fields"
 import { SettingsItem } from "@/components/settings-item"
-import { SubmitButton } from "@/components/submit-button"
-import { Button } from "@/components/ui/button"
-import { Checkbox, Input } from "@/components/ui/input"
-import { Field, Label } from "@/components/ui/label"
+import { SubmitButton } from "@kaperkunde/ui/submit-button"
+import { Button } from "@kaperkunde/ui/button"
+import { Checkbox, Input } from "@kaperkunde/ui/input"
+import { Field, Label } from "@kaperkunde/ui/label"
 import {
   restoreAction,
   restoreAtSetupAction,

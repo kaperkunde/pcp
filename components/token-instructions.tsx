@@ -2,10 +2,10 @@
 
 import { useActionState, useState, useTransition } from "react"
 
-import { FormError, FormNote } from "@/components/form-status"
-import { SubmitButton } from "@/components/submit-button"
-import { Button } from "@/components/ui/button"
-import { Textarea } from "@/components/ui/input"
+import { FormError, FormNote } from "@kaperkunde/ui/form-status"
+import { SubmitButton } from "@kaperkunde/ui/submit-button"
+import { Button } from "@kaperkunde/ui/button"
+import { Textarea } from "@kaperkunde/ui/input"
 import {
   keepInstructionsAction,
   saveInstructionsAction,

@@ -3,13 +3,13 @@ import Form from "next/form"
 import Link from "next/link"
 
 import { LocalDate } from "@/components/local-date"
-import { PageHeader } from "@/components/page-header"
-import { Badge } from "@/components/ui/badge"
-import { Button, ButtonLink } from "@/components/ui/button"
-import { Card } from "@/components/ui/card"
-import { Input, Select } from "@/components/ui/input"
-import { Field } from "@/components/ui/label"
-import { List, ListRow } from "@/components/ui/list"
+import { PageHeader } from "@kaperkunde/ui/page"
+import { Badge } from "@kaperkunde/ui/badge"
+import { Button, ButtonLink } from "@kaperkunde/ui/button"
+import { Card } from "@kaperkunde/ui/card"
+import { Input, Select } from "@kaperkunde/ui/input"
+import { Field } from "@kaperkunde/ui/label"
+import { List, ListRow } from "@kaperkunde/ui/list"
 import {
   activityLog,
   readActivityQuery,
@@ -227,7 +227,7 @@ function Outcome({ entry }: { entry: ActivityEntry }) {
     ? REQUEST_STATES[entry.requestState]
     : "Asked you"
   const badge = (
-    <Badge variant={entry.requestState === "waiting" ? "warning" : "outline"}>
+    <Badge variant={entry.requestState === "waiting" ? "warning" : "secondary"}>
       {label}
     </Badge>
   )

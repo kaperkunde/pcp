@@ -3,10 +3,10 @@
 import { useState } from "react"
 
 import { ServerStatusBadge } from "@/components/server-status-badge"
-import { Badge } from "@/components/ui/badge"
+import { Badge } from "@kaperkunde/ui/badge"
 import { IconTile } from "@/components/ui/icon-tile"
-import { List, ListRow } from "@/components/ui/list"
-import { SegmentedControl } from "@/components/ui/segmented-control"
+import { List, ListRow } from "@kaperkunde/ui/list"
+import { SegmentedControl } from "@kaperkunde/ui/segmented-control"
 import type { ServerKind, ServerSummary } from "@/lib/core/servers"
 
 export type ServerListItem = Pick<

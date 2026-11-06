@@ -1,8 +1,8 @@
 import type { Metadata } from "next"
 
 import { LocalDate, RelativeDate } from "@/components/local-date"
-import { PageColumn } from "@/components/page-column"
-import { PageHeader } from "@/components/page-header"
+import { PageColumn } from "@kaperkunde/ui/page"
+import { PageHeader } from "@kaperkunde/ui/page"
 import { TokenAvatar } from "@/components/token-avatar"
 import {
   TokenAllowances,
@@ -14,9 +14,9 @@ import {
 import { TokenScriptSites } from "@/components/token-scripts"
 import { TokenSkillsForm } from "@/components/token-skills"
 import { TokenTools } from "@/components/token-tools"
-import { Badge } from "@/components/ui/badge"
-import { ButtonLink } from "@/components/ui/button"
-import { List, ListRow } from "@/components/ui/list"
+import { Badge } from "@kaperkunde/ui/badge"
+import { ButtonLink } from "@kaperkunde/ui/button"
+import { List, ListRow } from "@kaperkunde/ui/list"
 import { listTokenAllowances } from "@/lib/core/allowances"
 import { listScriptSites } from "@/lib/core/browser-scripts"
 import { listOpenPermissions } from "@/lib/core/permissions"

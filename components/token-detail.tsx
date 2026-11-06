@@ -4,7 +4,7 @@ import Link from "next/link"
 import { useRouter } from "next/navigation"
 import { useState, useTransition } from "react"
 
-import { FormError, FormNote } from "@/components/form-status"
+import { FormError, FormNote } from "@kaperkunde/ui/form-status"
 import { LocalDate } from "@/components/local-date"
 import { PermissionConflicts } from "@/components/permission-conflicts"
 import { PermissionDecision } from "@/components/permission-decision"
@@ -15,11 +15,11 @@ import {
   TokenSettingsForm,
   type TokenSettings,
 } from "@/components/token-settings-form"
-import { CountBadge } from "@/components/ui/badge"
-import { Button, ButtonLink } from "@/components/ui/button"
-import { Select } from "@/components/ui/input"
-import { SwitchRow } from "@/components/ui/switch"
-import { List, ListRow, ListSection } from "@/components/ui/list"
+import { CountBadge } from "@kaperkunde/ui/badge"
+import { Button, ButtonLink } from "@kaperkunde/ui/button"
+import { Select } from "@kaperkunde/ui/input"
+import { SwitchRow } from "@kaperkunde/ui/switch"
+import { List, ListRow, ListSection } from "@kaperkunde/ui/list"
 import {
   copyTokenAccessAction,
   deleteTokenAction,

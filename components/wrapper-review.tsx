@@ -1,7 +1,7 @@
 import { Globe, KeyRound } from "lucide-react"
 import type { ReactNode } from "react"
 
-import { Badge } from "@/components/ui/badge"
+import { Badge } from "@kaperkunde/ui/badge"
 import {
   TOOL_TIER_HINTS,
   TOOL_TIER_LABELS,

@@ -1,9 +1,9 @@
 import type { Metadata } from "next"
 
 import { MergeReview } from "@/components/merge-review"
-import { PageColumn } from "@/components/page-column"
-import { PageHeader } from "@/components/page-header"
-import { Card } from "@/components/ui/card"
+import { PageColumn } from "@kaperkunde/ui/page"
+import { PageHeader } from "@kaperkunde/ui/page"
+import { Card } from "@kaperkunde/ui/card"
 import { db } from "@/lib/core/db"
 import { identicalDefinitions } from "@/lib/core/definitions"
 import { requireContext } from "@/lib/server/session"

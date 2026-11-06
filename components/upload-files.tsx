@@ -3,8 +3,8 @@
 import { Check, CircleAlert, FileUp, LoaderCircle } from "lucide-react"
 import { useEffect, useId, useState } from "react"
 
-import { Button, buttonVariants } from "@/components/ui/button"
-import { List, ListRow, ListSection, RowValue } from "@/components/ui/list"
+import { Button, buttonVariants } from "@kaperkunde/ui/button"
+import { List, ListRow, ListSection, RowValue } from "@kaperkunde/ui/list"
 import { cn } from "@/lib/utils"
 
 type Item = {

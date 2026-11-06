@@ -2,8 +2,8 @@
 
 import { useState, useTransition } from "react"
 
-import { Button } from "@/components/ui/button"
-import { List, ListRow, ListSection } from "@/components/ui/list"
+import { Button } from "@kaperkunde/ui/button"
+import { List, ListRow, ListSection } from "@kaperkunde/ui/list"
 import { removeScriptSiteAction } from "@/lib/actions/browser-scripts"
 import type { ActionState } from "@/lib/server/action-state"
 

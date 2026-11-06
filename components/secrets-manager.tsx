@@ -2,15 +2,15 @@
 
 import { useActionState, useState, useTransition } from "react"
 
-import { FormError, FormNote } from "@/components/form-status"
+import { FormError, FormNote } from "@kaperkunde/ui/form-status"
 import { LocalDate, RelativeDate } from "@/components/local-date"
-import { SubmitButton } from "@/components/submit-button"
-import { Badge } from "@/components/ui/badge"
-import { Button } from "@/components/ui/button"
-import { Card } from "@/components/ui/card"
-import { Checkbox, Input, Select, Textarea } from "@/components/ui/input"
-import { Field, Label } from "@/components/ui/label"
-import { List, ListRow, ListSection } from "@/components/ui/list"
+import { SubmitButton } from "@kaperkunde/ui/submit-button"
+import { Badge } from "@kaperkunde/ui/badge"
+import { Button } from "@kaperkunde/ui/button"
+import { Card } from "@kaperkunde/ui/card"
+import { Checkbox, Input, Select, Textarea } from "@kaperkunde/ui/input"
+import { Field, Label } from "@kaperkunde/ui/label"
+import { List, ListRow, ListSection } from "@kaperkunde/ui/list"
 import {
   addSecretOriginAction,
   deleteSecretAction,
@@ -192,13 +192,13 @@ function SecretRow({
           ) : null}
           {totp ? <Badge variant="secondary">One-time codes</Badge> : null}
           {secret.browserOrigins.length > 0 ? (
-            <Badge variant="outline">
+            <Badge variant="secondary">
               Browser: {secret.browserOrigins.length}{" "}
               {secret.browserOrigins.length === 1 ? "site" : "sites"}
             </Badge>
           ) : null}
           {secret.usedBy.map((server) => (
-            <Badge key={server.id} variant="outline">
+            <Badge key={server.id} variant="secondary">
               {server.name}
             </Badge>
           ))}

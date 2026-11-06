@@ -8,9 +8,6 @@ importers:
 
   .:
     dependencies:
-      '@base-ui/react':
-        specifier: ^1.8.0
-        version: 1.8.0(@types/react@19.2.18)(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
       '@img/sharp-wasm32':
         specifier: 0.35.5
         version: 0.35.5
@@ -29,6 +26,9 @@ importers:
       '@kaperkunde/security':
         specifier: 0.2.0
         version: 0.2.0
+      '@kaperkunde/ui':
+        specifier: 0.1.1
+        version: 0.1.1(@types/react@19.2.18)(next@16.3.6(@babel/core@7.29.7)(@playwright/test@1.63.0)(@types/node@24.19.1)(react-dom@19.2.8(react@19.2.8))(react@19.2.8))(react-dom@19.2.8(react@19.2.8))(react@19.2.8)(tailwindcss@4.3.3)
       '@mixmark-io/domino':
         specifier: ^2.2.0
         version: 2.2.0
@@ -50,12 +50,6 @@ importers:
       better-sqlite3:
         specifier: ^12.6.0
         version: 12.11.1
-      class-variance-authority:
-        specifier: ^0.7.1
-        version: 0.7.1
-      clsx:
-        specifier: ^2.1.1
-        version: 2.1.1
       fast-xml-parser:
         specifier: ^5.11.2
         version: 5.11.2
@@ -104,9 +98,6 @@ importers:
       ssh2:
         specifier: ^1.17.0
         version: 1.17.0
-      tailwind-merge:
-        specifier: ^3.7.0
-        version: 3.7.0
       tldts:
         specifier: ^7.4.19
         version: 7.4.19
@@ -537,6 +528,17 @@ packages:
   '@kaperkunde/security@0.2.0':
     resolution: {integrity: sha512-eb4he2SEO0HJEJ891NRQ5wu8QMpD7cTXrGXqRLsaeRiKwGAXSq1vw6/g7Vj4GDgsYC8Fbxk7DbiJMIPG6i6jBQ==}
     engines: {node: '>=22'}
+
+  '@kaperkunde/ui@0.1.1':
+    resolution: {integrity: sha512-Qhrae4HvNn9ZV2s8UkvRbOdMIKkuYTvg7BZwELXnVrOSwNEYLO0zkz/Ihgh5zifq6Cy2kuQma2kbmIT9JMHfbA==}
+    peerDependencies:
+      next: '>=15.0.0'
+      react: ^19.0.0
+      react-dom: ^19.0.0
+      tailwindcss: ^4.1.0
+    peerDependenciesMeta:
+      next:
+        optional: true
 
   '@mixmark-io/domino@2.2.0':
     resolution: {integrity: sha512-Y28PR25bHXUg88kCV7nivXrP2Nj2RueZ3/l/jdx6J9f8J4nsEGcgX0Qe6lt7Pa+J79+kPiJU3LguR6O/6zrLOw==}
@@ -4658,6 +4660,22 @@ snapshots:
   '@kaperkunde/security@0.2.0':
     dependencies:
       undici: 7.30.0
+
+  '@kaperkunde/ui@0.1.1(@types/react@19.2.18)(next@16.3.6(@babel/core@7.29.7)(@playwright/test@1.63.0)(@types/node@24.19.1)(react-dom@19.2.8(react@19.2.8))(react@19.2.8))(react-dom@19.2.8(react@19.2.8))(react@19.2.8)(tailwindcss@4.3.3)':
+    dependencies:
+      '@base-ui/react': 1.8.0(@types/react@19.2.18)(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
+      class-variance-authority: 0.7.1
+      clsx: 2.1.1
+      react: 19.2.8
+      react-dom: 19.2.8(react@19.2.8)
+      tailwind-merge: 3.7.0
+      tailwindcss: 4.3.3
+    optionalDependencies:
+      next: 16.3.6(@babel/core@7.29.7)(@playwright/test@1.63.0)(@types/node@24.19.1)(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
+    transitivePeerDependencies:
+      - '@date-fns/tz'
+      - '@types/react'
+      - date-fns
 
   '@mixmark-io/domino@2.2.0': {}
 

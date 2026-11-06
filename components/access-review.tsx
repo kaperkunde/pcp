@@ -3,22 +3,22 @@
 import { useMemo, useState } from "react"
 
 import { useAnswer } from "@/components/answer-queue"
-import { FormError } from "@/components/form-status"
+import { FormError } from "@kaperkunde/ui/form-status"
 import {
   DECISION_BUTTON,
   PermissionActions,
   QUIET_DECISION,
 } from "@/components/permission-actions"
 import { PermissionOutcome } from "@/components/permission-outcome"
-import { Badge } from "@/components/ui/badge"
-import { Button } from "@/components/ui/button"
-import { Select } from "@/components/ui/input"
-import { List, ListRow } from "@/components/ui/list"
+import { Badge } from "@kaperkunde/ui/badge"
+import { Button } from "@kaperkunde/ui/button"
+import { Select } from "@kaperkunde/ui/input"
+import { List, ListRow } from "@kaperkunde/ui/list"
 import {
   SegmentedControl,
   type SegmentedOption,
-} from "@/components/ui/segmented-control"
-import { Switch } from "@/components/ui/switch"
+} from "@kaperkunde/ui/segmented-control"
+import { Switch } from "@kaperkunde/ui/switch"
 import {
   decidePermissionAction,
   saveAccessRequestAction,
@@ -370,7 +370,7 @@ function ServerLevels({
           <h3 className="text-[15px] font-semibold">{server.name}</h3>
           <code className="text-xs text-muted-foreground">{server.slug}</code>
           {server.enabled ? null : (
-            <Badge variant="outline">Switched off</Badge>
+            <Badge variant="secondary">Switched off</Badge>
           )}
         </div>
         <div className="flex items-center gap-2">
@@ -433,7 +433,7 @@ function ServerLevels({
                     </Badge>
                   ) : null}
                   {asked && asked !== value ? (
-                    <Badge variant="outline">
+                    <Badge variant="secondary">
                       Proposed: {TOOL_ACCESS_LABELS[asked]}
                     </Badge>
                   ) : null}
@@ -443,7 +443,7 @@ function ServerLevels({
                     </Badge>
                   ) : null}
                   {askedTier && askedTier !== tierValue ? (
-                    <Badge variant="outline">
+                    <Badge variant="secondary">
                       Proposed tier: {tierLabel(askedTier, shownTier)}
                     </Badge>
                   ) : null}
@@ -574,7 +574,7 @@ function OwnTiers({
                     </Badge>
                   ) : null}
                   {asked && asked !== value ? (
-                    <Badge variant="outline">
+                    <Badge variant="secondary">
                       Proposed tier: {tierLabel(asked, tool)}
                     </Badge>
                   ) : null}

@@ -2,12 +2,12 @@
 
 import { useEffect, useState, useTransition } from "react"
 
-import { FormError, FormNote } from "@/components/form-status"
+import { FormError, FormNote } from "@kaperkunde/ui/form-status"
 import { LocalDate } from "@/components/local-date"
-import { SubmitButton } from "@/components/submit-button"
-import { Button } from "@/components/ui/button"
-import { Checkbox, Input } from "@/components/ui/input"
-import { List, ListRow, ListSection, RowValue } from "@/components/ui/list"
+import { SubmitButton } from "@kaperkunde/ui/submit-button"
+import { Button } from "@kaperkunde/ui/button"
+import { Checkbox, Input } from "@kaperkunde/ui/input"
+import { List, ListRow, ListSection, RowValue } from "@kaperkunde/ui/list"
 import type { ServerActionResult } from "@/lib/actions/servers"
 import {
   checkServiceImageAction,

@@ -9,17 +9,17 @@ import {
   useTransition,
 } from "react"
 
-import { FormError, FormNote } from "@/components/form-status"
+import { FormError, FormNote } from "@kaperkunde/ui/form-status"
 import { LocalDate } from "@/components/local-date"
 import { MemoryAlwaysSwitch } from "@/components/memory-always-switch"
-import { SubmitButton } from "@/components/submit-button"
-import { Badge } from "@/components/ui/badge"
-import { Button } from "@/components/ui/button"
-import { Card } from "@/components/ui/card"
-import { Checkbox, Input, Select, Textarea } from "@/components/ui/input"
-import { Field, Label } from "@/components/ui/label"
-import { List, ListRow, ListSection } from "@/components/ui/list"
-import { SwitchRow } from "@/components/ui/switch"
+import { SubmitButton } from "@kaperkunde/ui/submit-button"
+import { Badge } from "@kaperkunde/ui/badge"
+import { Button } from "@kaperkunde/ui/button"
+import { Card } from "@kaperkunde/ui/card"
+import { Checkbox, Input, Select, Textarea } from "@kaperkunde/ui/input"
+import { Field, Label } from "@kaperkunde/ui/label"
+import { List, ListRow, ListSection } from "@kaperkunde/ui/list"
+import { SwitchRow } from "@kaperkunde/ui/switch"
 import {
   deleteMemoriesAction,
   deleteMemoryAction,
@@ -405,7 +405,7 @@ function MemoryRow({
           {memory.visibility === "shared" ? (
             <Badge>Shared</Badge>
           ) : memory.tokenName ? (
-            <Badge variant="outline">Only {memory.tokenName}</Badge>
+            <Badge variant="secondary">Only {memory.tokenName}</Badge>
           ) : null}
           {memory.always ? (
             <Badge variant="secondary">Every conversation</Badge>

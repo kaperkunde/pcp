@@ -3,13 +3,13 @@
 import { useActionState, useState, type FormEvent, type ReactNode } from "react"
 import { useFormStatus } from "react-dom"
 
-import { FormError, FormNote } from "@/components/form-status"
+import { FormError, FormNote } from "@kaperkunde/ui/form-status"
 import { OwnerConfirmFields } from "@/components/owner-confirm-fields"
 import {
   TOKEN_OPTION_NAMES,
   type TokenOption,
 } from "@/components/token-options"
-import { Button } from "@/components/ui/button"
+import { Button } from "@kaperkunde/ui/button"
 import { updateTokenAction, type UpdateTokenResult } from "@/lib/actions/tokens"
 import type { ApiTokenSummary } from "@/lib/core/api-tokens"
 import { cn } from "@/lib/utils"

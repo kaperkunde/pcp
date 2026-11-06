@@ -3,18 +3,18 @@
 import { useActionState, useOptimistic, useState, useTransition } from "react"
 
 import { AllTokensCheckbox } from "@/components/all-tokens-checkbox"
-import { FormError, FormNote } from "@/components/form-status"
+import { FormError, FormNote } from "@kaperkunde/ui/form-status"
 import { LocalDate } from "@/components/local-date"
-import { SubmitButton } from "@/components/submit-button"
+import { SubmitButton } from "@kaperkunde/ui/submit-button"
 import { LEVEL_OPTIONS } from "@/components/token-tools"
-import { Button } from "@/components/ui/button"
-import { Checkbox, Input, Select } from "@/components/ui/input"
-import { List, ListSection } from "@/components/ui/list"
+import { Button } from "@kaperkunde/ui/button"
+import { Checkbox, Input, Select } from "@kaperkunde/ui/input"
+import { List, ListSection } from "@kaperkunde/ui/list"
 import {
   SegmentedControl,
   type SegmentedOption,
-} from "@/components/ui/segmented-control"
-import { SwitchRow } from "@/components/ui/switch"
+} from "@kaperkunde/ui/segmented-control"
+import { SwitchRow } from "@kaperkunde/ui/switch"
 import {
   setExitLevelAction,
   setExitLevelSharedAction,

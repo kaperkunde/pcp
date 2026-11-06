@@ -1,4 +1,4 @@
-import { Badge, StatusDot } from "@/components/ui/badge"
+import { Badge, StatusDot } from "@kaperkunde/ui/badge"
 import type { ServerKind, ServerStatus } from "@/lib/core/servers"
 import { cn } from "@/lib/utils"
 

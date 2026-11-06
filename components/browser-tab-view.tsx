@@ -3,10 +3,10 @@
 import { useRouter } from "next/navigation"
 import { useCallback, useEffect, useRef, useState, useTransition } from "react"
 
-import { FormError } from "@/components/form-status"
-import { Badge } from "@/components/ui/badge"
-import { Button } from "@/components/ui/button"
-import { Input, Select, Textarea } from "@/components/ui/input"
+import { FormError } from "@kaperkunde/ui/form-status"
+import { Badge } from "@kaperkunde/ui/badge"
+import { Button } from "@kaperkunde/ui/button"
+import { Input, Select, Textarea } from "@kaperkunde/ui/input"
 import {
   backTabAction,
   closeTabAction,

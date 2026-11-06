@@ -4,16 +4,16 @@ import { ChevronDown } from "lucide-react"
 import Link from "next/link"
 import { useActionState, useId, useState } from "react"
 
-import { FormError, FormNote } from "@/components/form-status"
+import { FormError, FormNote } from "@kaperkunde/ui/form-status"
 import {
   changesServers,
   useSharedInstances,
 } from "@/components/shared-definition"
-import { SubmitButton } from "@/components/submit-button"
-import { Badge } from "@/components/ui/badge"
-import { Button } from "@/components/ui/button"
-import { Textarea } from "@/components/ui/input"
-import { List, ListSection } from "@/components/ui/list"
+import { SubmitButton } from "@kaperkunde/ui/submit-button"
+import { Badge } from "@kaperkunde/ui/badge"
+import { Button } from "@kaperkunde/ui/button"
+import { Textarea } from "@kaperkunde/ui/input"
+import { List, ListSection } from "@kaperkunde/ui/list"
 import {
   setToolDescriptionAction,
   type ServerActionResult,

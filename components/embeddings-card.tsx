@@ -4,12 +4,12 @@ import { TextSearch } from "lucide-react"
 import Link from "next/link"
 import { useActionState, useState } from "react"
 
-import { FormError, FormNote } from "@/components/form-status"
+import { FormError, FormNote } from "@kaperkunde/ui/form-status"
 import { SettingsItem } from "@/components/settings-item"
-import { SubmitButton } from "@/components/submit-button"
-import { Checkbox, Input, Select } from "@/components/ui/input"
-import { Field } from "@/components/ui/label"
-import { SegmentedControl } from "@/components/ui/segmented-control"
+import { SubmitButton } from "@kaperkunde/ui/submit-button"
+import { Checkbox, Input, Select } from "@kaperkunde/ui/input"
+import { Field } from "@kaperkunde/ui/label"
+import { SegmentedControl } from "@kaperkunde/ui/segmented-control"
 import {
   clearEmbeddingsAction,
   saveEmbeddingsAction,
