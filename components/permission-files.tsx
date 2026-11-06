@@ -12,7 +12,7 @@ import {
 import { useState } from "react"
 
 import { LocalDate } from "@/components/local-date"
-import { Button, buttonVariants } from "@/components/ui/button"
+import { Button, buttonVariants } from "@kaperkunde/ui/button"
 import type { RequestFile } from "@/lib/core/permission-files"
 import { cn } from "@/lib/utils"
 

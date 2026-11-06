@@ -2,7 +2,7 @@
 
 import { Plus } from "lucide-react"
 
-import { buttonVariants } from "@/components/ui/button"
+import { buttonVariants } from "@kaperkunde/ui/button"
 import { IconTile } from "@/components/ui/icon-tile"
 import {
   Menu,
@@ -11,7 +11,7 @@ import {
   MenuNote,
   MenuSeparator,
   MenuTrigger,
-} from "@/components/ui/menu"
+} from "@kaperkunde/ui/menu"
 import type { ServerKind } from "@/lib/core/servers"
 
 const CHOICES: Array<{

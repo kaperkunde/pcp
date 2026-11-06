@@ -3,7 +3,7 @@
 import { useState } from "react"
 
 import { useAnswer } from "@/components/answer-queue"
-import { FormError } from "@/components/form-status"
+import { FormError } from "@kaperkunde/ui/form-status"
 import {
   DECISION_BUTTON,
   PermissionActions,
@@ -16,11 +16,11 @@ import {
   ProposedAccessEditor,
   type AccessRow,
 } from "@/components/proposed-access-editor"
-import { Button } from "@/components/ui/button"
-import { Checkbox, Input, Select, Textarea } from "@/components/ui/input"
-import { Field, Label } from "@/components/ui/label"
-import { List } from "@/components/ui/list"
-import { SwitchRow } from "@/components/ui/switch"
+import { Button } from "@kaperkunde/ui/button"
+import { Checkbox, Input, Select, Textarea } from "@kaperkunde/ui/input"
+import { Field, Label } from "@kaperkunde/ui/label"
+import { List } from "@kaperkunde/ui/list"
+import { SwitchRow } from "@kaperkunde/ui/switch"
 import { decidePermissionAction } from "@/lib/actions/permissions"
 import type { SecretSitesShown } from "@/lib/core/browser-secrets"
 import {

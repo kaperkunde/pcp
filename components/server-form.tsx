@@ -2,7 +2,7 @@
 
 import { useActionState, useState } from "react"
 
-import { FormError, FormNote } from "@/components/form-status"
+import { FormError, FormNote } from "@kaperkunde/ui/form-status"
 import {
   HeaderAuthFields,
   type ExtraHeaderValues,
@@ -10,11 +10,11 @@ import {
 } from "@/components/header-auth-fields"
 import { OAuthClientFields } from "@/components/oauth-client-fields"
 import { useSharedChangeGuard } from "@/components/shared-definition"
-import { SubmitButton } from "@/components/submit-button"
-import { Card } from "@/components/ui/card"
-import { Disclosure } from "@/components/ui/disclosure"
-import { Checkbox, Input, Select, Textarea } from "@/components/ui/input"
-import { Field, Label } from "@/components/ui/label"
+import { SubmitButton } from "@kaperkunde/ui/submit-button"
+import { Card } from "@kaperkunde/ui/card"
+import { Disclosure } from "@kaperkunde/ui/disclosure"
+import { Checkbox, Input, Select, Textarea } from "@kaperkunde/ui/input"
+import { Field, Label } from "@kaperkunde/ui/label"
 import {
   createServerAction,
   updateServerAction,

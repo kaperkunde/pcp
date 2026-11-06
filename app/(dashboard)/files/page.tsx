@@ -1,10 +1,10 @@
 import type { Metadata } from "next"
 import Link from "next/link"
 
-import { PageHeader } from "@/components/page-header"
-import { Badge, StatusDot } from "@/components/ui/badge"
+import { PageHeader } from "@kaperkunde/ui/page"
+import { Badge, StatusDot } from "@kaperkunde/ui/badge"
 import { IconTile } from "@/components/ui/icon-tile"
-import { List, ListRow, ListSection } from "@/components/ui/list"
+import { List, ListRow, ListSection } from "@kaperkunde/ui/list"
 import { loadResourceLimits } from "@/lib/core/resources/state"
 import { bytesLabel } from "@/lib/core/storage/browse"
 import { storeUsage } from "@/lib/core/storage/quota"

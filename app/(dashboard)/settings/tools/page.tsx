@@ -1,8 +1,8 @@
 import type { Metadata } from "next"
 
 import { OwnToolTiers } from "@/components/own-tool-tiers"
-import { PageColumn } from "@/components/page-column"
-import { PageHeader } from "@/components/page-header"
+import { PageColumn } from "@kaperkunde/ui/page"
+import { PageHeader } from "@kaperkunde/ui/page"
 import { listOwnToolTiers } from "@/lib/core/own-tool-tiers"
 import { requireContext } from "@/lib/server/session"
 

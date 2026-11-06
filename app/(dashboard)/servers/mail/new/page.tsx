@@ -4,8 +4,8 @@ import {
   EMPTY_MAIL_ACCOUNT,
   MailAccountForm,
 } from "@/components/mail-account-form"
-import { PageColumn } from "@/components/page-column"
-import { PageHeader } from "@/components/page-header"
+import { PageColumn } from "@kaperkunde/ui/page"
+import { PageHeader } from "@kaperkunde/ui/page"
 import { IconTile } from "@/components/ui/icon-tile"
 import { oauthRedirectUrl } from "@/lib/core/oauth-client"
 import { listSecrets } from "@/lib/core/secrets"

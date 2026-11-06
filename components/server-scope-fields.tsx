@@ -4,8 +4,8 @@ import { useState } from "react"
 
 import { ChoiceCard } from "@/components/assistant-choice"
 import { IconTile, serverKindLabel } from "@/components/ui/icon-tile"
-import { Checkbox } from "@/components/ui/input"
-import { SegmentedControl } from "@/components/ui/segmented-control"
+import { Checkbox } from "@kaperkunde/ui/input"
+import { SegmentedControl } from "@kaperkunde/ui/segmented-control"
 import type { ServerKind } from "@/lib/core/servers"
 import { cn } from "@/lib/utils"
 

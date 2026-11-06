@@ -1,12 +1,12 @@
 import type { Metadata } from "next"
 
 import { CloneForm, type CloneSource } from "@/components/clone-form"
-import { PageColumn } from "@/components/page-column"
-import { PageHeader } from "@/components/page-header"
+import { PageColumn } from "@kaperkunde/ui/page"
+import { PageHeader } from "@kaperkunde/ui/page"
 import { RepoFilesReview } from "@/components/repo-review"
 import { ServiceLaunchForm } from "@/components/service-form"
-import { ButtonLink } from "@/components/ui/button"
-import { Card } from "@/components/ui/card"
+import { ButtonLink } from "@kaperkunde/ui/button"
+import { Card } from "@kaperkunde/ui/card"
 import { importItemAction, importServiceAction } from "@/lib/actions/repos"
 import {
   DEFAULT_HEADER_NAME,

@@ -3,14 +3,14 @@
 import { useRouter } from "next/navigation"
 import { useActionState, useState, useTransition } from "react"
 
-import { FormError, FormNote } from "@/components/form-status"
+import { FormError, FormNote } from "@kaperkunde/ui/form-status"
 import { SkillFields } from "@/components/skill-fields"
-import { SubmitButton } from "@/components/submit-button"
-import { Button } from "@/components/ui/button"
-import { Card } from "@/components/ui/card"
-import { Input, Textarea } from "@/components/ui/input"
-import { Field } from "@/components/ui/label"
-import { ListSection } from "@/components/ui/list"
+import { SubmitButton } from "@kaperkunde/ui/submit-button"
+import { Button } from "@kaperkunde/ui/button"
+import { Card } from "@kaperkunde/ui/card"
+import { Input, Textarea } from "@kaperkunde/ui/input"
+import { Field } from "@kaperkunde/ui/label"
+import { ListSection } from "@kaperkunde/ui/list"
 import {
   deleteSkillAction,
   deleteSkillFileAction,

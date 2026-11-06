@@ -5,20 +5,20 @@ import { useRouter } from "next/navigation"
 import { useActionState, useEffect, useState, useTransition } from "react"
 
 import { useAnswer } from "@/components/answer-queue"
-import { FormError, FormNote } from "@/components/form-status"
+import { FormError, FormNote } from "@kaperkunde/ui/form-status"
 import { ChoiceField } from "@/components/server-form-parts"
-import { SubmitButton } from "@/components/submit-button"
-import { Button } from "@/components/ui/button"
+import { SubmitButton } from "@kaperkunde/ui/submit-button"
+import { Button } from "@kaperkunde/ui/button"
 import {
   Dialog,
   DialogContent,
   DialogDescription,
   DialogTitle,
   DialogTrigger,
-} from "@/components/ui/dialog"
-import { Input, Select } from "@/components/ui/input"
-import { Field } from "@/components/ui/label"
-import { Switch } from "@/components/ui/switch"
+} from "@kaperkunde/ui/dialog"
+import { Input, Select } from "@kaperkunde/ui/input"
+import { Field } from "@kaperkunde/ui/label"
+import { Switch } from "@kaperkunde/ui/switch"
 import {
   addItemsAction,
   answerChangeAction,

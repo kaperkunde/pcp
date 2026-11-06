@@ -3,15 +3,15 @@ import { notFound } from "next/navigation"
 
 import { ItemAboutRows } from "@/components/item-about"
 import { RelativeDate } from "@/components/local-date"
-import { PageColumn } from "@/components/page-column"
-import { PageHeader } from "@/components/page-header"
+import { PageColumn } from "@kaperkunde/ui/page"
+import { PageHeader } from "@kaperkunde/ui/page"
 import {
   SkillDelete,
   SkillEditForm,
   SkillFiles,
   SkillShare,
 } from "@/components/skill-editor"
-import { List, ListSection } from "@/components/ui/list"
+import { List, ListSection } from "@kaperkunde/ui/list"
 import { isPcpError } from "@/lib/core/errors"
 import { itemAbout } from "@/lib/core/item-about"
 import { getSkill, type SkillSummary } from "@/lib/core/skills"

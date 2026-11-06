@@ -1,10 +1,10 @@
 import type { Metadata } from "next"
 
 import { GetStarted } from "@/components/get-started"
-import { PageHeader } from "@/components/page-header"
+import { PageHeader } from "@kaperkunde/ui/page"
 import { ServerAddMenu } from "@/components/server-add-menu"
 import { ServerList } from "@/components/server-list"
-import { ListSection } from "@/components/ui/list"
+import { ListSection } from "@kaperkunde/ui/list"
 import { listApiTokens } from "@/lib/core/api-tokens"
 import { listServers } from "@/lib/core/servers"
 import { flowWrapperIds } from "@/lib/core/wrappers/definition"

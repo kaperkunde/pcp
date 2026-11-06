@@ -1,8 +1,11 @@
 # Design
 
-How PCP's owner pages look and behave, and why. The components in
-`components/ui/` carry the look; this file is what they cannot say on their
-own: when to use which, what goes where, and the rules a new page follows.
+How PCP's owner pages look and behave, and why. The primitives come from
+`@kaperkunde/ui` (kaperkunde/common-public), whose `themes/pcp.css` holds
+PCP's palette, and carry the look with PCP's own widgets in `components/`;
+this file is what they cannot say on their own: when to use which, what
+goes where, and the rules a new page follows. A primitive that needs to
+change is changed in the package, for every site that draws with it.
 Copy (the words) follows CLAUDE.md › Copy.
 
 ## Principles
@@ -51,7 +54,7 @@ token" where the token itself is meant (creating, revoking, copying it).
 
 ## Pages
 
-`PageColumn` (`components/page-column.tsx`) sets the width: the layout's
+`PageColumn` (`@kaperkunde/ui/page`) sets the width: the layout's
 960px for lists and Home, `narrow` (820px) for one thing's page and for
 Settings. Sections stand 32px apart.
 
@@ -63,7 +66,7 @@ what happens.
 
 ## Lists
 
-Most of PCP is grouped lists (`components/ui/list.tsx`), as in the Mac's
+Most of PCP is grouped lists (`@kaperkunde/ui/list`), as in the Mac's
 settings:
 
 - `ListSection`: the small grey heading above, an optional link at its
@@ -73,7 +76,7 @@ settings:
 - `ListRow`: icon, title, grey line, then what sits at the right. With
   `href` the row is a link and ends in a chevron. Rows are at least 56px
   tall.
-- `SwitchRow` (`components/ui/switch.tsx`): a label and a switch, the
+- `SwitchRow` (`@kaperkunde/ui/switch`): a label and a switch, the
   switch at the right. Use it for anything on/off; the label names the
   switch for assistive technology and tests.
 - `RowValue`: a grey value at a row's right ("Never", "2").
@@ -82,26 +85,26 @@ Use a `Card` for what is not rows: a form, a block of text, a code sample.
 
 ## Controls
 
-- **Buttons** (`components/ui/button.tsx`): `default` (teal) for the one
-  primary action; `secondary` (filled grey, also `outline`) for the rest;
+- **Buttons** (`@kaperkunde/ui/button`): `default` (teal) for the one
+  primary action; `secondary` (filled grey) for the rest;
   `ghost` (teal text) for an action inside a row; `plain` (grey text) for a
   quiet one; `destructive` (red text). Sizes: `default` 36px, `sm` 32px for
   inside rows, `lg` 44px for the decision buttons on a request.
 - **Switch** for on/off. A checkbox only where it reads as a list of
   choices (servers a token reaches) or as "also for all tokens".
-- **SegmentedControl** (`components/ui/segmented-control.tsx`) for two to
+- **SegmentedControl** (`@kaperkunde/ui/segmented-control`) for two to
   four exclusive choices that fit on a line: a tool's level (Allow / Ask /
   Block, tinted with `tone`), a filter, a sign-in kind. Over four, a
   `Select`.
 - **Fields**: `Field` puts the label above and a grey hint under. Inputs
   are 40px, on the darker field colour.
-- **Disclosure** (`components/ui/disclosure.tsx`) for "Advanced": a row
+- **Disclosure** (`@kaperkunde/ui/disclosure`) for "Advanced": a row
   with the title and a grey line naming what is inside, so the owner knows
   whether to open it. Native `<details>`: forms inside still submit.
-- **Dialog** (`components/ui/dialog.tsx`) for a short task that should not
+- **Dialog** (`@kaperkunde/ui/dialog`) for a short task that should not
   lose the page behind it: connecting an assistant. The primary button is
   last, at the right.
-- **Menu** (`components/ui/menu.tsx`) for a button's list of choices: the
+- **Menu** (`@kaperkunde/ui/menu`) for a button's list of choices: the
   bell, Add on Servers.
 - **IconTile** (`components/ui/icon-tile.tsx`): a server's kind picks its
   tint and symbol (MCP blue, API orange, mail purple, calendar red, browser
@@ -197,7 +200,8 @@ Opinionated, and each one the safe side:
 ## Look
 
 Dark only: PCP is a control panel kept open beside other windows. The
-values live in `app/globals.css`; use the Tailwind names, not hex values.
+values live in `@kaperkunde/ui/themes/pcp.css`, which `app/globals.css`
+imports; use the Tailwind names, not hex values.
 
 | Token                          | Use                                         |
 | ------------------------------ | ------------------------------------------- |

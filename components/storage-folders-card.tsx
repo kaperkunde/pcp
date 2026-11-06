@@ -1,7 +1,7 @@
-import { Badge } from "@/components/ui/badge"
-import { ButtonLink } from "@/components/ui/button"
+import { Badge } from "@kaperkunde/ui/badge"
+import { ButtonLink } from "@kaperkunde/ui/button"
 import { IconTile } from "@/components/ui/icon-tile"
-import { List, ListRow, ListSection } from "@/components/ui/list"
+import { List, ListRow, ListSection } from "@kaperkunde/ui/list"
 import type { StorageRootView } from "@/lib/core/storage/roots"
 
 /**

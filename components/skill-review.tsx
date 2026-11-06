@@ -1,4 +1,4 @@
-import { Badge } from "@/components/ui/badge"
+import { Badge } from "@kaperkunde/ui/badge"
 import type { DiffLine } from "@/lib/core/line-merge"
 import type { SkillShown } from "@/lib/core/skills"
 import { cn } from "@/lib/utils"

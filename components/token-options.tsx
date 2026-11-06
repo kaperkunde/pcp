@@ -1,6 +1,6 @@
 import type { ReactNode } from "react"
 
-import { Switch, SwitchRow } from "@/components/ui/switch"
+import { Switch, SwitchRow } from "@kaperkunde/ui/switch"
 
 /**
  * What a token may do besides running its tools: each is a form field of

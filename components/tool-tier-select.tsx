@@ -2,10 +2,10 @@
 
 import { useActionState, useRef } from "react"
 
-import { FormError } from "@/components/form-status"
-import { SubmitButton } from "@/components/submit-button"
-import { Badge } from "@/components/ui/badge"
-import { Select } from "@/components/ui/input"
+import { FormError } from "@kaperkunde/ui/form-status"
+import { SubmitButton } from "@kaperkunde/ui/submit-button"
+import { Badge } from "@kaperkunde/ui/badge"
+import { Select } from "@kaperkunde/ui/input"
 import type { TierActionResult } from "@/lib/actions/tool-tiers"
 import {
   TOOL_TIER_HINTS,

@@ -9,8 +9,8 @@ import {
   NameFields,
   ServerFormFrame,
 } from "@/components/server-form-parts"
-import { Input } from "@/components/ui/input"
-import { Field } from "@/components/ui/label"
+import { Input } from "@kaperkunde/ui/input"
+import { Field } from "@kaperkunde/ui/label"
 import type { ServerActionResult } from "@/lib/actions/servers"
 import {
   createSshServerAction,

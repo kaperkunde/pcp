@@ -8,20 +8,20 @@ import { BrowserDescribeForm } from "@/components/browser-describe-form"
 import { BrowserSignInImport } from "@/components/browser-sign-in-import"
 import { BrowserTabView } from "@/components/browser-tab-view"
 import { BrowserTabs } from "@/components/browser-tabs"
-import { FormError } from "@/components/form-status"
+import { FormError } from "@kaperkunde/ui/form-status"
 import { LocalDate } from "@/components/local-date"
-import { SubmitButton } from "@/components/submit-button"
-import { Button } from "@/components/ui/button"
+import { SubmitButton } from "@kaperkunde/ui/submit-button"
+import { Button } from "@kaperkunde/ui/button"
 import {
   Card,
   CardContent,
   CardDescription,
   CardHeader,
   CardTitle,
-} from "@/components/ui/card"
-import { Input } from "@/components/ui/input"
-import { Field } from "@/components/ui/label"
-import { List, ListRow, ListSection } from "@/components/ui/list"
+} from "@kaperkunde/ui/card"
+import { Input } from "@kaperkunde/ui/input"
+import { Field } from "@kaperkunde/ui/label"
+import { List, ListRow, ListSection } from "@kaperkunde/ui/list"
 import {
   browserOverviewAction,
   closeBrowserAction,

@@ -4,12 +4,12 @@ import { useActionState, useState, useTransition } from "react"
 
 import Link from "next/link"
 
-import { FormError, FormNote } from "@/components/form-status"
-import { SubmitButton } from "@/components/submit-button"
-import { Badge } from "@/components/ui/badge"
-import { Button, ButtonLink } from "@/components/ui/button"
-import { Input } from "@/components/ui/input"
-import { List, ListSection } from "@/components/ui/list"
+import { FormError, FormNote } from "@kaperkunde/ui/form-status"
+import { SubmitButton } from "@kaperkunde/ui/submit-button"
+import { Badge } from "@kaperkunde/ui/badge"
+import { Button, ButtonLink } from "@kaperkunde/ui/button"
+import { Input } from "@kaperkunde/ui/input"
+import { List, ListSection } from "@kaperkunde/ui/list"
 import {
   createExitAction,
   deleteExitAction,

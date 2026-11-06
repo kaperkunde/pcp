@@ -1,4 +1,4 @@
-import { Badge } from "@/components/ui/badge"
+import { Badge } from "@kaperkunde/ui/badge"
 import type { MemoryShown } from "@/lib/core/memories"
 
 /**

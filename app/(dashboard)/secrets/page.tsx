@@ -1,6 +1,6 @@
 import type { Metadata } from "next"
 
-import { PageHeader } from "@/components/page-header"
+import { PageHeader } from "@kaperkunde/ui/page"
 import { SecretAddDialog } from "@/components/secret-add-dialog"
 import { SecretsManager } from "@/components/secrets-manager"
 import {

@@ -1,4 +1,4 @@
-import { SwitchRow } from "@/components/ui/switch"
+import { SwitchRow } from "@kaperkunde/ui/switch"
 import { MAX_SHARED_MEMORY_CHARS } from "@/lib/core/constants"
 
 /**

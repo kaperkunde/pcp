@@ -22,10 +22,10 @@ import {
   OAuthClientFields,
   type OAuthClientValues,
 } from "@/components/oauth-client-fields"
-import { Button } from "@/components/ui/button"
-import { Input, Textarea } from "@/components/ui/input"
-import { Field } from "@/components/ui/label"
-import { SwitchRow } from "@/components/ui/switch"
+import { Button } from "@kaperkunde/ui/button"
+import { Input, Textarea } from "@kaperkunde/ui/input"
+import { Field } from "@kaperkunde/ui/label"
+import { SwitchRow } from "@kaperkunde/ui/switch"
 import {
   createEndpointAction,
   updateEndpointAction,

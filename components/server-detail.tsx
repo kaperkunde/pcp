@@ -10,11 +10,11 @@ import {
   type ReactNode,
 } from "react"
 
-import { CopyableValue } from "@/components/copyable-value"
-import { FormError, FormNote } from "@/components/form-status"
+import { CopyableValue } from "@kaperkunde/ui/copy-button"
+import { FormError, FormNote } from "@kaperkunde/ui/form-status"
 import { ItemAboutRows } from "@/components/item-about"
 import { LocalDate, RelativeDate } from "@/components/local-date"
-import { PageHeader } from "@/components/page-header"
+import { PageHeader } from "@kaperkunde/ui/page"
 import { ServerStatusBadge } from "@/components/server-status-badge"
 import { ServerTools, type ServerTool } from "@/components/server-tools"
 import { ServiceRemove } from "@/components/service-card"
@@ -22,15 +22,15 @@ import {
   SharedDefinitionNote,
   SharedInstancesProvider,
 } from "@/components/shared-definition"
-import { SubmitButton } from "@/components/submit-button"
-import { Badge } from "@/components/ui/badge"
-import { Button, buttonVariants } from "@/components/ui/button"
-import { Disclosure } from "@/components/ui/disclosure"
+import { SubmitButton } from "@kaperkunde/ui/submit-button"
+import { Badge } from "@kaperkunde/ui/badge"
+import { Button, buttonVariants } from "@kaperkunde/ui/button"
+import { Disclosure } from "@kaperkunde/ui/disclosure"
 import { IconTile, serverKindLabel } from "@/components/ui/icon-tile"
-import { Input } from "@/components/ui/input"
-import { Field } from "@/components/ui/label"
-import { List, ListRow, ListSection, RowValue } from "@/components/ui/list"
-import { SwitchRow } from "@/components/ui/switch"
+import { Input } from "@kaperkunde/ui/input"
+import { Field } from "@kaperkunde/ui/label"
+import { List, ListRow, ListSection, RowValue } from "@kaperkunde/ui/list"
+import { SwitchRow } from "@kaperkunde/ui/switch"
 import {
   deleteServerAction,
   disconnectOAuthAction,

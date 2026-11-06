@@ -3,10 +3,10 @@
 import { useRouter } from "next/navigation"
 import { useState, useTransition } from "react"
 
-import { FormError, FormNote } from "@/components/form-status"
-import { Button } from "@/components/ui/button"
-import { Select } from "@/components/ui/input"
-import { ListRow } from "@/components/ui/list"
+import { FormError, FormNote } from "@kaperkunde/ui/form-status"
+import { Button } from "@kaperkunde/ui/button"
+import { Select } from "@kaperkunde/ui/input"
+import { ListRow } from "@kaperkunde/ui/list"
 import { setClientProfileAction } from "@/lib/actions/tokens"
 import type { ActionState } from "@/lib/server/action-state"
 

@@ -9,12 +9,12 @@ import {
 } from "react"
 
 import { touchIdForget } from "@/components/desktop-bridge"
-import { FormError } from "@/components/form-status"
+import { FormError } from "@kaperkunde/ui/form-status"
 import { OwnerConfirmFields } from "@/components/owner-confirm-fields"
-import { Button } from "@/components/ui/button"
-import { Card, CardDescription, CardTitle } from "@/components/ui/card"
-import { Checkbox } from "@/components/ui/input"
-import { Label } from "@/components/ui/label"
+import { Button } from "@kaperkunde/ui/button"
+import { Card, CardDescription, CardTitle } from "@kaperkunde/ui/card"
+import { Checkbox } from "@kaperkunde/ui/input"
+import { Label } from "@kaperkunde/ui/label"
 import { deleteVaultAction } from "@/lib/actions/settings"
 import type { ActionState } from "@/lib/server/action-state"
 

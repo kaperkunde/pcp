@@ -3,11 +3,11 @@
 import { Plus, X } from "lucide-react"
 import { useState } from "react"
 
-import { Badge } from "@/components/ui/badge"
-import { Button } from "@/components/ui/button"
-import { Input, Select } from "@/components/ui/input"
-import { List, ListRow } from "@/components/ui/list"
-import { Switch } from "@/components/ui/switch"
+import { Badge } from "@kaperkunde/ui/badge"
+import { Button } from "@kaperkunde/ui/button"
+import { Input, Select } from "@kaperkunde/ui/input"
+import { List, ListRow } from "@kaperkunde/ui/list"
+import { Switch } from "@kaperkunde/ui/switch"
 import {
   TOOL_ACCESS_LABELS,
   TOOL_ACCESS_LEVELS,
@@ -154,7 +154,7 @@ export function ProposedAccessEditor({
                     <span className="flex flex-wrap items-center gap-2">
                       <code className="text-sm break-all">{row.pattern}</code>
                       {asked && changed ? (
-                        <Badge variant="outline">
+                        <Badge variant="secondary">
                           Proposed:{" "}
                           {[
                             ...(asked.access

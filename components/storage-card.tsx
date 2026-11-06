@@ -1,8 +1,8 @@
 import Link from "next/link"
 
 import { StoreConversionForm } from "@/components/store-conversion-form"
-import { ButtonLink } from "@/components/ui/button"
-import { List, ListRow, ListSection } from "@/components/ui/list"
+import { ButtonLink } from "@kaperkunde/ui/button"
+import { List, ListRow, ListSection } from "@kaperkunde/ui/list"
 import type { StorageRootView } from "@/lib/core/storage/roots"
 
 /**

@@ -1,12 +1,12 @@
 import { FolderGit2 } from "lucide-react"
 import type { Metadata } from "next"
 
-import { PageColumn } from "@/components/page-column"
-import { PageHeader } from "@/components/page-header"
+import { PageColumn } from "@kaperkunde/ui/page"
+import { PageHeader } from "@kaperkunde/ui/page"
 import { AddCommonRepoButton, AddRepoDialog } from "@/components/repo-forms"
-import { Badge } from "@/components/ui/badge"
+import { Badge } from "@kaperkunde/ui/badge"
 import { IconTile } from "@/components/ui/icon-tile"
-import { List, ListRow, ListSection } from "@/components/ui/list"
+import { List, ListRow, ListSection } from "@kaperkunde/ui/list"
 import { isCommonRepository } from "@/lib/core/repos/common"
 import { githubSignInOffered } from "@/lib/core/repos/signin"
 import {
