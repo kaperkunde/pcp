@@ -93,6 +93,20 @@ export default defineConfig(
         use: { ...devices["Desktop Chrome"] },
       },
       {
+        // The owner's key pages at a desktop window and a phone's width,
+        // compared with the pictures in e2e/screenshots. Right after setup,
+        // so the pages hold only what the spec adds. The committed pictures
+        // are CI's (its Chromium and fonts); anywhere else they are kept in
+        // e2e/.screenshots, made on the first run and compared after.
+        name: "screens",
+        testMatch: /screens\.spec\.ts/,
+        dependencies: ["setup"],
+        use: signedIn("screens"),
+        snapshotPathTemplate: process.env.CI
+          ? "{testDir}/../screenshots/{arg}{ext}"
+          : "{testDir}/../.screenshots/{arg}{ext}",
+      },
+      {
         name: "secrets",
         testMatch: /secrets\.spec\.ts/,
         dependencies: ["setup"],
