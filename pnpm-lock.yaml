@@ -20,6 +20,9 @@ importers:
       '@kaperkunde/mcp':
         specifier: 0.1.1
         version: 0.1.1(@modelcontextprotocol/server@2.2.0)(zod@4.6.5)
+      '@kaperkunde/next-kit':
+        specifier: 0.1.1
+        version: 0.1.1(react@19.2.8)
       '@kaperkunde/pcpgg-protocol':
         specifier: 0.1.1
         version: 0.1.1
@@ -517,6 +520,14 @@ packages:
       zod: ^4.6.0
     peerDependenciesMeta:
       '@modelcontextprotocol/server':
+        optional: true
+
+  '@kaperkunde/next-kit@0.1.1':
+    resolution: {integrity: sha512-ZmOmVrzp3c3itRZyY8a1WYSsnsorRmOyt0L96npADu28G+JqGcsL/T0eHWUTjwtEF7/t60wvoGdUAeqJZrGRMA==}
+    peerDependencies:
+      react: ^19.0.0
+    peerDependenciesMeta:
+      react:
         optional: true
 
   '@kaperkunde/pcpgg-protocol@0.1.1':
@@ -4632,6 +4643,10 @@ snapshots:
       zod: 4.6.5
     optionalDependencies:
       '@modelcontextprotocol/server': 2.2.0
+
+  '@kaperkunde/next-kit@0.1.1(react@19.2.8)':
+    optionalDependencies:
+      react: 19.2.8
 
   '@kaperkunde/pcpgg-protocol@0.1.1':
     dependencies:
