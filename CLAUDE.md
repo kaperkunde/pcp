@@ -857,10 +857,11 @@ embeddingProvider`, which hands `embeddings/provider.ts` the header;
   unencrypted. Never copy anything from the vault into one, and never add the
   pcp.gg key to an export (`EXPORTED_HOST_KEYS`). `lib/core/network/` starts
   nothing (timer, listener, request, connection) while all three are off.
-- `lib/core/network/pcpgg/{frames,mux,control}.ts` are copies of pcp.gg's
-  `tunnel/protocol/` (kaperkunde/pcp-gg) and speak its wire protocol: change
-  them only together with pcp.gg, keeping `PROTOCOL_VERSION`. `test-relay/`
-  is pcp.gg's relay for tests; PCP never runs it.
+- pcp.gg's wire protocol and connector come from
+  `@kaperkunde/pcpgg-protocol` (kaperkunde/common-public), which pcp.gg
+  takes too: a protocol change is a new version of that package, with a new
+  `PROTOCOL_VERSION`, and PCP and pcp.gg bump it together. Its `/relay` is
+  for tests only; PCP never runs a relay.
 - The Touch ID key (`lib/core/device-keys.ts`) is a credential the Mac app
   keeps and hands to PCP's page only after Touch ID. It is made only with
   the typed password (Settings, or the box on the sign-in page), a vault has

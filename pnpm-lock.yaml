@@ -17,6 +17,9 @@ importers:
       '@jitl/quickjs-singlefile-cjs-release-sync':
         specifier: 0.32.0
         version: 0.32.0
+      '@kaperkunde/pcpgg-protocol':
+        specifier: 0.1.1
+        version: 0.1.1
       '@mixmark-io/domino':
         specifier: ^2.2.0
         version: 2.2.0
@@ -138,9 +141,6 @@ importers:
       '@types/turndown':
         specifier: ^5.0.6
         version: 5.0.6
-      '@types/ws':
-        specifier: ^8.18.2
-        version: 8.18.2
       eslint:
         specifier: ^9
         version: 9.39.5(jiti@2.7.0)
@@ -168,9 +168,6 @@ importers:
       vitest:
         specifier: 5.0.2
         version: 5.0.2(@types/node@24.19.1)(vite@8.3.1(@types/node@24.19.1)(jiti@2.7.0)(yaml@2.9.1))
-      ws:
-        specifier: ^8.22.0
-        version: 8.22.0
 
 packages:
 
@@ -505,6 +502,10 @@ packages:
         optional: true
       vitest:
         optional: true
+
+  '@kaperkunde/pcpgg-protocol@0.1.1':
+    resolution: {integrity: sha512-MFzCqbuppP19cWoDhRMKyIDsJW2oDz2MXknsx2U2tvS0xyEo0bPETHS/0//LsNle6ZncGi4tuwF6NllMcm8smA==}
+    engines: {node: '>=24'}
 
   '@mixmark-io/domino@2.2.0':
     resolution: {integrity: sha512-Y28PR25bHXUg88kCV7nivXrP2Nj2RueZ3/l/jdx6J9f8J4nsEGcgX0Qe6lt7Pa+J79+kPiJU3LguR6O/6zrLOw==}
@@ -1102,9 +1103,6 @@ packages:
 
   '@types/validate-npm-package-name@4.0.2':
     resolution: {integrity: sha512-lrpDziQipxCEeK5kWxvljWYhUvOiB2A9izZd9B2AFarYAkqZshb4lPbRs7zKEic6eGtH8V/2qJW+dPp9OtF6bw==}
-
-  '@types/ws@8.18.2':
-    resolution: {integrity: sha512-67MQl+fpWKVTT1NYdnmo3U4sc/xPo/zQBncVnI74qmQa0z/b+1g6iYqNmGCPbxO+zz2aklb08a0oHfegiVd0/w==}
 
   '@typescript-eslint/eslint-plugin@8.72.1':
     resolution: {integrity: sha512-5CokTWXpmbylfFabsbvHC0CAw3XLaGnoa+nFJX5FR592h/LoZsENUE6p/rg5xvkKrFEXz6pYmgI29AgXc2N3BQ==}
@@ -4609,6 +4607,13 @@ snapshots:
       eslint-config-prettier: 10.1.8(eslint@9.39.5(jiti@2.7.0))
       vitest: 5.0.2(@types/node@24.19.1)(vite@8.3.1(@types/node@24.19.1)(jiti@2.7.0)(yaml@2.9.1))
 
+  '@kaperkunde/pcpgg-protocol@0.1.1':
+    dependencies:
+      ws: 8.22.0
+    transitivePeerDependencies:
+      - bufferutil
+      - utf-8-validate
+
   '@mixmark-io/domino@2.2.0': {}
 
   '@modelcontextprotocol/client@2.2.0':
@@ -5181,10 +5186,6 @@ snapshots:
   '@types/turndown@5.0.6': {}
 
   '@types/validate-npm-package-name@4.0.2': {}
-
-  '@types/ws@8.18.2':
-    dependencies:
-      '@types/node': 24.19.1
 
   '@typescript-eslint/eslint-plugin@8.72.1(@typescript-eslint/parser@8.72.1(eslint@9.39.5(jiti@2.7.0))(typescript@5.9.3))(eslint@9.39.5(jiti@2.7.0))(typescript@5.9.3)':
     dependencies:

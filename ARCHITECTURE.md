@@ -3840,17 +3840,17 @@ every interface even while the app keeps port 3000 to this computer: a
 router's forward needs exactly that (with a pcp.gg name they listen on
 127.0.0.1 only, below).
 
-**pcp.gg** (`pcpgg.ts`, `pcpgg/`): the owner pastes a connection key from
+**pcp.gg** (`pcpgg.ts`): the owner pastes a connection key from
 their pcp.gg dashboard, and PCP runs pcp.gg's connector itself
-(`pcpgg/connector.ts`, lifted from kaperkunde/pcp-gg's `tunnel/connector/`).
+(`@kaperkunde/pcpgg-protocol/connector`, the package pcp.gg's own tunnel uses).
 It holds one WebSocket to pcp.gg (`PCP_PCPGG_RELAY_URL` overrides the
 address) and answers each connection pcp.gg passes down by dialling the
 edge's own listeners on 127.0.0.1. Connections to the owner's name on port
 443 arrive still encrypted and end in the edge's HTTPS listener, so pcp.gg
 carries bytes it cannot read, Let's Encrypt's TLS-ALPN-01 validation among
-them; on port 80 pcp.gg passes on only Let's Encrypt's HTTP-01 challenge. The wire format (`pcpgg/frames.ts`, `mux.ts`,
-`control.ts`) is a copy of pcp.gg's `tunnel/protocol/`, protocol version 1;
-the tests run against a copy of pcp.gg's relay (`pcpgg/test-relay/`).
+them; on port 80 pcp.gg passes on only Let's Encrypt's HTTP-01 challenge. The wire format is the same
+package's (`@kaperkunde/pcpgg-protocol`), protocol version 1; the tests run
+against its relay (`@kaperkunde/pcpgg-protocol/relay`).
 
 `reconcileNetwork()` starts the connector while a key is saved and pcp.gg
 has not refused it, and stops it otherwise. pcp.gg's `ready` message names
