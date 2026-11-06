@@ -49,6 +49,12 @@ the browser's); the Playwright suite; and, on a macOS runner, the Touch ID
 keychain module built for both Mac architectures and loaded once. The one
 thing a push runs is the release workflow, on `main` (below).
 
+The first of those jobs runs on the owner's self-hosted runner, bob, except
+for a pull request from a fork, which always runs on GitHub's runners; the
+repository variable `CI_RUNNER` (`ubuntu-latest`, say) sends it back to
+GitHub's without a code change. The others stay on GitHub's: they install
+Chromium with its system packages, or need macOS.
+
 `pnpm lint`, `pnpm format:check` and `pnpm test` cover `desktop/` too (its
 scripts and its modules' tests: settings, updates, Touch ID's store, the
 keychain profile check); the app itself is built by hand or by the release
