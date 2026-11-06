@@ -20,7 +20,7 @@ import { markdownLink } from "../owner-link"
 import { hiddenCharacter, withoutPresentation } from "../memories"
 import { browserToolPaced, pacedResult, paceSite } from "../pacing"
 import { PERMISSION_TTL_MS } from "../permission-rules"
-import { checkRateLimit } from "../rate-limit"
+import { checkRateLimit } from "@kaperkunde/security"
 import { loadResourceLimits } from "../resources/state"
 import { missingResultMessage, resolveHandles } from "../result-handles"
 import {
@@ -2592,7 +2592,7 @@ async function runTool(
 ): Promise<CallToolResult> {
   const { ctx, tokenId, publicUrl, signal } = scope
 
-  if (!checkRateLimit(`browser:${tokenId}`, BROWSER_ACTIONS)) {
+  if (!checkRateLimit(`browser:${tokenId}`, BROWSER_ACTIONS).allowed) {
     return text(
       "That is a lot of browsing in a short time. Wait a few minutes.",
       true,

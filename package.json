@@ -34,6 +34,10 @@
     "@base-ui/react": "^1.8.0",
     "@img/sharp-wasm32": "0.35.5",
     "@jitl/quickjs-singlefile-cjs-release-sync": "0.32.0",
+    "@kaperkunde/mcp": "0.1.1",
+    "@kaperkunde/next-kit": "0.1.1",
+    "@kaperkunde/pcpgg-protocol": "0.1.1",
+    "@kaperkunde/security": "0.2.0",
     "@mixmark-io/domino": "^2.2.0",
     "@modelcontextprotocol/client": "^2.2.0",
     "@modelcontextprotocol/server": "^2.2.0",
@@ -67,7 +71,7 @@
     "zod": "^4.6.5"
   },
   "devDependencies": {
-    "@kaperkunde/config": "0.1.1",
+    "@kaperkunde/config": "0.1.2",
     "@playwright/test": "1.63.0",
     "@tailwindcss/postcss": "^4",
     "@types/better-sqlite3": "^9.6.0",
@@ -76,7 +80,6 @@
     "@types/react-dom": "~19.2.0",
     "@types/ssh2": "^1.15.6",
     "@types/turndown": "^5.0.6",
-    "@types/ws": "^8.18.2",
     "eslint": "^9",
     "eslint-config-next": "16.3.6",
     "eslint-config-prettier": "^10.1.8",
@@ -85,8 +88,7 @@
     "prettier": "^3.9.9",
     "tailwindcss": "^4",
     "typescript": "~5.9.0",
-    "vitest": "5.0.2",
-    "ws": "^8.22.0"
+    "vitest": "5.0.2"
   },
   "prettier": "@kaperkunde/config/prettier"
 }

@@ -13,7 +13,7 @@ import {
   type ScreencastSubscription,
 } from "@/lib/core/browser/screencast"
 import { resolveSession } from "@/lib/core/sessions"
-import { isSameOrigin } from "@/lib/server/same-origin"
+import { isSameOrigin } from "@kaperkunde/security"
 import { currentSession, SESSION_COOKIE } from "@/lib/server/session"
 
 export const dynamic = "force-dynamic"

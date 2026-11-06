@@ -1,5 +1,7 @@
+import { safeEqual } from "@kaperkunde/security"
+
 import type { VaultContext } from "./context"
-import { randomSecret, safeEqual, sha256Hex } from "./crypto"
+import { randomSecret, sha256Hex } from "./crypto"
 import { db } from "./db"
 import { newId } from "./ids"
 import { createCredentialGrant, unlockWithCredential } from "./keys"

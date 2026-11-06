@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
-import { resetRateLimits } from "@/lib/core/rate-limit"
+import { resetRateLimits } from "@kaperkunde/security"
 import {
   createSession,
   resolveSession,

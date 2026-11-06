@@ -1,7 +1,7 @@
 import { asBytes } from "@/lib/core/crypto"
 import { servedFile } from "@/lib/core/permission-files"
 import { openRequestFile } from "@/lib/core/permissions"
-import { isSameOrigin } from "@/lib/server/same-origin"
+import { isSameOrigin } from "@kaperkunde/security"
 import { currentSession } from "@/lib/server/session"
 
 export const dynamic = "force-dynamic"

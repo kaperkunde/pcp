@@ -20,7 +20,7 @@ import {
   ACCESS_TOKEN_PREFIX,
   resolveAccessToken,
 } from "@/lib/core/oauth-server/tokens"
-import { checkRateLimit } from "@/lib/core/rate-limit"
+import { checkRateLimit } from "@kaperkunde/security"
 import { publicUrlFor, publicUrlWithoutSession } from "@/lib/server/public-url"
 import { loadResourceLimits } from "@/lib/core/resources/state"
 import { runDueSyncs } from "@/lib/core/repos/sync"
@@ -159,7 +159,7 @@ async function handle(request: Request): Promise<Response> {
     )
   }
 
-  if (!checkRateLimit(`mcp:${resolved.tokenId}`, RATE_LIMIT)) {
+  if (!checkRateLimit(`mcp:${resolved.tokenId}`, RATE_LIMIT).allowed) {
     return withCors(
       jsonRpcError(429, "Too many requests; slow down.", {
         "Retry-After": "30",

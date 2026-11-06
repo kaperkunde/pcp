@@ -13,7 +13,7 @@ import {
 } from "@/lib/core/storage/browse"
 import { openStorageDownload } from "@/lib/core/upstream"
 import { publicUrlFor } from "@/lib/server/public-url"
-import { isSameOrigin } from "@/lib/server/same-origin"
+import { isSameOrigin } from "@kaperkunde/security"
 import { currentSession } from "@/lib/server/session"
 
 export const dynamic = "force-dynamic"

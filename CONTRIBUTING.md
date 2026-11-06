@@ -195,6 +195,15 @@ A bug that regressed gets a test that fails before the fix and passes after
 
 ## Key files
 
+Code Kaperkunde's apps share lives in the `@kaperkunde/*` packages
+([kaperkunde/common-public](https://github.com/kaperkunde/common-public)):
+pcp.gg's protocol and connector (`pcpgg-protocol`), the rate limiter,
+client address, same-origin check and public-address check (`security`),
+the MCP tool factory, validator and owner links (`mcp`, under PCP's layer
+in `lib/core/tools/`), the Server Action state (`next-kit`), and the lint,
+format and TypeScript settings (`config`). Check there before writing a
+helper, and change it there.
+
 | Path                                 | Purpose                                                               |
 | ------------------------------------ | --------------------------------------------------------------------- |
 | `lib/core/crypto.ts`                 | Envelope encryption, KEK derivation, wrapping the data key            |
@@ -240,7 +249,6 @@ A bug that regressed gets a test that fails before the fix and passes after
 | `lib/core/access-requests.ts`        | Tool levels an assistant proposes; the owner's save                   |
 | `lib/core/permissions.ts`            | Asking the owner before a call runs; running it once                  |
 | `lib/core/request-log.ts`            | One line per gateway call, never its arguments or results             |
-| `lib/core/owner-wait.ts`             | Holding a check while the owner answers or signs in                   |
 | `lib/core/connect.ts`                | The link an assistant hands over to connect an OAuth server           |
 | `lib/core/migrate.ts`                | Boot-time migrations                                                  |
 | `lib/core/backup.ts`                 | Export to one file and restore from one; backup-format.ts             |
@@ -285,5 +293,6 @@ the same way.
 Next.js 15 (App Router, Server Actions), React 19, TypeScript, Tailwind CSS 4
 with shadcn/ui primitives, Prisma 7 on SQLite (`better-sqlite3`), the
 `@modelcontextprotocol` v2 SDK for both the gateway and the upstream client,
-QuickJS in WebAssembly for `run_code`, `patchright-core` driving Chromium for
+Kaperkunde's shared `@kaperkunde/*` packages, QuickJS in WebAssembly for
+`run_code`, `patchright-core` driving Chromium for
 the browser, Electron for the desktop apps, Vitest, Playwright, pnpm.

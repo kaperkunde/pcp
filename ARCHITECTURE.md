@@ -178,7 +178,7 @@ from one endpoint could be built on it. What that would take:
    `datasource` block; a Postgres host generates its own migration history
    (`prisma migrate dev` against Postgres) and runs migrations as a deploy
    step instead of at boot (`instrumentation.ts` → `applyMigrations()` is
-   for a single instance). Rate limits (`lib/core/rate-limit.ts`) and
+   for a single instance). Rate limits (`@kaperkunde/security`) and
    pacing's state (`lib/core/pacing/pace.ts`) are per-process and would
    move to a shared store.
 5. **None of it lives in this repository.** No admin API, no "create vault"
@@ -444,9 +444,11 @@ change an endpoint decides where PCP sends requests:
 - **Public addresses only.** What an assistant registers has `public_only`
   set, and only the owner can clear it. Such an endpoint refuses loopback,
   private, link-local, carrier-grade NAT and multicast addresses, cloud
-  host addresses and the IPv6 forms that wrap one (`openapi/address.ts`), for
+  host addresses and the IPv6 forms that wrap one (`isPublicAddress` from
+  `@kaperkunde/security/net`, through `openapi/address.ts`), for
   its calls and for any schema download. The check is made on the address the
-  socket connects to (`openapi/transport.ts` resolves the name itself and
+  socket connects to (`openapi/transport.ts` resolves the name itself, with
+  the package's `publicLookup`, and
   checks every answer), so a name that resolves to a public address for a
   check and a private one for the connection cannot get through. The owner
   turns it off per endpoint, for an API on their own network, with the
@@ -3451,7 +3453,7 @@ says nothing of it.
 Assistants act far faster than a person, and a site that sees a quick run of
 automated actions can take the owner's account for a robot and flag it; a
 small server or a busy page can be overloaded by one. The rate limits
-(`lib/core/rate-limit.ts`) only refuse past a count; pacing
+(`checkRateLimit`, `@kaperkunde/security`) only refuse past a count; pacing
 (`lib/core/pacing/`) spaces actions out, the same way whatever made them.
 
 **Where it applies.** At two places, which every way of calling passes
@@ -3735,7 +3737,8 @@ with one it holds the password to; on the setup page there is no password
 yet, and whoever reaches that page could set up instead. Both are
 rate-limited like password attempts. The download is a route handler (an
 action cannot send a file), so it checks the request's origin itself
-(`lib/server/same-origin.ts`), which Server Actions get built in.
+(`isSameOrigin` from `@kaperkunde/security`), which Server Actions get built
+in.
 
 ## Reaching PCP: pcp.gg, dynamic DNS and HTTPS
 
@@ -3840,17 +3843,17 @@ every interface even while the app keeps port 3000 to this computer: a
 router's forward needs exactly that (with a pcp.gg name they listen on
 127.0.0.1 only, below).
 
-**pcp.gg** (`pcpgg.ts`, `pcpgg/`): the owner pastes a connection key from
+**pcp.gg** (`pcpgg.ts`): the owner pastes a connection key from
 their pcp.gg dashboard, and PCP runs pcp.gg's connector itself
-(`pcpgg/connector.ts`, lifted from kaperkunde/pcp-gg's `tunnel/connector/`).
+(`@kaperkunde/pcpgg-protocol/connector`, the package pcp.gg's own tunnel uses).
 It holds one WebSocket to pcp.gg (`PCP_PCPGG_RELAY_URL` overrides the
 address) and answers each connection pcp.gg passes down by dialling the
 edge's own listeners on 127.0.0.1. Connections to the owner's name on port
 443 arrive still encrypted and end in the edge's HTTPS listener, so pcp.gg
 carries bytes it cannot read, Let's Encrypt's TLS-ALPN-01 validation among
-them; on port 80 pcp.gg passes on only Let's Encrypt's HTTP-01 challenge. The wire format (`pcpgg/frames.ts`, `mux.ts`,
-`control.ts`) is a copy of pcp.gg's `tunnel/protocol/`, protocol version 1;
-the tests run against a copy of pcp.gg's relay (`pcpgg/test-relay/`).
+them; on port 80 pcp.gg passes on only Let's Encrypt's HTTP-01 challenge. The wire format is the same
+package's (`@kaperkunde/pcpgg-protocol`), protocol version 1; the tests run
+against its relay (`@kaperkunde/pcpgg-protocol/relay`).
 
 `reconcileNetwork()` starts the connector while a key is saved and pcp.gg
 has not refused it, and stops it otherwise. pcp.gg's `ready` message names
@@ -4195,7 +4198,10 @@ checks the token on every request, so a revoked one stops at once.
 ## The gateway's tools
 
 Every one of PCP's own tools is written to one interface
-(`lib/core/tools/`): `defineTool` with a zod input published as JSON
+(`lib/core/tools/`, PCP's layer over `@kaperkunde/mcp`, which holds the
+factory, the validator, the outcomes and serving a call; PCP adds its meta
+keys, error codes, placeholders, owner reasons, permission links and the
+lead in front of an answer): `defineTool` with a zod input published as JSON
 Schema 2020-12, every object closed (`additionalProperties: false`) and
 every property described (refused otherwise), all four annotations, an
 output schema when every answer is one shape, and old argument names
@@ -4463,7 +4469,7 @@ While the request waits, the owner can look at a file before answering, and
 download it: `app/api/permissions/[id]/files/[result]` is a route handler (a
 file needs Content-Type and Content-Disposition, which an action cannot
 send) that checks the request came from PCP's own page
-(`lib/server/same-origin.ts`) and the owner's session, and serves only a
+(`isSameOrigin`, `@kaperkunde/security`) and the owner's session, and serves only a
 result that waiting call's arguments name, of the request's own token
 (`openRequestFile`: pending and not expired, `requestServes`; then
 `openResult` with the request's token, which also checks the day it is kept
@@ -4859,7 +4865,7 @@ whatever it says, before sending the link again or assuming the request is
 still open (`owner-link.ts: nextMessageCheck`): the owner's words rarely say
 whether they answered, and an assistant that waited to be told sent links
 again for requests already decided. In case they are still on it, the check holds the call while
-the request is open (`lib/core/owner-wait.ts`: up to 45 seconds, under the
+the request is open (`waitForOwner`, `@kaperkunde/mcp/owner`: up to 45 seconds, under the
 minute at which clients and proxies give up, checking every second, and
 dropping out when the client goes away) and answers as soon as they have.
 Which app is on the other end decides whether a link may come before a

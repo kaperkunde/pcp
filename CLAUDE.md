@@ -42,6 +42,11 @@ so in the summary; the bump itself waits for the request.
 
 ## Boundaries
 
+- Shared code lives in `@kaperkunde/*` (kaperkunde/common-public); check
+  there before writing a helper, and change it upstream rather than
+  copying it here. PCP's own rules ride on top as thin layers
+  (`lib/core/tools/` over `@kaperkunde/mcp`, `lib/server/action-state.ts`
+  over `@kaperkunde/next-kit`).
 - `lib/core` is framework-free. No `next/*`, no React, no `lib/actions`,
   no `lib/server` (ESLint enforces it). Everything takes a `VaultContext`
   explicitly. If a core function needs something from the request, the
@@ -141,7 +146,9 @@ so in the summary; the bump itself waits for the request.
   with `share` (renaming it out of `/skills/mine/`), written as shown. A
   deleted token's stay, the owner's alone. A change to the SKILL.md shape
   stays backward compatible.
-- Every tool PCP exposes is defined through `lib/core/tools/`: PCP's own
+- Every tool PCP exposes is defined through `lib/core/tools/` (PCP's
+  layer over `@kaperkunde/mcp`: its meta keys, error codes, placeholders,
+  owner reasons and permission links): PCP's own
   at `/mcp` with `defineTool`, the families behind call_tool (browser, mail,
   calendar, SSH, services, storage folders) with `defineInnerTool`
   (`tools/family.ts`); a
@@ -803,7 +810,7 @@ embeddingProvider`, which hands `embeddings/provider.ts` the header;
   the desktop app only, also carries the version and the owner's install
   request for the wrapper to read), the export download (`app/api/export/route.ts`: a file needs
   `Content-Disposition`, which an action cannot send; it checks the request's
-  origin itself, `lib/server/same-origin.ts`), file links
+  origin itself, `isSameOrigin` from `@kaperkunde/security`), file links
   (`app/api/files/[secret]/`: curl from an assistant's own computer, a
   `share_file` link's download with its Range, and the upload page's PUTs
   and Done, the link's secret its only credential),
@@ -827,8 +834,8 @@ embeddingProvider`, which hands `embeddings/provider.ts` the header;
   `owner-link.ts` holds the label rules and the wording instructions and
   descriptions use), and a check to call on the owner's next message,
   whatever it says, before the link is sent again (`nextMessageCheck`;
-  `check_permission`, `check_server`, `check_upload`,
-  `lib/core/owner-wait.ts`). In a session, the next answer of any of PCP's
+  `check_permission`, `check_server`, `check_upload`, `waitForOwner` from
+  `@kaperkunde/mcp/owner`). In a session, the next answer of any of PCP's
   own tools names the token's requests answered since, once each, and
   `check_permission` with no id lists the last hour's. The header's bell lists what is waiting. No client prompts (elicitation) and no MCP Apps
   panel: Claude's apps stalled on the one and rebuilt the other stale (see
@@ -857,10 +864,11 @@ embeddingProvider`, which hands `embeddings/provider.ts` the header;
   unencrypted. Never copy anything from the vault into one, and never add the
   pcp.gg key to an export (`EXPORTED_HOST_KEYS`). `lib/core/network/` starts
   nothing (timer, listener, request, connection) while all three are off.
-- `lib/core/network/pcpgg/{frames,mux,control}.ts` are copies of pcp.gg's
-  `tunnel/protocol/` (kaperkunde/pcp-gg) and speak its wire protocol: change
-  them only together with pcp.gg, keeping `PROTOCOL_VERSION`. `test-relay/`
-  is pcp.gg's relay for tests; PCP never runs it.
+- pcp.gg's wire protocol and connector come from
+  `@kaperkunde/pcpgg-protocol` (kaperkunde/common-public), which pcp.gg
+  takes too: a protocol change is a new version of that package, with a new
+  `PROTOCOL_VERSION`, and PCP and pcp.gg bump it together. Its `/relay` is
+  for tests only; PCP never runs a relay.
 - The Touch ID key (`lib/core/device-keys.ts`) is a credential the Mac app
   keeps and hands to PCP's page only after Touch ID. It is made only with
   the typed password (Settings, or the box on the sign-in page), a vault has

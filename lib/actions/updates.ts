@@ -3,7 +3,7 @@
 import { revalidatePath } from "next/cache"
 
 import { invalid, PcpError } from "@/lib/core/errors"
-import { checkRateLimit } from "@/lib/core/rate-limit"
+import { checkRateLimit } from "@kaperkunde/security"
 import { CHECK_NOW_LIMIT, isUpdateChannel } from "@/lib/core/updates/limits"
 import {
   checkNow,
@@ -84,7 +84,7 @@ export async function setUpdateChannelAction(
 
     if (
       (await getUpdateConfig()).check &&
-      checkRateLimit("updates:check-now", CHECK_NOW_LIMIT)
+      checkRateLimit("updates:check-now", CHECK_NOW_LIMIT).allowed
     ) {
       const status = await checkNow()
       const newer = newerRelease(status)
@@ -110,7 +110,7 @@ export async function checkForUpdatesAction(): Promise<UpdatesResult> {
   await requireContext()
 
   const result = await guarded(async () => {
-    if (!checkRateLimit("updates:check-now", CHECK_NOW_LIMIT)) {
+    if (!checkRateLimit("updates:check-now", CHECK_NOW_LIMIT).allowed) {
       throw new PcpError(
         "forbidden",
         "You checked several times just now. Wait a minute and try again.",

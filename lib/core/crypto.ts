@@ -5,7 +5,6 @@ import {
   hkdfSync,
   randomBytes,
   scrypt,
-  timingSafeEqual,
 } from "node:crypto"
 
 /**
@@ -64,18 +63,6 @@ export function asBytes(buffer: Buffer): Uint8Array<ArrayBuffer> {
   const bytes = new Uint8Array(new ArrayBuffer(buffer.length))
   bytes.set(buffer)
   return bytes
-}
-
-/** Constant-time comparison of two strings of possibly different length. */
-export function safeEqual(a: string, b: string): boolean {
-  const left = Buffer.from(a)
-  const right = Buffer.from(b)
-
-  if (left.length !== right.length) {
-    return false
-  }
-
-  return timingSafeEqual(left, right)
 }
 
 /** nonce || ciphertext || tag */
