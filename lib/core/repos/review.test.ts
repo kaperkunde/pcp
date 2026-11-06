@@ -375,6 +375,26 @@ describe("reviewing a service", () => {
       "It keeps data in named volumes: cache at /opt/cache.",
     ])
 
+    const mcp = reviewItem(SERVICE, {
+      ...SERVICE,
+      definition: {
+        ...SERVICE.definition,
+        registers: {
+          kind: "mcp",
+          port: 5001,
+          path: "/mcp",
+          auth: {
+            env: "DOCLING_SERVE_API_KEY",
+            header: "Authorization",
+            template: "Bearer {{secret}}",
+          },
+        },
+      },
+    })
+    expect(mcp.flags.map((flag) => flag.message)).toEqual([
+      "PCP adds an MCP server at /mcp on port 5001, sending DOCLING_SERVE_API_KEY's secret in Authorization.",
+    ])
+
     const described = reviewItem(SERVICE, {
       ...SERVICE,
       description: "Other words.",

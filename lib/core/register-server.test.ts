@@ -1532,6 +1532,55 @@ describe("proposing a service", () => {
     expect(launched[0]!.env).toEqual({ DOCLING_SERVE_API_KEY: key.id })
   })
 
+  it("shows the header an MCP server it registers sends, and needs that variable's secret named", async () => {
+    const host = await sshServer()
+    await connectSeeing()
+    const mcp = {
+      ...DEFINITION,
+      env: [{ name: "MCP_TOKEN" }],
+      registers: {
+        kind: "mcp",
+        port: 5001,
+        path: "/mcp",
+        auth: {
+          env: "MCP_TOKEN",
+          header: "Authorization",
+          template: "Bearer {{secret}}",
+        },
+      },
+    }
+
+    expect(
+      (
+        await register({
+          name: "Docs MCP",
+          service: mcp,
+          ssh_server: host.slug,
+        })
+      ).text,
+    ).toMatch(
+      /The MCP server sends MCP_TOKEN's secret in Authorization: name it in env_secrets/,
+    )
+    expect(await db().permissionRequest.count()).toBe(0)
+
+    await register({
+      name: "Docs MCP",
+      service: mcp,
+      ssh_server: host.slug,
+      env_secrets: [{ name: "MCP_TOKEN", secret: "Docs MCP token" }],
+    })
+    expect((await shown()).lines).toContain(
+      "PCP adds an MCP server at /mcp on port 5001, sending MCP_TOKEN's secret in Authorization",
+    )
+
+    await approve("mcp-token-typed-by-the-owner")
+    const secret = await db().secret.findFirstOrThrow({
+      where: { name: "Docs MCP token" },
+    })
+    expect(launched[0]!.env).toEqual({ MCP_TOKEN: secret.id })
+    expect(launched[0]!.definition).toMatchObject({ registers: mcp.registers })
+  })
+
   it("is refused before the owner is asked when it cannot run as proposed", async () => {
     const host = await sshServer()
     const unpinned = await sshServer("Spare box", false)
@@ -1684,6 +1733,42 @@ describe("proposing a service", () => {
     })
     expect(JSON.stringify(await approve())).toMatch(/has changed since/)
     expect(launched).toHaveLength(2)
+  })
+
+  it("shows a files folder it names, and the tools that come with it", async () => {
+    const host = await sshServer()
+    await connectSeeing()
+
+    const asked = await register({
+      name: "Docling",
+      kind: "service",
+      service: {
+        ...DEFINITION,
+        files: { volume: "cache", path: "/opt/cache/in" },
+      },
+      ssh_server: host.slug,
+      env_secrets: [{ name: "DOCLING_SERVE_API_KEY", secret: "Docling key" }],
+    })
+
+    expect(asked.isError).toBe(false)
+    const view = await shown()
+    expect(view.lines).toEqual(
+      expect.arrayContaining([
+        "Files folder: /opt/cache/in, in its volume cache: its put_file copies a file an assistant has into it, and get_file copies one out",
+        "Its tools (status, logs, start, stop, restart, put_file, get_file) and what it adds ask you first, for every token, as a new server's do",
+      ]),
+    )
+    expect(view.full?.[0]?.text).toContain('"files"')
+
+    const outside = await register({
+      name: "Docling two",
+      kind: "service",
+      service: { ...DEFINITION, files: { volume: "data", path: "/data" } },
+      ssh_server: host.slug,
+      env_secrets: [{ name: "DOCLING_SERVE_API_KEY", secret: "Docling key" }],
+    })
+    expect(outside.isError).toBe(true)
+    expect(outside.text).toMatch(/not one of the service's volumes/)
   })
 
   it("takes tool_access for what it registers, by name, and refuses it for a service that registers nothing", async () => {

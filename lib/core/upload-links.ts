@@ -19,6 +19,7 @@ import {
   logUse,
   readSentFile,
   sentMediaType,
+  storePathAad,
   tokenCanUseLinks,
 } from "./file-links"
 import { newId } from "./ids"
@@ -73,6 +74,32 @@ const MAX_NAME_CHARS = 255
 
 function purposeAad(id: string): string {
   return `upload_link:${id}`
+}
+
+function destinationAad(id: string): string {
+  return `upload_link_destination:${id}`
+}
+
+/** Where the page's files go besides the assistant, as the page says it. */
+export type UploadDestination = { store: string; folder: string }
+
+function openDestination(
+  secret: string,
+  page: { id: string; destination: Uint8Array | null },
+): UploadDestination | null {
+  if (!page.destination) return null
+
+  const value = JSON.parse(
+    decryptString(
+      linkKey(secret, page.id),
+      Buffer.from(page.destination),
+      destinationAad(page.id),
+    ),
+  ) as Partial<UploadDestination>
+
+  return typeof value.store === "string" && typeof value.folder === "string"
+    ? { store: value.store, folder: value.folder }
+    : null
 }
 
 /** The hash a slot is stored under: unique, and no request looks it up. */
@@ -161,6 +188,11 @@ export async function createUploadLink(
     purpose: string
     maxFiles?: number
     minutes?: number
+    /**
+     * A store to save the files in too (store-uploads.ts): its id, its
+     * name as the page shows it, and the folder.
+     */
+    destination?: { storeId: string; storeName: string; folder: string }
   },
   now = new Date(),
 ): Promise<CreatedUploadLink> {
@@ -221,6 +253,18 @@ export async function createUploadLink(
         ),
         maxFiles,
         resultIds: JSON.stringify(slots.map((slot) => slot.resultId)),
+        destination: input.destination
+          ? asBytes(
+              encryptString(
+                linkKey(secret, id),
+                JSON.stringify({
+                  store: input.destination.storeName,
+                  folder: input.destination.folder,
+                }),
+                destinationAad(id),
+              ),
+            )
+          : null,
         createdAt: now,
         acceptUntil,
         expiresAt: new Date(acceptUntil.getTime() + RESULT_TTL_MS),
@@ -244,6 +288,18 @@ export async function createUploadLink(
         // Until it stops taking files; a file that arrives, a day.
         expiresAt: acceptUntil,
         uploadLinkId: id,
+        ...(input.destination
+          ? {
+              storeId: input.destination.storeId,
+              storePath: asBytes(
+                encryptString(
+                  ctx.dek,
+                  input.destination.folder,
+                  storePathAad(slot.id),
+                ),
+              ),
+            }
+          : {}),
       })),
     }),
   ])
@@ -413,6 +469,8 @@ export type UploadPageView =
       remaining: number
       acceptUntil: Date
       files: { name: string | null; mediaType: string; size: number }[]
+      /** The store and folder the files are saved in too, if any. */
+      destination: UploadDestination | null
     }
 
 /** What the upload page shows, read with the link alone. */
@@ -427,6 +485,7 @@ export async function uploadPageView(
   }
 
   let purpose: string
+  let destination: UploadDestination | null
 
   try {
     purpose = decryptString(
@@ -434,6 +493,7 @@ export async function uploadPageView(
       Buffer.from(page.purpose),
       purposeAad(page.id),
     )
+    destination = openDestination(secret, page)
   } catch {
     return { state: "gone" }
   }
@@ -456,6 +516,7 @@ export async function uploadPageView(
       mediaType,
       size,
     })),
+    destination,
   }
 }
 

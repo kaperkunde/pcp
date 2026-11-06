@@ -15,9 +15,10 @@ app/                 Routes and pages (Next.js App Router)
   api/oauth/…        OAuth callback and PCP's client metadata document
   api/servers/…      OAuth start (and the per-server callback older clients use)
   api/export/…       The export download (a file needs Content-Disposition)
-  api/files/…        File links: an assistant's own computer downloads or sends one file
+  api/files/…        File links: an assistant's own computer downloads or sends one file; a store file's public link
   api/health/…       The health check; in the desktop app, the version and an install request
   api/browser/…      A browser tab's live view: its pictures out, the owner's input in
+  api/storage/…      A store's file for the Files pages: downloaded, or previewed in a range
 components/          React components; forms call Server Actions
 lib/actions/         Server Actions: read the session, call lib/core, return a state
 lib/server/          Next-specific glue: cookies, request headers, public URL
@@ -66,7 +67,13 @@ associated data (a ciphertext cannot be moved to another row):
   `skill.personal_note` with `skill:<id>:note`),
 - the login name and note of one of the owner's secrets
   (`secret.login_name` with `secret:<id>:login`, `secret.note` with
-  `secret:<id>:note`): not secret, but theirs.
+  `secret:<id>:note`): not secret, but theirs,
+- a store's key (`storage_root.store_key`, `storage_store:<server id>`),
+  which in turn wraps each file's key in an encrypted store, and the
+  store's index of names, sizes and times (`storage_entry.meta`,
+  `storage_entry:<id>`); the files themselves are sealed in chunks under
+  their own keys on the store's backend (see "Stores and storage
+  folders").
 
 The DEK itself is stored only **wrapped** — AES-256-GCM under a **key
 encryption key (KEK)** — once per credential, in `key_grant`:
@@ -902,7 +909,7 @@ An SSH server is a server row of kind `ssh` (`url` is `ssh://host:port`,
 `auth_username` the login) whose one tool, `run_command`, runs one command per
 call with `exec`: no shell session kept between calls, no terminal, no
 agent, no file transfer but a storage folder's SFTP (below, [Storage
-folders](#storage-folders)), and no forwarding but the outbound channels of an
+folders](#stores-and-storage-folders)), and no forwarding but the outbound channels of an
 exit or a service (below, [Exits](#exits) and [Services](#services)). Only the owner adds one, on the
 Servers page; `register_server` has no kind for it, because a shell on a
 machine is more than an assistant should be able to ask for in a sentence.
@@ -978,9 +985,84 @@ long-lived connection sets TCP_NODELAY: its traffic is many small requests
 and answers (SFTP's, a proxy's handshake), and Nagle's algorithm held each
 for a delayed acknowledgement.
 
-## Storage folders
+## Stores and storage folders
 
-A storage folder (a storage root in code, `lib/core/storage/`) is a folder on
+A store (a storage root in code, `lib/core/storage/`) is a place assistants
+keep files in: a storage folder on one of the owner's SSH servers (backend
+`sftp`), or PCP's own store in its data folder (backend `local`,
+`<data>/storage/<server id>/`). Each is plain (the files as they are, which
+other apps such as Samba, Finder or the Files app read too) or encrypted
+(below), and the owner converts one either way. A storage folder the owner
+adds is encrypted unless they choose plain on its add form (`newStoreMode`,
+with a store key made with it); one from before stores stays plain until
+they convert it. Everything below about a
+storage folder's SFTP and confinement holds for both modes; an encrypted
+store adds a layer between the tools and those files.
+
+**PCP's own store** is made by PCP, one per vault (`ensureOwnStore`): at
+setup, and for a vault from before stores on its first gateway request or
+the owner's Servers page. It is encrypted from the start, has no SSH
+server and no key to open (`localConnect` is the machine's file system as a
+`RemoteFs`, `storage/local.ts`, its errors as SFTP's status codes), and
+cannot be removed or pointed elsewhere. What it may hold is a resource limit
+(`resourceLimits().storeBytes`, a quarter of the disk PCP keeps its data on
+by default, set on Settings → Resources), counted as the sealed objects'
+sizes in the index (`storage/quota.ts`); a store on an SSH server has that
+server's disk as its bound.
+
+**Encrypted stores.** The SSH server or the data folder holds only opaque
+objects, `.pcp-store/<two hex>/<object id>` with random 128-bit ids; the
+names, folders, sizes, types and times are the index, `storage_entry` (one
+row per file or folder: its folder's id, a keyed hash of its name there for
+lookups and uniqueness, `nameKeyOf`, and its meta encrypted under the vault
+key as `storage_entry:<id>`). Keys come in two layers (`storage/crypt.ts`,
+pure): the store key, random, wrapped under the vault key as
+`storage_store:<server id>` on `storage_root.store_key`; and each file's key,
+random and new for every write, wrapped under the store key as
+`storage_object:<server id>:<object id>` on its entry, so a key moved to
+another object or store does not open. The content is a header (`PCPS`,
+format 1) and 64 KiB chunks, each sealed with AES-256-GCM under the file
+key, its nonce the chunk's index and its associated data the object's id,
+the index and whether it is the last chunk: a file streams in and out a
+chunk at a time, a range (a download's, a preview's) opens only the chunks
+it covers (`sealedRange`, `decryptStream`), and a chunk changed, swapped
+(within the object or from another), cut off or followed by more is
+refused. A write seals the file under a part name, renames it into place,
+and only then points the index at it, in one transaction that also lets go
+of the object it replaced; until then the object is in `storage_pending`,
+which the next request that opens the store sweeps once it is old (and the
+cleanup, for PCP's own store, which needs no key for that). Decryption
+happens only inside a request: the store key is unwrapped with the request's
+vault key, and nothing of a file is kept but what is being read. An export
+carries the store rows, their wrapped keys and the index, never a file:
+the objects stay where they are, and a restore elsewhere has the index of
+files it cannot read until the data folder (or SSH server) comes with it.
+
+**Converting** (`storage/convert.ts`) is the owner's alone, on the store's
+page, one batch a request (`CONVERT_BUDGET_MS`, `CONVERT_BATCH_FILES`),
+never on a timer. Encrypting walks the plain folder deepest first, seals
+each file into the index and only then removes it, and removes each folder
+once it is empty; making it plain writes each file back under its name
+(with part file and rename, as `save_file` does) before its entry and object
+go, and removes `.pcp-store` with the last. While `storage_root.converting`
+is set every tool and the file browser refuse the store, so nothing changes
+it between batches; a batch cut short is picked up where it stopped, and a
+file a cut-short batch had already put in the index is recognised by name
+and size. Links and anything else that is not a file or folder stay where
+they are and are named. An encrypted store with files cannot be removed
+until it is made plain or emptied: its files go with its keys.
+
+**PCP's own tools for stores.** `list_folder`, `find_files`, `get_file`,
+`save_file`, `make_folder`, `move` and `delete` are also top-level tools at
+`/mcp` (`gateway.ts`), taking the family's arguments and `store` (a store's
+short name; without it, PCP's own). They are the default way in, not a second
+implementation: the tool named is the store server's own, run through the
+same path as `call_tool_<tier>` (`callResolved`: the token's level for that
+server's tool, blocked refused, ask a permission request, the arguments
+checked by the one validator, the tier at most the top-level tool's own),
+and logged under the store's server and tool.
+
+A storage folder is a folder on
 one of the owner's SSH servers that assistants work with files in. It is a
 server row of kind `storage` (`url` the fixed `pcp:storage`) with a
 `storage_root` row beside it: the SSH server (`host_id`, null once that is
@@ -1043,15 +1125,40 @@ SSH server's page; a server that cannot be reached is an error. Limits are
 in `storage/limits.ts`; the test server answers SFTP on the machine's own
 file system (`ssh/fake-server.ts`, `storage/storage.test.ts`).
 
-**The file browser** (`/servers/<id>/files`) is the owner's: one folder at a
-time, read over SFTP when the page loads, with sizes and dates, upload (a
-Server Action), a new folder, rename or move, and delete with a confirm, all
-through the same confinement, and none of them on a read-only folder.
-Download is a route handler (`app/api/storage/[id]/download`), like the
-export's, because a file needs `Content-Disposition` and may be larger than
-an action's answer: it checks the request came from PCP's own page and the
-owner's session, and streams the file from the SSH server as it is read,
-keeping nothing.
+**The Files pages** are the owner's. `/files` lists every store, PCP's own
+first (made there too if the vault has none yet): where it is (this machine,
+or a folder on an SSH server), plain or encrypted (or being converted), how
+much of its quota PCP's own holds (`storage/quota.ts storeUsage` against
+`resourceLimits().storeBytes`), and why PCP cannot reach a storage folder
+now (its SSH server gone, its host key not pinned, the last check failing),
+read from rows only: nothing connects to an SSH server to draw the list. Its
+caption says that an export carries stores' keys and index, not their files.
+`/files/<id>` is a store's file browser (the old `/servers/<id>/files`
+redirects there): one folder at a time, read when the page loads (over SFTP,
+or from the data folder, decrypted in that request for an encrypted store),
+folders first, with sizes and dates, upload (a Server Action, several files
+picked or dropped on the browser, up to `PAGE_UPLOAD_BYTES` at once), a new
+folder, rename or move, and delete with a confirm, all through the same
+confinement and none of them on a read-only store; under the files, the
+store's own card with its conversion either way.
+
+Download and preview are one route handler (`app/api/storage/[id]/download`),
+like the export's, because a file needs `Content-Disposition` and may be
+larger than an action's answer: it checks the request came from PCP's own
+page and the owner's session, and streams the file as it is read, keeping
+nothing. A Range header (one range) gets that part with 206, so a sound or a
+video seeks and a text preview reads only its first 64 KiB; an encrypted
+store opens only the chunks the range covers. With `?inline=1` it is a
+preview, decided in `storage/browse.ts` (pure): the name offers one (images
+but SVG, PDF, text of common kinds with SVG and HTML among them, sounds,
+videos), and the file's first bytes, read first, decide how it goes: an
+image, a sound or a video as the type its bytes name, under a sandboxing
+policy (a sound or a video may load itself again from PCP, as a media
+document does); a PDF as itself to the browser's own viewer in a tab of its
+own, its policy only `frame-ancestors 'none'` (PCP's pages are never
+framed); text as `text/plain`; anything whose bytes disagree, or with no
+preview, as the download. Every answer is nosniff, same-origin only
+(`Cross-Origin-Resource-Policy`) and never cached.
 
 ## Services
 
@@ -1084,8 +1191,12 @@ proposes one, or an image update, as a permission request (below).
   `{kind: "none"}`); and what it `registers`: `{kind: "openapi", port,
 specPath, basePath, auth?}` (an API endpoint from the schema it serves,
   `auth` naming the variable whose secret the endpoint sends in a header),
-  `{kind: "mcp", port, path}`, `{kind: "exit", port, protocol, auth?}` (a
-  VPN's proxy, see [Exits](#exits)) or `{kind: "none"}`. `hash` is its canonical JSON's SHA-256, and
+  `{kind: "mcp", port, path, auth?}` (an MCP server, `auth` the same: the
+  variable, the header and its template), `{kind: "exit", port, protocol, auth?}` (a
+  VPN's proxy, see [Exits](#exits)) or `{kind: "none"}`; and optionally
+  `files` (`{volume, path}`: a folder in one of its volumes, at or under
+  its mount path, for a service whose own tools take file paths there,
+  below). `hash` is its canonical JSON's SHA-256, and
   `definitionBasis` includes it. `writeServiceDefinition` writes it on every
   instance, as `writeWrapper` does a program.
 - The instance's own part: `host_id` (the SSH server; null once that is
@@ -1202,7 +1313,9 @@ serves at `http://127.0.0.1:<port>` (as the SSH server reaches it): an API
 endpoint (`createEndpoint` with the schema at `specPath`, the base URL at
 `basePath`, `publicOnly` off, since it is the owner's own machine, and the
 `auth` variable's secret as its header) or an MCP server (`createServer`,
-its tools read at once). Before `run`, PCP reads which of the definition's
+its tools read at once; with `auth`, authType `header` with that header,
+template and the secret bound to the variable, which the launch, like an
+endpoint's, refuses to go without). Before `run`, PCP reads which of the definition's
 volumes are on the SSH server already (`existingVolumes`: a service removed
 before with its data kept); a failure from `run` on (Docker's `run
 --detach` makes the container and its volumes before it starts it, so a
@@ -1218,7 +1331,21 @@ again. Making a container again (`recreateServiceOn`: an update, a changed
 secret, Start on a gone container) gets the image first, then removes the
 old container; when the new one does not start, the one made is removed
 (its volumes stay), the service's row is marked failed, and the error says
-that Start makes it again once what stopped it is fixed.
+that Start makes it again once what stopped it is fixed. Once the new
+container runs, an MCP server the service registered is given the header
+its definition's `auth` names now, with the secret bound to that variable
+now (`followRegisteredAuth`, `servers.ts setMcpHeaderCredential`): a
+definition that gained `auth` (a linked repository's, say) or a variable
+bound to another secret reaches the server with the remake that runs it,
+and its tools are read again. A definition with no `auth` leaves the
+server's credential as it is (the owner may have set one), and so does a
+server the owner moved to OAuth. A server that cannot take the header (a
+further header of its own has that name) does not undo the remake, whose
+container runs: the server's row is marked failed with what went wrong and
+how to fix it, and the same words come back with the remake's status
+(`ServiceStatus.note`, in `statusWords` and the owner's messages). An API
+endpoint keeps the header it was made with, since its header shapes its
+tools: relaunch it for another.
 
 **Status** is read only inside a request: the service's page when it opens
 (and on Check), `check_server` (for the service and for the server it
@@ -1255,6 +1382,32 @@ unit, which a Podman service's page says.
 (makes the container again from the definition when it is gone), `stop` and
 `restart`, their arguments checked before anything connects, and `update`
 (below), which only proposes. None takes a command or a variable.
+**Files** (`put_file`, Write, and `get_file`, Read; offered and run only
+for a definition with `files`, refused with `not_found` otherwise): a
+service whose tools take paths in its volume (a PDF tool's `/data`) gets a
+kept file through PCP rather than `run_command` on the host. Both go
+through the engine's own `cp` over SSH `exec` (`engine.ts`), so no shell
+or program runs in the container and an image without one works: put_file
+sends a tar stream of that one file (`services/files.ts fileTar`: built in
+PCP, mode 0644, owner 0:0 so the engine sets the container's, no folder
+entries, so a folder that is there keeps its owner and mode) to `cp -
+<container>:<files path>` on standard input, after `cp
+<container>:<path> -` read only its first `FILE_PROBE_BYTES` to see what is
+there: nothing, or a file or link replaced only with `overwrite`, never a
+folder (the engine would remove it whole). get_file reads `cp
+<container>:<path> -` to standard output, bounded by
+`resourceLimits().fileBytes` plus `FILE_TAR_OVERHEAD_BYTES`
+(`services/limits.ts`), takes a regular file only (a link is never
+followed, a folder refused), refuses one whose bytes hold a value PCP
+handed the service, and keeps it as the token's result. The name is
+relative to the files folder or a full path inside it, checked before
+anything connects (`fileName`: letters, digits, spaces and `._@+,=()-`,
+no `.`, `..` or empty part, within bounds), and checked again in the
+engine; the engine resolves it inside the container's own filesystem,
+never the SSH server's. put_file reads its file from the token's kept
+results itself, before anything connects (`services.ts` is among the
+modules that open a handle). The check and the copy are two commands: a
+file made between them is replaced, as the engine has no exclusive create.
 **Update** (the owner's) resolves the definition's `source` to its newest
 digest, pins it on the definition and makes this instance's container
 again; other instances show that they run an older image. **Check for a
@@ -1309,7 +1462,9 @@ with a `build` is refused: a build is the owner's alone.
 
 The test engine (`services/fake-docker.ts`) is a Node program on the PATH of
 a real sh that the test SSH server runs each command in, recording the
-words it got and the env file it read; it keeps named volumes, fails `run`
+words it got and the env file it read; it keeps named volumes (as folders
+of its own, which its `cp` reads and writes with the machine's real tar,
+so PCP's tar streams are tested against one), fails `run`
 after making the container when asked, and builds (checking the
 Containerfile and context the script hands it) from a test's tarball that
 its own curl and wget hand over.
@@ -1691,6 +1846,13 @@ the GitHub client and sync itself build on it.
   services needed the new format, so every other kind is still written as
   format 2 (`FORMAT_OF_KIND`): a PCP that reads format 2 reads them, and
   leaves `services/` alone as it does any folder its layout has no kind for.
+  Format 4 added two fields to a service's definition: `auth` on its MCP
+  server (`registers: {kind: mcp, …, auth}`) and its `files` folder
+  (`{volume, path}`). Only a service document that has either is written as
+  format 4 (`documents.ts serviceFormat`); every other one keeps its format
+  and its hash, so an older PCP refuses just that document as written by a
+  newer PCP rather than failing on an unknown key; a format-3 document that
+  names either is refused here too.
 - **Versions.** Each document carries `version`, a whole number: a skill's
   own version; for a server, endpoint or wrapper, `mcp_server.sync_version`
   (null reads as 1), which applying an item sets to the document's. PCP's
@@ -2699,8 +2861,12 @@ the viewport or of one element, and the tab's address, title and the link
 to it in PCP. A screenshot's answer says how to read the text in it: pass
 its handle to an OCR tool, naming one the token can call when it has one
 (`ocr.ts`: found by its words, OCR in its name, description or arguments,
-or a `force_ocr` argument, never by vendor), since `read_result` does not
-show an image. What the tree cannot read is named (`unseen.ts`, in PCP's
+or a `force_ocr` argument, never by vendor), and `read_image` otherwise
+(see Capabilities), since `read_result` does not show an image. A tab whose
+main document is a PDF or a picture (its Content-Type as Chromium reported
+the response, `challenge.ts watchDocuments`, never page script) says so,
+with the read path: `download` its address, then `convert_document` or
+`read_image` with the handle (`call.ts fileShownLine`). What the tree cannot read is named (`unseen.ts`, in PCP's
 own world: Playwright's handles and the tab's DevTools session, never page
 script): an iframe the snapshot shows empty (by its ref, and whether it is
 cross-origin), a closed shadow root (`DOM.getDocument` with `pierce`), a
@@ -3388,6 +3554,13 @@ Linux):
 - `tls/` — only once HTTPS is turned on: the ACME account key and, per name,
   `key.pem` and `cert.pem`. Directory mode 0700, files 0600 (see "Reaching
   PCP").
+- `storage/<server id>/` — PCP's own store (see "Stores and storage
+  folders"): encrypted, only `.pcp-store/<two hex>/<object id>` objects whose
+  names, keys and folders are in the database; plain once the owner converts
+  it. Directory mode 0700. An export carries its index and keys, not these
+  files: back up the data folder to keep them. The cleanup removes the
+  folder of a store that is gone, objects let go of and part files a write
+  left behind.
 - `browsers/chromium-<revision>/` — only once the owner installs Chromium
   from the Browser page: Playwright's build of it, as Playwright lays it out
   (see "Browser"). Machine data, not the vault's: it holds nothing of the
@@ -4030,9 +4203,9 @@ accepted for one release with a note (`aliases`). `serve.ts` runs a call:
 it renames, checks the arguments with `validate.ts` in PCP's words (a tool
 error, logged as "did not fit", never quoting them), runs it, and maps its
 outcome (`outcome.ts`): `ok`, `toolError` (isError, the code in
-`_meta["gg.pcp/error"]`), `needsOwner` (a permission request or a server to
-connect, as `structuredContent` `{kind: "needs_owner", …}` with the link
-last in the text), or an answer made elsewhere passed on, in which a
+`_meta["gg.pcp/error"]`), `needsOwner` (a permission request, a server to
+connect, an upload link, or a capability to set up, as `structuredContent`
+`{kind: "needs_owner", reason, …}` with the link last in the text), or an answer made elsewhere passed on, in which a
 permission link is recognised and marked the same way.
 
 The families behind call_tool are written to the same interface
@@ -4370,6 +4543,147 @@ ask, the page and the route share the file links' rate limit, and the page
 sends no referrer and is not indexed. The row is kept a day past its last
 file time for `check_upload`; the cleanup removes it then, and the empty
 rows when the link stops taking files. Not exported, wiped with the vault.
+
+**Public links to a store's file** (`lib/core/store-links.ts`, #90) are a
+third kind of `file_link`, `store`, made by the store tool `share_file`
+(through PCP's own top-level `share_file`, which takes `store` like the
+other store tools, at the owner's levels for that store's tool; only a
+token with **Move files by link**, refused for any other before anything
+connects). The link is for whoever the assistant gives it to, not only its
+own computer: anyone holding it downloads that one file, whole or one
+`Range` (206, `Accept-Ranges: bytes`), streamed and decrypted as it is
+read, as an attachment with `nosniff` and a `sandbox` CSP. Its secret
+derives a key (HKDF of the secret and the row's id, as a file link's) that
+wraps that one file's key (`file_link_file_key:<id>`); the row keeps the
+secret's hash, never the store key, and serving it needs no vault key:
+
+- A file of PCP's own store, encrypted: the key wrapped is the one the
+  store sealed that object under (`StorageFolder.sealed`), and the route
+  reads the object in place (`storage/encrypted.ts openSealedObject`, the
+  file key alone). Before each use it checks that the index still names
+  that object (`storage_entry.object_id`) and the store is still local,
+  encrypted and not converting: a file changed (a new object) or deleted
+  ends the link at once (410).
+- Any other store's file (a storage folder on an SSH server, which a
+  public request cannot reach without PCP's key; or a plain store, whose
+  file has no key): copied when shared, streamed through the store's own
+  confinement and sealed in the store format under a fresh key into
+  `<data>/file-links/.pcp-store/<xx>/<id>`, up to the largest-file limit.
+  Later changes to the file do not reach the copy.
+
+A link works for an hour by default and at most a week
+(`expires_in_minutes`, `storage/limits.ts`), for `max_downloads` whole
+files (5 by default, at most 100), counted in bytes so ranges cost what
+they read (`served_bytes`, at least one per request). It counts against the
+token's live file links, works only while its token is live and has the
+switch, and each use is a request-log line (`file_link/store_download`),
+under the files route's per-address rate limit. Not exported, wiped with
+the vault (the rows; the copies with them by the cleanup), gone with its
+token; the cleanup's results part removes expired rows and then every copy
+no row names (`pruneLinkCopies`, by names and dates, older than ten
+minutes, and part files older than a day).
+
+**Uploads into a store** (`lib/core/store-uploads.ts`, #90): `receive_file`
+and `create_upload_link` take `store` and `folder` (a folder alone means
+PCP's own store). The store must be one the token reaches whose `save_file`
+is not blocked for it (a read-only store has none); the upload page says
+where the files go, from a destination encrypted under the link's key
+(`upload_link.destination`). The file arrives as any upload does, held
+under the link's key, and still becomes a kept result when the token uses
+its handle; besides, the slot carries the store (`store_id`) and the folder
+encrypted under the vault key (`file_link_store_path:<id>`), and the first
+request that holds the vault's key saves it there: `check_upload` (which
+answers where each file went, or why not yet), or `after()` on `/mcp` and
+the owner's pages, one run per vault at a time, a failure tried again after
+five minutes. It writes through the store's own `StorageFolder` (encrypted
+or plain, confined, the folder made with its parents), never over a file:
+a taken name gets " (2)" and so on. Then the slot keeps the path it got
+(encrypted) for `check_upload` until its day is up; a slot that is both
+kept and saved drops its bytes, and `claimUploads` marks such a slot
+`claimed_at` instead of deleting it. Nothing is saved on a timer, and a
+store made read-only since gets nothing.
+
+Kept results themselves stay what they were: `tool_result` rows for a day.
+A file meant to last goes into a store with `save_file`.
+
+### Capabilities
+
+Some work an assistant asks for by what it is, not by a tool's name: read
+the text in a picture or a scan, fill in or merge a PDF, turn a document
+into Markdown. Each is a capability (`lib/core/capabilities/list.ts`, a
+typed list: `read_image`, `pdf_edit`, `convert_document`) and one of PCP's
+own tools that every token has (`read_image`, `edit_pdf`,
+`convert_document`). The tool does no work itself: a provider does, one of
+the token's own tools.
+
+**Providers** (`providers.ts`, pure) are found among the tools the token
+can call or ask for (blocked ones are not there; the browser's never
+count), by words in a tool's name and description, as search would (OCR,
+convert, fill and form, flatten, merge, signature and image), or a word in
+its arguments (`do_ocr`, `force_ocr`), never by a vendor's name; a server
+registered by a service launched from one of the capability's common items
+(its image or source tag, `candidates.ts serverOrigins`) ranks higher, an
+allowed tool above one that asks. One provider per server, its best tool;
+a service's own tools (status, logs, put_file, …) are never one.
+How to call it is read off its input schema: a kept result's handle where
+it takes one (an API endpoint's file field, as Docling's multipart
+`files`), the handle where it takes base64 (PCP puts the file there), or,
+for a tool that takes a path on a server with the #92 file convention
+(`put_file(file_path, content_base64)` and `get_file(file_path)`), the file
+step: put each file at `/data/pcp/<key>/<name>` (the key a hash of the
+operation and the files, so a call the owner allowed once is the same call
+when it is made again), run the tool on the paths with its `output_path` in
+the same folder, and `get_file` what it wrote, which comes back as a handle.
+The step is found by its tools' shape, never by their names alone (a
+same-named tool of another shape is no step): where the server was
+registered by a service whose definition names a files folder and the
+token sees that service's own `put_file` (a handle, a `path` relative to
+the folder, `overwrite`) and `get_file` (`path`), those are the step
+instead, preferred: the handle goes in as it is, the file is copied in by
+the engine (`pcp/<key>/<name>` in the folder), nothing passes through the
+MCP server as base64, and its tools take the full path put_file answered.
+A required argument the operation has nothing for leaves the tool out; a
+file argument named for PDFs takes PDFs only. Options are set where the tool
+has them and their enum allows (OCR forced, confidence asked for, Markdown,
+images as placeholders).
+
+**Calls** go through `gateway.ts forwardCall`, which run_code's `pcp.call`
+uses too: `resolveCall` (blocked, a secret, a handle that is not the
+token's), the capability tool's own tier (the owner's choice for it, else
+its annotations: Write, since a converter's POST is), a provider tool above
+it refused before anything is checked or asked and named with the entry
+that runs it, the arguments checked by the one validator, the owner asked
+where the level asks (`askCodeCall`, which hands a call they allowed once
+its answer), and `runCodeCall` otherwise, paced, its answer a value with
+files as handles. Each call is a request-log line of its own under the
+capability tool's name. A provider that asks stops the tool: its permission
+answer is passed on, with a line saying to call the tool again once the
+owner answered.
+
+`read_image` runs every provider (at most `MAX_READ_PROVIDERS`), keeps each
+reading with its confidence (`readings.ts`: the text and confidence read off
+the answer without knowing the provider), and flags where they disagree
+(their words overlap less than `AGREEMENT_MIN`, or they read different
+numbers) and a reading below `LOW_CONFIDENCE`; every answer says to check
+digits and meter readings against the picture. `convert_document` and
+`edit_pdf` (`form_fields`, `fill_form`, `flatten`, `merge`, `sign` with a
+picture of a signature; a digital signature needs a certificate and is the
+provider's own tool) try providers best first until one does it, and answer
+the text, or the PDF it made, as a handle.
+
+**No provider**: the answer is `needs_owner` with reason `setup` and the
+capability, a markdown link labelled with the capability's own words, last,
+to `/plugins/<id>`, and `noteOwnerAsked`; the assistant calls the tool again
+once the owner launched one. That page (`setup.ts capabilityOffers`) says
+what the capability is and offers its common items: "Add PCP's common items"
+when the vault does not link them (`addCommonRepoAction` with the capability,
+which comes back to the page), then "Launch <item>" to the repository's
+import page at the common repository's head commit, read on the page's load
+(where the owner reads the item whole, picks the SSH server and its secrets),
+or a link to the service they have. Search adds a "not installed" line for a
+capability its query names (`capabilitiesNamed`) with no provider, describe
+of a capability tool lists its providers or says there is none, and
+read_result's answer for a picture or a PDF names the tool that reads it.
 
 ### Descriptions read in a few words, and client profiles
 

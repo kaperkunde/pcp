@@ -333,6 +333,15 @@ function serviceFlags(
     )
   }
 
+  if (changed((definition) => definition.files ?? null)) {
+    flag(
+      "service",
+      after.files
+        ? `PCP puts files into it and gets them back (put_file, get_file) in ${after.files.path}, in its volume ${after.files.volume}.`
+        : "It has no files folder: no put_file or get_file.",
+    )
+  }
+
   if (changed((definition) => definition.args)) {
     flag(
       "service",
@@ -358,7 +367,7 @@ function serviceFlags(
       registers.kind === "openapi"
         ? `PCP adds an API endpoint from ${registers.specPath} on port ${registers.port}${registers.auth ? `, sending ${registers.auth.env}'s secret in ${registers.auth.header}` : ""}.`
         : registers.kind === "mcp"
-          ? `PCP adds an MCP server at ${registers.path} on port ${registers.port}.`
+          ? `PCP adds an MCP server at ${registers.path} on port ${registers.port}${registers.auth ? `, sending ${registers.auth.env}'s secret in ${registers.auth.header}` : ""}.`
           : "PCP adds nothing for it.",
     )
   }

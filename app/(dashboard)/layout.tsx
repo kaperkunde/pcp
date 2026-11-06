@@ -8,7 +8,7 @@ import { findBrowserServer } from "@/lib/core/browser/server"
 import { listOwnerNotices } from "@/lib/core/owner-notices"
 import { listPendingRequests } from "@/lib/core/permissions"
 import { runDueSyncs } from "@/lib/core/repos/sync"
-import { reconcileServices } from "@/lib/core/upstream"
+import { deliverUploads, reconcileServices } from "@/lib/core/upstream"
 import { availableUpdate } from "@/lib/core/updates/state"
 import { getVault } from "@/lib/core/vault"
 import { PCP_VERSION } from "@/lib/core/version"
@@ -43,6 +43,12 @@ export default async function DashboardLayout({
   // Services you left running whose container stopped (the SSH server
   // restarted) are started again the same way, throttled.
   after(() => reconcileServices(ctx, { publicUrl }))
+  // Files an assistant's upload link took for a store are saved there.
+  after(() =>
+    deliverUploads(ctx, { publicUrl }).catch((error) =>
+      console.error("[uploads] saving into a store failed", error),
+    ),
+  )
 
   return (
     <OwnerQueueProvider

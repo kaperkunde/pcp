@@ -4,6 +4,7 @@ import {
   type Server,
   type ServerResponse,
 } from "node:http"
+import { mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs"
 import type { AddressInfo } from "node:net"
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
@@ -26,6 +27,7 @@ import {
   launchService,
   readServiceStatus,
   reconcileServices,
+  recreateService,
   removeService,
   restartServicesUsingSecret,
   runServiceAction,
@@ -34,6 +36,12 @@ import {
   updateService,
 } from "../upstream"
 import { setupVault } from "../vault"
+import {
+  forgetResourceLimits,
+  getResourceConfig,
+  useResourceConfig,
+} from "../resources/state"
+import { keepBytes, resultKeepers, resultOpener } from "../tool-results"
 import { createApiToken, resolveApiToken } from "../api-tokens"
 import { decidePermission, getPermissionView, runCall } from "../permissions"
 import {
@@ -41,11 +49,17 @@ import {
   startFakeDocker,
   type FakeDocker,
 } from "./fake-docker"
-import type { ServiceDefinitionInput } from "./definition"
 import {
+  parseServiceDefinition,
+  type ServiceDefinitionInput,
+} from "./definition"
+import {
+  saveServiceSettings,
   serviceDial,
   serviceOfDefinition,
   serviceView,
+  statusWords,
+  writeServiceDefinition,
   type ServiceLaunchInput,
 } from "./services"
 
@@ -74,6 +88,10 @@ let answers: Record<string, { status: number; body: string }>
 let forwarding: boolean
 /** The tools the MCP server at /mcp lists. */
 let mcpTools: Array<{ name: string; description: string }>
+/** The Authorization the MCP server at /mcp asks for; null asks for none. */
+let mcpAuthorization: string | null
+/** The Authorization each request to /mcp came with. */
+let mcpSeen: Array<string | null>
 
 const SPEC = JSON.stringify({
   openapi: "3.0.3",
@@ -96,6 +114,14 @@ const SPEC = JSON.stringify({
 function answerMcp(request: IncomingMessage, response: ServerResponse) {
   if (request.method !== "POST") {
     response.writeHead(405).end()
+    return
+  }
+
+  const authorization = request.headers.authorization ?? null
+  mcpSeen.push(authorization)
+
+  if (mcpAuthorization !== null && authorization !== mcpAuthorization) {
+    response.writeHead(401).end()
     return
   }
 
@@ -158,6 +184,8 @@ async function setup(engine: "docker" | "podman" = "docker") {
   authorized = null
   forwarding = true
   mcpTools = [{ name: "convert", description: "Converts a document" }]
+  mcpAuthorization = null
+  mcpSeen = []
   docker = startFakeDocker({ engine })
   ssh = await startFakeSsh({
     authorizedKey: () => authorized,
@@ -230,6 +258,18 @@ function definition(
     ...change,
   }
 }
+
+/** What a service that serves an MCP server registers, with no header. */
+const MCP = { kind: "mcp", port: 5001, path: "/mcp" } as const
+/** The same, sending API_KEY's secret as a bearer token. */
+const MCP_WITH_AUTH = {
+  ...MCP,
+  auth: {
+    env: "API_KEY",
+    header: "Authorization",
+    template: "Bearer {{secret}}",
+  },
+} as const
 
 async function launchInput(
   hostId: string,
@@ -444,6 +484,55 @@ describe("launching a service", { timeout: 30_000 }, () => {
     expect(server.url).toBe(`http://127.0.0.1:${httpPort}/mcp`)
     expect(server.tools.map((tool) => tool.name)).toEqual(["convert"])
     expect(ssh.forwards).toContain(`127.0.0.1:${httpPort}`)
+  })
+
+  it("registers an MCP server that sends the secret its definition names in a header", async () => {
+    const hostId = await pinnedHost()
+    mcpAuthorization = `Bearer ${API_KEY}`
+    const launched = await launchService(
+      ctx,
+      await launchInput(hostId, {
+        definition: definition({ registers: MCP_WITH_AUTH }),
+      }),
+      FAST,
+    )
+    const secret = await db().secret.findFirstOrThrow({
+      where: { name: "docs-key" },
+    })
+    const server = await getServer(ctx, launched.registeredId!)
+
+    expect(server).toMatchObject({
+      kind: "mcp",
+      authType: "header",
+      authHeaderName: "Authorization",
+      authValueTemplate: "Bearer {{secret}}",
+      authSecretId: secret.id,
+    })
+    expect(server.tools.map((tool) => tool.name)).toEqual(["convert"])
+    expect(mcpSeen.length).toBeGreaterThan(0)
+    expect(new Set(mcpSeen)).toEqual(new Set([`Bearer ${API_KEY}`]))
+  })
+
+  it("refuses to launch an MCP server with a header before its variable has a secret", async () => {
+    const hostId = await pinnedHost()
+    const before = docker.commands.length
+
+    await expect(
+      launchService(
+        ctx,
+        await launchInput(hostId, {
+          definition: definition({
+            env: [{ name: "API_KEY" }],
+            registers: MCP_WITH_AUTH,
+          }),
+          env: {},
+        }),
+        FAST,
+      ),
+    ).rejects.toThrow(
+      /Choose the secret for API_KEY: the MCP server sends it in Authorization/,
+    )
+    expect(docker.commands.length).toBe(before)
   })
 
   it("takes everything back when the SSH server does not let PCP through", async () => {
@@ -961,6 +1050,169 @@ describe("a running service", { timeout: 30_000 }, () => {
     expect(everythingSent()).not.toContain("sk-rotated-value-5678")
   })
 
+  it("gives the MCP server it registered the header a definition gained, and the secret bound now, when it is made again", async () => {
+    const hostId = await pinnedHost()
+    const launched = await launchService(
+      ctx,
+      await launchInput(hostId, {
+        definition: definition({ registers: MCP }),
+      }),
+      FAST,
+    )
+    const secret = await db().secret.findFirstOrThrow({
+      where: { name: "docs-key" },
+    })
+    expect((await getServer(ctx, launched.registeredId!)).authType).toBe("none")
+
+    // The definition gains a header (a linked repository's, say): the
+    // server sends nothing new until the container is made again.
+    mcpAuthorization = `Bearer ${API_KEY}`
+    await writeServiceDefinition(
+      launched.id,
+      parseServiceDefinition(definition({ registers: MCP_WITH_AUTH })),
+    )
+    expect((await getServer(ctx, launched.registeredId!)).authType).toBe("none")
+
+    await updateService(ctx, launched.id, FAST)
+    const after = await getServer(ctx, launched.registeredId!)
+    expect(after).toMatchObject({
+      authType: "header",
+      authHeaderName: "Authorization",
+      authValueTemplate: "Bearer {{secret}}",
+      authSecretId: secret.id,
+      // Its tools are read again with the new credential.
+      status: "unknown",
+      lastSyncedAt: null,
+    })
+    expect((await syncServerTools(ctx, after, PUBLIC)).status).toBe("ok")
+    expect(mcpSeen.at(-1)).toBe(`Bearer ${API_KEY}`)
+
+    // Another secret bound to the variable: the remake the save asks for
+    // has the server send that one.
+    const other = await createSecret(ctx, {
+      name: "docs-key-two",
+      value: "sk-other-service-value-9876",
+    })
+    await saveServiceSettings(ctx, launched.id, {
+      name: (await getServer(ctx, launched.id)).name,
+      env: { API_KEY: other.id },
+    })
+    await recreateService(ctx, launched.id, FAST)
+    expect((await getServer(ctx, launched.registeredId!)).authSecretId).toBe(
+      other.id,
+    )
+  })
+
+  it("leaves the MCP server's credential alone when the definition names no header, or the owner moved it to OAuth", async () => {
+    const hostId = await pinnedHost()
+    const launched = await launchService(
+      ctx,
+      await launchInput(hostId, {
+        definition: definition({ registers: MCP }),
+      }),
+      FAST,
+    )
+    const secret = await db().secret.findFirstOrThrow({
+      where: { name: "docs-key" },
+    })
+    // The owner's own header, on the server's page.
+    await db().mcpServer.update({
+      where: { id: launched.registeredId! },
+      data: {
+        authType: "header",
+        authHeaderName: "X-Owner",
+        authValueTemplate: "{{secret}}",
+        authSecretId: secret.id,
+      },
+    })
+
+    await recreateService(ctx, launched.id, FAST)
+    expect(await getServer(ctx, launched.registeredId!)).toMatchObject({
+      authType: "header",
+      authHeaderName: "X-Owner",
+    })
+
+    await db().mcpServer.update({
+      where: { id: launched.registeredId! },
+      data: {
+        authType: "oauth",
+        authHeaderName: null,
+        authValueTemplate: null,
+        authSecretId: null,
+      },
+    })
+    await writeServiceDefinition(
+      launched.id,
+      parseServiceDefinition(definition({ registers: MCP_WITH_AUTH })),
+    )
+    await recreateService(ctx, launched.id, FAST)
+    expect(await getServer(ctx, launched.registeredId!)).toMatchObject({
+      authType: "oauth",
+      authSecretId: null,
+    })
+  })
+
+  it("keeps a remake that worked when the MCP server it registered cannot take the header, and says so there and in the answer", async () => {
+    const hostId = await pinnedHost()
+    const launched = await launchService(
+      ctx,
+      await launchInput(hostId, {
+        definition: definition({ registers: MCP }),
+      }),
+      FAST,
+    )
+    const secret = await db().secret.findFirstOrThrow({
+      where: { name: "docs-key" },
+    })
+    // The owner's own header, with a further one named as the definition's
+    // header will be.
+    await db().mcpServer.update({
+      where: { id: launched.registeredId! },
+      data: {
+        authType: "header",
+        authHeaderName: "X-Owner",
+        authValueTemplate: "{{secret}}",
+        authSecretId: secret.id,
+      },
+    })
+    await db().serverAuthHeader.create({
+      data: {
+        id: "extra-authorization",
+        serverId: launched.registeredId!,
+        position: 0,
+        headerName: "authorization",
+        valueTemplate: "Bearer {{secret}}",
+        secretId: secret.id,
+      },
+    })
+    await writeServiceDefinition(
+      launched.id,
+      parseServiceDefinition(definition({ registers: MCP_WITH_AUTH })),
+    )
+
+    const { status } = await updateService(ctx, launched.id, FAST)
+
+    // The container was made again and runs: the remake worked.
+    expect(status.state).toBe("running")
+    expect(docker.state().containers["pcp-docs"]!.state).toBe("running")
+    expect(status.note).toMatch(
+      /could not take API_KEY's secret in Authorization and sends what it did before: .* sends Authorization as a further header already: take that one out on its page and update the service again, or set the header there yourself\./,
+    )
+    expect(statusWords("Docs", status)).toContain(status.note)
+
+    // The server it registered says what failed, and keeps its header.
+    expect(await getServer(ctx, launched.registeredId!)).toMatchObject({
+      authType: "header",
+      authHeaderName: "X-Owner",
+      status: "error",
+      statusMessage: status.note,
+    })
+
+    // Made again later, it says the same.
+    const again = await recreateService(ctx, launched.id, FAST)
+    expect(again.note).toBe(status.note)
+  })
+
   it("names the service among what uses its secret, which cannot be deleted under it", async () => {
     const { service } = await launched()
     const secret = await db().secret.findFirstOrThrow({
@@ -1077,6 +1329,301 @@ describe("a running service", { timeout: 30_000 }, () => {
         where: { serverId: service.id },
       }),
     ).toEqual(before)
+  })
+})
+
+describe("a service's files folder", { timeout: 30_000 }, () => {
+  beforeEach(() => setup())
+  afterEach(async () => {
+    forgetResourceLimits()
+    await teardown()
+  })
+
+  const PDF = Buffer.from("%PDF-1.7\n1 0 obj << >> endobj\n%%EOF\n")
+
+  async function launchedWithFiles(
+    files: ServiceDefinitionInput["files"] | null = {
+      volume: "data",
+      path: "/data",
+    },
+  ) {
+    const hostId = await pinnedHost()
+    const input = await launchInput(hostId, {
+      definition: definition(files ? { files } : {}),
+    })
+    const result = await launchService(ctx, input, FAST)
+    const { token } = await createApiToken(ctx, {
+      name: "Claude",
+      allowAllServers: true,
+    })
+    const tokenId = (await resolveApiToken(token))!.tokenId
+    return { service: await getServer(ctx, result.id), tokenId }
+  }
+
+  async function keep(tokenId: string, bytes = PDF, name = "report.pdf") {
+    return (
+      await keepBytes(ctx, {
+        tokenId,
+        serverId: null,
+        toolName: "test",
+        bytes,
+        mediaType: "application/pdf",
+        name,
+      })
+    ).id
+  }
+
+  function call(
+    service: Awaited<ReturnType<typeof launchedWithFiles>>["service"],
+    tokenId: string,
+    tool: string,
+    args: Record<string, unknown>,
+  ) {
+    return callServerTool(ctx, service, tool, args, {
+      ...PUBLIC,
+      tokenId,
+      keep: resultKeepers(ctx, tokenId).text,
+      keepBytes: resultKeepers(ctx, tokenId).bytes,
+      open: resultOpener(ctx, tokenId),
+    })
+  }
+
+  function textOf(result: { content: unknown }): string {
+    return (result.content as Array<{ text: string }>)
+      .map((part) => part.text)
+      .join("\n")
+  }
+
+  function codeOf(result: { _meta?: Record<string, unknown> }): unknown {
+    return (result._meta?.["gg.pcp/error"] as { code?: string })?.code
+  }
+
+  it("offers put_file and get_file only with a files folder in one of its volumes", async () => {
+    const { service } = await launchedWithFiles()
+    expect(service.tools.map((tool) => tool.name)).toEqual(
+      expect.arrayContaining(["put_file", "get_file"]),
+    )
+    expect(
+      service.tools.find((tool) => tool.name === "put_file")!.description,
+    ).toContain("/data")
+
+    expect(() =>
+      parseServiceDefinition(
+        definition({ files: { volume: "cache", path: "/data" } }),
+      ),
+    ).toThrow(/not one of the service's volumes/)
+    expect(() =>
+      parseServiceDefinition(
+        definition({ files: { volume: "data", path: "/etc" } }),
+      ),
+    ).toThrow(/not in the volume data/)
+    expect(() =>
+      parseServiceDefinition(
+        definition({ files: { volume: "data", path: "/data/../etc" } }),
+      ),
+    ).toThrow()
+    expect(
+      parseServiceDefinition(
+        definition({ files: { volume: "data", path: "/data/in" } }),
+      ).files,
+    ).toEqual({ volume: "data", path: "/data/in" })
+  })
+
+  it("puts a kept file into the volume with the engine's cp, and gets it back", async () => {
+    const { service, tokenId } = await launchedWithFiles()
+    const id = await keep(tokenId)
+    const before = docker.commands.length
+
+    const put = await call(service, tokenId, "put_file", {
+      file: { $result: id },
+      path: "in/report.pdf",
+    })
+    expect(put.isError, textOf(put)).toBeFalsy()
+    expect(put.structuredContent).toMatchObject({
+      path: "/data/in/report.pdf",
+      size: PDF.length,
+    })
+    // On the SSH server: the engine's own cp, the bytes on standard input.
+    const words = docker.state().calls.slice(-2)
+    expect(words).toEqual([
+      ["cp", "pcp-docs:/data/in/report.pdf", "-"],
+      ["cp", "-", "pcp-docs:/data"],
+    ])
+    expect(docker.commands.slice(before).join("\n")).not.toContain("PDF-1.7")
+    expect(
+      readFileSync(`${docker.volumeDir("pcp-docs-data")}/in/report.pdf`),
+    ).toEqual(PDF)
+
+    // What the service's tools wrote, read back by its full path.
+    writeFileSync(
+      `${docker.volumeDir("pcp-docs-data")}/in/report.txt`,
+      "the text",
+    )
+    const got = await call(service, tokenId, "get_file", {
+      path: "/data/in/report.txt",
+    })
+    expect(got.isError, textOf(got)).toBeFalsy()
+    const answer = got.structuredContent as {
+      result: { $result: string }
+      size: number
+      name: string
+    }
+    expect(answer).toMatchObject({ name: "report.txt", size: 8 })
+    const opened = await resultOpener(ctx, tokenId)(answer.result.$result)
+    expect(opened!.bytes().toString()).toBe("the text")
+
+    // And the PDF it was given, round trip.
+    const back = await call(service, tokenId, "get_file", {
+      path: "in/report.pdf",
+    })
+    const backId = (back.structuredContent as { result: { $result: string } })
+      .result.$result
+    expect((await resultOpener(ctx, tokenId)(backId))!.bytes()).toEqual(PDF)
+  })
+
+  it("replaces a file only with overwrite, and never a folder", async () => {
+    const { service, tokenId } = await launchedWithFiles()
+    const first = await keep(tokenId)
+    const second = await keep(tokenId, Buffer.from("second"))
+    await call(service, tokenId, "put_file", {
+      file: { $result: first },
+      path: "report.pdf",
+    })
+
+    const refused = await call(service, tokenId, "put_file", {
+      file: { $result: second },
+      path: "report.pdf",
+    })
+    expect(refused.isError).toBe(true)
+    expect(codeOf(refused)).toBe("conflict")
+    expect(textOf(refused)).toMatch(/already a file at \/data\/report\.pdf/)
+    const volume = docker.volumeDir("pcp-docs-data")
+    expect(readFileSync(`${volume}/report.pdf`)).toEqual(PDF)
+
+    const replaced = await call(service, tokenId, "put_file", {
+      file: { $result: second },
+      path: "report.pdf",
+      overwrite: true,
+    })
+    expect(replaced.structuredContent).toMatchObject({ replaced: true })
+    expect(readFileSync(`${volume}/report.pdf`, "utf8")).toBe("second")
+
+    mkdirSync(`${volume}/out`)
+    const folder = await call(service, tokenId, "put_file", {
+      file: { $result: second },
+      path: "out",
+      overwrite: true,
+    })
+    expect(codeOf(folder)).toBe("conflict")
+    expect(textOf(folder)).toMatch(/is a folder/)
+    expect(statSync(`${volume}/out`).isDirectory()).toBe(true)
+
+    const notAFile = await call(service, tokenId, "get_file", { path: "out" })
+    expect(notAFile.isError).toBe(true)
+    expect(textOf(notAFile)).toMatch(/a folder/)
+  })
+
+  it.each([
+    "../etc/passwd",
+    "/etc/passwd",
+    "/data",
+    "a/../../b",
+    "a;rm -rf x",
+    "a$(id)",
+  ])("refuses the name %j before anything connects", async (path) => {
+    const { service, tokenId } = await launchedWithFiles()
+    const id = await keep(tokenId)
+    const before = docker.commands.length
+
+    for (const [tool, args] of [
+      ["put_file", { file: { $result: id }, path }],
+      ["get_file", { path }],
+    ] as const) {
+      const refused = await call(service, tokenId, tool, args)
+      expect(refused.isError).toBe(true)
+      expect(codeOf(refused)).toBe("invalid_arguments")
+    }
+
+    expect(docker.commands.length).toBe(before)
+  })
+
+  it("refuses a file the token does not have before anything connects", async () => {
+    const { service, tokenId } = await launchedWithFiles()
+    const before = docker.commands.length
+    const refused = await call(service, tokenId, "put_file", {
+      file: { $result: "no-such-result" },
+      path: "a.pdf",
+    })
+    expect(refused.isError).toBe(true)
+    expect(docker.commands.length).toBe(before)
+  })
+
+  it("refuses a file larger than PCP keeps, either way", async () => {
+    const { service, tokenId } = await launchedWithFiles()
+    const big = Buffer.alloc(1024 * 1024 + 1, 1)
+    const id = await keep(tokenId, big, "big.bin")
+    useResourceConfig({ ...(await getResourceConfig()), fileMb: 1 })
+    const before = docker.commands.length
+
+    const put = await call(service, tokenId, "put_file", {
+      file: { $result: id },
+      path: "big.bin",
+    })
+    expect(put.isError).toBe(true)
+    expect(textOf(put)).toMatch(/more than PCP copies at once/)
+    expect(docker.commands.length).toBe(before)
+
+    writeFileSync(`${docker.volumeDir("pcp-docs-data")}/out.bin`, big)
+    const got = await call(service, tokenId, "get_file", { path: "out.bin" })
+    expect(got.isError).toBe(true)
+    expect(textOf(got)).toMatch(/larger than PCP keeps of one file/)
+
+    // One past what PCP reads of the stream at all: cut off, not read whole.
+    writeFileSync(
+      `${docker.volumeDir("pcp-docs-data")}/huge.bin`,
+      Buffer.alloc(2 * 1024 * 1024, 2),
+    )
+    const huge = await call(service, tokenId, "get_file", { path: "huge.bin" })
+    expect(huge.isError).toBe(true)
+    expect(textOf(huge)).toMatch(/larger than PCP keeps of one file/)
+  })
+
+  it("does not keep a file that holds a secret the service was given", async () => {
+    const { service, tokenId } = await launchedWithFiles()
+    writeFileSync(
+      `${docker.volumeDir("pcp-docs-data")}/env.txt`,
+      `API_KEY=${API_KEY}\n`,
+    )
+    const got = await call(service, tokenId, "get_file", { path: "env.txt" })
+    expect(got.isError).toBe(true)
+    expect(codeOf(got)).toBe("forbidden")
+    expect(textOf(got)).not.toContain(API_KEY)
+  })
+
+  it("says when there is no such file", async () => {
+    const { service, tokenId } = await launchedWithFiles()
+    const got = await call(service, tokenId, "get_file", { path: "nope.pdf" })
+    expect(got.isError).toBe(true)
+    expect(codeOf(got)).toBe("not_found")
+  })
+
+  it("is refused by a service without a files folder", async () => {
+    const { service, tokenId } = await launchedWithFiles(null)
+    expect(service.tools.map((tool) => tool.name)).not.toContain("put_file")
+    const id = await keep(tokenId)
+    const before = docker.commands.length
+
+    for (const [tool, args] of [
+      ["put_file", { file: { $result: id }, path: "a.pdf" }],
+      ["get_file", { path: "a.pdf" }],
+    ] as const) {
+      const refused = await call(service, tokenId, tool, args)
+      expect(refused.isError).toBe(true)
+      expect(codeOf(refused)).toBe("not_found")
+      expect(textOf(refused)).toMatch(/has no files folder/)
+    }
+
+    expect(docker.commands.length).toBe(before)
   })
 })
 

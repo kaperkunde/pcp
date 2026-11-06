@@ -221,7 +221,10 @@ so in the summary; the bump itself waits for the request.
   server only fills in a first instance. Format 3 adds `services/<name>.yaml`
   (a service's definition); every other kind is still written in the
   format that first held it (`FORMAT_OF_KIND`), so an older PCP reads them
-  and leaves `services/` alone. PCP's common items,
+  and leaves `services/` alone. Format 4 adds `auth` on a service's MCP
+  server and a service's `files`; only a service document that has either
+  is written as format 4 (`serviceFormat`), and a format-3 one naming
+  either is refused. PCP's common items,
   `kaperkunde/pcp-gg-common` (`repos/common.ts`), are offered in one click,
   linked read-only and untrusted (pinned imports), read without a sign-in.
   A push is one commit per item, fast-forward only, and
@@ -322,12 +325,44 @@ so in the summary; the bump itself waits for the request.
   no kind for it. Its limits go in `ssh/limits.ts`, and a change to how a host
   is trusted, PCP signs in or a channel opens gets a test against the test
   server (`ssh/client.test.ts`).
-- Storage folders (`lib/core/storage/`, kind `storage`, a `storage_root`
-  row) are folders on an SSH server PCP holds that assistants list, find,
-  get, save, move and delete files in, over SFTP on the SSH server's pooled
-  connection (`ssh/client.ts openSftp`): a pinned host only, opened with
-  the key a request handed in (`upstream.ts storageConnect`), never in the
-  background, and SFTP for nothing else. Every path is confined by
+- Stores (`lib/core/storage/`, kind `storage`, a `storage_root` row) are
+  where assistants list, find, get, save, move and delete files: a storage
+  folder on an SSH server PCP holds (backend `sftp`), or PCP's own store in
+  its data folder (backend `local`, `<data>/storage/<server id>/`, one per
+  vault, made by `ensureOwnStore` at setup and on a vault's first request,
+  never removed). A storage folder the owner adds is `encrypted` unless
+  they choose plain on its add form (`newStoreMode`); one from before
+  stores stays plain until converted. Each is `plain` (the files as they are, for other apps
+  too) or `encrypted`: opaque objects (`.pcp-store/<xx>/<random id>`) and
+  an index in `storage_entry` (names, folders, sizes, times encrypted under
+  the vault key as `storage_entry:<id>`; a name found by a keyed hash).
+  `storage/crypt.ts` (pure) holds the keys and the format: the store key
+  wrapped under the vault key (`storage_store:<id>`), a new random key per
+  file write wrapped under it (`storage_object:<store>:<object>`), and the
+  content sealed in 64 KiB AES-256-GCM chunks, nonce the index, the object
+  id, index and last-chunk flag as associated data, so a range opens only
+  its chunks and a change, swap, cut or extension is refused. A new format
+  bumps the header's version and keeps reading the old one. Decryption
+  happens only inside a request; an object is written under a part name,
+  renamed, then pointed at in one transaction, and until then sits in
+  `storage_pending`, swept by the next request that opens the store (and
+  by the cleanup for the local store). Only the owner converts a store
+  either way (`storage/convert.ts`, a batch per request, never a timer,
+  each file removed only once its replacement is whole, every tool refused
+  while `converting` is set); an encrypted store with files is not removed.
+  PCP's own tools `list_folder`, `find_files`, `get_file`, `share_file`
+  (only for a token with `shareFiles`), `save_file`,
+  `make_folder`, `move` and `delete` take `store` (a short name; without
+  it, PCP's own) and run that store's own tool through `gateway.ts
+callResolved`, the same path, levels, tier gate and validator as
+  call_tool; the family stays the one implementation. The local store's
+  size is `resourceLimits().storeBytes`. An export carries store rows, keys
+  and the index, never a file. Storage folders' files travel over SFTP on
+  the SSH server's pooled connection (`ssh/client.ts openSftp`): a pinned
+  host only, opened with the key a request handed in (`upstream.ts
+storageConnect`), never in the background, and SFTP for nothing else;
+  the local store is the data folder (`storage/local.ts`, the same
+  `RemoteFs`). Every path is confined by
   `storage/files.ts`: `..` refused before anything connects, the folder a
   name is in resolved by its real path on the server and refused unless it
   is the root's or inside it, the name itself never followed (a link is
@@ -341,10 +376,16 @@ so in the summary; the bump itself waits for the request.
   (`save_file`'s `file`, read before anything connects). A read-only folder
   offers and runs the reading tools only; `delete` is Destructive. Only
   the owner adds one (on the SSH server's page) or changes it;
-  `register_server` has no kind for it. Its file browser
-  (`/servers/<id>/files`) goes through the same confinement. Limits go in
+  `register_server` has no kind for it. The owner's Files pages
+  (`/files`, every store with its mode and reach; `/files/<id>`, a store's
+  file browser) go through the same confinement, and a preview goes out
+  only as `storage/browse.ts` decides: an image (never SVG), a PDF, a sound
+  or a video as itself only when its first bytes agree, text as plain text,
+  anything else as a download. Limits go in
   `storage/limits.ts`, and a new tool, argument or way a path is resolved
-  gets a test against the test server's SFTP (`storage/storage.test.ts`).
+  gets a test against the test server's SFTP (`storage/storage.test.ts`)
+  or a temporary data folder (`storage/stores.test.ts`); a change to the
+  format, a test in `storage/crypt.test.ts`.
 - Exits (`lib/core/exits/`) let web_fetch (`exit`) and a new browser tab
   (`tabs` open with `exit`) go out from somewhere else than PCP's machine:
   an SSH server PCP holds (kind `ssh`), or a VPN container PCP started on one
@@ -414,7 +455,14 @@ so in the summary; the bump itself waits for the request.
   through `after()` from `/mcp` and the owner's pages, throttled, never a
   timer or a stored key) bring it back up. Only the owner
   launches, changes, updates or removes one; an assistant gets `status`, `logs`, `start`, `stop`, `restart` at the
-  owner's levels, and proposes one only through `register_server` (kind
+  owner's levels, and with a files folder in the definition (`files`: a
+  volume of its own and a path in it) `put_file` and `get_file`, which copy
+  a kept file in and out with the engine's own `cp` and a tar stream PCP
+  builds and reads (`services/files.ts`), over standard input and output:
+  no program in the container, the name confined to that folder before
+  anything connects, a file replaced only with `overwrite` and a folder
+  never, bounded by `resourceLimits().fileBytes`, and a file holding a
+  value PCP handed the service never kept, and proposes one only through `register_server` (kind
   `service`, `services/proposals.ts`): a `service_change` request that shows
   everything it runs in full (image, ports and address, variables and their
   secrets by name, volumes, health, what it registers, the SSH server) and
@@ -435,6 +483,25 @@ so in the summary; the bump itself waits for the request.
   failed and says that Start makes it again. Limits go in
   `services/limits.ts`; a new command, tool or argument gets a test against
   the fake engine (`services/fake-docker.ts`, `services.test.ts`).
+- Capabilities (`lib/core/capabilities/`): `read_image`, `edit_pdf` and
+  `convert_document` are PCP's own tools for every token; the work is a
+  provider's, a tool among the token's own found by words in its name,
+  description or arguments (`providers.ts`, pure, never a vendor's name;
+  the common item a server was launched from only ranks it), called how its
+  schema says (a handle, base64, or a file step `put_file` → tool →
+  `get_file`, found by its tools' shape, never their names: the service's
+  own when a service with `files` registered the server, else the #92
+  shape on the server itself; a service's own tools are never a provider). Every call goes through `gateway.ts forwardCall` (as
+  run_code's): the token's own levels, the capability tool's own tier with
+  a provider above it refused naming the entry that runs it, the one
+  validator, `askCodeCall` where a level asks, paced, a request-log line
+  each. With no provider the answer is `needs_owner` reason `setup`: a
+  markdown link, last, to `/plugins/<capability>`, `noteOwnerAsked`, and the
+  tool called again once the owner launched one; that page offers the
+  capability's common items (add PCP's common items first if needed, then
+  the import page at the common repository's head). A new capability is a
+  row in `list.ts`, its operations in `providers.ts`, and a test against
+  fake providers (`capabilities.test.ts`).
 - Search (`lib/core/search.ts`, pure) finds a tool by keywords with no
   provider: stems, a short synonym table, and for PCP's own tools what
   their description's lead says they are for (task phrases there, in a
@@ -460,7 +527,8 @@ embeddingProvider`, which hands `embeddings/provider.ts` the header;
   `tool_result:<id>`, readable by the token whose call produced them, gone
   after a day, never logged and never exported. A handle (`{"$result": id}`)
   in a call's arguments is replaced only in `upstream.ts`, `endpoints.ts`,
-  `mail/accounts.ts`, `storage/roots.ts` and `browser/call.ts`
+  `mail/accounts.ts`, `storage/roots.ts`, `services/services.ts` and
+  `browser/call.ts`
   (`lib/core/result-handles.ts`), with the token's own
   results, before anything is sent; a waiting request stores the handle,
   never the content. File links (`lib/core/file-links.ts`, only for a token
@@ -470,14 +538,31 @@ embeddingProvider`, which hands `embeddings/provider.ts` the header;
   upload's key also wrapped under the vault's, so it becomes a kept result
   only when the token uses its handle); an hour, a few downloads or one
   upload, its token live, every use in the request log, never exported, and
-  pruned by the cleanup. Upload links (`lib/core/upload-links.ts`, same
+  pruned by the cleanup. A store's file goes out by a public link
+  (`lib/core/store-links.ts`, `share_file`, a store tool at the owner's
+  levels, same option): a `file_link` of kind `store` that holds that one
+  file's key wrapped under the link's key (`file_link_file_key:<id>`),
+  never the store key; a file of PCP's own store, encrypted, is read in
+  place with that key alone (`openSealedObject`) and the link ends when the
+  index no longer names its object; any other store's file is copied when
+  shared, sealed the same way, into `<data>/file-links/` (a public request
+  holds no SSH key). Ranges are served, counted against `max_downloads`
+  times the file; at most a week (`storage/limits.ts`); the cleanup removes
+  copies no link names. Upload links (`lib/core/upload-links.ts`, same
   option) are the one link for the owner: `create_upload_link` hands the
   assistant `/upload/<secret>` (a page outside the dashboard, no session,
   the link alone its credential) to give the owner as a markdown link, and
   `check_upload` waits for what arrived; it takes a few files for an hour,
   then a quarter of an hour from the first or until Done, each file a
   `file_link` slot made with it (result id and wrapped key up front), so it
-  too becomes a kept result only when the token uses its handle. The one
+  too becomes a kept result only when the token uses its handle. Made with
+  a `store` and `folder` (also `receive_file`; a store whose save_file is
+  not blocked for the token, shown on the page), each file is saved there
+  too by the next request that holds the vault's key
+  (`lib/core/store-uploads.ts`: check_upload, or `after()` from `/mcp` and
+  the owner's pages; never a timer, never over a file there), its folder
+  and path encrypted (`file_link_store_path:<id>`). Kept results stay rows
+  for a day: a file kept for good is `save_file`'s, into a store. The one
   other way a kept result goes over HTTP is to the owner's own page, while
   a call that names it waits for them (`lib/core/permission-files.ts`,
   `permissions.ts openRequestFile`): only a result that waiting request's
@@ -537,7 +622,8 @@ embeddingProvider`, which hands `embeddings/provider.ts` the header;
   (`scripts/sandbox.test.ts` pins the compose file). New limits go in
   `code/limits.ts`, and a new bridge operation gets a test.
 - Limits on the machine's memory, processors and disk (a program's memory,
-  programs at once, the largest file, kept results per token) are not
+  programs at once, the largest file, kept results per token, PCP's own
+  store) are not
   constants: they are `resourceLimits()` (`lib/core/resources/`), picked
   from the machine unless the owner set them on Settings → Resources, and
   never past what `checkResourceConfig` lets the machine spare. A new one
@@ -718,15 +804,18 @@ embeddingProvider`, which hands `embeddings/provider.ts` the header;
   request for the wrapper to read), the export download (`app/api/export/route.ts`: a file needs
   `Content-Disposition`, which an action cannot send; it checks the request's
   origin itself, `lib/server/same-origin.ts`), file links
-  (`app/api/files/[secret]/`: curl from an assistant's own computer, and
-  the upload page's PUTs and Done, the link's secret its only credential),
+  (`app/api/files/[secret]/`: curl from an assistant's own computer, a
+  `share_file` link's download with its Range, and the upload page's PUTs
+  and Done, the link's secret its only credential),
   the browser's live view
   (`app/api/browser/tabs/[id]/`: a stream of a tab's pictures and the
   owner's input, which an action cannot carry; the same origin check and
-  session), a storage folder's download
+  session), a store's download and preview
   (`app/api/storage/[id]/download/`: a file needs `Content-Disposition` and
-  can be larger than an action's answer; streamed from the SSH server, kept
-  nowhere; the same origin check and session), and the files a waiting call
+  can be larger than an action's answer, a sound or a video a byte range;
+  streamed from the SSH server or the data folder, decrypted as it is read,
+  kept nowhere; `?inline=1` as `storage/browse.ts servedPreview` says,
+  sandboxed and nosniff; the same origin check and session), and the files a waiting call
   carries (`app/api/permissions/[id]/files/[result]/`: a preview or download
   needs Content-Type and Content-Disposition; the same origin check and
   session).
@@ -859,7 +948,8 @@ OpenAPI schema is an "endpoint" ("API endpoints" in the UI); a mailbox PCP
 signs in to is a "mail account"; a machine PCP runs commands on is an "SSH
 server" ("SSH servers" in the UI); a folder on one that assistants keep
 files in is a "storage folder" ("Storage folders" in the UI; a storage root
-in code); a container PCP runs on one is a
+in code), and any place assistants keep files, PCP's own included, is a
+"store" ("PCP files" is PCP's own); a container PCP runs on one is a
 "service" ("Services" in the UI); calendars and reminders PCP reaches over
 CalDAV are a "calendar account" ("Calendar accounts" in the UI); a server
 whose tools are programs over the

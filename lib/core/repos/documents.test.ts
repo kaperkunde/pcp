@@ -625,7 +625,7 @@ describe("a hostile repository", () => {
       await problemOf(
         wrapperFiles({ ...WRAPPER, pcp_format: PCP_FORMAT + 1, more: "new" }),
       ),
-    ).toMatch(/format 4, written by a newer PCP; this one reads format 3/)
+    ).toMatch(/format 5, written by a newer PCP; this one reads format 4/)
     expect(
       await problemOf({
         "skills/pdf-tools/SKILL.md": ANTHROPIC_SKILL.replace(
@@ -702,6 +702,54 @@ describe("a hostile repository", () => {
   })
 })
 
+describe("format 4: a service's files folder", () => {
+  const WITH_FILES = {
+    ...DOCLING,
+    volumes: [{ name: "data", path: "/data" }],
+    files: { volume: "data", path: "/data" },
+  }
+
+  it("writes a service with a files folder in format 4, and only that one", async () => {
+    const ctx = await freshVault()
+    const { id } = await addService(ctx, WITH_FILES)
+    const { document } = await localItem(ctx, "service", id)
+    const files = serializeItem(document)
+    const text = files["services/docling-service.yaml"]!
+
+    expect(text).toContain("pcp_format: 4\n")
+    expect(text).toMatch(/files:\n {2}volume: data\n {2}path: \/data\n/)
+    const read = await readRepo(files)
+    expect(read.problems).toEqual([])
+    expect(read.items).toEqual([document])
+    expect(serializeItem(read.items[0]!)).toEqual(files)
+  })
+
+  it("refuses a files folder in a format-3 document, as an older PCP would", async () => {
+    const read = await readRepo({
+      "services/docling.yaml": yamlText({
+        pcp_format: 3,
+        version: 1,
+        name: "Docling",
+        ...WITH_FILES,
+      }),
+    })
+    expect(read.problems[0]?.message).toMatch(/format 3, which has no files/)
+    const fine = await readRepo({
+      "services/docling.yaml": yamlText({
+        pcp_format: 4,
+        version: 1,
+        name: "Docling",
+        ...WITH_FILES,
+      }),
+    })
+    expect(fine.problems).toEqual([])
+    expect((fine.items[0] as ServiceDocument).definition.files).toEqual({
+      volume: "data",
+      path: "/data",
+    })
+  })
+})
+
 describe("format 3: services", () => {
   it("writes a service's definition as services/<name>.yaml in format 3, and reads it back the same", async () => {
     const ctx = await freshVault()
@@ -720,7 +768,7 @@ describe("format 3: services", () => {
     const text = files["services/docling-service.yaml"]!
     expect(text).toContain(`pcp_format: ${FORMAT_OF_KIND.service}\n`)
     expect(FORMAT_OF_KIND.service).toBe(3)
-    expect(PCP_FORMAT).toBe(3)
+    expect(PCP_FORMAT).toBe(4)
     expect(text).toContain(`image: ${DOCLING.image}`)
     // Nothing of the instance: not its SSH server, address, container,
     // secrets or what it registered.
@@ -739,6 +787,61 @@ describe("format 3: services", () => {
     expect(read.problems).toEqual([])
     expect(read.items).toEqual([document])
     expect(serializeItem(read.items[0]!)).toEqual(files)
+  })
+
+  it("writes a service whose MCP server sends a secret header in format 4, and only that one", async () => {
+    const ctx = await freshVault()
+    const registers = {
+      kind: "mcp" as const,
+      port: 5001,
+      path: "/mcp",
+      auth: {
+        env: "DOCLING_SERVE_API_KEY",
+        header: "Authorization",
+        template: "Bearer {{secret}}",
+      },
+    }
+    const { id } = await addService(ctx, { ...DOCLING, registers })
+    const document = (await localItem(ctx, "service", id))
+      .document as ServiceDocument
+    const files = serializeItem(document)
+    const text = files["services/docling-service.yaml"]!
+
+    expect(text).toContain("pcp_format: 4\n")
+    expect(text).toContain("template: Bearer {{secret}}")
+    expect(text).not.toContain("dk-SERVICE-KEY")
+    const read = await readRepo(files)
+    expect(read.problems).toEqual([])
+    expect((read.items[0] as ServiceDocument).definition.registers).toEqual(
+      registers,
+    )
+    expect(serializeItem(read.items[0]!)).toEqual(files)
+
+    // Without a header it is format 3 still, as it always was.
+    const plain = serializeItem({
+      ...document,
+      definition: {
+        ...document.definition,
+        registers: { kind: "mcp", port: 5001, path: "/mcp" },
+      },
+    })
+    expect(plain["services/docling-service.yaml"]).toContain("pcp_format: 3\n")
+
+    // A format-3 document has no header on an MCP server, as a PCP that
+    // reads format 3 says.
+    const older = await readRepo({
+      "services/docling.yaml": yamlText({
+        pcp_format: 3,
+        version: 1,
+        name: "Docling",
+        ...DOCLING,
+        registers,
+      }),
+    })
+    expect(older.items).toEqual([])
+    expect(older.problems[0]?.message).toMatch(
+      /format 3, whose MCP server sends no secret header: write it as format 4/,
+    )
   })
 
   it("never shares a service built from a repository, and reads no build from a document", async () => {

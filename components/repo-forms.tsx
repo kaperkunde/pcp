@@ -491,14 +491,23 @@ function ActionButton({
   )
 }
 
-/** One click for PCP's common items: linked read-only, then browsed. */
-export function AddCommonRepoButton() {
+/**
+ * One click for PCP's common items: linked read-only, then browsed, or back
+ * to the capability's page it was offered on.
+ */
+export function AddCommonRepoButton({
+  forCapability,
+  variant = "secondary",
+}: {
+  forCapability?: string
+  variant?: "secondary" | "default"
+} = {}) {
   return (
     <ActionButton
       label="Add PCP's common items"
       pendingLabel="Adding…"
-      variant="secondary"
-      run={() => addCommonRepoAction()}
+      variant={variant}
+      run={() => addCommonRepoAction(forCapability)}
     />
   )
 }

@@ -1,6 +1,5 @@
 import { randomBytes } from "node:crypto"
 import { isIP } from "node:net"
-import type { Readable } from "node:stream"
 
 import {
   auth,
@@ -44,15 +43,21 @@ import {
   sshExec,
   type SshIdentity,
 } from "./ssh/client"
-import { openFolder, type StorageFolder } from "./storage/files"
+import { convertStoreStep, type ConversionStep } from "./storage/convert"
+import { deliverStoreUploads, type Delivery } from "./store-uploads"
+import { type OpenedFile, type StorageFolder } from "./storage/files"
 import {
   callStorageTool,
+  isLocalStore,
   loadStorageRoot,
+  localConnect,
+  openStoreFolder,
   syncStorageTools,
   unreachableReason,
   withFolder,
   type LoadedStorage,
   type StorageConnect,
+  type StoreMode,
 } from "./storage/roots"
 import { remoteFs } from "./storage/sftp"
 import {
@@ -1433,10 +1438,15 @@ async function sshIdentity(
  * session is opened and handed to the ssh module, never further. A host
  * whose key the owner has not pinned is not connected to (openSftp refuses).
  */
-function storageConnect(
+export function storageConnect(
   ctx: VaultContext,
   loaded: LoadedStorage,
 ): StorageConnect {
+  // PCP's own store is in its data folder: no SSH server, no key.
+  if (isLocalStore(loaded.root)) {
+    return localConnect
+  }
+
   return async () => {
     const host = loaded.host
 
@@ -1474,21 +1484,55 @@ export async function withStorageFolder<T>(
     throw new PcpError("state", unreachable.split("\n")[0]!)
   }
 
-  return withFolder(loaded, storageConnect(ctx, loaded), (folder) =>
+  return withFolder(ctx, loaded, storageConnect(ctx, loaded), (folder) =>
     run(folder, loaded),
   )
 }
 
 /**
- * One file of a storage root as a stream, for the owner's download: the
- * session stays open while the stream is read and closes when it ends.
+ * Saves files that arrived by upload links made with a store as their
+ * destination (store-uploads.ts), each store opened as the owner's file
+ * browser opens it, with the key this request holds. Run by check_upload
+ * and, after the answer, by any request that brings the vault's key.
  */
-export async function openStorageDownload(
+export function deliverUploads(
+  ctx: VaultContext,
+  {
+    publicUrl,
+    ...options
+  }: {
+    publicUrl: string
+    tokenId?: string
+    uploadLinkId?: string
+    retryNow?: boolean
+  },
+): Promise<Delivery[]> {
+  return deliverStoreUploads(ctx, {
+    ...options,
+    open: (storeId, run) =>
+      withStorageFolder(ctx, storeId, { publicUrl }, (folder, loaded) => {
+        if (loaded.server.readOnly) {
+          throw new PcpError(
+            "state",
+            `${loaded.server.name} is read-only in PCP now, so nothing is saved there.`,
+          )
+        }
+        return run(folder)
+      }),
+  })
+}
+
+/**
+ * One batch of the owner's conversion of a store, encrypted or plain
+ * (storage/convert.ts), on its backend opened for this request.
+ */
+export async function convertStore(
   ctx: VaultContext,
   serverId: string,
-  path: string,
+  to: StoreMode,
   { publicUrl }: { publicUrl: string },
-): Promise<{ name: string; size: number; stream: Readable }> {
+  options?: { budgetMs?: number; maxFiles?: number },
+): Promise<ConversionStep> {
   const loaded = await loadStorageRoot(ctx, serverId)
   const unreachable = unreachableReason(loaded, publicUrl)
 
@@ -1496,25 +1540,49 @@ export async function openStorageDownload(
     throw new PcpError("state", unreachable.split("\n")[0]!)
   }
 
-  const fs = await storageConnect(ctx, loaded)()
+  return convertStoreStep(ctx, loaded, storageConnect(ctx, loaded), to, options)
+}
+
+/**
+ * One file of a store as a stream, whole or a range (`offset`, `length`),
+ * for the owner's download: decrypted as it is read when the store is
+ * encrypted. The session stays open while the stream is read and closes
+ * when it ends.
+ */
+export async function openStorageDownload(
+  ctx: VaultContext,
+  serverId: string,
+  path: string,
+  { publicUrl }: { publicUrl: string },
+  range?: { offset?: number; length?: number },
+): Promise<OpenedFile> {
+  const loaded = await loadStorageRoot(ctx, serverId)
+  const unreachable = unreachableReason(loaded, publicUrl)
+
+  if (unreachable) {
+    throw new PcpError("state", unreachable.split("\n")[0]!)
+  }
+
+  const { folder, end: close } = await openStoreFolder(
+    ctx,
+    loaded,
+    storageConnect(ctx, loaded),
+  )
 
   try {
-    const folder = await openFolder(fs, loaded.root.path, {
-      umask: loaded.root.umask,
-    })
-    const file = await folder.file(path)
-    const stream = fs.readStream(file.real)
+    const file = await folder.open(path, range)
     let ended = false
     const end = () => {
       if (ended) return
       ended = true
-      fs.end()
+      close()
     }
-    stream.once("close", end)
-    stream.once("error", end)
-    return { name: file.name, size: file.size, stream }
+    file.stream.once("close", end)
+    file.stream.once("error", end)
+    file.stream.once("end", end)
+    return file
   } catch (error) {
-    fs.end()
+    close()
     throw error
   }
 }
@@ -1885,6 +1953,7 @@ async function readServerTools(
     const loaded = await loadStorageRoot(ctx, server.id)
 
     return syncStorageTools(
+      ctx,
       loaded,
       // Only the owner's check connects: a read for an assistant stores
       // the tools as they are.
@@ -2479,9 +2548,10 @@ async function dispatchKind(
 
     // The root reads a file to save from the token's kept results itself,
     // as bytes, before anything connects.
-    return callStorageTool(loaded, toolName, args, {
+    return callStorageTool(ctx, loaded, toolName, args, {
       connect: storageConnect(ctx, loaded),
       publicUrl,
+      tokenId,
       keepBytes,
       open,
     })
@@ -2506,7 +2576,9 @@ async function dispatchKind(
         ...access,
         env: { ...access.env, redact: [...access.env.redact, ...placed] },
       },
-      { publicUrl },
+      // put_file reads its file from the token's kept results itself, as
+      // bytes, before anything connects; get_file keeps what it reads.
+      { publicUrl, open, keepBytes },
     )
   }
 

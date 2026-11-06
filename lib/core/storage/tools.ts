@@ -4,6 +4,11 @@ import type { CatalogueTool } from "../catalogue"
 import { defineInnerTool, exactlyOne, type InnerTool } from "../tools/family"
 import {
   DEFAULT_FIND_RESULTS,
+  DEFAULT_STORE_LINK_DOWNLOADS,
+  DEFAULT_STORE_LINK_MINUTES,
+  MAX_STORE_LINK_DOWNLOADS,
+  MAX_STORE_LINK_MINUTES,
+  MIN_STORE_LINK_MINUTES,
   MAX_FIND_RESULTS,
   MAX_GLOB_CHARS,
   MAX_LIST_ENTRIES,
@@ -32,8 +37,16 @@ export const STORAGE_WRITE_TOOLS = [
   "move",
   "delete",
 ] as const
+/**
+ * Tools that change no file but make something of one: share_file's public
+ * link (store-links.ts), offered on a read-only store too, and run only for
+ * a token the owner lets move files by link.
+ */
+export const STORAGE_LINK_TOOLS = ["share_file"] as const
 export type StorageToolName =
-  (typeof STORAGE_READ_TOOLS)[number] | (typeof STORAGE_WRITE_TOOLS)[number]
+  | (typeof STORAGE_READ_TOOLS)[number]
+  | (typeof STORAGE_WRITE_TOOLS)[number]
+  | (typeof STORAGE_LINK_TOOLS)[number]
 
 const path = (what: string) =>
   z
@@ -116,6 +129,39 @@ const getFile = defineInnerTool({
     path: path("The file, relative to the top of this storage folder."),
   }),
   annotations: READ,
+})
+
+const shareFile = defineInnerTool({
+  name: "share_file",
+  title: "Share a file by link",
+  description: "Shares one file by a public download link.",
+  input: z.strictObject({
+    path: path("The file to share, relative to the top of this store."),
+    expires_in_minutes: z
+      .number()
+      .int()
+      .min(MIN_STORE_LINK_MINUTES)
+      .max(MAX_STORE_LINK_MINUTES)
+      .optional()
+      .describe(
+        `How long the link works, in minutes; ${DEFAULT_STORE_LINK_MINUTES} by default, at most ${MAX_STORE_LINK_MINUTES} (a week).`,
+      ),
+    max_downloads: z
+      .number()
+      .int()
+      .min(1)
+      .max(MAX_STORE_LINK_DOWNLOADS)
+      .optional()
+      .describe(
+        `How many times it serves the whole file (a range counts what it reads); ${DEFAULT_STORE_LINK_DOWNLOADS} by default.`,
+      ),
+  }),
+  annotations: {
+    readOnlyHint: false,
+    destructiveHint: false,
+    idempotentHint: false,
+    openWorldHint: true,
+  },
 })
 
 const saveFile = defineInnerTool({
@@ -229,6 +275,7 @@ const TOOLS: Record<StorageToolName, InnerTool> = {
   list_folder: listFolder,
   find_files: findFiles,
   get_file: getFile,
+  share_file: shareFile,
   save_file: saveFile,
   make_folder: makeFolder,
   move,
@@ -244,24 +291,27 @@ export function isStorageWrite(name: string): boolean {
   return (STORAGE_WRITE_TOOLS as readonly string[]).includes(name)
 }
 
-/** The catalogue's tools for one root, in words that name it. */
+/** The catalogue's tools for one store, in words that name it. */
 export function storageTools({
-  folder,
-  host,
+  where,
+  encrypted,
   readOnly,
 }: {
-  /** The root's path on the server. */
-  folder: string
-  /** The SSH server's name. */
-  host: string
+  /** Where its files are, in words: "the folder /srv/scans on nas". */
+  where: string
+  /** Its files are kept encrypted (names too). */
+  encrypted: boolean
   readOnly: boolean
 }): CatalogueTool[] {
-  const where = `the folder ${folder} on ${host}`
+  const kept = encrypted
+    ? " PCP keeps them encrypted there, names and folders too, and decrypts them only for a call."
+    : ""
   const words: Record<StorageToolName, string> = {
-    list_folder: `Lists the files and folders in ${where}, or a folder inside it: each one's name, path, type, size and when it changed, folders first. Paths are relative to the top of the folder; nothing outside it is reached.`,
+    list_folder: `Lists the files and folders in ${where}, or a folder inside it: each one's name, path, type, size and when it changed, folders first. Paths are relative to the top of the folder; nothing outside it is reached.${kept}`,
     find_files: `Finds files and folders by name in ${where} (or a folder inside it) and every folder under it, with * and ? in the name. Answers with each match's path, size and when it changed. Symbolic links are not followed.`,
     get_file: `Gets one file from ${where} as a kept result's handle, {"$result": "<id>"}, to pass on whole to another tool (send_email's attachments, save_file on another folder, an API's file field) without reading it yourself; a text file's start comes back as text too. A file larger than PCP keeps is refused.`,
-    save_file: `Saves a file in ${where}: a kept result's handle (file, {"$result": "<id>"}: a mail attachment, a scan, a converted document) or text. It is written under a temporary name and renamed into place when whole, with the folder's permissions. A file already there is replaced only with overwrite: true.`,
+    share_file: `Shares one file of ${where}, by a public download link anyone holding it can use, for as long and as many downloads as asked (an hour and ${DEFAULT_STORE_LINK_DOWNLOADS} by default, at most a week): to send a file to someone, or open it on another device. The link holds the key to that one file and nothing else; a file of PCP's own store is read in place and the link ends when it is changed or deleted, one elsewhere is copied when shared. Only for a token the owner lets move files by link.`,
+    save_file: `Saves a file in ${where}: a kept result's handle (file, {"$result": "<id>"}: a mail attachment, a scan, a converted document) or text. It is written whole before it takes its name, so a file is never half there. A file already there is replaced only with overwrite: true.${kept}`,
     make_folder: `Makes a folder in ${where}, with parents: true also the folders above it. A folder already there is left as it is.`,
     move: `Moves or renames a file or folder within ${where}: from and to are both full paths inside it. A file at to is replaced only with overwrite: true; a folder never.`,
     delete: `Deletes a file or folder in ${where} for good: there is no Trash. A folder must be empty unless recursive: true. A symbolic link is deleted itself, never what it points to.`,
@@ -271,3 +321,21 @@ export function storageTools({
     .filter((name) => !readOnly || !isStorageWrite(name))
     .map((name) => TOOLS[name].listed(words[name]))
 }
+
+/**
+ * The store tools' inputs, for PCP's own top-level tools of the same names
+ * (gateway.ts), which take a store beside them: one set of arguments, so a
+ * call reads the same either way in.
+ */
+export const STORAGE_INPUTS = {
+  list_folder: listFolder,
+  find_files: findFiles,
+  get_file: getFile,
+  share_file: shareFile,
+  save_file: saveFile,
+  make_folder: makeFolder,
+  move,
+  delete: remove,
+} as const satisfies Record<StorageToolName, InnerTool>
+
+export const STORAGE_TOOL_NAMES = Object.keys(TOOLS) as StorageToolName[]

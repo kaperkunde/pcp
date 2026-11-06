@@ -112,7 +112,11 @@ async function populate() {
       name: "Scans",
       slug: "scans",
       url: "pcp:storage",
-      storageRoot: { create: { path: "/srv/scans" } },
+      storageRoot: { create: { path: "/srv/scans", mode: "encrypted" } },
+      storageEntries: {
+        create: { id: "entry1", nameKey: "k", meta: new Uint8Array([1]) },
+      },
+      storagePending: { create: { objectId: "0".repeat(32) } },
     },
   })
   await storeTools(server.id, [
@@ -212,6 +216,8 @@ describe("deleteVault", { timeout: 30_000 }, () => {
     expect(before.server_definition).toBe(1)
     expect(before.service_spec).toBe(1)
     expect(before.storage_root).toBe(1)
+    expect(before.storage_entry).toBe(1)
+    expect(before.storage_pending).toBe(1)
     expect(before.exit).toBe(1)
     expect(before.upload_link).toBe(1)
     expect(before.tool_tier).toBe(1)

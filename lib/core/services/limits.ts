@@ -68,3 +68,16 @@ export const START_ON_DEMAND_WAIT_MS = 45_000
 export const SERVICE_RECONCILE_INTERVAL_MS = 10 * 60_000
 /** And stops starting more once this long has gone. */
 export const SERVICE_RECONCILE_BUDGET_MS = 2 * 60_000
+
+/** A file's name in a service's files folder, and each folder or name in it. */
+export const MAX_FILE_NAME_CHARS = 200
+export const MAX_FILE_NAME_PART_CHARS = 100
+/** Copying one file into or out of a container (put_file, get_file). */
+export const FILE_COPY_TIMEOUT_MS = 5 * 60_000
+/** What PCP reads of a name's tar stream to see whether it is there, and what it is. */
+export const FILE_PROBE_BYTES = 8 * 1024
+/**
+ * The tar stream's own bytes around a file get_file reads (its headers,
+ * padding and end): the most read back is the largest file plus these.
+ */
+export const FILE_TAR_OVERHEAD_BYTES = 64 * 1024

@@ -23,6 +23,7 @@ let fake: FakeSsh
 let authorized: string | null = null
 let base: string
 let top: string
+let newFolderPage: string
 
 test.beforeAll(async () => {
   base = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "pcp-e2e-")))
@@ -67,13 +68,21 @@ test("a folder is added on its SSH server's page and browsed there", async ({
   // The SSH server's page has Name fields of its own (the server, an exit):
   // fill in the folder's once its page is open.
   await expect(page).toHaveURL(/\/servers\/storage\/new\?/)
+  newFolderPage = page.url()
   await page.getByLabel("Name", { exact: true }).fill(FOLDER)
   await page.getByLabel("Folder", { exact: true }).fill(top)
+  // A new folder is encrypted unless you choose plain: this one is a share
+  // other apps read, with a file in it already.
+  const modes = page.getByTestId("storage-mode")
+  await expect(modes.getByRole("radio", { name: "Encrypted" })).toBeChecked()
+  await modes.getByRole("radio", { name: "Plain" }).check()
   await page.getByRole("button", { name: "Add folder" }).click()
   await expect(page).toHaveURL(/\/servers\/[0-9a-f-]+$/)
   await expect(page.getByTestId("storage-folder")).toContainText(top)
 
   await page.getByRole("link", { name: "Browse files" }).click()
+  // Its file browser is under Files, and Files lists it after PCP's own.
+  await expect(page).toHaveURL(/\/files\/[\w-]+$/)
   const entries = page.getByTestId("storage-entries")
   await expect(entries).toContainText("hello.txt")
   await expect(entries).toContainText("A link out of the folder")
@@ -100,6 +109,14 @@ test("a folder is added on its SSH server's page and browsed there", async ({
     .getByRole("button", { name: "Delete" })
     .click()
   await expect(entries).not.toContainText("note.txt")
+
+  await page.goto("/files")
+  const stores = page.getByTestId("stores").getByRole("listitem")
+  await expect(stores.first()).toContainText("PCP files")
+  await expect(stores.filter({ hasText: FOLDER })).toContainText(
+    `${top} on ${HOST}`,
+  )
+  await expect(stores.filter({ hasText: FOLDER })).toContainText("Plain")
 })
 
 test("an assistant saves a file once the owner allows it, inside the folder only", async ({
@@ -133,4 +150,37 @@ test("an assistant saves a file once the owner allows it, inside the folder only
   })
   expect(toolText(escaped)).toMatch(/leads out of the folder/)
   expect(fs.readdirSync(path.join(base, "private"))).toEqual([])
+})
+
+test("a folder added as it comes is encrypted: the server holds only objects", async ({
+  page,
+}) => {
+  const vault = path.join(base, "vault")
+  fs.mkdirSync(vault)
+
+  await page.goto(newFolderPage)
+  await page.getByLabel("Name", { exact: true }).fill(`Vault ${RUN}`)
+  await page.getByLabel("Folder", { exact: true }).fill(vault)
+  await page.getByRole("button", { name: "Add folder" }).click()
+  await expect(page).toHaveURL(/\/servers\/[0-9a-f-]+$/)
+
+  await page.getByRole("link", { name: "Browse files" }).click()
+  await expect(page).toHaveURL(/\/files\/[\w-]+$/)
+  await page.getByLabel("Files to upload").setInputFiles({
+    name: "plan.txt",
+    mimeType: "text/plain",
+    buffer: Buffer.from("for the owner only"),
+  })
+  await page.getByRole("button", { name: "Upload", exact: true }).click()
+  await expect(page.getByTestId("storage-entries")).toContainText("plan.txt")
+  // On the SSH server: no name, no text.
+  expect(fs.readdirSync(vault)).toEqual([".pcp-store"])
+
+  await page.goto("/files")
+  await expect(
+    page
+      .getByTestId("stores")
+      .getByRole("listitem")
+      .filter({ hasText: `Vault ${RUN}` }),
+  ).toContainText("Encrypted")
 })
