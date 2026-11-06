@@ -1,4 +1,5 @@
 import { db } from "../db"
+import { localStoresBytes } from "../storage/cleanup"
 import { MIN_RECLAIM_BYTES, MIN_RECLAIM_SHARE } from "./limits"
 
 /**
@@ -53,4 +54,18 @@ export async function reclaimSpace(): Promise<number> {
   const after = await pages()
 
   return Math.max(0, size - after.pageCount * after.pageSize)
+}
+
+/**
+ * What PCP's own store takes in the data folder (lib/core/storage/), beside
+ * the database: its files, counted after the cleanup removed what it left
+ * behind. Nothing is read but the files' sizes.
+ */
+export async function storesSpace(): Promise<{ storeBytes?: number }> {
+  try {
+    const bytes = await localStoresBytes()
+    return bytes > 0 ? { storeBytes: bytes } : {}
+  } catch {
+    return {}
+  }
 }

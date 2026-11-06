@@ -23,6 +23,7 @@ import {
   decidePermission,
   getPermissionView,
   listAnsweredRequests,
+  openRequestFile,
   listOwnOpenRequests,
   answeredNote,
   ownRequests,
@@ -524,13 +525,14 @@ describe("kept results in a call", () => {
     ).id
   }
 
-  it("shows the owner what each handle is, and warns when one is gone", async () => {
+  it("shows the owner each handle as a file, and warns when one is gone", async () => {
     const { ctx, scope, server, tokenId } = await setup()
     const id = await keepFile(ctx, server.id, tokenId)
-    await withPermission(
+    const asked = await withPermission(
       scope,
       call(server, "send_postcard", {
         attachments: [{ $result: id }, { $result: "gone" }],
+        nested: { deep: [{ file: { $result: id } }] },
       }),
     )
 
@@ -541,14 +543,89 @@ describe("kept results in a call", () => {
     expect(view?.lines).toContain(
       `attachments: [{"$result":"${id}"},{"$result":"gone"}]`,
     )
-    expect(
-      view?.lines.find((line) => line.startsWith(`Kept result ${id}:`)),
-    ).toMatch(
-      /^Kept result [^:]+: dot\.png, image\/png, 8 bytes, from postcards\/get_attachment, readable until \d{4}-/,
+    // Files are chips, not lines of text; named twice, shown once.
+    expect(view?.lines.some((line) => line.startsWith("Kept result"))).toBe(
+      false,
     )
-    expect(view?.lines).toContain(
+    expect(view?.files).toEqual([
+      {
+        id,
+        found: true,
+        name: "dot.png",
+        mediaType: "image/png",
+        kind: "bytes",
+        length: 8,
+        size: "8 B",
+        from: "postcards/get_attachment",
+        expiresAt: expect.any(Date),
+        preview: "image",
+      },
+      { id: "gone", found: false },
+    ])
+    // The raw arguments fold under them, even when the lines said it all.
+    expect(view?.full?.map((part) => part.label)).toEqual([
+      "attachments",
+      "nested",
+    ])
+
+    // The assistant is still told what each one is.
+    const told = textOf(asked)
+    expect(told).toMatch(
+      /Kept result [^:]+: dot\.png, image\/png, 8 bytes, from postcards\/get_attachment, readable until \d{4}-/,
+    )
+    expect(told).toContain(
       "Kept result gone: no longer available for this token; the call will fail",
     )
+  })
+
+  it("serves the owner only a file the waiting request names, of its own token, while it waits", async () => {
+    const { ctx, scope, server, tokenId } = await setup()
+    const named = await keepFile(ctx, server.id, tokenId)
+    const unnamed = await keepFile(ctx, server.id, tokenId)
+    const { id: otherToken } = await createApiToken(ctx, {
+      name: "Other",
+      allowAllServers: true,
+      serverIds: [],
+    })
+    const foreign = await keepFile(ctx, server.id, otherToken)
+    await withPermission(
+      scope,
+      call(server, "send_postcard", {
+        attachments: [{ $result: named }, { $result: foreign }],
+      }),
+    )
+    const permissionId = await onlyRequestId()
+    const open = (resultId: string, now?: Date) =>
+      openRequestFile(ctx, { permissionId, resultId }, now)
+
+    expect((await open(named))?.bytes()).toEqual(PNG)
+    // Not named in its arguments.
+    expect(await open(unnamed)).toBeNull()
+    // Named, but another token's: the call could not send it either.
+    expect(await open(foreign)).toBeNull()
+    // Another vault's request, or none.
+    expect(
+      await openRequestFile(ctx, { permissionId: "nope", resultId: named }),
+    ).toBeNull()
+
+    // Not once the result is gone (a day), nor once the request expired.
+    const row = await db().permissionRequest.findFirstOrThrow()
+    expect(
+      await open(named, new Date(row.expiresAt.getTime() + 1000)),
+    ).toBeNull()
+    const kept = await db().toolResult.findUniqueOrThrow({
+      where: { id: named },
+    })
+    expect(
+      await open(named, new Date(kept.expiresAt.getTime() + 1000)),
+    ).toBeNull()
+
+    // Nor once it is answered.
+    await db().permissionRequest.update({
+      where: { id: permissionId },
+      data: { status: "declined" },
+    })
+    expect(await open(named)).toBeNull()
   })
 
   it("hands the upstream a way to open the token's own results, and no other's", async () => {

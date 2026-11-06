@@ -7,14 +7,32 @@ import {
   IMAGE_BY_DIGEST,
   IMAGE_BY_TAG,
   imageRepository,
+  LOCAL_IMAGE,
   volumeOnHost,
+  type ServiceBuild,
   type ServiceDefinition,
+  type ServiceFiles,
   type ServicePublish,
 } from "./definition"
 import {
+  fileName,
+  filesFolder,
+  fileTar,
+  firstTarEntry,
+  TarError,
+  type TarEntryType,
+} from "./files"
+import {
+  BUILD_LOG_TAIL_BYTES,
+  BUILD_TIMEOUT_MS,
   ENGINE_COMMAND_TIMEOUT_MS,
   ENGINE_OUTPUT_BYTES,
   ENGINE_PULL_TIMEOUT_MS,
+  FILE_COPY_TIMEOUT_MS,
+  FILE_PROBE_BYTES,
+  FILE_TAR_OVERHEAD_BYTES,
+  MAX_BUILD_SOURCE_BYTES,
+  MAX_BUILT_IMAGE_BYTES,
   MAX_ENV_SECRET_BYTES,
   MAX_LOG_BYTES,
   STOP_GRACE_SECONDS,
@@ -156,6 +174,12 @@ export async function pullImage(
     throw new EngineError("An image is pulled by digest.")
   }
 
+  if (LOCAL_IMAGE.test(image)) {
+    throw new EngineError(
+      `${image} was built on the SSH server from a repository: it is never pulled.`,
+    )
+  }
+
   const result = await run(
     host,
     commandLine([program(engine), "pull", "--quiet", image]),
@@ -231,6 +255,175 @@ export function pickDigest(output: string, source: string): string {
   }
 
   return `${repository}@${found.slice(found.indexOf("@") + 1)}`
+}
+
+// ---- Building from a repository ----------------------------------------------
+
+/** What the engine runs an image as: a built one by its id, `sha256:<id>`. */
+export function runReference(image: string): string {
+  return LOCAL_IMAGE.test(image) ? image.slice(image.indexOf("@") + 1) : image
+}
+
+/** The name a build's image is tagged with: localhost/pcp-<repository's name>. */
+export function builtImageName(
+  build: Pick<ServiceBuild, "repository">,
+): string {
+  const name =
+    (build.repository.split("/")[1] ?? "")
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "")
+      .slice(0, 50) || "build"
+
+  return `localhost/pcp-${name}`
+}
+
+/** Where the repository's tarball at the commit is, on GitHub: no redirect. */
+export function buildSourceUrl(
+  build: Pick<ServiceBuild, "repository" | "commit">,
+): string {
+  return `https://codeload.github.com/${build.repository}/tar.gz/${build.commit}`
+}
+
+/**
+ * The script that builds: in a folder of its own (mktemp -d, removed on
+ * exit however it ends) it downloads the repository at the commit with
+ * curl or wget (whichever the login has; HTTPS only, bounded in time and
+ * size), unpacks it, checks that the Containerfile and the build's folder
+ * are inside it (not reached through a link out), builds with the engine
+ * and writes the image id. Every word from the definition is quoted; the
+ * only words left to the shell are its own variables.
+ */
+export function buildScript(
+  engine: ServiceEngine,
+  build: ServiceBuild,
+): string {
+  const exe = program(engine)
+  const url = buildSourceUrl(build)
+  const parts = build.containerfile.split("/")
+  const base = parts.pop()!
+  const fileDir = ["src", ...parts].join("/")
+  const contextDir = build.context === "." ? "src" : `src/${build.context}`
+  const limit = String(MAX_BUILD_SOURCE_BYTES)
+  const refuse = (message: string, code: number) =>
+    `{ echo ${shellQuote(message)} >&2; exit ${code}; }`
+  const args = build.args.flatMap((arg) => [
+    "--build-arg",
+    `${arg.name}=${arg.value}`,
+  ])
+
+  return [
+    "umask 022",
+    "d=$(mktemp -d) || exit 1",
+    `trap 'rm -rf "$d"' EXIT`,
+    "trap 'exit 129' HUP INT TERM",
+    'cd "$d" || exit 1',
+    "if command -v curl >/dev/null 2>&1; then",
+    `  ${commandLine(["curl", "-fsS", "--proto", "=https", "--max-time", "600", "--max-filesize", limit, "-o", "src.tar.gz", url])} || ${refuse(`PCP could not download ${build.repository} at ${build.commit} from GitHub (a public repository and a commit it has).`, 3)}`,
+    "elif command -v wget >/dev/null 2>&1; then",
+    `  ${commandLine(["wget", "-q", "-T", "60", "-O", "src.tar.gz", url])} || ${refuse(`PCP could not download ${build.repository} at ${build.commit} from GitHub (a public repository and a commit it has).`, 3)}`,
+    "else",
+    `  ${refuse("Neither curl nor wget is installed for the login PCP uses: PCP downloads the repository with one of them.", 4)}`,
+    "fi",
+    `command -v tar >/dev/null 2>&1 || ${refuse("tar is not installed for the login PCP uses: PCP unpacks the repository with it.", 4)}`,
+    `[ "$(wc -c < src.tar.gz)" -le ${limit} ] || ${refuse(`The repository at that commit is larger than the ${MAX_BUILD_SOURCE_BYTES / 1024 / 1024} MB PCP builds.`, 5)}`,
+    `mkdir src && tar -xzf src.tar.gz -C src --strip-components=1 --no-same-owner || ${refuse("The repository's download did not unpack.", 6)}`,
+    "rm -f src.tar.gz",
+    "s=$(cd src && pwd -P) || exit 6",
+    `c=$(cd ${shellQuote(contextDir)} 2>/dev/null && pwd -P) || ${refuse(`There is no folder ${build.context} in the repository at that commit.`, 7)}`,
+    `case "$c/" in "$s"/*) ;; *) ${refuse(`The build's folder ${build.context} leads out of the repository.`, 7)} ;; esac`,
+    `f=$(cd ${shellQuote(fileDir)} 2>/dev/null && pwd -P) || ${refuse(`There is no ${build.containerfile} in the repository at that commit.`, 7)}`,
+    `case "$f/" in "$s"/*) ;; *) ${refuse(`${build.containerfile} leads out of the repository.`, 7)} ;; esac`,
+    `[ -f "$f"/${shellQuote(base)} ] && [ ! -L "$f"/${shellQuote(base)} ] || ${refuse(`There is no ${build.containerfile} in the repository at that commit.`, 7)}`,
+    `${commandLine([exe, "build", "--file"])} "$f"/${shellQuote(base)} --iidfile "$d/iid" ${commandLine(["--tag", `${builtImageName(build)}:${build.commit.slice(0, 12)}`, ...args])} "$c" >"$d/log" 2>&1 || { tail -c ${BUILD_LOG_TAIL_BYTES} "$d/log" >&2; exit 8; }`,
+    'cat "$d/iid"',
+  ].join("\n")
+}
+
+/**
+ * Builds the definition's repository at its commit on the SSH server and
+ * answers the image it made, as `localhost/pcp-<name>@sha256:<id>`: what
+ * the definition pins and a container runs by id. An image past
+ * MAX_BUILT_IMAGE_BYTES is removed again and refused.
+ */
+export async function buildImage(
+  host: ServiceHost,
+  engine: ServiceEngine,
+  build: ServiceBuild,
+): Promise<string> {
+  const result = await run(host, buildScript(engine, build), {
+    timeoutMs: BUILD_TIMEOUT_MS,
+  })
+
+  if (failed(result)) {
+    throw new EngineError(
+      `${host.name} could not build ${build.repository} at ${build.commit.slice(0, 12)}: ${result.timedOut ? `it took longer than ${BUILD_TIMEOUT_MS / 60_000} minutes` : said(result, [])}`,
+    )
+  }
+
+  const found = /^(?:sha256:)?([a-f0-9]{64})\s*$/.exec(
+    text(result.stdout).trim(),
+  )
+
+  if (!found) {
+    throw new EngineError(
+      `${host.name}'s engine built ${build.repository} but named no image id.`,
+    )
+  }
+
+  const id = `sha256:${found[1]}`
+  const exe = program(engine)
+  const size = await run(
+    host,
+    commandLine([exe, "image", "inspect", "--format", "{{.Size}}", id]),
+  )
+  const bytes = Number(text(size.stdout).trim())
+
+  if (failed(size) || !Number.isFinite(bytes)) {
+    throw new EngineError(
+      `${host.name} could not read the size of the image it built: ${said(size, [])}`,
+    )
+  }
+
+  if (bytes > MAX_BUILT_IMAGE_BYTES) {
+    await run(host, `${commandLine([exe, "rmi", id])} >/dev/null 2>&1; true`)
+    throw new EngineError(
+      `The image built from ${build.repository} is ${Math.round(bytes / 1024 / 1024)} MB, more than the ${MAX_BUILT_IMAGE_BYTES / 1024 / 1024 / 1024} GB PCP keeps: it was removed again.`,
+    )
+  }
+
+  return `${builtImageName(build)}@${id}`
+}
+
+/** Whether the SSH server still has an image PCP built (by its id). */
+export async function imagePresent(
+  host: ServiceHost,
+  engine: ServiceEngine,
+  image: string,
+): Promise<boolean> {
+  const result = await run(
+    host,
+    commandLine([
+      program(engine),
+      "image",
+      "inspect",
+      "--format",
+      "{{.Id}}",
+      runReference(image),
+    ]),
+  )
+
+  if (!failed(result)) {
+    return true
+  }
+
+  if (/no such image|image not known|not found/i.test(text(result.stderr))) {
+    return false
+  }
+
+  throw new EngineError(
+    `${host.name} could not look for the image ${image}: ${said(result, [])}`,
+  )
 }
 
 // ---- The container ----------------------------------------------------------
@@ -339,12 +532,17 @@ export function runWords(engine: ServiceEngine, spec: ContainerSpec): string[] {
     words.push("--device", device)
   }
 
-  if (!IMAGE_BY_DIGEST.test(definition.image)) {
+  if (!definition.image || !IMAGE_BY_DIGEST.test(definition.image)) {
     throw new EngineError("A service's image is pinned by digest.")
   }
 
   // The image's arguments follow it: nothing after it is the engine's.
-  words.push("--env-file", "\0ENVFILE\0", definition.image, ...definition.args)
+  words.push(
+    "--env-file",
+    "\0ENVFILE\0",
+    runReference(definition.image),
+    ...definition.args,
+  )
   return words
 }
 
@@ -385,7 +583,16 @@ export async function runContainer(
   }
 }
 
-/** Removes the container (never its volumes, but when asked to). */
+/** What an engine says of a container or volume that is not there. */
+const GONE =
+  /no such (container|volume|object)|no container with name or id|no volume with name|not found/i
+
+/**
+ * Removes the container, and the named volumes asked for (never one that
+ * was not). One that is gone already is what was asked for; anything else
+ * the engine refuses (a volume in use, a daemon that does not answer) is
+ * an EngineError naming what is left on the SSH server.
+ */
 export async function removeContainer(
   host: ServiceHost,
   engine: ServiceEngine,
@@ -394,16 +601,74 @@ export async function removeContainer(
 ): Promise<void> {
   const exe = program(engine)
   const name = checkName(containerName)
-  const parts = [`${commandLine([exe, "rm", "--force", name])} >/dev/null 2>&1`]
+  const removed = await run(
+    host,
+    `${commandLine([exe, "rm", "--force", name])} >/dev/null`,
+  )
 
-  if (volumes.length > 0) {
-    parts.push(
-      `${commandLine([exe, "volume", "rm", ...volumes.map((volume) => volumeOnHost(name, volume))])} >/dev/null 2>&1`,
+  if (failed(removed) && !GONE.test(text(removed.stderr))) {
+    throw new EngineError(
+      `${host.name} did not remove the container ${name}: ${removed.timedOut ? "it took too long" : said(removed, [])}`,
     )
   }
 
-  // Gone already is what was asked for.
-  await run(host, `${parts.join("; ")}; true`)
+  const left: string[] = []
+
+  // One at a time: a volume that is gone does not hide another's failure.
+  for (const volume of volumes) {
+    const onHost = volumeOnHost(name, volume)
+    const result = await run(
+      host,
+      `${commandLine([exe, "volume", "rm", onHost])} >/dev/null`,
+    )
+
+    if (failed(result) && !GONE.test(text(result.stderr))) {
+      left.push(
+        `${onHost} (${result.timedOut ? "it took too long" : said(result, [])})`,
+      )
+    }
+  }
+
+  if (left.length > 0) {
+    throw new EngineError(
+      `${host.name} removed the container ${name} but not the volume${left.length === 1 ? "" : "s"} ${left.join(", ")}`,
+    )
+  }
+}
+
+/**
+ * Which of a container's named volumes are on the SSH server already (a
+ * service removed before with its data kept): a launch that fails takes
+ * back only the volumes it made itself.
+ */
+export async function existingVolumes(
+  host: ServiceHost,
+  engine: ServiceEngine,
+  containerName: string,
+  volumes: string[],
+): Promise<string[]> {
+  if (volumes.length === 0) {
+    return []
+  }
+
+  const exe = program(engine)
+  const name = checkName(containerName)
+  const script = volumes
+    .map(
+      (volume, at) =>
+        `if ${commandLine([exe, "volume", "inspect", volumeOnHost(name, volume)])} >/dev/null 2>&1; then echo ${at}; fi`,
+    )
+    .join("\n")
+  const result = await run(host, script)
+
+  if (failed(result)) {
+    throw new EngineError(
+      `${host.name} could not list ${name}'s volumes: ${said(result, [])}`,
+    )
+  }
+
+  const found = new Set(text(result.stdout).trim().split(/\s+/))
+  return volumes.filter((_, at) => found.has(String(at)))
 }
 
 export type ContainerAction = "start" | "stop" | "restart"
@@ -446,12 +711,14 @@ export type ContainerState = {
   error: string | null
   /** The image it was created from, as PCP named it (by digest). */
   image: string | null
+  /** The id of that image, as the engine has it: sha256:<64 hex>. */
+  imageId: string | null
   /** pcp.service on it: the service it belongs to. */
   serviceLabel: string | null
 }
 
 const INSPECT_FORMAT =
-  "[{{json .State}},{{json .Config.Image}},{{json .Config.Labels}}]"
+  "[{{json .State}},{{json .Config.Image}},{{json .Config.Labels}},{{json .Image}}]"
 
 /**
  * The container's state, image and label, through a narrow format: never
@@ -497,6 +764,7 @@ export function missingState(): ContainerState {
     exitCode: null,
     error: null,
     image: null,
+    imageId: null,
     serviceLabel: null,
   }
 }
@@ -519,7 +787,7 @@ export function parseInspect(output: string, redact: string[]): ContainerState {
     )
   }
 
-  const [state, image, labels] = Array.isArray(parsed) ? parsed : []
+  const [state, image, labels, imageId] = Array.isArray(parsed) ? parsed : []
   const s = (state ?? {}) as Record<string, unknown>
   const health = (s.Health ?? s.Healthcheck) as
     Record<string, unknown> | undefined
@@ -533,11 +801,21 @@ export function parseInspect(output: string, redact: string[]): ContainerState {
     exitCode: typeof s.ExitCode === "number" ? s.ExitCode : null,
     error: error ? scrub.text(error) : null,
     image: short(image, 400),
+    imageId: imageIdOf(imageId),
     serviceLabel: short(
       (labels as Record<string, unknown> | null)?.["pcp.service"],
       100,
     ),
   }
+}
+
+/** An image id as Docker (sha256:<hex>) or Podman (<hex>) writes it. */
+function imageIdOf(value: unknown): string | null {
+  const found =
+    typeof value === "string"
+      ? /^(?:sha256:)?([a-f0-9]{64})$/.exec(value)
+      : null
+  return found ? `sha256:${found[1]}` : null
 }
 
 export type LogsRequest = { lines: number; sinceMinutes?: number }
@@ -581,5 +859,196 @@ export async function containerLogs(
       truncated: result.truncated,
     }),
     truncated: result.truncated,
+  }
+}
+
+// ---- Files in its files folder ----------------------------------------------
+
+/**
+ * What a container has at a name in its files folder: nothing, a file, a
+ * folder, a link or something else. The engine's own `cp` to standard
+ * output (a tar stream), of which PCP reads only the start: no program in
+ * the container runs, so an image without a shell works too.
+ */
+export async function probeContainerFile(
+  host: ServiceHost,
+  engine: ServiceEngine,
+  containerName: string,
+  files: ServiceFiles,
+  name: string,
+): Promise<TarEntryType | "none"> {
+  const { path } = fileName(files, name)
+  const result = await run(
+    host,
+    `${commandLine([program(engine), "cp", `${checkName(containerName)}:${path}`, "-"])} </dev/null`,
+    { maxOutputBytes: FILE_PROBE_BYTES, timeoutMs: ENGINE_COMMAND_TIMEOUT_MS },
+  )
+
+  if (result.stdout.length > 0) {
+    try {
+      return firstTarEntry(result.stdout)?.type ?? "none"
+    } catch (error) {
+      if (error instanceof TarError) {
+        throw new EngineError(
+          `${host.name}'s engine answered for ${path} with what is not a tar stream.`,
+        )
+      }
+
+      throw error
+    }
+  }
+
+  if (failed(result)) {
+    const words = text(result.stderr)
+
+    if (/no such container|no container with name or id/i.test(words)) {
+      throw new EngineError(
+        `${containerName} is not on ${host.name}: start the service, or the owner makes it again on its page.`,
+      )
+    }
+
+    if (
+      /could not find|could not be found|no such file|does not exist|not exist/i.test(
+        words,
+      )
+    ) {
+      return "none"
+    }
+
+    throw new EngineError(
+      `${host.name} could not look at ${path} in ${containerName}: ${result.timedOut ? "it took too long" : said(result, [])}`,
+    )
+  }
+
+  return "none"
+}
+
+/**
+ * Copies one file into the container's files folder with the engine's own
+ * `cp -`, a tar stream of that one file on standard input (built here, the
+ * name checked again): no shell in the container, no path on the SSH
+ * server, the bytes never on a command line. The engine makes the folders
+ * above it that are not there and writes it as the container's.
+ */
+export async function copyIntoContainer(
+  host: ServiceHost,
+  engine: ServiceEngine,
+  containerName: string,
+  files: ServiceFiles,
+  name: string,
+  bytes: Buffer,
+): Promise<string> {
+  const checked = fileName(files, name)
+  const folder = filesFolder(files)
+  const result = await run(
+    host,
+    `${commandLine([program(engine), "cp", "-", `${checkName(containerName)}:${folder}`])} >/dev/null`,
+    {
+      stdin: fileTar(checked.relative, bytes),
+      timeoutMs: FILE_COPY_TIMEOUT_MS,
+    },
+  )
+
+  if (failed(result)) {
+    throw new EngineError(
+      `${host.name} did not copy ${checked.path} into ${containerName}: ${result.timedOut ? "it took too long" : said(result, [])}`,
+    )
+  }
+
+  return checked.path
+}
+
+/** A file in the container is larger than PCP reads back. */
+export class ContainerFileTooLargeError extends Error {
+  constructor(readonly path: string) {
+    super(`${path} is larger than PCP keeps of one file.`)
+    this.name = "ContainerFileTooLargeError"
+  }
+}
+
+/**
+ * Reads one file out of the container's files folder with the engine's
+ * own `cp <container>:<path> -`: a tar stream on standard output, bounded
+ * by the largest file PCP keeps plus the stream's own bytes. Only a
+ * regular file: a folder, a link (never followed) or anything else is
+ * refused.
+ */
+export async function copyOutOfContainer(
+  host: ServiceHost,
+  engine: ServiceEngine,
+  containerName: string,
+  files: ServiceFiles,
+  name: string,
+  maxBytes: number,
+): Promise<{ path: string; name: string; bytes: Buffer } | null> {
+  const checked = fileName(files, name)
+  const result = await run(
+    host,
+    `${commandLine([program(engine), "cp", `${checkName(containerName)}:${checked.path}`, "-"])} </dev/null`,
+    {
+      maxOutputBytes: maxBytes + FILE_TAR_OVERHEAD_BYTES,
+      timeoutMs: FILE_COPY_TIMEOUT_MS,
+    },
+  )
+
+  if (result.truncated) {
+    throw new ContainerFileTooLargeError(checked.path)
+  }
+
+  if (failed(result)) {
+    const words = text(result.stderr)
+
+    if (
+      !/no such container|no container with name or id/i.test(words) &&
+      /could not find|could not be found|no such file|does not exist|not exist/i.test(
+        words,
+      )
+    ) {
+      return null
+    }
+
+    throw new EngineError(
+      `${host.name} could not copy ${checked.path} out of ${containerName}: ${result.timedOut ? "it took too long" : said(result, [])}`,
+    )
+  }
+
+  let entry: ReturnType<typeof firstTarEntry>
+
+  try {
+    entry = firstTarEntry(result.stdout)
+  } catch (error) {
+    if (error instanceof TarError) {
+      throw new EngineError(
+        `${host.name}'s engine answered for ${checked.path} with what is not a tar stream.`,
+      )
+    }
+
+    throw error
+  }
+
+  if (!entry) {
+    return null
+  }
+
+  if (entry.type !== "file") {
+    throw new EngineError(
+      `${checked.path} in ${containerName} is ${entry.type === "folder" ? "a folder" : entry.type === "link" ? "a link, which PCP does not follow" : "not a regular file"}: get_file reads one file.`,
+    )
+  }
+
+  if (entry.size > maxBytes) {
+    throw new ContainerFileTooLargeError(checked.path)
+  }
+
+  if (!entry.data) {
+    throw new EngineError(
+      `${host.name}'s engine ended ${checked.path}'s tar stream early.`,
+    )
+  }
+
+  return {
+    path: checked.path,
+    name: checked.relative.split("/").pop()!,
+    bytes: entry.data,
   }
 }

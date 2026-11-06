@@ -59,6 +59,14 @@ import {
 import { saveWrapperByOwner } from "./wrappers/admin"
 import { createSshExit, writeExitAccess } from "./exits/exits"
 import { createSshServer } from "./ssh/hosts"
+import { openEncryptedFolder } from "./storage/encrypted"
+import { localFs } from "./storage/local"
+import {
+  ensureOwnStore,
+  loadStorageRoot,
+  storeKeyOf,
+  storePath,
+} from "./storage/roots"
 import { addLinkedRepo } from "./repos/test-vault"
 import {
   getRepo,
@@ -932,6 +940,83 @@ describe("restoring", { timeout: 60_000 }, () => {
     expect(await toolTier(serverId, "alpha")).toBe("destructive")
   })
 
+  it("carries a store's key and index but never its files, and restores a file from before stores", async () => {
+    const { ctx } = await populate()
+    const own = await ensureOwnStore(ctx)
+    const loaded = await loadStorageRoot(ctx, own)
+    const folder = await openEncryptedFolder(
+      ctx,
+      {
+        serverId: own,
+        storeKey: storeKeyOf(ctx, loaded),
+        rootReal: await storePath(loaded),
+        umask: 0o077,
+      },
+      localFs(),
+    )
+    await folder.makeFolder("tax", { parents: false })
+    await folder.save("tax/return.pdf", Buffer.from("%PDF"), {
+      overwrite: false,
+    })
+    const entries = await db().storageEntry.findMany({ orderBy: { id: "asc" } })
+    const root = await db().storageRoot.findUniqueOrThrow({
+      where: { serverId: own },
+    })
+    expect(entries).toHaveLength(2)
+
+    const file = await exportVault(ctx, EXPORT_PASSWORD)
+    const raw = await openRaw(file, EXPORT_PASSWORD)
+    expect(JSON.stringify(raw)).not.toContain("%PDF")
+
+    const { payload: read } = await readExport(file, EXPORT_PASSWORD)
+    await restoreExport(
+      read,
+      { into: "vault", ctx },
+      { restoreHostSettings: false },
+    )
+    expect(
+      await db().storageEntry.findMany({ orderBy: { id: "asc" } }),
+    ).toEqual(entries)
+    expect(
+      await db().storageRoot.findUniqueOrThrow({ where: { serverId: own } }),
+    ).toEqual(root)
+    // The objects stayed in the data folder: the file reads as it did.
+    const again = await openEncryptedFolder(
+      ctx,
+      {
+        serverId: own,
+        storeKey: storeKeyOf(ctx, await loadStorageRoot(ctx, own)),
+        rootReal: await storePath(loaded),
+        umask: 0o077,
+      },
+      localFs(),
+    )
+    expect((await again.read("tax/return.pdf", 100)).bytes.toString()).toBe(
+      "%PDF",
+    )
+
+    const older = structuredClone(raw)
+    delete (older.tables as Record<string, unknown>).storageEntries
+    for (const row of (older.tables as { storageRoots: object[] })
+      .storageRoots as Array<Record<string, unknown>>) {
+      delete row.backend
+      delete row.mode
+      delete row.storeKey
+      delete row.converting
+    }
+    const { payload: old } = await readExport(
+      await encodeExport(older, EXPORT_PASSWORD),
+      EXPORT_PASSWORD,
+    )
+    expect(old.tables.storageEntries).toEqual([])
+    expect(old.tables.storageRoots[0]).toMatchObject({
+      backend: "sftp",
+      mode: "plain",
+      storeKey: null,
+      converting: "",
+    })
+  })
+
   it("carries exits and their levels, and restores a file from before exits", async () => {
     const { ctx } = await populate()
     const { id: sshId } = await createSshServer(ctx, {
@@ -1089,6 +1174,7 @@ describe("restoring", { timeout: 60_000 }, () => {
     const { ctx, secretId, token } = await populate()
     const tokenId = (await resolveApiToken(token))!.tokenId
     await bindOrigin(ctx, secretId, "https://shop.example")
+    await bindOrigin(ctx, secretId, "https://waternet.nl", { subdomains: true })
     await grantSecretUse(ctx, {
       tokenId,
       secretId,
@@ -1098,7 +1184,8 @@ describe("restoring", { timeout: 60_000 }, () => {
     const file = await exportVault(ctx, EXPORT_PASSWORD)
     const raw = await openRaw(file, EXPORT_PASSWORD)
     expect(raw.tables.secretBrowserOrigins).toMatchObject([
-      { secretId, origin: "https://shop.example" },
+      { secretId, origin: "https://shop.example", includeSubdomains: false },
+      { secretId, origin: "https://waternet.nl", includeSubdomains: true },
     ])
     expect(JSON.stringify(raw)).not.toContain("api_token_secret_allowance")
 
@@ -1109,9 +1196,38 @@ describe("restoring", { timeout: 60_000 }, () => {
       { restoreHostSettings: false },
     )
     expect(await listBrowserOrigins(ctx)).toEqual(
-      new Map([[secretId, ["https://shop.example"]]]),
+      new Map([
+        [
+          secretId,
+          [
+            { origin: "https://shop.example", subdomains: false },
+            { origin: "https://waternet.nl", subdomains: true },
+          ],
+        ],
+      ]),
     )
     expect(await db().apiTokenSecretAllowance.count()).toBe(0)
+
+    // A file from before subdomains: each site its own host only.
+    const flagless = structuredClone(raw)
+    for (const site of flagless.tables.secretBrowserOrigins ?? []) {
+      delete (site as Record<string, unknown>).includeSubdomains
+    }
+    await restoreExport(
+      (
+        await readExport(
+          await encodeExport(flagless, EXPORT_PASSWORD),
+          EXPORT_PASSWORD,
+        )
+      ).payload,
+      { into: "vault", ctx },
+      { restoreHostSettings: false },
+    )
+    expect(
+      (await listBrowserOrigins(ctx))
+        .get(secretId)
+        ?.map((site) => site.subdomains),
+    ).toEqual([false, false])
 
     const older = structuredClone(raw)
     delete (older.tables as Record<string, unknown>).secretBrowserOrigins

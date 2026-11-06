@@ -142,7 +142,9 @@ export async function addSecretOriginAction(
   const ctx = await requireContext()
 
   const result = await guarded(async () => {
-    await bindOrigin(ctx, field(formData, "id"), field(formData, "origin"))
+    await bindOrigin(ctx, field(formData, "id"), field(formData, "origin"), {
+      subdomains: formData.get("subdomains") === "on",
+    })
     return {}
   })
 

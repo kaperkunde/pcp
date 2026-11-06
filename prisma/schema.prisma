@@ -576,6 +576,10 @@ model SecretBrowserOrigin {
   secret    Secret   @relation(fields: [secretId], references: [id], onDelete: Cascade)
   /// https://host[:port], as URL.origin writes it.
   origin    String
+  /// The site and its subdomains: an origin at the same scheme and port
+  /// whose host ends in this one's, within the same registrable domain
+  /// (the public suffix list, browser-secrets.ts). Never another domain.
+  includeSubdomains Boolean @default(false) @map("include_subdomains")
   createdAt DateTime @default(now()) @map("created_at")
 
   @@id([secretId, origin])
@@ -603,7 +607,8 @@ model McpServer {
   /// ssh://host:port. caldav: the CalDAV server PCP finds the calendars
   /// from (https://caldav.icloud.com/). browser: the fixed "pcp:browser", which no request is
   /// ever sent to. wrapper: the fixed "pcp:wrapper", likewise. service: the
-  /// fixed "pcp:service": where it runs is in service_spec.
+  /// fixed "pcp:service": where it runs is in service_spec. storage: the
+  /// fixed "pcp:storage": where its files are is in storage_root.
   url         String
   enabled     Boolean @default(true)
 
@@ -654,7 +659,7 @@ model McpServer {
   updatedAt     DateTime  @updatedAt @map("updated_at")
 
   /// mcp | openapi | jmap | imap | ssh | caldav | browser | wrapper |
-  /// service. An openapi
+  /// service | storage. An openapi
   /// server is an HTTP API described by an OpenAPI schema; its tools are the
   /// schema's operations and PCP calls them directly (lib/core/endpoints.ts).
   /// jmap and imap are mail accounts with a fixed set of mail tools
@@ -665,7 +670,9 @@ model McpServer {
   /// (lib/core/browser/). A wrapper's tools are programs the owner approved
   /// that call the vault's other tools (lib/core/wrappers/). A service is a
   /// container PCP runs with the owner's Docker or Podman on one of their
-  /// SSH servers (lib/core/services/), with tools to see and run it.
+  /// SSH servers (lib/core/services/), with tools to see and run it. A
+  /// storage root is a folder on one of their SSH servers that assistants
+  /// read and write files in over SFTP, confined to it (lib/core/storage/).
   kind       String  @default("mcp")
   /// openapi: where the schema came from, url | upload.
   specSource String? @map("spec_source")
@@ -673,6 +680,7 @@ model McpServer {
   specUrl    String? @map("spec_url")
   /// openapi: offer GET operations only. jmap/imap: offer the tools that
   /// read mail only. caldav: the tools that read calendars and reminders.
+  /// storage: the tools that read files only.
   readOnly   Boolean @default(false) @map("read_only")
   /// openapi: refuse private, loopback and link-local addresses, for the
   /// schema download and for every call. Set on endpoints an assistant
@@ -764,6 +772,10 @@ model McpServer {
   serviceSpec        ServiceSpec?        @relation("ServiceOwn")
   servicesHosted     ServiceSpec[]       @relation("ServiceHost")
   registeredBy       ServiceSpec?        @relation("ServiceRegistered")
+  storageRoot        StorageRoot?        @relation("StorageOwn")
+  storageHosted      StorageRoot[]       @relation("StorageHost")
+  storageEntries     StorageEntry[]
+  storagePending     StoragePending[]
   authHeaders        ServerAuthHeader[]
   toolResults        ToolResult[]
   repoItems          RepoItem[]
@@ -989,6 +1001,98 @@ model ServiceSpec {
   @@map("service_spec")
 }
 
+/// storage: a store of files assistants read and write (lib/core/storage/):
+/// a folder on one of the owner's SSH servers, reached over SFTP on PCP's
+/// own SSH connection (backend "sftp"), or PCP's own store in its data
+/// folder (backend "local", one per vault, made by PCP). Every path is
+/// checked to stay inside it. A plain store holds the files as they are; an
+/// encrypted one holds opaque objects, each sealed under a key of its own,
+/// with the names, folders, sizes and times in storage_entry. Its own server
+/// row (kind "storage") carries the file tools, so levels, tiers and
+/// read-only work as for any server. Only the owner adds or changes one.
+/// Kept apart from the server row like a service's spec.
+model StorageRoot {
+  serverId   String     @id @map("server_id")
+  server     McpServer  @relation("StorageOwn", fields: [serverId], references: [id], onDelete: Cascade)
+  /// The SSH server the folder is on. Null for the local store, and once
+  /// that server is deleted: the folder stays there, and PCP no longer
+  /// reaches it.
+  hostId     String?    @map("host_id")
+  host       McpServer? @relation("StorageHost", fields: [hostId], references: [id], onDelete: SetNull)
+  /// The folder, an absolute path on the SSH server ("" for the local
+  /// store, which is <data>/storage/<server id>). Every path a tool names
+  /// is resolved under it, and refused when its real path is not.
+  path       String
+  /// Whose files the owner wants these to be (a Samba share's user). SFTP
+  /// writes as the SSH login: when this differs, the page says so. Empty is
+  /// the login.
+  writeAs    String     @default("") @map("write_as")
+  /// The umask new files and folders get, as a number (2 is 002): PCP sets
+  /// their mode itself, whatever the server's own umask is.
+  umask      Int        @default(2)
+  /// "sftp" (a folder on the SSH server) or "local" (PCP's data folder).
+  backend    String     @default("sftp")
+  /// "plain" (files as they are, for other apps too) or "encrypted".
+  mode       String     @default("plain")
+  /// The store key, random, encrypted under the vault key with
+  /// "storage_store:<server id>" as associated data; it wraps each file's
+  /// key. Null for a store that was never encrypted.
+  storeKey   Bytes?     @map("store_key")
+  /// While the owner converts it: "encrypted" or "plain", the mode it is
+  /// going to. Tools are refused until it is done.
+  converting String     @default("")
+  createdAt  DateTime   @default(now()) @map("created_at")
+  updatedAt  DateTime   @updatedAt @map("updated_at")
+
+  @@index([hostId])
+  @@map("storage_root")
+}
+
+/// The index of an encrypted store: one row per file or folder. The name,
+/// size, type and times are in `meta`, encrypted under the vault key with
+/// "storage_entry:<id>" as associated data; the content is the object
+/// `objectId` on the store's backend, sealed under `fileKey`
+/// (lib/core/storage/crypt.ts).
+model StorageEntry {
+  id          String    @id
+  serverId    String    @map("server_id")
+  server      McpServer @relation(fields: [serverId], references: [id], onDelete: Cascade)
+  /// The folder it is in; "" for the top.
+  parentId    String    @default("") @map("parent_id")
+  /// A keyed hash of its name in that folder (crypt.ts nameKeyOf), so the
+  /// index finds a name and keeps it unique without holding it.
+  nameKey     String    @map("name_key")
+  folder      Boolean   @default(false)
+  /// The sealed object's id on the backend; "" for a folder.
+  objectId    String    @default("") @map("object_id")
+  /// The file's key, encrypted under the store key with
+  /// "storage_object:<server id>:<object id>"; null for a folder.
+  fileKey     Bytes?    @map("file_key")
+  meta        Bytes
+  /// The sealed object's size, what it takes on the backend.
+  storedBytes Float     @default(0) @map("stored_bytes")
+  createdAt   DateTime  @default(now()) @map("created_at")
+
+  @@unique([serverId, parentId, nameKey])
+  @@index([serverId, parentId])
+  @@map("storage_entry")
+}
+
+/// Objects of an encrypted store that may be on its backend with no entry
+/// pointing at them: one being written, or one an entry let go of (written
+/// again, deleted). Removed with the object once it is gone; one older
+/// than the sweep's age is removed by the next request that opens the
+/// store, or by the cleanup for the local store. Not exported.
+model StoragePending {
+  objectId  String    @id @map("object_id")
+  serverId  String    @map("server_id")
+  server    McpServer @relation(fields: [serverId], references: [id], onDelete: Cascade)
+  createdAt DateTime  @default(now()) @map("created_at")
+
+  @@index([serverId, createdAt])
+  @@map("storage_pending")
+}
+
 /// An OAuth authorization in flight: the state parameter sent to the
 /// authorization server and the PKCE verifier to redeem the code with.
 model OAuthState {
@@ -1100,7 +1204,7 @@ model FileLink {
   vault      Vault     @relation(fields: [vaultId], references: [id], onDelete: Cascade)
   tokenId    String    @map("token_id")
   token      ApiToken  @relation(fields: [tokenId], references: [id], onDelete: Cascade)
-  /// download | upload
+  /// download | upload | store
   kind       String
   /// SHA-256 of the link's secret, which a request is looked up by.
   secretHash String    @unique @map("secret_hash")
@@ -1129,6 +1233,29 @@ model FileLink {
   /// receive_file link. Not a relation: a file that arrived outlives its
   /// page until the token uses it, and the cleanup removes each by its date.
   uploadLinkId String? @map("upload_link_id")
+  /// A "store" link (share_file): the store whose object it reads with the
+  /// file's key alone (PCP's own store, encrypted), or null for a copy made
+  /// when it was shared (file_links/ in the data folder). An upload: the
+  /// store the file goes to once a request holds the key. Not a relation:
+  /// the link ends with the file, which the index says (storage_entry).
+  storeId      String?   @map("store_id")
+  /// An upload into a store: the folder it goes to, then the file's path
+  /// there once saved; AES-256-GCM under the vault's data key with
+  /// "file_link_store_path:<id>".
+  storePath    Bytes?    @map("store_path")
+  /// An upload into a store: when it was saved there.
+  deliveredAt  DateTime? @map("delivered_at")
+  /// An upload into a store: when the token used its handle (it then is a
+  /// kept result too); the row stays until it is saved.
+  claimedAt    DateTime? @map("claimed_at")
+  /// A "store" link: the sealed object it serves (storage/crypt.ts).
+  objectId     String?   @map("object_id")
+  /// A "store" link: that object's file key, AES-256-GCM under the link's
+  /// key with "file_link_file_key:<id>", so only the link opens it.
+  fileKey      Bytes?    @map("file_key")
+  /// A "store" link: bytes served so far, ranges counted; it serves
+  /// maxUses times the file's size.
+  servedBytes  Float     @default(0) @map("served_bytes")
 
   @@index([tokenId, resultId])
   @@index([expiresAt])
@@ -1166,6 +1293,10 @@ model UploadLink {
   closedAt    DateTime? @map("closed_at")
   /// The row is kept until then, for check_upload: a day past acceptUntil.
   expiresAt   DateTime  @map("expires_at")
+  /// Where its files go besides becoming kept results, as the page shows
+  /// it ({store, folder} as JSON): AES-256-GCM under the link's key with
+  /// "upload_link_destination:<id>"; null for none.
+  destination Bytes?
 
   @@index([tokenId])
   @@index([expiresAt])

@@ -106,10 +106,20 @@ import { MAX_DOCUMENT_DEPTH } from "./limits"
  * A service's own part (the SSH server it runs on, where its ports are
  * published, which secret each variable takes, its container's name, what
  * it registered, the owner's note) is never in a document.
+ *
+ * Format 4 adds two fields to a service's definition: a secret header on
+ * an MCP server it registers (`registers: {kind: mcp, …, auth}`, as kind
+ * openapi has had since format 3) and a files folder (`files: {volume,
+ * path}`, a folder in one of its volumes that put_file and get_file copy
+ * files into and out of). Only a service document that has either is
+ * written as format 4 (`serviceFormat`), so an older PCP reads every other
+ * document as before and refuses that one as written by a newer PCP rather
+ * than half-reading it; a format-3 document that names either is refused,
+ * as a PCP that reads format 3 would.
  */
 
 /** The newest document format this PCP reads and writes. */
-export const PCP_FORMAT = 3
+export const PCP_FORMAT = 4
 
 /**
  * The format each kind is written in: the first that holds it. A kind
@@ -124,6 +134,20 @@ export const FORMAT_OF_KIND: Record<ItemKind, number> = {
   endpoint: 2,
   server: 2,
   service: 3,
+}
+
+/**
+ * The format of a service's document: 4 when it holds a field format 4
+ * added (`registers.auth` on kind mcp, or a files folder, `files`), else 3.
+ * Only a document that holds a new field is written in the new format, so
+ * an older PCP reads every other one, and refuses that one as "written by a
+ * newer PCP" rather than half-reading it.
+ */
+export function serviceFormat(definition: ServiceDefinition): number {
+  return (definition.registers.kind === "mcp" && definition.registers.auth) ||
+    definition.files
+    ? 4
+    : FORMAT_OF_KIND.service
 }
 
 // ---- Documents --------------------------------------------------------------
@@ -375,7 +399,7 @@ function serviceYaml(definition: ServiceDefinition): Record<string, unknown> {
     list.length > 0 ? { [key]: list } : {}
 
   return {
-    image: definition.image,
+    image: definition.image ?? "",
     ...(definition.source !== undefined ? { source: definition.source } : {}),
     ...listed(
       "ports",
@@ -415,7 +439,20 @@ function serviceYaml(definition: ServiceDefinition): Record<string, unknown> {
       : {
           registers:
             registers.kind === "mcp"
-              ? { kind: "mcp", port: registers.port, path: registers.path }
+              ? {
+                  kind: "mcp",
+                  port: registers.port,
+                  path: registers.path,
+                  ...(registers.auth
+                    ? {
+                        auth: {
+                          env: registers.auth.env,
+                          header: registers.auth.header,
+                          template: registers.auth.template,
+                        },
+                      }
+                    : {}),
+                }
               : registers.kind === "exit"
                 ? {
                     kind: "exit",
@@ -448,6 +485,14 @@ function serviceYaml(definition: ServiceDefinition): Record<string, unknown> {
                       : {}),
                   },
         }),
+    ...(definition.files
+      ? {
+          files: {
+            volume: definition.files.volume,
+            path: definition.files.path,
+          },
+        }
+      : {}),
   }
 }
 
@@ -550,7 +595,7 @@ export function serializeItem(document: ItemDocument): RepoFiles {
 
     case "service": {
       files[itemRoot(ref)] = yaml({
-        pcp_format: FORMAT_OF_KIND.service,
+        pcp_format: serviceFormat(document.definition),
         version: document.version,
         name: document.displayName,
         description: document.description,
@@ -1462,10 +1507,18 @@ function parseService(item: ItemFiles): ServiceDocument {
         (path[0] === "name" || path[0] === "description")) ||
       (path.length === 3 && path[0] === "env" && path[2] === "description"),
   )
-  formatOf(raw, what)
+  const format = formatOf(raw, what)
 
   if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
     throw invalid(`${what} is a YAML mapping.`)
+  }
+
+  // A build from a repository is the owner's alone, on their launch page:
+  // a document names an image pinned by digest. (Format 3 never had one.)
+  if ("build" in raw) {
+    throw invalid(
+      `${what} builds its image from a repository, which only the owner sets up on PCP's launch page: a service's document names an image pinned by digest.`,
+    )
   }
 
   const own = Object.keys(raw).filter((key) => key in SERVICE_INSTANCE_KEYS)
@@ -1490,6 +1543,22 @@ function parseService(item: ItemFiles): ServiceDocument {
     definition = parseServiceDefinition(rest)
   } catch (error) {
     throw withWhere(error, what)
+  }
+
+  if (
+    format < 4 &&
+    definition.registers.kind === "mcp" &&
+    definition.registers.auth
+  ) {
+    throw invalid(
+      `${what} is in format ${format}, whose MCP server sends no secret header: write it as format 4 to have registers.auth.`,
+    )
+  }
+
+  if (format < 4 && definition.files) {
+    throw invalid(
+      `${what} is in format ${format}, which has no files folder: write it as format 4 to have files.`,
+    )
   }
 
   return {

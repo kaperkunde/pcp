@@ -18,6 +18,11 @@ import {
   type BrowserOverview,
 } from "@/lib/core/browser/owner"
 import {
+  importSignIns,
+  previewSignInImport,
+  type ImportPreview,
+} from "@/lib/core/browser/sign-in-import"
+import {
   createBrowserServer,
   updateBrowserServer,
 } from "@/lib/core/browser/server"
@@ -29,7 +34,8 @@ import { requireContext } from "@/lib/server/session"
 /**
  * What the owner does with the browser on its pages: add it, open and
  * close tabs, take one over and hand it back, move it along while it is
- * theirs, close the browser, forget its sign-ins, and install Chromium.
+ * theirs, close the browser, import or forget its sign-ins, and install
+ * Chromium.
  */
 
 function revalidateBrowser() {
@@ -144,6 +150,36 @@ export async function closeBrowserAction(): Promise<ActionState> {
 export async function forgetSitesAction(): Promise<ActionState> {
   const ctx = await requireContext()
   return onTab(() => forgetSites(ctx))
+}
+
+/**
+ * The preview of a sign-in import: sites and counts, what is left out and
+ * replaced. Nothing is written.
+ */
+export async function previewSignInImportAction(
+  text: string,
+): Promise<ActionState<{ preview: ImportPreview }>> {
+  const ctx = await requireContext()
+  return guarded(async () => ({
+    preview: await previewSignInImport(ctx, String(text), {
+      publicUrl: await publicUrlFor(ctx),
+    }),
+  }))
+}
+
+/** Imports what the preview showed (`basis`) into the browser's profile. */
+export async function importSignInsAction(
+  text: string,
+  basis: string,
+): Promise<ActionState<{ sites: number; cookies: number }>> {
+  const ctx = await requireContext()
+  const result = await guarded(async () =>
+    importSignIns(ctx, String(text), String(basis), {
+      publicUrl: await publicUrlFor(ctx),
+    }),
+  )
+  revalidateBrowser()
+  return result
 }
 
 /** Starts it and returns: the page follows it through the overview. */

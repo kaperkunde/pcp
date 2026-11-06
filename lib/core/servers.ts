@@ -34,7 +34,8 @@ import {
  * authenticated to. A server is an MCP server, an API endpoint (kind
  * "openapi", lib/core/endpoints.ts), a mail account (kinds "jmap" and
  * "imap", lib/core/mail/), a calendar account (kind "caldav",
- * lib/core/caldav/) or an SSH server (kind "ssh", lib/core/ssh/).
+ * lib/core/caldav/), an SSH server (kind "ssh", lib/core/ssh/) or a storage
+ * root, a folder on an SSH server (kind "storage", lib/core/storage/).
  * Talking to them is lib/core/upstream.ts.
  */
 
@@ -57,6 +58,7 @@ export type ServerKind =
   | "browser"
   | "wrapper"
   | "service"
+  | "storage"
 
 export type MailKind = Extract<ServerKind, "jmap" | "imap">
 
@@ -70,6 +72,7 @@ const SERVER_KINDS: readonly ServerKind[] = [
   "browser",
   "wrapper",
   "service",
+  "storage",
 ]
 
 /**
@@ -92,6 +95,17 @@ export function isWrapperKind(kind: string): kind is "wrapper" {
 /** The vault's own headless browser, rather than something PCP reaches. */
 export function isBrowserKind(kind: string): kind is "browser" {
   return kind === "browser"
+}
+
+/**
+ * A storage root's url: the folder and its SSH server are in storage_root
+ * (lib/core/storage/), reached over that server's SSH connection.
+ */
+export const STORAGE_URL = "pcp:storage"
+
+/** A folder on one of the owner's SSH servers, read and written over SFTP. */
+export function isStorageKind(kind: string): kind is "storage" {
+  return kind === "storage"
 }
 
 /** A mail account rather than an MCP server or an API endpoint. */
@@ -132,6 +146,8 @@ export function kindNoun(kind: string): string {
       return "a wrapper"
     case "service":
       return "a service"
+    case "storage":
+      return "a storage folder"
     default:
       return "an MCP server"
   }
@@ -1012,6 +1028,77 @@ export async function updateServer(
 }
 
 /**
+ * Makes an MCP server send one secret header, keeping its further headers:
+ * what remaking a service does to the MCP server it registered, when its
+ * definition names a header (services.ts followRegisteredAuth). Only a
+ * server with no credential or a header one is changed: one the owner moved
+ * to OAuth keeps it. A change marks its tools to be read again. Answers
+ * whether anything changed.
+ */
+export async function setMcpHeaderCredential(
+  vaultId: string,
+  id: string,
+  credential: { headerName: string; valueTemplate: string; secretId: string },
+): Promise<boolean> {
+  const row = await db().mcpServer.findFirst({
+    where: { id, vaultId, kind: "mcp" },
+  })
+
+  if (!row || (row.authType !== "none" && row.authType !== "header")) {
+    return false
+  }
+
+  const headerName = validateHeaderName(credential.headerName)
+  const template = validateValueTemplate(credential.valueTemplate)
+
+  if (
+    row.authType === "header" &&
+    row.authHeaderName === headerName &&
+    row.authValueTemplate === template &&
+    row.authSecretId === credential.secretId
+  ) {
+    return false
+  }
+
+  const secret = await db().secret.findFirst({
+    where: { id: credential.secretId, vaultId, kind: "text" },
+    select: { id: true },
+  })
+
+  if (!secret) {
+    throw invalid("That secret does not exist.")
+  }
+
+  const extras = row.authType === "header" ? await extraAuthHeaders(id) : []
+
+  if (
+    extras.some(
+      (extra) => extra.headerName.toLowerCase() === headerName.toLowerCase(),
+    )
+  ) {
+    throw invalid(
+      `${row.name} sends ${headerName} as a further header already: take that one out on its page and update the service again, or set the header there yourself.`,
+    )
+  }
+
+  await db().mcpServer.update({
+    where: { id },
+    data: {
+      authType: "header",
+      authHeaderName: headerName,
+      authValueTemplate: template,
+      authSecretId: credential.secretId,
+      // Another credential can mean other tools: read them again.
+      status: "unknown",
+      statusMessage: "",
+      lastSyncedAt: null,
+    },
+  })
+
+  return true
+}
+
+/**
  * Gives an OAuth server or endpoint the client the owner created with the
  * provider, keeping every other setting: what its page asks for when it
  * does not let PCP register itself. The client ID is required here, since
@@ -1178,6 +1265,32 @@ export async function deleteServer(ctx: VaultContext, id: string) {
       "Remove a service on its own page: PCP removes its container from the SSH server first.",
     )
   }
+  // A store's files: PCP's own store is always there, and an encrypted
+  // store's files go with its keys, so it is emptied or made plain first.
+  if (existing.kind === "storage") {
+    const root = await db().storageRoot.findUnique({
+      where: { serverId: id },
+      select: { backend: true, mode: true, converting: true },
+    })
+
+    if (root?.backend === "local") {
+      throw new PcpError(
+        "state",
+        "PCP's own store stays: delete its files instead, or keep them.",
+      )
+    }
+
+    if (
+      (root?.mode === "encrypted" || root?.converting) &&
+      (await db().storageEntry.count({ where: { serverId: id } })) > 0
+    ) {
+      throw new PcpError(
+        "state",
+        "This store holds encrypted files only PCP can open: make it plain first (its files stay on the server), or delete them, then remove it.",
+      )
+    }
+  }
+
   // Its exits go with it (a cascade), and their levels with them.
   const exits = await db().exit.findMany({
     where: { OR: [{ serverId: id }, { serviceId: id }] },

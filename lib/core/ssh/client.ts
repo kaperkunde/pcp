@@ -1,6 +1,11 @@
 import type { Duplex } from "node:stream"
 
-import { Client, type ClientChannel, type ConnectConfig } from "ssh2"
+import {
+  Client,
+  type ClientChannel,
+  type ConnectConfig,
+  type SFTPWrapper,
+} from "ssh2"
 
 import { PCP_VERSION } from "../version"
 import { hostKeyLine } from "./keys"
@@ -17,9 +22,9 @@ import {
 /**
  * PCP's SSH connections, through ssh2: one connection per call, signed in
  * with PCP's own key and nothing else, to a host whose key is the one PCP
- * pinned; and, for exits (lib/core/exits/) and services
- * (lib/core/services/), one long-lived connection per SSH server that
- * carries direct-tcpip channels.
+ * pinned; and, for exits (lib/core/exits/), services (lib/core/services/)
+ * and storage roots (lib/core/storage/), one long-lived connection per SSH
+ * server that carries direct-tcpip and SFTP channels.
  *
  * - The host key is checked against the pin when there is one. Without
  *   one, the key the server shows is taken, but reported as seen only after
@@ -27,8 +32,11 @@ import {
  *   the server's signature, so a key is worth keeping only once the
  *   `handshake` event says the server proved it holds it.
  * - Only publickey: no password, no keyboard-interactive, no agent.
- * - One session channel, one command with `exec`: no terminal, no file
- *   transfer.
+ * - One session channel, one command with `exec`: no terminal. File
+ *   transfer only for storage roots: `openSftp` opens the SFTP subsystem
+ *   on the long-lived connection, on a host whose key the owner pinned,
+ *   and lib/core/storage/ confines every path it uses to the root's real
+ *   path. Nothing else asks for a subsystem.
  * - Forwarding for exits and services only, and only outbound:
  *   `openChannel` opens a direct-tcpip channel to an address and port the
  *   exits module checked from the exit's side (lib/core/exits/check.ts),
@@ -470,6 +478,8 @@ async function connectPooled(
     keepaliveInterval: SSH_KEEPALIVE_INTERVAL_MS,
     keepaliveCountMax: SSH_KEEPALIVE_COUNT,
   })
+  // Many small requests and answers (SFTP's): no waiting to fill a packet.
+  client.setNoDelay(true)
   const socket = (client as unknown as { _sock?: { remoteAddress?: string } })
     ._sock
   const entry: Pooled = {
@@ -665,6 +675,106 @@ export async function openChannel(
 
     channel.once("close", release)
     return channel
+  } catch (error) {
+    release()
+    throw error
+  }
+}
+
+// ---- SFTP for storage roots ----------------------------------------------
+
+/** An SFTP session on the long-lived connection, and how to give it back. */
+export type SftpSession = {
+  sftp: SFTPWrapper
+  /** Ends the session's channel; the connection idles out as for exits. */
+  release: () => void
+}
+
+/**
+ * Opens the SFTP subsystem on the long-lived connection for `name`, made
+ * with `identity` when none is open (a request's key, never one in the
+ * background), on a host whose key the owner pinned. Only storage roots
+ * (lib/core/storage/) open one, and every path they hand it is checked to
+ * stay inside the root first.
+ */
+export async function openSftp(
+  name: string,
+  target: SshTarget,
+  identity: SshIdentity,
+): Promise<SftpSession> {
+  const entry = await pooled(name, target, identity)
+
+  if (entry.channels >= SSH_EXIT_MAX_CHANNELS) {
+    throw new Error(
+      `PCP already has ${SSH_EXIT_MAX_CHANNELS} connections open through ${target.host}. Try again in a moment.`,
+    )
+  }
+
+  entry.channels++
+  if (entry.idleTimer) clearTimeout(entry.idleTimer)
+  entry.idleTimer = null
+  let counted = true
+  const release = () => {
+    if (!counted) return
+    counted = false
+    entry.channels = Math.max(0, entry.channels - 1)
+    idleLater(entry)
+  }
+
+  try {
+    const sftp = await new Promise<SFTPWrapper>((resolve, reject) => {
+      let settled = false
+      const timer = setTimeout(() => {
+        settled = true
+        reject(
+          new Error(
+            `${target.host} did not start SFTP within ${SSH_CHANNEL_OPEN_TIMEOUT_MS / 1000} seconds.`,
+          ),
+        )
+      }, SSH_CHANNEL_OPEN_TIMEOUT_MS)
+
+      try {
+        entry.client.sftp((error, session) => {
+          if (settled) {
+            session?.end()
+            return
+          }
+          settled = true
+          clearTimeout(timer)
+
+          if (error) {
+            reject(
+              new Error(
+                `${target.host} would not start SFTP for ${target.username} (${error.message || "refused"}): its sshd_config needs an sftp Subsystem, and PCP's key in authorized_keys must not force a command.`,
+              ),
+            )
+            return
+          }
+
+          resolve(session)
+        })
+      } catch (error) {
+        settled = true
+        clearTimeout(timer)
+        // The connection closed under it.
+        closePooled(entry)
+        reject(error instanceof Error ? error : new Error(String(error)))
+      }
+    })
+
+    let ended = false
+    const end = () => {
+      if (ended) return
+      ended = true
+      try {
+        sftp.end()
+      } catch {
+        // Closing anyway.
+      }
+      release()
+    }
+    sftp.once("close", end)
+    return { sftp, release: end }
   } catch (error) {
     release()
     throw error

@@ -1,5 +1,7 @@
+import { isJson, isText } from "./call"
 import { entries, isObject, own, ownString, type JsonObject } from "./json"
 import {
+  MAX_FILE_ANSWER_TYPES,
   MAX_OUTLINE_CHARS,
   MAX_OUTLINE_PROPERTIES,
   OUTLINE_MAX_NODES,
@@ -42,6 +44,48 @@ function answerSchema(doc: unknown, operation: JsonObject): unknown {
 
   return undefined
 }
+
+/** The success answers' content entries, each response's $ref followed. */
+function successContent(
+  doc: unknown,
+  operation: JsonObject,
+): Array<[string, unknown]> {
+  return entries(own(operation, "responses"))
+    .filter(([status]) => /^2(\d\d|XX)$/i.test(status) || status === "default")
+    .flatMap(([, raw]) => entries(own(follow(doc, raw, new Set()), "content")))
+}
+
+/**
+ * The success answers' media types that are files: declared with a schema
+ * of `format: binary`, or a type that is neither JSON nor text (a PDF, an
+ * image, application/octet-stream). Lower case, without parameters; a
+ * wildcard counts only when declared binary.
+ */
+export function fileAnswerTypes(doc: unknown, operation: JsonObject): string[] {
+  const found = new Set<string>()
+
+  for (const [raw, media] of successContent(doc, operation)) {
+    const type = raw.split(";")[0]!.trim().toLowerCase()
+
+    if (!/^[\w.+*-]+\/[\w.+*-]+$/.test(type) || type.length > 200) {
+      continue
+    }
+
+    const schema = follow(doc, own(media, "schema"), new Set())
+    const binary = isObject(schema) && own(schema, "format") === "binary"
+    const plainFile = !type.includes("*") && !isJson(type) && !isText(type)
+
+    if (binary || plainFile) {
+      found.add(type)
+    }
+  }
+
+  return [...found].slice(0, MAX_FILE_ANSWER_TYPES)
+}
+
+/** What describe says a call answers when it answers a file. */
+export const FILE_ANSWER_OUTLINE =
+  "{file: {$result: string, type: string, size: number, name: string}, note: string} (a file PCP keeps for you: pass the file object where a tool wants a file)"
 
 /** A node with its local $ref followed, or undefined when it cannot be. */
 function follow(doc: unknown, node: unknown, seen: Set<string>): unknown {
@@ -221,7 +265,9 @@ export function outlineAnswer(
   const schema = answerSchema(doc, operation)
 
   if (schema === undefined) {
-    return null
+    return fileAnswerTypes(doc, operation).length > 0
+      ? FILE_ANSWER_OUTLINE
+      : null
   }
 
   for (const depth of [4, 3, 2, 1]) {

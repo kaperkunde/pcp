@@ -5,6 +5,7 @@ import { isTextBytes, sniffMediaType } from "./media-types"
 import { pacedRetryAfter } from "./pacing/pace"
 import { canonicalJson } from "./permission-rules"
 import { handleOf, type KeptResult, type ResultHandle } from "./tool-results"
+import { ERROR_META_KEY } from "./tools/outcome"
 
 /**
  * What an assistant reads of a tool's answer. An API can answer with far
@@ -756,6 +757,38 @@ function sizeOf(handle: ResultHandle): string {
     : `${(handle.length ?? 0).toLocaleString("en")} characters`
 }
 
+/**
+ * The name an embedded file is kept under: the last part of its URI's path
+ * (its scheme, query and fragment left out), URL-decoded (`my%20file.pdf`
+ * is `my file.pdf`; a malformed escape is kept as written). A separator the
+ * decoding brought in (`%2F`, `%5C`) does not make a path: only what follows
+ * the last one counts. Null when nothing is left, or only `.` or `..`.
+ */
+export function resourceFileName(uri: string): string | null {
+  const segment = uri
+    .replace(/[?#][\s\S]*$/, "")
+    .replace(/^[a-z][a-z0-9+.-]*:/i, "")
+    .split("/")
+    .filter(Boolean)
+    .pop()
+
+  if (!segment) {
+    return null
+  }
+
+  let decoded = segment
+
+  try {
+    decoded = decodeURIComponent(segment)
+  } catch {
+    // A malformed escape: the segment as it is.
+  }
+
+  const name = decoded.split(/[/\\]/).filter(Boolean).pop()
+
+  return name && name !== "." && name !== ".." ? name : null
+}
+
 /** Makes the handles of one answer, and says what it made. */
 class Handles {
   made: Array<{ path: string; handle: ResultHandle }> = []
@@ -996,8 +1029,7 @@ class Handles {
           ? {
               data: block.resource.blob,
               type: block.resource.mimeType ?? null,
-              name:
-                block.resource.uri.split(/[/?#]/).filter(Boolean).pop() ?? null,
+              name: resourceFileName(block.resource.uri),
               what: "file",
             }
           : null
@@ -1184,6 +1216,37 @@ export async function shapeAnswerKeeping(
 const MAX_CODE_ERROR_CHARS = 4_000
 
 /**
+ * The code a failed result carries in `_meta["gg.pcp/error"]`, and when to
+ * try again where it says: a word of lower-case letters, digits and
+ * underscores, and a wait of whole milliseconds; anything else is no code.
+ */
+export function errorCodeOf(
+  result: CallToolResult,
+): { code: string; retryAfterMs?: number } | null {
+  const meta = (result._meta as Record<string, unknown> | undefined)?.[
+    ERROR_META_KEY
+  ] as { code?: unknown; retryAfterMs?: unknown } | undefined
+  const code = meta?.code
+
+  if (
+    result.isError !== true ||
+    typeof code !== "string" ||
+    !/^[a-z][a-z0-9_]{0,39}$/.test(code)
+  ) {
+    return null
+  }
+
+  const wait = meta?.retryAfterMs
+
+  return {
+    code,
+    ...(typeof wait === "number" && Number.isFinite(wait)
+      ? { retryAfterMs: Math.max(0, Math.round(wait)) }
+      : {}),
+  }
+}
+
+/**
  * A tool's answer as a program run by run_code gets it (lib/core/code/):
  * the value itself rather than text to read, so the program can filter it.
  * `fields` and `decode` shape it as for call_tool, and `keep` makes handles
@@ -1205,7 +1268,7 @@ export async function answerValue(
   { max }: { max: number },
 ): Promise<
   | { ok: true; value: unknown }
-  | { ok: false; error: string; code?: "paced"; retryAfterMs?: number }
+  | { ok: false; error: string; code?: string; retryAfterMs?: number }
 > {
   if (result.isError) {
     const text = (result.content ?? [])
@@ -1215,11 +1278,23 @@ export async function answerValue(
     // PCP's own pacing refused it (pacing/pace.ts pacedResult): the program
     // is told when to try again, as fields it can read.
     const retryAfterMs = pacedRetryAfter(result)
+    // Otherwise the tool error's own code (tools/outcome.ts), as it is:
+    // "timeout", "browser_busy" and whatever a family adds later.
+    const coded = retryAfterMs === null ? errorCodeOf(result) : null
 
     return {
       ok: false,
       error: clip(text || "The tool reported an error.", MAX_CODE_ERROR_CHARS),
-      ...(retryAfterMs === null ? {} : { code: "paced", retryAfterMs }),
+      ...(retryAfterMs !== null
+        ? { code: "paced", retryAfterMs }
+        : coded
+          ? {
+              code: coded.code,
+              ...(coded.retryAfterMs !== undefined
+                ? { retryAfterMs: coded.retryAfterMs }
+                : {}),
+            }
+          : {}),
     }
   }
 

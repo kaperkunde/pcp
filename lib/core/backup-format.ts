@@ -21,6 +21,8 @@ import type {
   ServerAuthHeader,
   ServerDefinition,
   ServiceSpec,
+  StorageEntry,
+  StorageRoot,
   Exit,
   Setting,
   Skill,
@@ -289,6 +291,8 @@ const SecretRow = z.strictObject({
 const SecretBrowserOriginRow = z.strictObject({
   secretId: id,
   origin: str,
+  // "This domain and its subdomains": absent from older files.
+  includeSubdomains: z.boolean().default(false),
   createdAt: date,
 })
 
@@ -436,6 +440,44 @@ const ServiceSpecRow = z.strictObject({
   updatedAt: date,
 })
 
+/** A text column that holds one of a few words. */
+const oneOf = (words: string[]) =>
+  str.refine((value) => words.includes(value), {
+    message: `One of ${words.join(", ")}.`,
+  })
+
+// Storage roots, added with the storage kind: absent from older files.
+const StorageRootRow = z.strictObject({
+  serverId: id,
+  hostId: id.nullable(),
+  path: str,
+  writeAs: str.default(""),
+  umask: z.number().int().min(0).max(0o777).default(2),
+  // Stores (#90): absent from older files, whose roots are plain folders
+  // over SFTP.
+  backend: oneOf(["sftp", "local"]).default("sftp"),
+  mode: oneOf(["plain", "encrypted"]).default("plain"),
+  storeKey: bytesOrNull.default(null),
+  converting: oneOf(["", "plain", "encrypted"]).default(""),
+  createdAt: date,
+  updatedAt: date,
+})
+
+// An encrypted store's index, added with stores: absent from older files.
+// The objects themselves stay on the store's backend, never in a file.
+const StorageEntryRow = z.strictObject({
+  id,
+  serverId: id,
+  parentId: z.string().max(200).default(""),
+  nameKey: str,
+  folder: z.boolean().default(false),
+  objectId: z.string().max(200).default(""),
+  fileKey: bytesOrNull.default(null),
+  meta: bytes,
+  storedBytes: z.number().min(0).default(0),
+  createdAt: date,
+})
+
 // Exits, added with exits: absent from older files.
 const ExitRow = z.strictObject({
   id,
@@ -566,6 +608,8 @@ export const PayloadSchema = z.strictObject({
     openApiSpecs: z.array(OpenApiSpecRow),
     wrapperSpecs: z.array(WrapperSpecRow).default([]),
     serviceSpecs: z.array(ServiceSpecRow).default([]),
+    storageRoots: z.array(StorageRootRow).default([]),
+    storageEntries: z.array(StorageEntryRow).default([]),
     exits: z.array(ExitRow).default([]),
     repos: z.array(RepoRow).default([]),
     repoItems: z.array(RepoItemRow).default([]),
@@ -834,6 +878,15 @@ export function checkReferences(payload: ExportPayload): void {
     pointsAt(spec.registeredId, servers, "the server a service registered")
   }
 
+  for (const root of tables.storageRoots) {
+    pointsAt(root.serverId, servers, "a server")
+    pointsAt(root.hostId, servers, "a storage root's SSH server")
+  }
+
+  for (const entry of tables.storageEntries) {
+    pointsAt(entry.serverId, servers, "a stored file's store")
+  }
+
   for (const exit of tables.exits) {
     pointsAt(exit.serverId, servers, "an exit's SSH server")
     pointsAt(exit.serviceId, servers, "an exit's service")
@@ -1013,6 +1066,8 @@ export const FORMAT_COVERS_SCHEMA: {
   openApiSpec: Covers<OpenApiSpec, z.output<typeof OpenApiSpecRow>>
   wrapperSpec: Covers<WrapperSpec, z.output<typeof WrapperSpecRow>>
   serviceSpec: Covers<ServiceSpec, z.output<typeof ServiceSpecRow>>
+  storageRoot: Covers<StorageRoot, z.output<typeof StorageRootRow>>
+  storageEntry: Covers<StorageEntry, z.output<typeof StorageEntryRow>>
   exit: Covers<Exit, z.output<typeof ExitRow>>
   repo: Covers<Repo, z.output<typeof RepoRow>>
   repoItem: Covers<RepoItem, z.output<typeof RepoItemRow>>
@@ -1042,6 +1097,8 @@ export const FORMAT_COVERS_SCHEMA: {
   openApiSpec: true,
   wrapperSpec: true,
   serviceSpec: true,
+  storageRoot: true,
+  storageEntry: true,
   exit: true,
   repo: true,
   repoItem: true,

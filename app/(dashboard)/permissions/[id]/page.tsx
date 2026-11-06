@@ -23,6 +23,7 @@ import { PageHeader } from "@/components/page-header"
 import { PageColumn } from "@/components/page-column"
 import { PermissionConflicts } from "@/components/permission-conflicts"
 import { PermissionDecision } from "@/components/permission-decision"
+import { PermissionFiles } from "@/components/permission-files"
 import { PermissionLines } from "@/components/permission-lines"
 import { PermissionOutcome } from "@/components/permission-outcome"
 import { RepoReview } from "@/components/repo-review"
@@ -198,6 +199,13 @@ export default async function PermissionPage({
         ) : (
           <PermissionLines lines={view.lines} />
         )}
+        {view.files.length > 0 ? (
+          <PermissionFiles
+            requestId={view.id}
+            files={view.files}
+            pending={pending}
+          />
+        ) : null}
         {view.skill ? <SkillReview skill={view.skill} /> : null}
         {view.full ? (
           <ShownInFull parts={view.full} open={view.kind === "script_use"} />
@@ -273,6 +281,7 @@ export default async function PermissionPage({
               }
               privateAddresses={view.offersPrivateAddresses}
               access={view.proposedAccess}
+              sites={view.secretSites}
             />
           </>
         ) : (
@@ -348,6 +357,7 @@ function RequestTile({ view }: { view: PermissionView }) {
       return <IconTile size="lg" icon={Globe} className={tile} />
     case "secret_use":
     case "secret_request":
+    case "secret_sites_change":
       return <IconTile size="lg" icon={KeyRound} className={tile} />
     case "script_use":
       return <IconTile size="lg" icon={SquareCode} className={tile} />
@@ -460,6 +470,19 @@ function PendingNote({ view }: { view: PermissionView }) {
           Any other use asks you first.
         </p>
       )
+    case "secret_sites_change":
+      return (
+        <p className={note}>
+          Applying makes only the changes you ticked, to the sites as shown
+          here; the secret&apos;s value stays as it is. A site you take away
+          ends every token&apos;s allowance there. You can change its sites any
+          time under{" "}
+          <Link href="/secrets" className="underline">
+            Secrets
+          </Link>
+          .
+        </p>
+      )
     case "skill_change":
       return (
         <p className={note}>
@@ -509,10 +532,10 @@ function PendingNote({ view }: { view: PermissionView }) {
     case "service_change":
       return (
         <p className={note}>
-          Launching it pulls the image exactly as shown above, by its digest,
-          and runs it on that SSH server with the secrets named there; nothing
-          runs until you agree. You can stop, update or remove it on its page
-          under{" "}
+          Launching or updating it pulls the image exactly as shown above, by
+          its digest, and runs it on that SSH server with the secrets named
+          there; nothing runs until you agree. You can stop, update or remove it
+          on its page under{" "}
           <Link href="/servers" className="underline">
             Servers
           </Link>

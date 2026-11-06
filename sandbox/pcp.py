@@ -23,6 +23,14 @@ command, which is this file:
 
     small = pcp.image(screenshot, max_width=1200, grayscale=True)
     shots = pcp.frames(video, every=10)
+    pcp.sleep(2000)
+    answer = pcp.with_timeout(10000, lambda: pcp.call("github", "get_issue", {"number": 7}))
+
+`sleep` waits on PCP's clock, the run's own (a minute at most at once, and
+never past the run's end). `with_timeout` runs a function and raises a
+PcpError with code "timeout" when it has no result within the time; what the
+function started may still finish (a call under way is not taken back and
+may have gone through), so check before trying it again.
 
 `image` makes a smaller copy of a kept image, which PCP decodes itself;
 `frames` takes frames from a kept video with ffmpeg, here in the sandbox,
@@ -43,8 +51,12 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
 
-__all__ = ["PcpError", "call", "describe", "frames", "image", "keep", "read", "tools"]
+__all__ = [
+    "PcpError", "call", "describe", "frames", "image", "keep", "read", "sleep",
+    "tools", "with_timeout",
+]
 
 # Frames one `frames` takes at most: PCP's MAX_VIDEO_FRAMES
 # (lib/core/code/limits.ts), and its defaults.
@@ -53,14 +65,19 @@ DEFAULT_FRAMES = 5
 DEFAULT_FRAME_WIDTH = 1280
 # How long ffmpeg may take over one look at the video, in seconds.
 FFMPEG_TIMEOUT = 60
+# The longest with_timeout waits: a run's own limit, PCP's RUN_TIMEOUT_MS
+# (lib/core/code/limits.ts).
+RUN_TIMEOUT_MS = 3 * 60_000
 
 
 class PcpError(Exception):
     """PCP refused a request, or the tool answered with an error.
 
     A call PCP's pacing refused (nothing was sent) has code "paced" and
-    retry_after_ms, when the place it calls takes its next action; any
-    other has code None.
+    retry_after_ms, when the place it calls takes its next action. A tool
+    error with a code of its own has that code ("timeout", "browser_busy",
+    …) and retry_after_ms where it says when to try again; with_timeout's
+    has "timeout". Any other has code None.
     """
 
     def __init__(self, message, code=None, retry_after_ms=None):
@@ -95,14 +112,53 @@ def _ask(op, payload):
     reply = json.loads(b"".join(chunks))
     if reply.get("ok"):
         return reply.get("value")
-    if reply.get("code") == "paced":
+    code = reply.get("code")
+    if isinstance(code, str):
         wait = reply.get("retryAfterMs")
-        raise PcpError(
-            reply.get("error") or "PCP refused that.",
-            code="paced",
-            retry_after_ms=wait if isinstance(wait, int) and not isinstance(wait, bool) else 0,
-        )
+        if not isinstance(wait, int) or isinstance(wait, bool):
+            wait = 0 if code == "paced" else None
+        raise PcpError(reply.get("error") or "PCP refused that.", code=code, retry_after_ms=wait)
     raise PcpError(reply.get("error") or "PCP refused that.")
+
+
+def sleep(ms):
+    """Waits ms milliseconds on PCP's clock, which counts against the run's
+    time: a minute at most at once, and never past the run's end."""
+    if isinstance(ms, bool) or not isinstance(ms, (int, float)) or not ms >= 0:
+        raise PcpError("sleep takes a number of milliseconds, 0 or more.")
+    _ask("sleep", {"ms": ms})
+
+
+def with_timeout(ms, fn):
+    """Runs fn() and returns what it returns, or raises a PcpError with code
+    "timeout" when it has none within ms milliseconds. What fn started may
+    still finish: a call under way is not taken back and may have gone
+    through, so check before trying it again."""
+    if isinstance(ms, bool) or not isinstance(ms, (int, float)) or not 0 <= ms <= RUN_TIMEOUT_MS:
+        raise PcpError(f"with_timeout takes 0 to {RUN_TIMEOUT_MS} milliseconds and a function.")
+    if not callable(fn):
+        raise PcpError("with_timeout takes milliseconds and a function.")
+    outcome = {}
+
+    def work():
+        try:
+            outcome["value"] = fn()
+        except BaseException as error:  # handed back to the caller as it is
+            outcome["error"] = error
+
+    worker = threading.Thread(target=work, daemon=True)
+    worker.start()
+    worker.join(ms / 1000)
+    if worker.is_alive():
+        raise PcpError(
+            f"with_timeout: no result within {ms:g} ms, so the program went on without it. "
+            "What it started may still finish: a call under way is not taken back and "
+            "may have gone through, so check before you try it again.",
+            code="timeout",
+        )
+    if "error" in outcome:
+        raise outcome["error"]
+    return outcome.get("value")
 
 
 def _paths(value):
@@ -122,14 +178,20 @@ def call(server, tool, args=None, *, fields=None, decode=None, keep=None):
     return _ask("call", payload)
 
 
-def read(handle, as_="text"):
+def read(handle, as_="text", *, offset=None, length=None):
     """A kept result, by its handle or its id: its text, or a file's bytes
-    as base64 (as_="base64") or as bytes (as_="bytes")."""
+    as base64 (as_="base64") or as bytes (as_="bytes"). offset and length
+    read a part: bytes of a file, characters of a text."""
     if isinstance(handle, dict):
         handle = handle.get("$result")
+    payload = {"id": handle, "as": "base64" if as_ == "bytes" else as_}
+    if offset is not None:
+        payload["offset"] = offset
+    if length is not None:
+        payload["length"] = length
     if as_ == "bytes":
-        return base64.b64decode(_ask("read", {"id": handle, "as": "base64"}))
-    return _ask("read", {"id": handle, "as": as_})
+        return base64.b64decode(_ask("read", payload))
+    return _ask("read", payload)
 
 
 def keep(value, *, name=None, type=None, encoding=None):

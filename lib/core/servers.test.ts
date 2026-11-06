@@ -13,6 +13,7 @@ import {
   normalizeBasicAuth,
   normalizeOAuthClient,
   oauthTokensObsolete,
+  setMcpHeaderCredential,
   updateServer,
   validateUsername,
 } from "./servers"
@@ -287,6 +288,77 @@ describe("with a vault", () => {
     expect(
       await db().secret.findUnique({ where: { id: "managed" } }),
     ).toBeNull()
+  })
+
+  it("setMcpHeaderCredential gives an MCP server one header, keeping its further ones, and only when it changes", async () => {
+    const key = await createSecret(ctx, { name: "Key", value: "k-1" })
+    const extra = await createSecret(ctx, { name: "Extra", value: "e-1" })
+    const { id } = await createServer(ctx, {
+      name: "Docs",
+      url: "http://127.0.0.1:5001/mcp",
+      authType: "none",
+    })
+    const header = {
+      headerName: "Authorization",
+      valueTemplate: "Bearer {{secret}}",
+      secretId: key.id,
+    }
+
+    expect(await setMcpHeaderCredential(ctx.vaultId, id, header)).toBe(true)
+    expect(
+      await db().mcpServer.findUniqueOrThrow({ where: { id } }),
+    ).toMatchObject({
+      authType: "header",
+      authHeaderName: "Authorization",
+      authValueTemplate: "Bearer {{secret}}",
+      authSecretId: key.id,
+      status: "unknown",
+      lastSyncedAt: null,
+    })
+    expect(await setMcpHeaderCredential(ctx.vaultId, id, header)).toBe(false)
+
+    await db().serverAuthHeader.create({
+      data: {
+        id: "extra-header",
+        serverId: id,
+        position: 0,
+        headerName: "X-Extra",
+        valueTemplate: "{{secret}}",
+        secretId: extra.id,
+      },
+    })
+    await expect(
+      setMcpHeaderCredential(ctx.vaultId, id, {
+        ...header,
+        headerName: "x-extra",
+      }),
+    ).rejects.toThrow(/sends x-extra as a further header already/)
+    await expect(
+      setMcpHeaderCredential(ctx.vaultId, id, {
+        ...header,
+        secretId: "nope",
+      }),
+    ).rejects.toThrow(/secret does not exist/)
+    await expect(
+      setMcpHeaderCredential(ctx.vaultId, id, {
+        ...header,
+        valueTemplate: "Bearer",
+      }),
+    ).rejects.toThrow(/\{\{secret\}\}/)
+    expect(
+      await setMcpHeaderCredential(ctx.vaultId, id, {
+        ...header,
+        secretId: extra.id,
+      }),
+    ).toBe(true)
+    expect(await db().serverAuthHeader.count({ where: { serverId: id } })).toBe(
+      1,
+    )
+
+    // One the owner moved to OAuth keeps it; another vault's is not found.
+    await db().mcpServer.update({ where: { id }, data: { authType: "oauth" } })
+    expect(await setMcpHeaderCredential(ctx.vaultId, id, header)).toBe(false)
+    expect(await setMcpHeaderCredential("other-vault", id, header)).toBe(false)
   })
 
   it("updateServer refuses a mail account", async () => {

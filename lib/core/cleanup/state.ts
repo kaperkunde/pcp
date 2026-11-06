@@ -48,6 +48,12 @@ export type CleanupCounts = {
    * status saved before it.
    */
   vectors?: number
+  /**
+   * What PCP's own store left behind: unfinished files, files let go of,
+   * the folders of stores that are gone. Missing from a status saved
+   * before it.
+   */
+  storage?: number
   logDays: number
 }
 
@@ -57,6 +63,8 @@ export type CleanupStatus = {
   trigger?: "start" | "schedule" | "owner"
   ms?: number
   removed?: CleanupCounts
+  /** What PCP's own store takes in the data folder after the run. */
+  storeBytes?: number
   /** Bytes of the database file given back to the disk. */
   freedBytes?: number
   /** The parts that failed, said for the owner (the server log has why). */
@@ -201,6 +209,7 @@ const REMOVED: Array<[keyof CleanupCounts, string, string]> = [
     "ended time-limited allowances",
   ],
   ["vectors", "unused search vector", "unused search vectors"],
+  ["storage", "leftover stored file", "leftover stored files"],
   ["logDays", "day of log", "days of log"],
 ]
 

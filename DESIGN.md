@@ -28,8 +28,9 @@ Copy (the words) follows CLAUDE.md › Copy.
 
 The sidebar (`components/app-sidebar.tsx`) has two groups:
 
-- **Every day:** Home, Servers, Assistants, Memories, Skills, and Browser
-  below Skills while the browser is added and enabled.
+- **Every day:** Home, Servers, Assistants, Memories, Skills, Files (every
+  store and its file browser), and Browser below Files while the browser is
+  added and enabled.
 - **Now and then:** Secrets, Log, Settings.
 
 At the bottom: the update notice, the owner's name and **Lock**. The bell

@@ -1,7 +1,7 @@
 import type { VaultContext } from "../context"
 import { db } from "../db"
 import { definitionBasis } from "../definitions"
-import { invalid, PcpError } from "../errors"
+import { invalid, isPcpError, PcpError } from "../errors"
 import type { ShownText } from "../permission-rules"
 import { checkPersonalNote, setPersonalNote } from "../personal-notes"
 import {
@@ -13,7 +13,6 @@ import {
 } from "../proposed-access"
 import {
   createSecretNamedAfter,
-  deleteSecret,
   findTextSecretByName,
   validateSecretName,
 } from "../secrets"
@@ -24,6 +23,7 @@ import {
   isLoopback,
   parsePublish,
   parseServiceDefinition,
+  registerAuth,
   type ServiceDefinition,
   type ServicePublish,
 } from "./definition"
@@ -135,6 +135,14 @@ export async function prepareServiceProposal(
     description = args.description ?? ""
   }
 
+  // A build from a repository is the owner's alone: what it runs is made
+  // on their SSH server from code, not an image anyone pinned.
+  if (definition.build) {
+    throw invalid(
+      "This service is built from a repository on the SSH server, which only the owner sets up, on PCP's launch page (Servers, Add, Service). Propose an image pinned by digest instead, or ask them to launch it.",
+    )
+  }
+
   // An exit is the owner's alone to add (lib/core/exits/): an assistant
   // names one in its calls, never makes one.
   if (definition.registers.kind === "exit") {
@@ -235,8 +243,7 @@ export async function prepareServiceProposal(
     })
   }
 
-  const auth =
-    definition.registers.kind === "openapi" ? definition.registers.auth : null
+  const auth = registerAuth(definition.registers)
 
   // What it registers is read once it runs: its tools are named by
   // pattern. The service's own tools are the owner's to set.
@@ -252,7 +259,7 @@ export async function prepareServiceProposal(
 
   if (auth && !given.has(auth.env)) {
     throw invalid(
-      `The endpoint sends ${auth.env}'s secret in ${auth.header}: name it in env_secrets.`,
+      `The ${definition.registers.kind === "mcp" ? "MCP server" : "endpoint"} sends ${auth.env}'s secret in ${auth.header}: name it in env_secrets.`,
     )
   }
 
@@ -280,6 +287,11 @@ export async function prepareServiceProposal(
 }
 
 /** The definition as the owner reads it: every field, in order. */
+/** The service's own tools, as the request names them. */
+function ownTools(definition: ServiceDefinition): string {
+  return `status, logs, start, stop, restart${definition.files ? ", put_file, get_file" : ""}`
+}
+
 function definitionText(definition: ServiceDefinition): string {
   return JSON.stringify(definition, null, 2)
 }
@@ -316,6 +328,11 @@ export function describeServiceAsk(ask: ServiceChangeAsk): {
     definition.volumes.length > 0
       ? `Named volumes (never a folder of the server): ${definition.volumes.map((volume) => `${volume.name} at ${volume.path}`).join(", ")}`
       : "No volumes: it keeps nothing when its container is made again",
+    ...(definition.files
+      ? [
+          `Files folder: ${definition.files.path}, in its volume ${definition.files.volume}: its put_file copies a file an assistant has into it, and get_file copies one out`,
+        ]
+      : []),
     ...(definition.args.length > 0
       ? [`Arguments: ${definition.args.join(" ")}`]
       : []),
@@ -325,7 +342,7 @@ export function describeServiceAsk(ask: ServiceChangeAsk): {
     registers.kind === "openapi"
       ? `PCP adds an API endpoint from ${registers.specPath} on port ${registers.port}${registers.auth ? `, sending ${registers.auth.env}'s secret in ${registers.auth.header}` : ""}`
       : registers.kind === "mcp"
-        ? `PCP adds an MCP server at ${registers.path} on port ${registers.port}`
+        ? `PCP adds an MCP server at ${registers.path} on port ${registers.port}${registers.auth ? `, sending ${registers.auth.env}'s secret in ${registers.auth.header}` : ""}`
         : "PCP adds no server for it",
     ...(ask.instanceOf
       ? [
@@ -333,8 +350,8 @@ export function describeServiceAsk(ask: ServiceChangeAsk): {
         ]
       : []),
     ask.proposedAccess
-      ? "Its tools (status, logs, start, stop, restart) and what it adds ask you first, for every token, as a new server's do, except where you set a level below for what it adds"
-      : "Its tools (status, logs, start, stop, restart) and what it adds ask you first, for every token, as a new server's do",
+      ? `Its tools (${ownTools(definition)}) and what it adds ask you first, for every token, as a new server's do, except where you set a level below for what it adds`
+      : `Its tools (${ownTools(definition)}) and what it adds ask you first, for every token, as a new server's do`,
     ...(ask.note
       ? [
           `Your note on it, which every assistant that sees it reads as yours:\n${ask.note}`,
@@ -362,8 +379,9 @@ export type ServiceLauncher = (
 
 /**
  * The owner said yes: launches exactly what they were shown, with the
- * secret they typed in (saved under the name shown, and removed again when
- * the launch fails), and gives the token that asked what it launched.
+ * secret they typed in (saved under the name shown, and kept when the
+ * launch fails, which the error says), and gives the token that asked what
+ * it launched.
  */
 export async function applyServiceChange(
   ctx: VaultContext,
@@ -437,9 +455,12 @@ export async function applyServiceChange(
       note: ask.note,
     })
   } catch (error) {
-    // The secret was typed in for this service alone.
+    // What the owner typed stays theirs: said so, never dropped unseen.
     if (saved) {
-      await deleteSecret(ctx, saved.id).catch(() => {})
+      throw new PcpError(
+        isPcpError(error) ? error.code : "upstream",
+        `${isPcpError(error) ? error.message : "Something went wrong inside PCP while launching it."}\nThe secret you entered is kept in PCP as "${saved.name}": an assistant that asks again can name it, and you can choose it when you launch the service yourself, or delete it on the Secrets page.`,
+      )
     }
 
     throw error
@@ -483,5 +504,5 @@ export async function applyServiceChange(
     ? ` The secret the owner entered is saved in PCP as "${saved.name}".`
     : ""
 
-  return `${launched.message} The service is "${service.slug}" (status, logs, start, stop, restart)${registered ? `, and what it serves is "${registered.slug}" with ${registered.tools.length} tool${registered.tools.length === 1 ? "" : "s"}` : ""}. ${levels ? `${levels} The service's own tools ask the owner the first time they are used` : "Its tools ask the owner the first time they are used"}; search finds them.${keptAs}`
+  return `${launched.message} The service is "${service.slug}" (status, logs, start, stop, restart${service.tools.some((tool) => tool.name === "put_file") ? ", put_file, get_file" : ""})${registered ? `, and what it serves is "${registered.slug}" with ${registered.tools.length} tool${registered.tools.length === 1 ? "" : "s"}` : ""}. ${levels ? `${levels} The service's own tools ask the owner the first time they are used` : "Its tools ask the owner the first time they are used"}; search finds them.${keptAs}`
 }

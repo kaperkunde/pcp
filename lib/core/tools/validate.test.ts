@@ -439,6 +439,23 @@ describe("validate: handles and secrets", () => {
       ),
     ).toHaveLength(1)
   })
+
+  it("takes a placeholder's part, the value's or the login name's, and nothing else", () => {
+    const schema = object({ text: { type: "string" } })
+    const at = { secretAt: (pointer: string) => pointer === "/text" }
+
+    for (const part of ["username", "password"]) {
+      expect(
+        validate(schema, { text: { $secret: "Password", part } }, at),
+      ).toEqual([])
+    }
+    expect(
+      validate(schema, { text: { $secret: "Password", part: "seed" } }, at),
+    ).toHaveLength(1)
+    expect(
+      validate(schema, { text: { $secret: "Password", other: 1 } }, at),
+    ).toHaveLength(1)
+  })
 })
 
 describe("validate: bounds", () => {

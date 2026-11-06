@@ -45,6 +45,7 @@ describe("the browser's tools", () => {
       "handle_dialog",
       "hand_over",
       "request_secret",
+      "update_secret_sites",
       "evaluate",
       "console_log",
       "network_log",
@@ -209,6 +210,25 @@ describe("the browser's tools", () => {
     expect(
       parse("type", { tab: "t1", ref: "e3", text: { $secret: "Shop" } }),
     ).toEqual({ tab: "t1", ref: "e3", text: { $secret: "Shop" } })
+    // Its login name, as one credential with it.
+    expect(
+      parse("type", {
+        tab: "t1",
+        ref: "e3",
+        text: { $secret: "Shop", part: "username" },
+      }),
+    ).toEqual({
+      tab: "t1",
+      ref: "e3",
+      text: { $secret: "Shop", part: "username" },
+    })
+    expect(() =>
+      parse("type", {
+        tab: "t1",
+        ref: "e3",
+        text: { $secret: "Shop", part: "seed" },
+      }),
+    ).toThrow()
     expect(() =>
       parse("type", {
         tab: "t1",
@@ -263,6 +283,41 @@ describe("the browser's tools", () => {
     ).toThrow()
     // No value: the owner types it in on PCP's page.
     expect(() => parse({ ...ask, value: "hunter2" })).toThrow()
+
+    // A login name, and a password PCP makes, within bounds.
+    const full = {
+      ...ask,
+      username: "ada@example.com",
+      generate: { length: 20, symbols: false, exclude: "0O" },
+    }
+    expect(parse(full)).toEqual(full)
+    expect(() => parse({ ...ask, generate: { length: 7 } })).toThrow()
+    expect(() => parse({ ...ask, generate: { length: 129 } })).toThrow()
+    expect(() => parse({ ...ask, generate: { value: "x" } })).toThrow()
+    expect(() => parse({ ...ask, username: "" })).toThrow()
+    expect(() => parse({ ...full, kind: "totp" })).toThrow(
+      /neither username nor generate/,
+    )
+  })
+
+  it("propose sites for a secret: some to add or to take away, and why", () => {
+    const parse = (args: unknown) =>
+      parseBrowserArgs(browserToolSpec("update_secret_sites")!, args)
+    const change = {
+      name: "Shop password",
+      reason: "The shop signs in at login.shop.example now.",
+      add: [{ origin: "https://shop.example", subdomains: true }],
+      remove: ["https://old.example"],
+    }
+
+    expect(parse(change)).toEqual(change)
+    expect(() => parse({ name: "Shop password", reason: "x" })).toThrow(
+      /add or to remove/,
+    )
+    expect(() => parse({ ...change, reason: "" })).toThrow()
+    expect(() =>
+      parse({ ...change, add: [{ origin: "https://a.example", owner: 1 }] }),
+    ).toThrow()
   })
 
   it("move files only as kept results, never by a path", () => {
@@ -383,11 +438,13 @@ describe("the browser's tools", () => {
     ).toThrow(/at most one/)
   })
 
-  it("name the tab in every tool but tabs' open and list, and request_secret", () => {
+  it("name the tab in every tool but tabs' open and list, and the secrets' requests", () => {
     for (const tool of browserTools()) {
       const schema = tool.inputSchema as { required?: string[] }
       expect(schema.required?.includes("tab") ?? false, tool.name).toBe(
-        tool.name !== "tabs" && tool.name !== "request_secret",
+        tool.name !== "tabs" &&
+          tool.name !== "request_secret" &&
+          tool.name !== "update_secret_sites",
       )
     }
     expect(
@@ -525,7 +582,7 @@ describe("the browser's tools", () => {
           }
         ).properties,
       ),
-    ).toEqual(["tab", "text", "within"])
+    ).toEqual(["tab", "text", "within", "timeout_ms"])
     // Another tool takes no query.
     expect(() =>
       parseBrowserArgs(browserToolSpec("snapshot")!, {

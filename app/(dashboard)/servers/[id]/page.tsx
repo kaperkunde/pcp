@@ -14,6 +14,9 @@ import { ServiceCard } from "@/components/service-card"
 import { ServiceSettingsForm } from "@/components/service-form"
 import { SshAccessCard } from "@/components/ssh-access-card"
 import { SshServerForm } from "@/components/ssh-server-form"
+import { StorageCard } from "@/components/storage-card"
+import { StorageFolderForm } from "@/components/storage-folder-form"
+import { StorageFoldersCard } from "@/components/storage-folders-card"
 import { WrapperForm } from "@/components/wrapper-form"
 import { db } from "@/lib/core/db"
 import { isPcpError } from "@/lib/core/errors"
@@ -33,6 +36,11 @@ import {
 import { listExits } from "@/lib/core/exits/exits"
 import { serviceView } from "@/lib/core/services/services"
 import { sshServerView } from "@/lib/core/ssh/hosts"
+import {
+  listStorageRoots,
+  loadStorageRoot,
+  storageRootView,
+} from "@/lib/core/storage/roots"
 import { describeOAuthConnection } from "@/lib/core/upstream"
 import { getWrapper, replacedTools } from "@/lib/core/wrappers/admin"
 import { itemAbout } from "@/lib/core/item-about"
@@ -85,6 +93,11 @@ export default async function ServerPage({
   const browser = kind === "browser"
   const ssh = kind === "ssh" ? sshServerView(server) : null
   const exits = ssh ? await listExits(ctx, { serverId: server.id }) : []
+  const folders = ssh ? await listStorageRoots(ctx, server.id) : []
+  const storage =
+    kind === "storage"
+      ? storageRootView(await loadStorageRoot(ctx, server.id))
+      : null
   const wrapper = kind === "wrapper" ? await getWrapper(ctx, { id }) : null
   const service = kind === "service" ? await serviceView(ctx, id) : null
   const replaced = await replacedTools(ctx, server.id)
@@ -121,176 +134,196 @@ export default async function ServerPage({
           }
         : null
 
-  const settings = service ? (
-    <ServiceSettingsForm
-      initial={{
-        id: server.id,
-        name: server.name,
-        slug: server.slug,
-        description: server.description,
-        env: Object.fromEntries(
-          service.env
-            .filter((entry) => entry.secretId)
-            .map((entry) => [entry.name, entry.secretId!]),
-        ),
-        values: Object.fromEntries(
-          service.env
-            .filter((entry) => entry.value !== null)
-            .map((entry) => [entry.name, entry.value!]),
-        ),
-      }}
-      variables={service.definition.env.map((entry) => ({
-        name: entry.name,
-        required: entry.required,
-        description: entry.description,
-        plain: entry.plain,
-        value: entry.value ?? null,
-      }))}
-      secrets={secrets}
-    />
-  ) : wrapper ? (
-    <WrapperForm
-      initial={{
-        id: wrapper.id,
-        name: wrapper.name,
-        slug: wrapper.slug,
-        description: wrapper.description,
-        callLevels: wrapper.callLevels,
-        definition: JSON.stringify(
-          { tools: wrapper.tools, secrets: wrapper.secrets },
-          null,
-          2,
-        ),
-      }}
-      secretNames={secrets.map((secret) => secret.name)}
-    />
-  ) : browser ? (
-    <BrowserDescribeForm name={server.name} description={server.description} />
-  ) : ssh ? (
-    <SshServerForm
-      initial={{
-        id: server.id,
-        name: server.name,
-        slug: server.slug,
-        description: server.description,
-        host: ssh.host,
-        port: String(ssh.port),
-        username: ssh.username,
-      }}
-    />
-  ) : kind === "caldav" ? (
-    <CalendarAccountForm
-      initial={{
-        id: server.id,
-        name: server.name,
-        slug: server.slug,
-        description: server.description,
-        url: server.url,
-        readOnly: server.readOnly,
-        authType:
-          server.authType === "header" || server.authType === "oauth"
-            ? server.authType
-            : "basic",
-        authUsername: server.authUsername ?? "",
-        authSecretId: server.authSecretId ?? "",
-        oauthClientId: server.oauthClientId ?? "",
-        oauthClientSecretId: server.oauthClientSecretId ?? "",
-        oauthScope: server.oauthScope ?? "",
-        oauthAuthorizeParams: server.oauthAuthorizeParams ?? "",
-      }}
-      secrets={secrets}
-      redirectUrl={redirectUrl}
-    />
-  ) : mail ? (
-    <MailAccountForm
-      initial={{
-        id: server.id,
-        protocol: kind === "imap" ? "imap" : "jmap",
-        name: server.name,
-        slug: server.slug,
-        description: server.description,
-        url: server.url,
-        smtpUrl: server.smtpUrl ?? "",
-        readOnly: server.readOnly,
-        authType:
-          server.authType === "header" || server.authType === "oauth"
-            ? server.authType
-            : "basic",
-        authUsername: server.authUsername ?? "",
-        authSecretId: server.authSecretId ?? "",
-        mailFrom: server.mailFrom ?? "",
-        mailSaveSent:
-          server.mailSaveSent === "always" || server.mailSaveSent === "never"
-            ? server.mailSaveSent
-            : "auto",
-        oauthClientId: server.oauthClientId ?? "",
-        oauthClientSecretId: server.oauthClientSecretId ?? "",
-        oauthScope: server.oauthScope ?? "",
-        oauthAuthorizeParams: server.oauthAuthorizeParams ?? "",
-      }}
-      secrets={secrets}
-      redirectUrl={redirectUrl}
-    />
-  ) : endpoint ? (
-    <EndpointForm
-      initial={{
-        id: server.id,
-        name: server.name,
-        slug: server.slug,
-        description: server.description,
-        specSource: server.specSource === "upload" ? "upload" : "url",
-        specUrl: server.specUrl ?? "",
-        specReadAt: spec?.fetchedAt ?? null,
-        specUrlFromAssistant: server.specUrlFromAssistant,
-        patches: patches.length > 0 ? JSON.stringify(patches, null, 2) : "",
-        // Not prefilled: a value in the field is something the owner
-        // typed, which is what lets them confirm where a secret goes.
-        baseUrl: "",
-        currentBaseUrl: server.url,
-        readOnly: server.readOnly,
-        publicOnly: server.publicOnly,
-        authType:
-          server.authType === "header" ||
-          server.authType === "basic" ||
-          server.authType === "oauth"
-            ? server.authType
-            : "none",
-        authUsername: server.authUsername ?? "",
-        authHeaderName: server.authHeaderName ?? "Authorization",
-        authValueTemplate: server.authValueTemplate ?? "Bearer {{secret}}",
-        authSecretId: server.authSecretId ?? "",
-        authExtraHeaders,
-        oauthClientId: server.oauthClientId ?? "",
-        oauthClientSecretId: server.oauthClientSecretId ?? "",
-        oauthScope: server.oauthScope ?? "",
-        oauthAuthorizeParams: server.oauthAuthorizeParams ?? "",
-      }}
-      secrets={secrets}
-      redirectUrl={redirectUrl}
-    />
-  ) : (
-    <ServerForm
-      initial={{
-        id: server.id,
-        name: server.name,
-        slug: server.slug,
-        url: server.url,
-        description: server.description,
-        authType: server.authType as AuthType,
-        authHeaderName: server.authHeaderName ?? "Authorization",
-        authValueTemplate: server.authValueTemplate ?? "Bearer {{secret}}",
-        authSecretId: server.authSecretId ?? "",
-        authExtraHeaders,
-        oauthClientId: server.oauthClientId ?? "",
-        oauthClientSecretId: server.oauthClientSecretId ?? "",
-        oauthScope: server.oauthScope ?? "",
-        oauthAuthorizeParams: server.oauthAuthorizeParams ?? "",
-        publicOnly: server.publicOnly,
-      }}
-      secrets={secrets}
-      redirectUrl={redirectUrl}
-    />
-  )
+  // PCP's own store has no folder to choose: nothing to set but its
+  // tools' levels.
+  const settings =
+    storage?.backend === "local" ? null : storage ? (
+      <StorageFolderForm
+        initial={{
+          id: server.id,
+          name: server.name,
+          slug: server.slug,
+          description: server.description,
+          path: storage.path,
+          writeAs: storage.writeAs,
+          umask: storage.umask,
+          readOnly: storage.readOnly,
+        }}
+        login={storage.host?.login ?? ""}
+      />
+    ) : service ? (
+      <ServiceSettingsForm
+        initial={{
+          id: server.id,
+          name: server.name,
+          slug: server.slug,
+          description: server.description,
+          env: Object.fromEntries(
+            service.env
+              .filter((entry) => entry.secretId)
+              .map((entry) => [entry.name, entry.secretId!]),
+          ),
+          values: Object.fromEntries(
+            service.env
+              .filter((entry) => entry.value !== null)
+              .map((entry) => [entry.name, entry.value!]),
+          ),
+        }}
+        variables={service.definition.env.map((entry) => ({
+          name: entry.name,
+          required: entry.required,
+          description: entry.description,
+          plain: entry.plain,
+          value: entry.value ?? null,
+        }))}
+        secrets={secrets}
+      />
+    ) : wrapper ? (
+      <WrapperForm
+        initial={{
+          id: wrapper.id,
+          name: wrapper.name,
+          slug: wrapper.slug,
+          description: wrapper.description,
+          callLevels: wrapper.callLevels,
+          definition: JSON.stringify(
+            { tools: wrapper.tools, secrets: wrapper.secrets },
+            null,
+            2,
+          ),
+        }}
+        secretNames={secrets.map((secret) => secret.name)}
+      />
+    ) : browser ? (
+      <BrowserDescribeForm
+        name={server.name}
+        description={server.description}
+      />
+    ) : ssh ? (
+      <SshServerForm
+        initial={{
+          id: server.id,
+          name: server.name,
+          slug: server.slug,
+          description: server.description,
+          host: ssh.host,
+          port: String(ssh.port),
+          username: ssh.username,
+        }}
+      />
+    ) : kind === "caldav" ? (
+      <CalendarAccountForm
+        initial={{
+          id: server.id,
+          name: server.name,
+          slug: server.slug,
+          description: server.description,
+          url: server.url,
+          readOnly: server.readOnly,
+          authType:
+            server.authType === "header" || server.authType === "oauth"
+              ? server.authType
+              : "basic",
+          authUsername: server.authUsername ?? "",
+          authSecretId: server.authSecretId ?? "",
+          oauthClientId: server.oauthClientId ?? "",
+          oauthClientSecretId: server.oauthClientSecretId ?? "",
+          oauthScope: server.oauthScope ?? "",
+          oauthAuthorizeParams: server.oauthAuthorizeParams ?? "",
+        }}
+        secrets={secrets}
+        redirectUrl={redirectUrl}
+      />
+    ) : mail ? (
+      <MailAccountForm
+        initial={{
+          id: server.id,
+          protocol: kind === "imap" ? "imap" : "jmap",
+          name: server.name,
+          slug: server.slug,
+          description: server.description,
+          url: server.url,
+          smtpUrl: server.smtpUrl ?? "",
+          readOnly: server.readOnly,
+          authType:
+            server.authType === "header" || server.authType === "oauth"
+              ? server.authType
+              : "basic",
+          authUsername: server.authUsername ?? "",
+          authSecretId: server.authSecretId ?? "",
+          mailFrom: server.mailFrom ?? "",
+          mailSaveSent:
+            server.mailSaveSent === "always" || server.mailSaveSent === "never"
+              ? server.mailSaveSent
+              : "auto",
+          oauthClientId: server.oauthClientId ?? "",
+          oauthClientSecretId: server.oauthClientSecretId ?? "",
+          oauthScope: server.oauthScope ?? "",
+          oauthAuthorizeParams: server.oauthAuthorizeParams ?? "",
+        }}
+        secrets={secrets}
+        redirectUrl={redirectUrl}
+      />
+    ) : endpoint ? (
+      <EndpointForm
+        initial={{
+          id: server.id,
+          name: server.name,
+          slug: server.slug,
+          description: server.description,
+          specSource: server.specSource === "upload" ? "upload" : "url",
+          specUrl: server.specUrl ?? "",
+          specReadAt: spec?.fetchedAt ?? null,
+          specUrlFromAssistant: server.specUrlFromAssistant,
+          patches: patches.length > 0 ? JSON.stringify(patches, null, 2) : "",
+          // Not prefilled: a value in the field is something the owner
+          // typed, which is what lets them confirm where a secret goes.
+          baseUrl: "",
+          currentBaseUrl: server.url,
+          readOnly: server.readOnly,
+          publicOnly: server.publicOnly,
+          authType:
+            server.authType === "header" ||
+            server.authType === "basic" ||
+            server.authType === "oauth"
+              ? server.authType
+              : "none",
+          authUsername: server.authUsername ?? "",
+          authHeaderName: server.authHeaderName ?? "Authorization",
+          authValueTemplate: server.authValueTemplate ?? "Bearer {{secret}}",
+          authSecretId: server.authSecretId ?? "",
+          authExtraHeaders,
+          oauthClientId: server.oauthClientId ?? "",
+          oauthClientSecretId: server.oauthClientSecretId ?? "",
+          oauthScope: server.oauthScope ?? "",
+          oauthAuthorizeParams: server.oauthAuthorizeParams ?? "",
+        }}
+        secrets={secrets}
+        redirectUrl={redirectUrl}
+      />
+    ) : (
+      <ServerForm
+        initial={{
+          id: server.id,
+          name: server.name,
+          slug: server.slug,
+          url: server.url,
+          description: server.description,
+          authType: server.authType as AuthType,
+          authHeaderName: server.authHeaderName ?? "Authorization",
+          authValueTemplate: server.authValueTemplate ?? "Bearer {{secret}}",
+          authSecretId: server.authSecretId ?? "",
+          authExtraHeaders,
+          oauthClientId: server.oauthClientId ?? "",
+          oauthClientSecretId: server.oauthClientSecretId ?? "",
+          oauthScope: server.oauthScope ?? "",
+          oauthAuthorizeParams: server.oauthAuthorizeParams ?? "",
+          publicOnly: server.publicOnly,
+        }}
+        secrets={secrets}
+        redirectUrl={redirectUrl}
+      />
+    )
 
   // A wrapper's tool is paced by the calls its program makes.
   const pace = await serverPacing(ctx, server.id)
@@ -361,6 +394,10 @@ export default async function ServerPage({
         about={about}
       >
         {ssh ? <SshAccessCard serverId={server.id} view={ssh} /> : null}
+        {storage ? <StorageCard view={storage} /> : null}
+        {ssh ? (
+          <StorageFoldersCard serverId={server.id} folders={folders} />
+        ) : null}
         {ssh ? <ExitsCard serverId={server.id} exits={exits} /> : null}
         {service ? <ServiceCard view={service} /> : null}
       </ServerDetail>

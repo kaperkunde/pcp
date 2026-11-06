@@ -321,7 +321,8 @@ export function handleOf(kept: KeptResult, preview?: string): ResultHandle {
  * The link holds the file under a key of its own, which only the vault's
  * key unwraps: so it becomes a result the first time the token, holding the
  * vault's key, uses its handle. Each is taken once, in a transaction that
- * removes the link, so two calls at once keep it once.
+ * removes the link (or marks it taken, for one a store gets as well), so
+ * two calls at once keep it once.
  */
 async function claimUploads(
   ctx: VaultContext,
@@ -336,6 +337,7 @@ async function claimUploads(
       kind: "upload",
       resultId: { in: ids },
       receivedAt: { not: null },
+      claimedAt: null,
       expiresAt: { gt: now },
     },
   })
@@ -356,9 +358,19 @@ async function claimUploads(
       `file_link:${link.id}`,
     )
     const claimed = await db().$transaction(async (tx) => {
-      const { count } = await tx.fileLink.deleteMany({
-        where: { id: link.id },
-      })
+      // One that goes to a store too stays until its day is up, saying
+      // where it went (store-uploads.ts); its bytes go once it is there.
+      const { count } = link.storeId
+        ? await tx.fileLink.updateMany({
+            where: { id: link.id, claimedAt: null },
+            data: {
+              claimedAt: now,
+              ...(link.deliveredAt ? { ciphertext: null } : {}),
+            },
+          })
+        : await tx.fileLink.deleteMany({
+            where: { id: link.id },
+          })
 
       if (count === 0) {
         return false

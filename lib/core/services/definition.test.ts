@@ -10,7 +10,14 @@ import {
   tunnelAddress,
   type ServiceDefinitionInput,
 } from "./definition"
-import { envFile, pickDigest, runScript, runWords } from "./engine"
+import {
+  buildScript,
+  envFile,
+  pickDigest,
+  runReference,
+  runScript,
+  runWords,
+} from "./engine"
 
 // A service's definition and where one runs, checked field by field before
 // any of it reaches an engine command, and the commands built from them.
@@ -85,6 +92,36 @@ describe("parseServiceDefinition", () => {
     [
       "registering an unknown kind",
       { registers: { kind: "exec", port: 5001 } },
+    ],
+    [
+      "an MCP server's secret from no variable",
+      {
+        registers: {
+          kind: "mcp",
+          port: 5001,
+          path: "/mcp",
+          auth: {
+            env: "NOPE",
+            header: "Authorization",
+            template: "Bearer {{secret}}",
+          },
+        },
+      },
+    ],
+    [
+      "an MCP server's header value without the secret",
+      {
+        registers: {
+          kind: "mcp",
+          port: 5001,
+          path: "/mcp",
+          auth: {
+            env: "DOCLING_API_KEY",
+            header: "X-Api-Key",
+            template: "key",
+          },
+        },
+      },
     ],
     [
       "an endpoint secret from no variable",
@@ -191,6 +228,41 @@ describe("checkEnvBindings", () => {
     expect(() => checkEnvBindings({}, definition)).toThrow(/DOCLING_API_KEY/)
     expect(checkEnvBindings({ DOCLING_API_KEY: "s1" }, definition)).toEqual({
       DOCLING_API_KEY: "s1",
+    })
+  })
+
+  it("needs the variable an MCP server's header sends bound to a secret", () => {
+    const mcp = parseServiceDefinition({
+      ...BASE,
+      env: [{ name: "MCP_TOKEN" }],
+      registers: {
+        kind: "mcp",
+        port: 5001,
+        path: "/mcp",
+        auth: {
+          env: "MCP_TOKEN",
+          header: "Authorization",
+          template: "Bearer {{secret}}",
+        },
+      },
+    })
+
+    expect(mcp.registers).toEqual({
+      kind: "mcp",
+      port: 5001,
+      path: "/mcp",
+      auth: {
+        env: "MCP_TOKEN",
+        header: "Authorization",
+        template: "Bearer {{secret}}",
+      },
+    })
+    // Not required as a variable, but the MCP server sends it.
+    expect(() => checkEnvBindings({}, mcp)).toThrow(
+      /Choose the secret for MCP_TOKEN: the MCP server sends it in Authorization/,
+    )
+    expect(checkEnvBindings({ MCP_TOKEN: "s1" }, mcp)).toEqual({
+      MCP_TOKEN: "s1",
     })
   })
 
@@ -434,5 +506,108 @@ describe("an exit's definition (a VPN container)", () => {
     expect(
       checkEnvBindings({}, definition, { VPN_SERVICE_PROVIDER: "mullvad" }),
     ).toEqual({})
+  })
+})
+
+describe("a definition built from a repository", () => {
+  const BUILD = {
+    repository: "kaperkunde/docs-server",
+    commit: "a".repeat(40),
+    containerfile: "deploy/Containerfile",
+  }
+
+  function built(change: Record<string, unknown> = {}) {
+    const rest = Object.fromEntries(
+      Object.entries(BASE).filter(
+        ([key]) => key !== "image" && key !== "source",
+      ),
+    )
+    return { ...rest, build: { ...BUILD, ...change } }
+  }
+
+  it("takes a repository at a full commit, with the context and arguments defaulted", () => {
+    const definition = parseServiceDefinition(built())
+    expect(definition.build).toEqual({
+      ...BUILD,
+      context: ".",
+      args: [],
+    })
+    expect(definition.image).toBeUndefined()
+  })
+
+  it.each([
+    [{ commit: "main" }, /40 hex digits/],
+    [{ commit: "A".repeat(40) }, /40 hex digits/],
+    [{ repository: "kaperkunde" }, /owner\/name/],
+    [{ repository: "kaperkunde/.." }, /owner\/name/],
+    [{ containerfile: "../Containerfile" }, /Containerfile's path/],
+    [{ containerfile: "/etc/passwd" }, /Containerfile's path/],
+    [{ containerfile: "-f" }, /Containerfile's path/],
+    [{ context: "app/../.." }, /build's folder/],
+    [{ args: [{ name: "X", value: "a\nb" }] }, /one line/],
+    [{ args: [{ name: "1X", value: "a" }] }, /variable's name/],
+  ])("refuses %j", (change, message) => {
+    expect(() => parseServiceDefinition(built(change))).toThrow(message)
+  })
+
+  it("updates from a commit, not a tag, and runs only the image PCP built", () => {
+    expect(() =>
+      parseServiceDefinition({ ...built(), source: "ghcr.io/x/y:latest" }),
+    ).toThrow(/leave source out/)
+    expect(() =>
+      parseServiceDefinition({ ...built(), image: BASE.image }),
+    ).toThrow(/leave image out/)
+    expect(
+      parseServiceDefinition({
+        ...built(),
+        image: `localhost/pcp-docs-server@${DIGEST}`,
+      }).image,
+    ).toBe(`localhost/pcp-docs-server@${DIGEST}`)
+    // A built image is never one to pull.
+    expect(() =>
+      parseServiceDefinition(
+        withChange({
+          image: `localhost/pcp-docs-server@${DIGEST}`,
+          source: undefined,
+        }),
+      ),
+    ).toThrow(/comes with its build/)
+    const noImage = Object.fromEntries(
+      Object.entries(BASE).filter(([key]) => key !== "image"),
+    )
+    expect(() => parseServiceDefinition(noImage)).toThrow(/pinned by digest/)
+  })
+
+  it("builds in a folder of its own, every word quoted, and runs the image by its id", () => {
+    const definition = parseServiceDefinition(
+      built({ args: [{ name: "GREETING", value: "it's $(id)" }] }),
+    )
+    const script = buildScript("podman", definition.build!)
+
+    expect(script).toContain("d=$(mktemp -d)")
+    expect(script).toContain(`trap 'rm -rf "$d"' EXIT`)
+    expect(script).toContain(
+      `https://codeload.github.com/kaperkunde/docs-server/tar.gz/${"a".repeat(40)}`,
+    )
+    expect(script).toContain("--proto '=https'")
+    expect(script).toContain(
+      `podman build --file "$f"/Containerfile --iidfile "$d/iid" --tag localhost/pcp-docs-server:aaaaaaaaaaaa --build-arg 'GREETING=it'\\''s $(id)' "$c"`,
+    )
+    expect(
+      runWords("docker", {
+        serviceId: "s1",
+        containerName: "pcp-docs",
+        definition: {
+          ...definition,
+          image: `localhost/pcp-docs-server@${DIGEST}`,
+        },
+        publish: {
+          address: "127.0.0.1",
+          ports: [{ container: 5001, host: 5001 }],
+        },
+      }),
+    ).toContain(DIGEST)
+    expect(runReference(`localhost/pcp-docs-server@${DIGEST}`)).toBe(DIGEST)
+    expect(runReference(BASE.image!)).toBe(BASE.image)
   })
 })

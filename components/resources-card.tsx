@@ -64,6 +64,12 @@ const ROWS: Array<{
     unit: "",
     hint: "With no tool call, nobody watching a tab and no hand-over waiting for you. An open browser holds memory.",
   },
+  {
+    field: "storeMb",
+    label: "PCP's own store (MB)",
+    unit: "MB",
+    hint: "What the files assistants keep in PCP's own store may take of the disk where PCP keeps its data.",
+  },
 ]
 
 /**
@@ -134,7 +140,8 @@ export function ResourcesCard({ overview }: { overview: ResourcesOverview }) {
           {overview.chosen.programsAtOnce === 1 ? "program" : "programs"} of{" "}
           {megabytes(overview.chosen.programMemoryMb)} at once, files up to{" "}
           {megabytes(overview.chosen.fileMb)}, and{" "}
-          {megabytes(overview.chosen.keptMb)} of kept results per token; the
+          {megabytes(overview.chosen.keptMb)} of kept results per token,{" "}
+          {megabytes(overview.chosen.storeMb)} for PCP&apos;s own store; the
           browser closes after {overview.chosen.browserIdleMinutes} minutes
           idle. Programs together may hold at most{" "}
           {megabytes(overview.maxProgramsMemoryMb)}, three quarters of this

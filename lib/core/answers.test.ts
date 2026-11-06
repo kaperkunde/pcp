@@ -10,6 +10,7 @@ import {
   MAX_HANDLES_PER_ANSWER,
   pickFields,
   readFields,
+  resourceFileName,
   shapeAnswer,
   resultUri,
   shapeAnswerKeeping,
@@ -561,6 +562,23 @@ describe("files in other blocks", () => {
     expect(texts(shown)[2]).toMatch(/a result too, to hand to another tool/)
   })
 
+  it("keeps an embedded file under the decoded last part of its address", async () => {
+    const { kept } = await keeping({
+      content: [
+        {
+          type: "resource",
+          resource: {
+            uri: "file:///data/my%20file.pdf",
+            mimeType: "application/pdf",
+            blob: Buffer.from("%PDF-1.7 ...").toString("base64"),
+          },
+        },
+      ],
+    })
+
+    expect(kept[0]).toMatchObject({ kind: "bytes", name: "my file.pdf" })
+  })
+
   it("keeps an embedded file under the last part of its address", async () => {
     const { kept } = await keeping({
       content: [
@@ -580,6 +598,41 @@ describe("files in other blocks", () => {
       mediaType: "application/pdf",
       name: "q3.pdf",
     })
+  })
+})
+
+describe("resourceFileName", () => {
+  it("URL-decodes the last part of the address", () => {
+    expect(resourceFileName("file:///data/my%20file.pdf")).toBe("my file.pdf")
+    expect(resourceFileName("https://x.test/r/%C3%A9t%C3%A9.txt")).toBe(
+      "été.txt",
+    )
+    expect(resourceFileName("file:///reports/q3.pdf")).toBe("q3.pdf")
+  })
+
+  it("leaves out the query and fragment", () => {
+    expect(resourceFileName("https://x.test/a/q3.pdf?v=2#page=1")).toBe(
+      "q3.pdf",
+    )
+  })
+
+  it("keeps a malformed escape as written", () => {
+    expect(resourceFileName("file:///data/100%.pdf")).toBe("100%.pdf")
+    expect(resourceFileName("file:///data/a%E0%A4.pdf")).toBe("a%E0%A4.pdf")
+  })
+
+  it("never makes a path of a decoded separator", () => {
+    expect(resourceFileName("file:///data/..%2F..%2Fetc%2Fpasswd")).toBe(
+      "passwd",
+    )
+    expect(resourceFileName("file:///data/dir%5Cname.txt")).toBe("name.txt")
+    expect(resourceFileName("file:///data/sub%2F")).toBe("sub")
+  })
+
+  it("is null when no name is left", () => {
+    expect(resourceFileName("file:///")).toBeNull()
+    expect(resourceFileName("file:///data/%2E%2E")).toBeNull()
+    expect(resourceFileName("file:///data/%2F")).toBeNull()
   })
 })
 

@@ -279,3 +279,11 @@ A bug that regressed gets a test that fails before the fix and passes after
 
 MIT. By opening a pull request you agree that your contribution is licensed
 the same way.
+
+## Stack
+
+Next.js 15 (App Router, Server Actions), React 19, TypeScript, Tailwind CSS 4
+with shadcn/ui primitives, Prisma 7 on SQLite (`better-sqlite3`), the
+`@modelcontextprotocol` v2 SDK for both the gateway and the upstream client,
+QuickJS in WebAssembly for `run_code`, `patchright-core` driving Chromium for
+the browser, Electron for the desktop apps, Vitest, Playwright, pnpm.

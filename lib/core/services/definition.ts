@@ -6,6 +6,7 @@ import { sha256Hex } from "../crypto"
 import { invalid } from "../errors"
 import { canonicalJson } from "../permission-rules"
 import {
+  MAX_BUILD_ARGS,
   MAX_ENV_DESCRIPTION_CHARS,
   MAX_ENV_VALUE_CHARS,
   MAX_IMAGE_CHARS,
@@ -27,9 +28,17 @@ import {
  *
  * - The image is pinned by digest (`repo@sha256:…`): what the owner approved
  *   is what runs. `source` is the tag an update resolves to a new digest.
+ *   Or, the owner's alone, it is built on the SSH server from a public
+ *   GitHub repository at a pinned commit (`build`), and the image id PCP
+ *   built is what it pins (`localhost/pcp-<repo>@sha256:<id>`), never
+ *   pulled.
  * - Volumes are named volumes only, named after the container
  *   (`pcp-<name>-<volume>`): never a path on the host, so a definition can
  *   neither read nor write the host's files.
+ * - `files` names a folder in one of those volumes that PCP copies a kept
+ *   file into, and back out of, with the engine's own `cp` (a tar stream
+ *   over standard input or output, engine.ts): for a service whose tools
+ *   take paths in its volume.
  * - Environment variables are names here; their values are the owner's
  *   secrets, bound per instance, or a fixed value that is no secret. Values
  *   reach the host over standard input only.
@@ -63,6 +72,24 @@ export const IMAGE_BY_DIGEST = new RegExp(`^${NAME}@sha256:[a-f0-9]{64}$`)
 export const IMAGE_BY_TAG = new RegExp(
   `^${NAME}(?::[A-Za-z0-9_][A-Za-z0-9_.-]{0,127})?$`,
 )
+/**
+ * An image PCP built on the SSH server itself (`build`): its image id,
+ * named for the repository it came from. Never pulled from anywhere; a
+ * container runs it by that id (engine.ts runReference).
+ */
+export const LOCAL_IMAGE =
+  /^localhost\/pcp-[a-z0-9][a-z0-9-]{0,60}@sha256:[a-f0-9]{64}$/
+/** A GitHub repository, owner/name, as GitHub allows them. */
+export const GITHUB_REPOSITORY =
+  /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})\/(?!\.{1,2}$)[A-Za-z0-9._-]{1,100}$/
+/** A commit, by its full 40-hex id: what the owner approved is what builds. */
+export const COMMIT = /^[a-f0-9]{40}$/
+/**
+ * A path inside the repository: relative, letters, digits and ._-/ only,
+ * never `..`, `.` as a part, a leading dash or an empty part.
+ */
+export const REPOSITORY_PATH =
+  /^(?!-)(?!.*(?:^|\/)\.{1,2}(?:\/|$))[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)*$/
 /** A variable's name, as POSIX shells and env files take one. */
 export const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]{0,127}$/
 /** A volume's own name; on the host it is `<container>-<name>`. */
@@ -80,6 +107,18 @@ export function imageRepository(reference: string): string {
   const slash = base.lastIndexOf("/")
   const colon = base.lastIndexOf(":")
   return colon > slash ? base.slice(0, colon) : base
+}
+
+/** A container path without its trailing slashes ("/" stays "/"). */
+export function trimPath(path: string): string {
+  return path.replace(/\/+$/, "") || "/"
+}
+
+/** Whether `path` is `folder` or inside it, by their words alone. */
+export function pathWithin(path: string, folder: string): boolean {
+  const inner = trimPath(path)
+  const outer = trimPath(folder)
+  return inner === outer || inner.startsWith(outer === "/" ? "/" : `${outer}/`)
 }
 
 // ---- The definition ---------------------------------------------------------
@@ -137,12 +176,43 @@ const VolumeSchema = z.strictObject({
     ),
 })
 
+/**
+ * The folder in one of its named volumes that PCP puts files into and gets
+ * them back from (the service's put_file and get_file tools, engine.ts
+ * copyIntoContainer): for a service whose own tools take paths in its
+ * volume (a PDF tool's /data). `path` is the volume's mount path or a
+ * folder inside it, so what PCP writes is the volume's, and stays when the
+ * container is made again.
+ */
+const FilesSchema = z.strictObject({
+  volume: z.string().regex(VOLUME_NAME, {
+    message: "The volume files go in: one of the service's volumes, by name.",
+  }),
+  path: z
+    .string()
+    .max(MAX_PATH_CHARS)
+    .regex(CONTAINER_PATH, {
+      message:
+        "Where files go: an absolute path in the container, in that volume.",
+    })
+    .refine(
+      (value) =>
+        !value.split("/").some((part) => part === ".." || part === "."),
+      { message: "The files' folder cannot go up with .." },
+    ),
+})
+
+export type ServiceFiles = z.output<typeof FilesSchema>
+
 const HealthSchema = z.discriminatedUnion("kind", [
   z.strictObject({ kind: z.literal("http"), port, path: httpPath }),
   z.strictObject({ kind: z.literal("none") }),
 ])
 
-/** An API endpoint's secret header, sent with the secret bound to `env`. */
+/**
+ * The secret header an API endpoint or an MCP server it registers sends,
+ * with the secret bound to `env`.
+ */
 const RegisterAuthSchema = z.strictObject({
   env: envName,
   header: z.string().regex(HEADER_NAME),
@@ -180,7 +250,12 @@ const RegistersSchema = z.discriminatedUnion("kind", [
     basePath: httpPath.default("/"),
     auth: RegisterAuthSchema.optional(),
   }),
-  z.strictObject({ kind: z.literal("mcp"), port, path: httpPath }),
+  z.strictObject({
+    kind: z.literal("mcp"),
+    port,
+    path: httpPath,
+    auth: RegisterAuthSchema.optional(),
+  }),
   /** A VPN container's proxy, which PCP adds as an exit. */
   z.strictObject({
     kind: z.literal("exit"),
@@ -191,12 +266,65 @@ const RegistersSchema = z.discriminatedUnion("kind", [
   z.strictObject({ kind: z.literal("none") }),
 ])
 
+/** A build argument: a name and a value, no secret (it shows in the image). */
+const BuildArgSchema = z.strictObject({
+  name: envName,
+  value: z
+    .string()
+    .max(MAX_ENV_VALUE_CHARS)
+    .refine((value) => !/[\u0000-\u001f\u007f]/.test(value), {
+      message: "A build argument's value is one line, no control characters.",
+    }),
+})
+
+/**
+ * Where the owner's own image comes from: a public GitHub repository at a
+ * pinned commit, built on the SSH server with its engine (engine.ts
+ * buildImage). The owner's alone: an assistant never proposes one.
+ */
+const BuildSchema = z.strictObject({
+  /** owner/name on GitHub. */
+  repository: z.string().regex(GITHUB_REPOSITORY, {
+    message: "The repository on GitHub, as owner/name.",
+  }),
+  /** The commit, all 40 hex digits of it. */
+  commit: z.string().regex(COMMIT, {
+    message: "The commit, by its full id: 40 hex digits.",
+  }),
+  /** The Containerfile (or Dockerfile), relative to the repository's root. */
+  containerfile: z.string().max(MAX_PATH_CHARS).regex(REPOSITORY_PATH, {
+    message:
+      "The Containerfile's path in the repository, like Containerfile or docker/Dockerfile.",
+  }),
+  /** The build's context, relative to the repository's root; its root by default. */
+  context: z
+    .string()
+    .max(MAX_PATH_CHARS)
+    .refine((value) => value === "." || REPOSITORY_PATH.test(value), {
+      message: "The build's folder in the repository, like . or app.",
+    })
+    .default("."),
+  args: z.array(BuildArgSchema).max(MAX_BUILD_ARGS).default([]),
+})
+
+export type ServiceBuild = z.output<typeof BuildSchema>
+
 export const ServiceDefinitionSchema = z
   .strictObject({
-    image: z.string().max(MAX_IMAGE_CHARS).regex(IMAGE_BY_DIGEST, {
-      message:
-        "The image, pinned by digest: repository@sha256:<64 hex digits>.",
-    }),
+    /**
+     * The image, pinned by digest. For a `build`, the image PCP built (its
+     * id, LOCAL_IMAGE), written once it is built; absent before.
+     */
+    image: z
+      .string()
+      .max(MAX_IMAGE_CHARS)
+      .regex(IMAGE_BY_DIGEST, {
+        message:
+          "The image, pinned by digest: repository@sha256:<64 hex digits>.",
+      })
+      .optional(),
+    /** Built on the SSH server from a repository, in place of a pulled image. */
+    build: BuildSchema.optional(),
     /** The tag an update resolves to a new digest; none: updates by hand. */
     source: z
       .string()
@@ -243,8 +371,46 @@ export const ServiceDefinitionSchema = z
       .default([]),
     health: HealthSchema.default({ kind: "none" }),
     registers: RegistersSchema.default({ kind: "none" }),
+    /**
+     * Where PCP puts files for the service's own tools, and gets them back
+     * from: a folder in one of its volumes. None: no put_file or get_file.
+     */
+    files: FilesSchema.optional(),
   })
   .superRefine((definition, issue) => {
+    if (definition.build) {
+      if (definition.source !== undefined) {
+        issue.addIssue({
+          code: "custom",
+          message:
+            "A service built from a repository updates to a new commit, not from a source tag: leave source out.",
+        })
+      }
+
+      if (
+        definition.image !== undefined &&
+        !LOCAL_IMAGE.test(definition.image)
+      ) {
+        issue.addIssue({
+          code: "custom",
+          message:
+            "A service built from a repository runs the image PCP built: leave image out.",
+        })
+      }
+    } else if (definition.image === undefined) {
+      issue.addIssue({
+        code: "custom",
+        message:
+          "The image, pinned by digest: repository@sha256:<64 hex digits> (or build, from a repository).",
+      })
+    } else if (LOCAL_IMAGE.test(definition.image)) {
+      issue.addIssue({
+        code: "custom",
+        message:
+          "localhost/pcp-… is an image PCP built from a repository: it comes with its build.",
+      })
+    }
+
     const ports = definition.ports.map((entry) => entry.container)
     const names = definition.env.map((entry) => entry.name)
     const volumes = definition.volumes.map((entry) => entry.name)
@@ -297,6 +463,23 @@ export const ServiceDefinitionSchema = z
       })
     }
 
+    if (definition.files) {
+      const { volume, path } = definition.files
+      const mounted = definition.volumes.find((entry) => entry.name === volume)
+
+      if (!mounted) {
+        issue.addIssue({
+          code: "custom",
+          message: `Files go in the volume ${volume}, which is not one of the service's volumes.`,
+        })
+      } else if (!pathWithin(path, mounted.path)) {
+        issue.addIssue({
+          code: "custom",
+          message: `Files go in ${path}, which is not in the volume ${volume} (mounted at ${mounted.path}).`,
+        })
+      }
+    }
+
     if (definition.registers.kind === "exit" && definition.registers.auth) {
       const { user_env, password_env } = definition.registers.auth
 
@@ -317,14 +500,12 @@ export const ServiceDefinitionSchema = z
       }
     }
 
-    if (
-      definition.registers.kind === "openapi" &&
-      definition.registers.auth &&
-      !names.includes(definition.registers.auth.env)
-    ) {
+    const auth = registerAuth(definition.registers)
+
+    if (auth && !names.includes(auth.env)) {
       issue.addIssue({
         code: "custom",
-        message: `The endpoint's secret comes from ${definition.registers.auth.env}, which is not one of the service's variables.`,
+        message: `The ${registeredNoun(definition.registers)}'s secret comes from ${auth.env}, which is not one of the service's variables.`,
       })
     }
   })
@@ -332,6 +513,24 @@ export const ServiceDefinitionSchema = z
 export type ServiceDefinition = z.output<typeof ServiceDefinitionSchema>
 export type ServiceDefinitionInput = z.input<typeof ServiceDefinitionSchema>
 export type ServiceRegisters = ServiceDefinition["registers"]
+export type ServiceRegisterAuth = z.output<typeof RegisterAuthSchema>
+
+/**
+ * The secret header what a service registers sends (an API endpoint's or an
+ * MCP server's), or null: an exit's login is PCP's own (ExitAuthSchema).
+ */
+export function registerAuth(
+  registers: ServiceRegisters,
+): ServiceRegisterAuth | null {
+  return registers.kind === "openapi" || registers.kind === "mcp"
+    ? (registers.auth ?? null)
+    : null
+}
+
+/** What a service registers, in words: "endpoint" or "MCP server". */
+function registeredNoun(registers: Pick<ServiceRegisters, "kind">): string {
+  return registers.kind === "mcp" ? "MCP server" : "endpoint"
+}
 
 function problems(error: z.ZodError): string {
   return error.issues
@@ -591,12 +790,11 @@ export function checkEnvBindings(
     }
   }
 
-  const auth =
-    definition.registers.kind === "openapi" ? definition.registers.auth : null
+  const auth = registerAuth(definition.registers)
 
   if (auth && !checked[auth.env]) {
     throw invalid(
-      `Choose the secret for ${auth.env}: the endpoint sends it in ${auth.header}.`,
+      `Choose the secret for ${auth.env}: the ${registeredNoun(definition.registers)} sends it in ${auth.header}.`,
     )
   }
 

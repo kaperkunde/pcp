@@ -31,7 +31,7 @@ let ctx: VaultContext
 
 const { owner, name } = COMMON_REPOSITORY
 
-function doclingFiles(image: string = DOCLING.image) {
+function doclingFiles(image: string = DOCLING.image!) {
   const document: ServiceDocument = {
     kind: "service",
     name: "docling",

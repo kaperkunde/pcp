@@ -1,4 +1,11 @@
-import { mkdirSync, readdirSync, statSync, writeFileSync } from "node:fs"
+import {
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  statSync,
+  utimesSync,
+  writeFileSync,
+} from "node:fs"
 import path from "node:path"
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
@@ -19,6 +26,9 @@ import { scratchDatabase } from "../test-db"
 import { EMPTY_CONFIG, saveResourceConfig } from "../resources/state"
 import { keepBytes, keepResult, RESULT_TTL_MS } from "../tool-results"
 import { createUploadLink, UPLOAD_LINK_TTL_MS } from "../upload-links"
+import { localStoreDir } from "../storage/local"
+import { linkCopiesDir } from "../store-links"
+import { ensureOwnStore } from "../storage/roots"
 import { setupVault } from "../vault"
 import { DEFAULT_CLEANUP_CRON, DEFAULT_LOG_DAYS } from "./limits"
 import { runCleanup } from "./run"
@@ -191,6 +201,28 @@ describe("a run", () => {
     expect(await db().toolResult.count()).toBe(1)
   })
 
+  it("removes the copies share_file made once no link names them (#90)", async () => {
+    const now = new Date()
+    const bucket = path.join(linkCopiesDir(), ".pcp-store", "ab")
+    const orphan = path.join(bucket, "ab".padEnd(32, "0"))
+    const fresh = path.join(bucket, "ab".padEnd(32, "1"))
+    const part = path.join(bucket, `${"ab".padEnd(32, "2")}.x.pcp-part`)
+    mkdirSync(bucket, { recursive: true })
+    for (const file of [orphan, fresh, part])
+      writeFileSync(file, "x".repeat(10))
+    const hourAgo = new Date(now.getTime() - 60 * 60_000)
+    utimesSync(orphan, hourAgo, hourAgo)
+
+    const status = await runCleanup("owner", now)
+
+    // The orphan goes; one just written (a share under way) and a part
+    // file younger than a day stay.
+    expect(status.removed?.results).toBe(1)
+    expect(existsSync(orphan)).toBe(false)
+    expect(existsSync(fresh)).toBe(true)
+    expect(existsSync(part)).toBe(true)
+  })
+
   it("removes upload links a day after they stop taking files, with their empty places", async () => {
     const now = new Date()
     const link = { tokenId, publicUrl: "https://pcp.example", purpose: "x" }
@@ -242,6 +274,39 @@ describe("a run", () => {
     })
     expect(describeRemoved(status.removed!)).toBe(
       "1 kept result past its day and 2 days of log",
+    )
+  })
+
+  it("removes what PCP's own store left behind, and the folders of stores that are gone", async () => {
+    const own = await ensureOwnStore(ctx)
+    const dir = localStoreDir(own)
+    const objects = path.join(dir, ".pcp-store", "ab")
+    mkdirSync(objects, { recursive: true })
+    // An object let go of, a part file a write left a day and more ago,
+    // and a fresh one still being written.
+    const object = "ab".repeat(16)
+    writeFileSync(path.join(objects, object), "x".repeat(100))
+    await db().storagePending.create({
+      data: { objectId: object, serverId: own, createdAt: new Date(0) },
+    })
+    const old = path.join(objects, `${"cd".repeat(16)}.1234.pcp-part`)
+    writeFileSync(old, "half")
+    utimesSync(old, new Date(0), new Date(0))
+    writeFileSync(path.join(objects, `${"ef".repeat(16)}.5678.pcp-part`), "now")
+    // A store whose row is gone.
+    const gone = localStoreDir("gone-store")
+    mkdirSync(gone, { recursive: true })
+    writeFileSync(path.join(gone, "file"), "x")
+
+    const status = await runCleanup("owner")
+
+    expect(status.removed?.storage).toBe(3)
+    expect(readdirSync(objects)).toEqual([`${"ef".repeat(16)}.5678.pcp-part`])
+    expect(await db().storagePending.count()).toBe(0)
+    expect(existsSync(gone)).toBe(false)
+    expect(status.storeBytes).toBe(3)
+    expect(describeRemoved(status.removed!)).toContain(
+      "3 leftover stored files",
     )
   })
 

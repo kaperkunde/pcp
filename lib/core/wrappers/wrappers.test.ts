@@ -470,6 +470,25 @@ describe("calling a wrapper's tool", () => {
     expect(api.requests).toHaveLength(0)
   })
 
+  it("never sends a secret's login name to anything but a page", async () => {
+    const wrapper = await approvedWrapper({
+      ...ECHO_TOOL,
+      program:
+        'return await pcp.call("things", "echo", { key: { $secret: "Things key", part: "username" }, q: args.word })',
+    })
+    await writeToolAccess(scope.tokenId, wrapper.id, "lookup", "allowed")
+
+    const result = await call("call_tool_destructive", {
+      server: "lookup",
+      tool: "lookup",
+      arguments: { word: "hello" },
+    })
+
+    expect(result.isError).toBe(true)
+    expect(result.text).toContain("goes only into a page")
+    expect(api.requests).toHaveLength(0)
+  })
+
   it("refuses a call its tool does not list", async () => {
     const wrapper = await approvedWrapper({
       ...ECHO_TOOL,

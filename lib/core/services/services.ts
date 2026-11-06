@@ -16,13 +16,23 @@ import {
 } from "../definition-rows"
 import { createEndpoint } from "../endpoints"
 import { invalid, isPcpError, notFound, PcpError } from "../errors"
+import { OwnerNeeded } from "../browser/types"
 import { forgetExitAnswers } from "../exits/dial"
 import { DOH_RESOLVERS } from "../exits/doh"
 import { checkNewExit, createServiceExit } from "../exits/exits"
 import { httpConnect, socks5Connect, type ProxyAuth } from "../exits/handshake"
 import { newId } from "../ids"
 import { errorToolResult, jsonToolResult } from "../json-result"
-import { argumentsResult, familyError } from "../tools/family"
+import {
+  argumentsResult,
+  familyError,
+  refusalOf,
+  withNotes,
+} from "../tools/family"
+import { bareType, fileMediaType } from "../media-types"
+import { loadResourceLimits } from "../resources/state"
+import { missingResultMessage } from "../result-handles"
+import { handleOf, type BytesKeeper, type ResultOpener } from "../tool-results"
 import { readCapped } from "../openapi/http"
 import { makeRedactor } from "../openapi/redact"
 import { send, type SendOptions } from "../openapi/transport"
@@ -34,6 +44,7 @@ import {
   deleteServer,
   getServer,
   normalizeNameAndDescription,
+  setMcpHeaderCredential,
   setServerStatus,
   slugify,
   uniqueSlug,
@@ -42,6 +53,8 @@ import { parseSshAddress } from "../ssh/hosts"
 import {
   checkEnvBindings,
   checkPlainValues,
+  COMMIT,
+  LOCAL_IMAGE,
   EXIT_PUBLISH_ADDRESS,
   parsePublish,
   parseServiceDefinition,
@@ -50,9 +63,11 @@ import {
   readPublish,
   readReach,
   readServiceDefinition,
+  registerAuth,
   serviceDefinitionHash,
   serviceOrigin,
   tunnelAddress,
+  volumeOnHost,
   type ServiceDefinition,
   type ServiceEnvBindings,
   type ServicePlainValues,
@@ -63,13 +78,21 @@ import {
   CONTAINER_NAME,
   containerAction,
   containerLogs,
+  ContainerFileTooLargeError,
+  copyIntoContainer,
+  copyOutOfContainer,
   detectEngine,
   EngineError,
+  existingVolumes,
   inspectContainer,
+  buildImage,
+  imagePresent,
   pullImage,
   removeContainer,
   resolveDigest,
+  probeContainerFile,
   runContainer,
+  runReference,
   type ContainerAction,
   type ContainerState,
   type ServiceEngine,
@@ -85,7 +108,15 @@ import {
   SERVICE_RECONCILE_INTERVAL_MS,
   START_ON_DEMAND_WAIT_MS,
 } from "./limits"
-import { readServiceCall, SERVICE_TOOL_NAMES, serviceTools } from "./tools"
+import { fileName } from "./files"
+import {
+  readServiceCall,
+  SERVICE_FILE_TOOLS,
+  SERVICE_TOOL_NAMES,
+  serviceTools,
+  type ServiceCall,
+} from "./tools"
+import { checkUpdateImage, prepareServiceUpdate } from "./updates"
 
 /**
  * Services: containers PCP runs with the owner's own Docker or Podman, on
@@ -496,12 +527,23 @@ export type LaunchResult = {
  */
 export async function launchServiceOn(
   ctx: VaultContext,
-  prepared: PreparedLaunch,
+  asked: PreparedLaunch,
   access: ServiceAccess,
 ): Promise<LaunchResult> {
   const { host, env } = access
   const found = await engineCall(() => detectEngine(host))
   const id = newId()
+
+  // The image: pulled by digest, or built from the repository when the SSH
+  // server does not have it. Nothing is on the SSH server yet that a
+  // failure here would leave (a build cleans up after itself).
+  const image = await engineCall(() =>
+    ensureImage(host, found.engine, asked.definition),
+  )
+  const rebuilt = image !== asked.definition.image
+  const prepared: PreparedLaunch = rebuilt
+    ? { ...asked, definition: { ...asked.definition, image } }
+    : asked
   const spec = {
     serviceId: id,
     containerName: prepared.containerName,
@@ -509,16 +551,26 @@ export async function launchServiceOn(
     publish: prepared.publish,
   }
 
-  await engineCall(() =>
-    pullImage(host, found.engine, prepared.definition.image),
+  // Volumes there already (a service removed before, its data kept) stay
+  // whatever happens; only the ones this launch makes are taken back.
+  const volumeNames = prepared.definition.volumes.map((volume) => volume.name)
+  const kept = await engineCall(() =>
+    existingVolumes(host, found.engine, prepared.containerName, volumeNames),
   )
-  await engineCall(() => runContainer(host, found.engine, spec, env))
+  const madeVolumes = volumeNames.filter((volume) => !kept.includes(volume))
 
   let registeredId: string | null = null
   let made = false
   let credentialId: string | null = null
+  // Whether the error already quotes the container's lines.
+  let quoted = false
 
   try {
+    // `run --detach` makes the container and then starts it: when the
+    // start fails (a port in use), the container and its volumes are
+    // there, and are taken back below with everything else.
+    await engineCall(() => runContainer(host, found.engine, spec, env))
+
     const health = await waitHealthy(
       host,
       found.engine,
@@ -528,8 +580,9 @@ export async function launchServiceOn(
     )
 
     if (!health.ok) {
+      quoted = true
       throw new EngineError(
-        `${prepared.name} did not become healthy: ${health.detail}${await lastLines(host, found.engine, prepared.containerName, env.redact)}`,
+        `${prepared.name} did not become healthy: ${health.detail}${await logExcerpt(host, found.engine, prepared.containerName, env.redact)}`,
       )
     }
 
@@ -588,9 +641,18 @@ export async function launchServiceOn(
     ])
     made = true
     await ensureDefinition(id)
+
+    // Another of a definition built here: its siblings pin the image built.
+    if (rebuilt && definitionRow) {
+      await writeServiceDefinition(id, prepared.definition)
+    }
     await storeTools(
       id,
-      serviceTools({ service: prepared.name, host: prepared.host.name }),
+      serviceTools({
+        service: prepared.name,
+        host: prepared.host.name,
+        files: prepared.definition.files?.path ?? null,
+      }),
     )
 
     if (prepared.note) {
@@ -619,15 +681,31 @@ export async function launchServiceOn(
       exitId,
     }
   } catch (error) {
-    const undone = [
-      `removed the container ${prepared.containerName}${prepared.definition.volumes.length > 0 ? " and its volumes" : ""} from ${host.name}`,
-    ]
+    // Read before the container goes: what it wrote is why, often.
+    const lines = quoted
+      ? ""
+      : await logExcerpt(host, found.engine, prepared.containerName, env.redact)
+    const undone: string[] = []
+    const name = prepared.containerName
+    const volumesWord = (list: string[]) =>
+      `the volume${list.length === 1 ? "" : "s"} ${list.map((volume) => volumeOnHost(name, volume)).join(", ")}`
 
-    await removeContainer(host, found.engine, prepared.containerName, {
-      volumes: prepared.definition.volumes.map((volume) => volume.name),
-    }).catch(() => {
-      undone[0] = `could not remove the container ${prepared.containerName} from ${host.name}: remove it there by hand`
-    })
+    try {
+      await removeContainer(host, found.engine, name, { volumes: madeVolumes })
+      undone.push(
+        `removed the container ${name}${madeVolumes.length > 0 ? ` and ${volumesWord(madeVolumes)} it made` : ""} from ${host.name}`,
+      )
+    } catch (removal) {
+      undone.push(
+        `could not take everything back on ${host.name} (${removal instanceof Error ? removal.message : String(removal)}): remove the container ${name}${madeVolumes.length > 0 ? ` and ${volumesWord(madeVolumes)}` : ""} there by hand`,
+      )
+    }
+
+    if (kept.length > 0) {
+      undone.push(
+        `kept ${volumesWord(kept)}, which ${kept.length === 1 ? "was" : "were"} there before`,
+      )
+    }
 
     if (registeredId) {
       await deleteServer(ctx, registeredId).catch(() => {})
@@ -645,12 +723,12 @@ export async function launchServiceOn(
     }
 
     const reason = makeRedactor(env.redact).text(
-      error instanceof Error ? error.message : String(error),
+      `${error instanceof Error ? error.message : String(error)}${lines}`,
     )
 
     throw new PcpError(
       isPcpError(error) ? error.code : "upstream",
-      `${reason}\nPCP ${undone.join(" and ")}.`.slice(0, 2000),
+      `${reason}\nPCP ${undone.join(" and ")}.`.slice(0, 4000),
     )
   }
 }
@@ -741,12 +819,22 @@ async function register(
     "tunnel",
   )!
 
+  const auth = registerAuth(registers)
+  const header = auth
+    ? {
+        authType: "header" as const,
+        authHeaderName: auth.header,
+        authValueTemplate: auth.template,
+        authSecretId: prepared.env[auth.env],
+      }
+    : { authType: "none" as const }
+
   if (registers.kind === "mcp") {
     const { id } = await createServer(ctx, {
       name: prepared.name,
       description: prepared.description,
       url: `${origin}${registers.path}`,
-      authType: "none",
+      ...header,
       // The owner's own machine: a private address is what it is.
       publicOnly: false,
     })
@@ -754,7 +842,6 @@ async function register(
     return { id, kind: "mcp" }
   }
 
-  const auth = registers.auth
   const { id, sync } = await createEndpoint(ctx, {
     name: prepared.name,
     description: prepared.description,
@@ -764,14 +851,7 @@ async function register(
     readOnly: false,
     publicOnly: false,
     reach: { dial: serviceDial(prepared.publish, sshHost, forwardOf(access)) },
-    ...(auth
-      ? {
-          authType: "header" as const,
-          authHeaderName: auth.header,
-          authValueTemplate: auth.template,
-          authSecretId: prepared.env[auth.env],
-        }
-      : { authType: "none" as const }),
+    ...header,
   })
 
   if (sync.status !== "ok") {
@@ -1047,7 +1127,12 @@ async function waitHealthy(
   }
 }
 
-async function lastLines(
+/**
+ * What the container wrote, for a message about why it failed: its first
+ * and last lines (scrubbed), or nothing when it wrote none or cannot be
+ * read. A container that was made and never started has none.
+ */
+async function logExcerpt(
   host: ServiceHost,
   engine: ServiceEngine,
   containerName: string,
@@ -1058,13 +1143,32 @@ async function lastLines(
       host,
       engine,
       containerName,
-      { lines: 20 },
+      { lines: EXCERPT_READ_LINES },
       redact,
     )
-    return text.trim() ? `. Its last lines:\n${text.trim().slice(-2000)}` : ""
+    return excerptOf(text)
   } catch {
     return ""
   }
+}
+
+/** Lines read for an excerpt, and how many of each end it shows. */
+const EXCERPT_READ_LINES = 200
+const EXCERPT_LINES = 10
+
+/** The first and last lines of what a container wrote, bounded. */
+export function excerptOf(text: string): string {
+  const lines = text.trim() ? text.trim().split(/\r?\n/) : []
+
+  if (lines.length === 0) {
+    return ""
+  }
+
+  if (lines.length <= EXCERPT_LINES * 2) {
+    return `. Its lines:\n${lines.join("\n").slice(-3000)}`
+  }
+
+  return `. Its first lines:\n${lines.slice(0, EXCERPT_LINES).join("\n").slice(0, 1500)}\n…\nIts last lines:\n${lines.slice(-EXCERPT_LINES).join("\n").slice(-1500)}`
 }
 
 export type ServiceHealth = "healthy" | "unhealthy" | "starting" | "unchecked"
@@ -1079,8 +1183,8 @@ export type ServiceStatus = {
   exitCode: number | null
   /** The image the container runs, by digest. */
   image: string | null
-  /** The image its definition names. */
-  definitionImage: string
+  /** The image its definition names (none before a build's first). */
+  definitionImage: string | null
   /** It runs the image its definition names. */
   upToDate: boolean
   /** The container by that name is not this service's (its pcp.service label). */
@@ -1091,6 +1195,12 @@ export type ServiceStatus = {
   url: string | null
   /** Through the SSH connection, or directly from PCP's machine. */
   reach: ServiceReach
+  /**
+   * What went wrong beside a remake that worked: the MCP server it
+   * registered could not take the header its definition names
+   * (followRegisteredAuth). Said with the status (statusWords).
+   */
+  note?: string
 }
 
 /** The service's state on its SSH server now, read through the engine. */
@@ -1123,8 +1233,8 @@ export async function serviceStatusOn(
     startedAt: state.startedAt,
     exitCode: state.exitCode,
     image: state.image,
-    definitionImage: loaded.definition.image,
-    upToDate: state.image === loaded.definition.image,
+    definitionImage: loaded.definition.image ?? null,
+    upToDate: runsImage(state, loaded.definition.image),
     foreign,
     engine: loaded.engine,
     engineVersion: loaded.spec.engineVersion,
@@ -1147,8 +1257,29 @@ export async function serviceStatusOn(
   return status
 }
 
+/**
+ * Whether the container runs the image the definition pins: by name for a
+ * pulled one, by image id for one built on the SSH server.
+ */
+function runsImage(state: ContainerState, image: string | undefined): boolean {
+  if (!image) {
+    return false
+  }
+
+  if (LOCAL_IMAGE.test(image)) {
+    return state.imageId === runReference(image)
+  }
+
+  return state.image === image
+}
+
 /** The status in words, for the server's row and an assistant. */
 export function statusWords(name: string, status: ServiceStatus): string {
+  const words = stateWords(name, status)
+  return status.note ? `${words} ${status.note}` : words
+}
+
+function stateWords(name: string, status: ServiceStatus): string {
   if (status.foreign) {
     return `The container named for ${name} on its SSH server is not the one PCP started.`
   }
@@ -1278,23 +1409,41 @@ export async function recreateServiceOn(
   const name = loaded.spec.containerName
   const reach: ServiceReach = access.forward ? "tunnel" : loaded.reach
 
-  await engineCall(async () => {
-    await pullImage(access.host, loaded.engine, loaded.definition.image)
-    await removeContainer(access.host, loaded.engine, name)
-    await runContainer(
-      access.host,
-      loaded.engine,
-      {
-        serviceId: loaded.server.id,
-        containerName: name,
-        definition: loaded.definition,
-        publish: loaded.publish,
-      },
-      access.env,
-    )
-  })
+  // The image first: when it cannot be had, the container runs on as it
+  // was. One built here and gone since (pruned) is built again from the
+  // same commit, and pinned.
+  const image = await engineCall(() =>
+    ensureImage(access.host, loaded.engine, loaded.definition),
+  )
 
+  if (image !== loaded.definition.image) {
+    loaded.definition = { ...loaded.definition, image }
+    await writeServiceDefinition(loaded.server.id, loaded.definition)
+  }
+
+  await engineCall(() => removeContainer(access.host, loaded.engine, name))
   await recordIntent(loaded, "running")
+
+  try {
+    await engineCall(() =>
+      runContainer(
+        access.host,
+        loaded.engine,
+        {
+          serviceId: loaded.server.id,
+          containerName: name,
+          definition: loaded.definition,
+          publish: loaded.publish,
+        },
+        access.env,
+      ),
+    )
+  } catch (error) {
+    throw await failedRecreate(loaded, access, error)
+  }
+
+  const note = await followRegisteredAuth(loaded)
+
   const health = await waitHealthy(
     access.host,
     loaded.engine,
@@ -1316,46 +1465,220 @@ export async function recreateServiceOn(
   if (!health.ok) {
     throw new PcpError(
       "upstream",
-      `${loaded.server.name} was made again but did not become healthy: ${health.detail}${await lastLines(access.host, loaded.engine, name, access.env.redact)}`,
+      `${loaded.server.name} was made again but did not become healthy: ${health.detail}${note ? ` ${note}` : ""}${await logExcerpt(access.host, loaded.engine, name, access.env.redact)}`,
     )
   }
 
-  return status
+  return note ? { ...status, note } : status
 }
 
 /**
- * Pulls the newest image of the definition's `source` tag, pins its digest
- * on the definition (every instance's), and makes this instance's container
- * again from it. Without a source, makes it again from the pinned image.
+ * The MCP server a service registered sends the header its definition
+ * names now, with the secret bound to that variable now: a remake (an
+ * update to a definition that gained `auth`, a variable bound to another
+ * secret) brings one registered before in step with the container just
+ * made. A definition that names no header leaves the server's credential
+ * as it is (the owner may have set one), and so does a server the owner
+ * moved to OAuth. An API endpoint keeps the header it was made with: its
+ * header shapes its tools.
+ *
+ * The container is up by now, so a server that cannot take the header (one
+ * of its further headers has that name) does not undo the remake: that
+ * server's row says what failed and how to fix it, and the same words come
+ * back as the remake's note. Null when nothing went wrong.
+ */
+async function followRegisteredAuth(
+  loaded: LoadedService,
+): Promise<string | null> {
+  const registers = loaded.definition.registers
+  const auth = registers.kind === "mcp" ? registers.auth : undefined
+  const secretId = auth ? loaded.env[auth.env] : undefined
+  const id = loaded.spec.registeredId
+
+  if (!auth || !secretId || !id) {
+    return null
+  }
+
+  try {
+    await setMcpHeaderCredential(loaded.server.vaultId, id, {
+      headerName: auth.header,
+      valueTemplate: auth.template,
+      secretId,
+    })
+    return null
+  } catch (error) {
+    const registered = await db().mcpServer.findUnique({
+      where: { id },
+      select: { name: true },
+    })
+    const note = `${loaded.server.name} was made again, but the MCP server it registered${registered ? ` (${registered.name})` : ""} could not take ${auth.env}'s secret in ${auth.header} and sends what it did before: ${error instanceof Error ? error.message : String(error)}`
+
+    await setServerStatus(id, "error", note).catch(() => {})
+    return note
+  }
+}
+
+/**
+ * The old container is gone and the new one did not start (a port taken
+ * since, an engine that refused): the one made is taken out again (its
+ * volumes, the service's data, stay), the service is marked failed on its
+ * row, and the error says so and how to make it again.
+ */
+async function failedRecreate(
+  loaded: LoadedService,
+  access: ServiceAccess,
+  error: unknown,
+): Promise<PcpError> {
+  const name = loaded.spec.containerName
+  const lines = await logExcerpt(
+    access.host,
+    loaded.engine,
+    name,
+    access.env.redact,
+  )
+  const left = await removeContainer(access.host, loaded.engine, name).then(
+    () => "",
+    (removal: unknown) =>
+      ` PCP could not take out the container it made (${removal instanceof Error ? removal.message : String(removal)}): remove ${name} on ${access.host.name} by hand first.`,
+  )
+  const reason = makeRedactor(access.env.redact).text(
+    `${error instanceof Error ? error.message : String(error)}${lines}`,
+  )
+  const message =
+    `${loaded.server.name} could not be made again: ${reason}\nIts old container is gone; its volumes and settings stay.${left} Once what stopped it is fixed (a port in use on ${access.host.name}, say), Start on its page or its start tool makes it again.`.slice(
+      0,
+      4000,
+    )
+
+  // The row says it first, within what a status line keeps.
+  const said = makeRedactor(access.env.redact).text(
+    error instanceof Error ? error.message : String(error),
+  )
+  await setServerStatus(
+    loaded.server.id,
+    "error",
+    `${loaded.server.name} could not be made again and has no container now: Start makes it again once what stopped it is fixed. ${said}`,
+    { lastSyncedAt: new Date() },
+  ).catch(() => {})
+
+  return new PcpError(isPcpError(error) ? error.code : "upstream", message)
+}
+
+/**
+ * The image a definition runs, on this SSH server: pulled by its digest,
+ * or for one built from a repository, the image built there, built (again)
+ * when the SSH server does not have it. Answers the image to pin, which
+ * differs from the definition's only after a build.
+ */
+export async function ensureImage(
+  host: ServiceHost,
+  engine: ServiceEngine,
+  definition: ServiceDefinition,
+): Promise<string> {
+  if (definition.build) {
+    if (
+      definition.image &&
+      (await imagePresent(host, engine, definition.image))
+    ) {
+      return definition.image
+    }
+
+    return buildImage(host, engine, definition.build)
+  }
+
+  if (!definition.image) {
+    throw new EngineError("A service's image is pinned by digest.")
+  }
+
+  await pullImage(host, engine, definition.image)
+  return definition.image
+}
+
+/** What an update is asked for: by the owner, or as an assistant proposed it. */
+export type ServiceUpdateChoice = {
+  /** A digest of the same repository (an assistant's proposal, approved). */
+  image?: string
+  /** The definition's hash when the owner was asked: unchanged, or nothing. */
+  basis?: string
+  /** A service built from a repository: the commit to build. */
+  commit?: string
+}
+
+/**
+ * Pins a new image on the definition (every instance's) and makes this
+ * instance's container again from it: the newest of the definition's
+ * `source` tag, or the image named (`image`, of the same repository); for
+ * one built from a repository, the image built from `commit`. Without
+ * either, makes it again from the image pinned.
  */
 export async function updateServiceOn(
   loaded: LoadedService,
   access: ServiceAccess,
+  choice: ServiceUpdateChoice = {},
 ): Promise<{ status: ServiceStatus; image: string; changed: boolean }> {
-  let image = loaded.definition.image
-
-  if (loaded.definition.source) {
-    const source = loaded.definition.source
-    image = await engineCall(() =>
-      resolveDigest(access.host, loaded.engine, source),
+  if (choice.basis !== undefined && loaded.spec.hash !== choice.basis) {
+    throw new PcpError(
+      "state",
+      `${loaded.server.name}'s definition changed since this was asked (it pins ${loaded.definition.image ?? "no image"} now), so nothing was updated. The assistant can ask again.`,
     )
   }
 
-  const changed = image !== loaded.definition.image
+  const before = loaded.definition.image
+  let definition = loaded.definition
 
-  if (changed) {
-    await writeServiceDefinition(loaded.server.id, {
-      ...loaded.definition,
-      image,
-    })
+  if (definition.build) {
+    if (choice.image !== undefined) {
+      throw invalid(
+        `${loaded.server.name} is built from a repository: it updates to a new commit.`,
+      )
+    }
+
+    const commit = choice.commit?.trim() || definition.build.commit
+
+    if (!COMMIT.test(commit)) {
+      throw invalid("The commit, by its full id: 40 hex digits.")
+    }
+
+    if (commit !== definition.build.commit) {
+      const build = { ...definition.build, commit }
+      const image = await engineCall(() =>
+        buildImage(access.host, loaded.engine, build),
+      )
+      definition = { ...definition, build, image }
+    }
+  } else if (choice.commit !== undefined) {
+    throw invalid(
+      `${loaded.server.name} runs an image it pulls: it has no commit to build.`,
+    )
+  } else if (choice.image !== undefined) {
+    definition = {
+      ...definition,
+      image: checkUpdateImage(loaded, choice.image),
+    }
+  } else if (definition.source) {
+    const source = definition.source
+    const image = await engineCall(() =>
+      resolveDigest(access.host, loaded.engine, source),
+    )
+    definition = { ...definition, image }
   }
 
-  const status = await recreateServiceOn(
-    { ...loaded, definition: { ...loaded.definition, image } },
-    access,
-  )
+  const changed =
+    JSON.stringify(definition) !== JSON.stringify(loaded.definition)
 
-  return { status, image, changed }
+  if (changed) {
+    await writeServiceDefinition(loaded.server.id, definition)
+  }
+
+  const next = { ...loaded, definition }
+  const status = await recreateServiceOn(next, access)
+
+  // A rebuild of an image that was gone pins a new one too.
+  return {
+    status,
+    image: next.definition.image ?? "",
+    changed: changed || next.definition.image !== before,
+  }
 }
 
 /**
@@ -1376,12 +1699,35 @@ export async function writeServiceDefinition(
     data: { definition: json, hash },
   })
 
+  const instances = [id]
+
   for (const sibling of await siblingInstances(id)) {
     if (sibling.kind === "service") {
       await db().serviceSpec.updateMany({
         where: { serverId: sibling.id, hash: { not: hash } },
         data: { definition: json, hash },
       })
+      instances.push(sibling.id)
+    }
+  }
+
+  // Its tools follow the definition: put_file and get_file come and go
+  // with a files folder.
+  for (const serverId of instances) {
+    const row = await db().mcpServer.findUnique({
+      where: { id: serverId },
+      select: { name: true, serviceSpec: { select: { host: true } } },
+    })
+
+    if (row) {
+      await storeTools(
+        serverId,
+        serviceTools({
+          service: row.name.replace(/ service$/, ""),
+          host: row.serviceSpec?.host?.name ?? "its SSH server",
+          files: checked.files?.path ?? null,
+        }),
+      )
     }
   }
 }
@@ -1492,6 +1838,7 @@ export async function syncServiceTools(
     serviceTools({
       service: loaded.server.name.replace(/ service$/, ""),
       host: loaded.host?.name ?? "its SSH server",
+      files: loaded.definition.files?.path ?? null,
     }),
   )
 
@@ -1518,20 +1865,29 @@ export async function syncServiceTools(
   }
 }
 
-/** One call to a service's tool, its arguments checked before anything connects. */
+/**
+ * One call to a service's tool, its arguments checked before anything
+ * connects. put_file reads its file from the token's kept results itself
+ * (`open`), before anything connects; get_file keeps what it reads as one
+ * (`keepBytes`).
+ */
 export async function callServiceTool(
   loaded: LoadedService,
   toolName: string,
   args: Record<string, unknown>,
   access: ServiceAccess,
-  { publicUrl }: { publicUrl: string },
+  {
+    publicUrl,
+    open,
+    keepBytes,
+  }: { publicUrl: string; open?: ResultOpener; keepBytes?: BytesKeeper },
 ): Promise<CallToolResult> {
   const read = readServiceCall(toolName, args)
 
   if (!read.fits) {
     return "unknown" in read
       ? familyError(
-          `A service has no tool called ${toolName}; it has ${SERVICE_TOOL_NAMES.join(", ")}.`,
+          `A service has no tool called ${toolName}; it has ${SERVICE_TOOL_NAMES.filter((name) => loaded.definition.files || !SERVICE_FILE_TOOLS.includes(name)).join(", ")}.`,
           "not_found",
         )
       : argumentsResult(`${loaded.server.slug}/${toolName}`, read.problems, {
@@ -1541,6 +1897,42 @@ export async function callServiceTool(
 
   const { call } = read
   const redact = access.env.redact
+
+  // An image update is the owner's: what it finds is a request for them.
+  if (call.tool === "update") {
+    let proposed: Awaited<ReturnType<typeof prepareServiceUpdate>>
+
+    try {
+      proposed = await prepareServiceUpdate(loaded, access, call.digest)
+    } catch (error) {
+      if (isPcpError(error) && error.code !== "upstream") {
+        return familyError(error.message, error.code)
+      }
+
+      return errorToolResult(
+        `${error instanceof Error ? error.message : String(error)}\nThe service's page: ${markdownLink(`Open ${loaded.server.name}'s page in PCP`, pageOf(loaded.server.id, publicUrl))}`,
+        { redact },
+      )
+    }
+
+    if ("already" in proposed) {
+      return jsonToolResult(
+        { summary: proposed.already, image: loaded.definition.image },
+        { redact },
+      )
+    }
+
+    throw new OwnerNeeded({ kind: "service_change", input: proposed })
+  }
+
+  if (call.tool === "put_file" || call.tool === "get_file") {
+    return serviceFileCall(loaded, call, access, {
+      publicUrl,
+      open,
+      keepBytes,
+      notes: read.notes,
+    })
+  }
 
   try {
     if (call.tool === "logs") {
@@ -1580,6 +1972,207 @@ export async function callServiceTool(
     if (isPcpError(error) && error.code !== "upstream") {
       throw error
     }
+
+    return errorToolResult(
+      `${error instanceof Error ? error.message : String(error)}\nThe service's page: ${markdownLink(`Open ${loaded.server.name}'s page in PCP`, pageOf(loaded.server.id, publicUrl))}`,
+      { redact },
+    )
+  }
+}
+
+/** Whether a file's bytes hold one of the values PCP handed the service. */
+function holdsSecret(bytes: Buffer, values: string[]): boolean {
+  return values.some(
+    (value) => value.length >= 4 && bytes.includes(Buffer.from(value, "utf8")),
+  )
+}
+
+function bytesWords(count: number): string {
+  return new Intl.NumberFormat("en").format(count)
+}
+
+/**
+ * put_file and get_file: a kept file copied into the service's files
+ * folder, or one copied out of it as a kept result, with the engine's own
+ * `cp` (engine.ts). The name is checked, and put_file's file read, before
+ * anything connects; a service without a files folder refuses.
+ */
+async function serviceFileCall(
+  loaded: LoadedService,
+  call: Extract<ServiceCall, { tool: "put_file" | "get_file" }>,
+  access: ServiceAccess,
+  {
+    publicUrl,
+    open,
+    keepBytes,
+    notes,
+  }: {
+    publicUrl: string
+    open?: ResultOpener
+    keepBytes?: BytesKeeper
+    notes: string[]
+  },
+): Promise<CallToolResult> {
+  const label = `${loaded.server.slug}/${call.tool}`
+  const files = loaded.definition.files
+  const redact = access.env.redact
+
+  if (!files) {
+    return familyError(
+      `${loaded.server.name} has no files folder: its definition names none (files, a folder in one of its volumes), so PCP has nowhere to put a file or get one. The owner can add one to its definition.`,
+      "not_found",
+      { notes },
+    )
+  }
+
+  const { fileBytes } = await loadResourceLimits()
+  let upload: Buffer | null = null
+  let path: string
+
+  // Before anything connects: a name that leaves the folder, or a file
+  // the token does not have, never reaches the SSH server.
+  try {
+    path = fileName(files, call.path).path
+
+    if (call.tool === "put_file") {
+      if (!open) {
+        throw invalid(
+          "put_file's file is a result PCP kept for this token, and this call cannot read it.",
+        )
+      }
+
+      const opened = await open(call.resultId)
+
+      if (!opened) {
+        throw invalid(missingResultMessage())
+      }
+
+      upload = opened.bytes()
+
+      if (upload.length > fileBytes) {
+        throw invalid(
+          `That file is ${bytesWords(upload.length)} bytes, more than PCP copies at once (${bytesWords(fileBytes)}). The owner can raise that in PCP's settings, under Resources.`,
+        )
+      }
+    } else if (!keepBytes) {
+      throw new PcpError(
+        "state",
+        "get_file answers with a kept result, which this call cannot make.",
+      )
+    }
+  } catch (error) {
+    const refused = refusalOf(error, label, notes)
+    if (refused) return refused
+    throw error
+  }
+
+  const { host } = access
+  const container = loaded.spec.containerName
+
+  try {
+    if (call.tool === "put_file" && upload) {
+      const there = await probeContainerFile(
+        host,
+        loaded.engine,
+        container,
+        files,
+        path,
+      )
+
+      if (there === "folder" || (there !== "none" && !call.overwrite)) {
+        return familyError(
+          there === "folder"
+            ? `${path} is a folder in ${loaded.server.name}: put_file puts a file, and never replaces a folder.`
+            : `There is already ${there === "file" ? "a file" : "something"} at ${path} in ${loaded.server.name}: nothing changed. overwrite: true replaces it, or choose another name.`,
+          "conflict",
+          { notes },
+        )
+      }
+
+      const placed = await copyIntoContainer(
+        host,
+        loaded.engine,
+        container,
+        files,
+        path,
+        upload,
+      )
+
+      return withNotes(
+        jsonToolResult(
+          {
+            summary: `Put the file in ${loaded.server.name} at ${placed}: pass that path to its own tools.`,
+            path: placed,
+            size: upload.length,
+            ...(there !== "none" ? { replaced: true } : {}),
+          },
+          { redact },
+        ),
+        notes,
+      )
+    }
+
+    const got = await copyOutOfContainer(
+      host,
+      loaded.engine,
+      container,
+      files,
+      path,
+      fileBytes,
+    )
+
+    if (!got) {
+      return familyError(
+        `There is no file at ${path} in ${loaded.server.name}.`,
+        "not_found",
+        { notes },
+      )
+    }
+
+    // Bytes are not text to scrub: a file that holds a value PCP handed
+    // the service (a secret of the owner's) is not kept at all.
+    if (holdsSecret(got.bytes, redact)) {
+      return familyError(
+        `${path} holds a secret PCP handed ${loaded.server.name}, so PCP did not keep it.`,
+        "forbidden",
+        { notes },
+      )
+    }
+
+    const type = fileMediaType(got.name, got.bytes)
+    const kept = await keepBytes!({
+      bytes: got.bytes,
+      mediaType: type,
+      name: got.name,
+      serverId: loaded.server.id,
+      toolName: "get_file",
+    })
+
+    return withNotes(
+      jsonToolResult(
+        {
+          path: got.path,
+          name: got.name,
+          size: got.bytes.length,
+          type: bareType(type),
+          result: handleOf(kept),
+          note: `PCP keeps this file for you: pass {"$result": "${kept.id}"} where a tool wants it (put_file on another service, save_file in a storage folder, send_email's attachments, an API's file field), or read it in a program with pcp.read.`,
+        },
+        { redact },
+      ),
+      notes,
+    )
+  } catch (error) {
+    if (error instanceof ContainerFileTooLargeError) {
+      return familyError(
+        `${error.path} is larger than PCP keeps of one file (${bytesWords(fileBytes)} bytes). The owner can raise that in PCP's settings, under Resources.`,
+        "validation",
+        { notes },
+      )
+    }
+
+    const refused = refusalOf(error, label, notes)
+    if (refused) return refused
 
     return errorToolResult(
       `${error instanceof Error ? error.message : String(error)}\nThe service's page: ${markdownLink(`Open ${loaded.server.name}'s page in PCP`, pageOf(loaded.server.id, publicUrl))}`,
@@ -1968,7 +2561,7 @@ export async function exitServiceDefinitions(
       if (definition.registers.kind === "exit") {
         found.set(id, {
           name: spec.server.name.replace(/ service$/i, ""),
-          image: definition.image,
+          image: definition.image ?? "",
         })
       }
     } catch {

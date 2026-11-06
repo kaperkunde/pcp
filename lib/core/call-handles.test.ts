@@ -501,7 +501,7 @@ describe("call_tool with a call handle", () => {
     })
     expect(tabless.isError).toBe(true)
     expect(tabless.text).toContain('"tab" is missing')
-    expect(tabless.text).toContain("This token has no tab open.")
+    expect(tabless.text).toContain("This token has no tab open (")
 
     // A rule across arguments, in its own words.
     const both = await call(client, "call_tool_destructive", {

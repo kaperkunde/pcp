@@ -132,6 +132,7 @@ const SYNONYM_GROUPS: ReadonlyArray<readonly string[]> = [
   ["launch", "start", "run", "deploy"],
   ["store", "save", "keep"],
   ["email", "mail"],
+  ["folder", "directory"],
 ]
 
 const SYNONYMS: ReadonlyMap<string, readonly string[]> = (() => {
@@ -849,11 +850,13 @@ export type OwnToolDescription = PcpToolCandidate & {
 /**
  * describe's answer for one of PCP's own tools: what it is and its schemas,
  * and that it is called directly, so it has no call_handle. `note` says
- * first what describe made of the name it was given.
+ * first what describe made of the name it was given; `extra` adds what the
+ * gateway knows of it (a capability's providers).
  */
 export function describeOwnTool(
   tool: OwnToolDescription,
   note: string | null = null,
+  extra: Record<string, unknown> = {},
 ): string {
   return JSON.stringify(
     {
@@ -862,6 +865,7 @@ export function describeOwnTool(
       kind: "pcp",
       call: `PCP's own tool: call ${tool.name} directly, with arguments that match its inputSchema, not through call_tool_*. It has no call_handle.`,
       ...(tool.tier ? { tier: tool.tier } : {}),
+      ...extra,
       title: tool.title,
       description: tool.description,
       inputSchema: tool.inputSchema,

@@ -16,8 +16,9 @@ import { isPcpError, type PcpErrorCode } from "../errors"
  *   in `_meta["gg.pcp/error"]`, so a PcpError's code is never lost. An
  *   assistant reads it and tries again; a protocol error is only for an
  *   unknown tool or a malformed request, which the SDK answers.
- * - needsOwner(owner, text): it waits for the owner: a permission request
- *   or a server to connect. The text ends with the link the assistant hands
+ * - needsOwner(owner, text): it waits for the owner: a permission request,
+ *   a server to connect, files to upload, or something to set up first (a
+ *   capability with no provider, capabilities/). The text ends with the link the assistant hands
  *   over, a markdown link labelled with `label` (owner-link.ts
  *   linkLastText); structuredContent carries the same as
  *   NEEDS_OWNER, on every tool, declared in the output schema of the tools
@@ -34,6 +35,17 @@ export type ToolErrorCode =
   | "invalid_arguments"
   /** Too many calls of this kind in a short time; nothing ran. */
   | "rate_limited"
+  /**
+   * The call took longer than its timeout and was answered without waiting
+   * further (the browser's timeout_ms); the message names the step and
+   * whether what it was asked may have happened.
+   */
+  | "timeout"
+  /**
+   * The browser's tab (or the browser) has more work waiting than the call
+   * would wait for; nothing ran. `retryAfterMs` says when to try again.
+   */
+  | "browser_busy"
   /** A fault in PCP itself. */
   | "internal"
 
@@ -75,11 +87,13 @@ export type ConnectLinks = z.infer<typeof CONNECT_LINKS>
  * A call that waits for the owner, as structuredContent: the link to hand
  * over and what it is for. A permission request names its id, for
  * check_permission; a server to connect names its links, for check_server;
- * an upload link (create_upload_link) its id, for check_upload.
+ * an upload link (create_upload_link) its id, for check_upload; something
+ * to set up (reason "setup") the capability it is for, whose tool to call
+ * again once the owner has.
  */
 export const NEEDS_OWNER = z.object({
   kind: z.literal("needs_owner"),
-  reason: z.enum(["permission", "connect", "upload"]),
+  reason: z.enum(["permission", "connect", "upload", "setup"]),
   /**
    * The page the owner opens: signed in to PCP, but for an upload link's,
    * which the link alone opens.
@@ -91,6 +105,11 @@ export const NEEDS_OWNER = z.object({
   request: z.string().optional(),
   connect: CONNECT_LINKS.optional(),
   server: SERVER_STATE.optional(),
+  /**
+   * What the owner sets up (reason "setup"): a capability's id
+   * (capabilities/list.ts), whose tool to call again afterwards.
+   */
+  capability: z.string().optional(),
   /** The upload link's id, for check_upload, and until when it takes files. */
   upload: z
     .object({ id: z.string(), maxFiles: z.number(), until: z.string() })
@@ -115,6 +134,8 @@ export type Outcome =
       hint?: string
       /** What the request log keeps instead of the message. */
       logAs?: string
+      /** When trying again may go through, in milliseconds (browser_busy). */
+      retryAfterMs?: number
     }
   | { type: "needs_owner"; owner: NeedsOwner; text: string }
   | { type: "result"; result: CallToolResult }
@@ -134,7 +155,13 @@ export function toolError(
     code = "validation",
     hint,
     logAs,
-  }: { code?: ToolErrorCode; hint?: string; logAs?: string } = {},
+    retryAfterMs,
+  }: {
+    code?: ToolErrorCode
+    hint?: string
+    logAs?: string
+    retryAfterMs?: number
+  } = {},
 ): Outcome {
   return {
     type: "error",
@@ -142,6 +169,9 @@ export function toolError(
     code,
     ...(hint ? { hint } : {}),
     ...(logAs ? { logAs } : {}),
+    ...(retryAfterMs !== undefined
+      ? { retryAfterMs: Math.max(0, Math.round(retryAfterMs)) }
+      : {}),
   }
 }
 
@@ -235,6 +265,9 @@ export function toCallToolResult(
           [ERROR_META_KEY]: {
             code: outcome.code,
             ...(outcome.hint ? { hint: outcome.hint } : {}),
+            ...(outcome.retryAfterMs !== undefined
+              ? { retryAfterMs: outcome.retryAfterMs }
+              : {}),
           },
         },
       }

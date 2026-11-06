@@ -62,6 +62,18 @@ const ALL_TOOLS = [
   "run_code_write",
   "run_code_destructive",
   "check_run",
+  "read_image",
+  "convert_document",
+  "edit_pdf",
+  // PCP's own store, and the others by store (#90).
+  "list_folder",
+  "find_files",
+  "get_file",
+  "share_file",
+  "save_file",
+  "make_folder",
+  "move",
+  "delete",
 ]
 
 /** Proposals: nothing happens until the owner agrees, and each is new. */
@@ -178,13 +190,16 @@ describe("PCP's own tools", () => {
         "check_permission",
         "check_server",
         "check_upload",
+        "convert_document",
         "create_upload_link",
         "create_wrapper",
         "delete_wrapper",
+        "edit_pdf",
         "get_endpoint",
         "get_wrapper",
         "list_secrets",
         "propose_tool_access",
+        "read_image",
         "receive_file",
         "register_server",
         "share_result",
@@ -244,7 +259,7 @@ describe("PCP's own tools", () => {
       const first = tool.description!.slice(0, 25)
 
       expect(first, tool.name).toMatch(
-        /^(START HERE: |(Search|List|Get|Call|Run|Check|Withdraw|Read|Share|Receive|Propose|Change|Fetch|Save) )/,
+        /^(START HERE: |(Search|List|Get|Call|Run|Check|Withdraw|Read|Share|Receive|Propose|Change|Fetch|Save|Edit|Convert|Find|Make|Move|Delete) )/,
       )
       // A verb and an object, not a verb alone.
       expect(first.trim().split(/\s+/).length, tool.name).toBeGreaterThan(2)
@@ -282,6 +297,17 @@ describe("PCP's own tools", () => {
       propose_tool_access: /tool/,
       list_tools: /tool/,
       web_fetch: /web/,
+      read_image: /image/,
+      convert_document: /document/,
+      edit_pdf: /PDF/,
+      list_folder: /^List files in a folder/,
+      find_files: /^Find files by name/,
+      get_file: /^Get a file as a handle/,
+      share_file: /^Share a stored file/,
+      save_file: /^Save a file to a store/,
+      make_folder: /^Make a folder/,
+      move: /^Move or rename/,
+      delete: /^Delete a file or folder/,
     }
 
     expect(Object.keys(keywords).sort()).toEqual([...ALL_TOOLS].sort())
@@ -620,7 +646,7 @@ describe("once a session, for the app on the other end (#53)", () => {
     expect(every).toHaveLength(1)
     expect(every[0]).toContain(MIRRORED_LEAD)
     expect(every[0]).toContain("call_handle")
-    expect(every[0]).toContain("End your reply with the link")
+    expect(every[0]).toContain("end your reply with every one of them")
     // read_memory every had them: search does not repeat them.
     expect(await texts(app, "search", { query: "memory" })).toHaveLength(1)
     await app.close()

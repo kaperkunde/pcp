@@ -42,7 +42,10 @@ import {
  * gone is told apart from one the tab never gave without remembering it.
  * A new document in the tab (a page opened, not a page's own change of
  * address) starts the matching afresh. An element in a frame keeps the
- * frame's mark in front (f1e12), as Playwright writes it. The map holds
+ * frame's mark in front (f1e12), as Playwright writes it; one of the page's
+ * own does not, though Playwright marks the main frame too once a
+ * navigation to another site gave the tab a new one (the number alone
+ * keeps every ref apart). The map holds
  * the latest snapshot's elements (at most MAX_PAGE_REFS) and, for an
  * element out of it for now (covered by a dialog, hidden), the last
  * MAX_GONE_REFS of those, so it gets its ref back when it shows again.
@@ -69,6 +72,8 @@ type Seen = {
   identity: string
   group: string
   ordinal: number
+  /** Whether it is inside a frame (an iframe's element above it). */
+  inFrame: boolean
 }
 
 function digest(value: string): string {
@@ -168,7 +173,7 @@ export class TabRefs {
     for (const element of seen) {
       const ref =
         given.get(element) ??
-        `${framePrefix(element.playwright)}e${this.next++}`
+        `${element.inFrame ? framePrefix(element.playwright) : ""}e${this.next++}`
 
       byOld.set(element.playwright, ref)
       live.set(ref, {
@@ -207,15 +212,19 @@ export class TabRefs {
 
     return elements.slice(0, MAX_PAGE_REFS).map((node) => {
       const around: string[] = []
+      let inFrame = false
 
-      for (let up = node.parent; up; up = up.parent) around.push(label(up))
+      for (let up = node.parent; up; up = up.parent) {
+        around.push(label(up))
+        if (up.role === "iframe") inFrame = true
+      }
 
       const identity = digest(label(node))
       const group = digest(`${label(node)}\u0001${around.join("\u0001")}`)
       const ordinal = counts.get(group) ?? 0
       counts.set(group, ordinal + 1)
 
-      return { node, playwright: node.ref, identity, group, ordinal }
+      return { node, playwright: node.ref, identity, group, ordinal, inFrame }
     })
   }
 

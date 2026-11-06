@@ -26,7 +26,11 @@ import {
 } from "./access-requests"
 import { allowSiteFor, allowToolFor, parseAllowForMinutes } from "./allowances"
 import type { SyncResult } from "./catalogue"
-import type { PermissionDecision, PermissionKind } from "./constants"
+import type {
+  PasswordRecipe,
+  PermissionDecision,
+  PermissionKind,
+} from "./constants"
 import type { VaultContext } from "./context"
 import { asBytes, decryptString, encryptString } from "./crypto"
 import { db } from "./db"
@@ -129,12 +133,19 @@ import { toolTier } from "./tool-tiers"
 import { noteOwnerAsked } from "./request-log"
 import { collectHandleIds } from "./result-handles"
 import {
-  describeResults,
   keepWholeAnswer,
+  openResult,
   resultKeepers,
   resultNotices,
   resultOpener,
+  type OpenedResult,
 } from "./tool-results"
+import {
+  fileLine,
+  requestFiles,
+  requestServes,
+  type RequestFile,
+} from "./permission-files"
 import { finishHandover, performNavigate } from "./browser/call"
 import { noteHandoverRequest } from "./browser/runtime"
 import { closePendingRequests } from "./permission-close"
@@ -144,6 +155,7 @@ import {
   describeBrowseAsk,
   describeHandoverAsk,
   describeSecretRequestAsk,
+  describeSecretSitesChangeAsk,
   describeSecretUseAsk,
   describeScriptUseAsk,
 } from "./browser/describe"
@@ -155,6 +167,7 @@ import {
   type HandoverAsk,
   type ScriptUseAsk,
   type SecretRequestAsk,
+  type SecretSitesChangeAsk,
   type SecretUseAsk,
 } from "./browser/types"
 import {
@@ -165,13 +178,18 @@ import {
 } from "./browser-scripts"
 import {
   applySecretRequest,
+  applySecretSitesChange,
   checkSecretAnswer,
+  checkSecretSitesAnswer,
   dropOnceAllowance,
   findTypableSecret,
   grantSecretUse,
   isBoundOrigin,
+  showSecretSitesChange,
+  type SecretSitesShown,
   type SecretUseLevel,
 } from "./browser-secrets"
+import { checkPasswordRecipe, generatePassword } from "./generate-password"
 import { resourceLimits } from "./resources/state"
 import {
   askFirstLine,
@@ -191,12 +209,19 @@ import {
   needsConnecting,
   openExitForCall,
   syncServerTools,
+  updateService,
 } from "./upstream"
 import {
   applyServiceChange,
   describeServiceAsk,
   type ServiceChangeAsk,
 } from "./services/proposals"
+import {
+  applyServiceUpdate,
+  describeServiceUpdate,
+  isServiceUpdate,
+  type ServiceUpdateAsk,
+} from "./services/updates"
 import {
   applyWrapperChange,
   type WrapperChangeAsk,
@@ -319,7 +344,7 @@ export type PermissionAsk =
   | { kind: "repo_change"; input: RepoChangeAsk }
   | { kind: "repo_share"; input: RepoShareAsk }
   | { kind: "note_change"; input: NoteChangeAsk }
-  | { kind: "service_change"; input: ServiceChangeAsk }
+  | { kind: "service_change"; input: ServiceChangeAsk | ServiceUpdateAsk }
   | MemoryAsk
   | SkillAsk
   | AccessAsk
@@ -328,6 +353,7 @@ export type PermissionAsk =
   | { kind: "browser_handover"; input: HandoverAsk }
   | { kind: "secret_use"; input: SecretUseAsk }
   | { kind: "secret_request"; input: SecretRequestAsk }
+  | { kind: "secret_sites_change"; input: SecretSitesChangeAsk }
   | { kind: "exit_use"; input: ExitUseAsk }
   | { kind: "script_use"; input: ScriptUseAsk }
 
@@ -348,6 +374,8 @@ export type PermissionExecutor = {
   browse?: typeof performNavigate
   /** A service the owner agreed to launch; the real one when left out. */
   launchService?: typeof launchService
+  /** An image update the owner agreed to; the real one when left out. */
+  updateService?: typeof updateService
 }
 
 export const defaultExecutor: PermissionExecutor = {
@@ -381,6 +409,12 @@ export type PermissionView = {
    * it all.
    */
   full: ShownText[] | null
+  /**
+   * The kept results a call's arguments name, as the page shows them: one
+   * chip each, to open and download while the request waits
+   * (permission-files.ts). Empty for anything but a call.
+   */
+  files: RequestFile[]
   /** A memory request's memory, for the page to show its text first. */
   memory: MemoryShown | null
   /** A skill request's skill as it would be, and what changes, in full. */
@@ -443,7 +477,18 @@ export type PermissionView = {
      */
     kind?: "text" | "totp"
     origins?: string[]
+    /** request_secret: the login name it goes with, which the owner can change. */
+    username?: string | null
+    /** request_secret: the password the assistant asked PCP to make. */
+    generate?: PasswordRecipe | null
   } | null
+  /**
+   * update_secret_sites: the secret's sites now and each change asked for,
+   * with lookalikes flagged, for the owner to tick; `basis` goes back with
+   * the answer (decidePermission's `sites`). Null for other requests and
+   * once answered.
+   */
+  secretSites: SecretSitesShown | null
   /**
    * A new or changed server's levels and tiers the assistant proposed
    * (proposed-access.ts), for the page to show filled in and editable
@@ -639,9 +684,13 @@ export type CodeCallOutcome =
        * answer in time), so it may have gone through.
        */
       transit?: boolean
-      /** "paced": its turn under pacing was too far off; nothing was sent. */
-      code?: "paced"
-      /** With "paced": when the destination takes its next action. */
+      /**
+       * "paced": its turn under pacing was too far off; nothing was sent.
+       * Otherwise the tool error's own code, when it gave one ("timeout",
+       * "browser_busy", …).
+       */
+      code?: string
+      /** When trying again may go through, where the code says so. */
       retryAfterMs?: number
     }
   /** The owner has to act first: the result with their link. */
@@ -809,7 +858,9 @@ function describeAsk(ask: PermissionAsk): {
       }
     case "service_change":
       return {
-        target: `service:${ask.input.host.id}\n${ask.input.name}`,
+        target: isServiceUpdate(ask.input)
+          ? `service_update:${ask.input.serviceId}\n${ask.input.to}`
+          : `service:${ask.input.host.id}\n${ask.input.name}`,
         args: ask.input as Record<string, unknown>,
       }
     case "fetch":
@@ -837,6 +888,11 @@ function describeAsk(ask: PermissionAsk): {
         target: `secret_request:${ask.input.name}`,
         args: ask.input as Record<string, unknown>,
       }
+    case "secret_sites_change":
+      return {
+        target: `secret_sites:${ask.input.secretName}`,
+        args: ask.input as Record<string, unknown>,
+      }
     case "script_use":
       return {
         target: `script_use:${ask.input.site}\n${ask.input.tabId}\n${scriptDigest(ask.input.script)}`,
@@ -859,8 +915,10 @@ function toolNameOf(ask: PermissionAsk): string {
     case "call":
       return ask.tool.name
     case "register":
-    case "service_change":
       return "register_server"
+    case "service_change":
+      // An image update is asked by the service's own tool.
+      return isServiceUpdate(ask.input) ? "update" : "register_server"
     case "access":
       return "propose_tool_access"
     case "endpoint_change":
@@ -881,6 +939,8 @@ function toolNameOf(ask: PermissionAsk): string {
       return "type"
     case "secret_request":
       return "request_secret"
+    case "secret_sites_change":
+      return "update_secret_sites"
     case "exit_use":
       return ask.input.via === "web_fetch" ? "web_fetch" : "tabs"
     case "script_use":
@@ -1018,6 +1078,7 @@ async function summarizeRow(
   lines: string[]
   warning: string | null
   full?: ShownText[] | null
+  files?: RequestFile[]
   memory?: MemoryShown
   skill?: SkillShown
   wrapper?: WrapperShown
@@ -1087,7 +1148,9 @@ async function summarizeRow(
   }
 
   if (row.kind === "service_change") {
-    const asked = describeServiceAsk(args as ServiceChangeAsk)
+    const asked = isServiceUpdate(args)
+      ? describeServiceUpdate(args)
+      : describeServiceAsk(args as ServiceChangeAsk)
 
     return { ...asked, lines: [...asked.lines, asker] }
   }
@@ -1124,6 +1187,16 @@ async function summarizeRow(
 
   if (row.kind === "secret_request") {
     const asked = describeSecretRequestAsk(args as SecretRequestAsk)
+
+    return { ...asked, lines: [...asked.lines, asker] }
+  }
+
+  if (row.kind === "secret_sites_change") {
+    const ask = args as SecretSitesChangeAsk
+    const asked = describeSecretSitesChangeAsk(
+      ask,
+      await showSecretSitesChange(ctx, ask),
+    )
 
     return { ...asked, lines: [...asked.lines, asker] }
   }
@@ -1404,6 +1477,7 @@ async function summarizeRow(
     row.server?.kind === "ssh" && row.toolName === RUN_COMMAND
       ? stdinAsText(args)
       : null
+  const files = await requestFiles(ctx, row.tokenId, args)
 
   return {
     title: `Allow ${toolLabel(row)}?`,
@@ -1417,8 +1491,8 @@ async function summarizeRow(
         : []),
       asker,
       ...previewArgs(args),
-      ...(await handleLines(ctx, row.tokenId, args)),
     ],
+    files,
     warning: destructive
       ? "This is a Destructive tool: it can change or delete things for good."
       : null,
@@ -1427,6 +1501,9 @@ async function summarizeRow(
       stdin === null
         ? []
         : [{ label: "stdin_base64, decoded as text", text: visible(stdin) }],
+      // A call that carries files shows its arguments as they are under
+      // the chips, so the owner can see where each one goes.
+      { always: files.length > 0 },
     ),
   }
 }
@@ -1460,56 +1537,6 @@ async function wrapperCallLines(
   ]
 }
 
-const COUNT = new Intl.NumberFormat("en-US")
-
-/**
- * What each kept result a call's arguments name is, so the owner sees what
- * the call carries without its content: its name, type and size, which
- * server's tool kept it, and until when. An id the token no longer has is
- * said too, since the call would fail.
- */
-async function handleLines(
-  ctx: VaultContext,
-  tokenId: string,
-  args: Record<string, unknown>,
-): Promise<string[]> {
-  let ids: string[]
-
-  try {
-    ids = collectHandleIds(args, { loose: true })
-  } catch {
-    return []
-  }
-
-  const infos = await describeResults(ctx, tokenId, ids)
-  const serverIds = infos.flatMap((info) =>
-    info.found && info.serverId ? [info.serverId] : [],
-  )
-  const servers = serverIds.length
-    ? await db().mcpServer.findMany({
-        where: { id: { in: serverIds }, vaultId: ctx.vaultId },
-        select: { id: true, slug: true },
-      })
-    : []
-  const slugs = new Map(servers.map((server) => [server.id, server.slug]))
-
-  return infos.map((info) => {
-    if (!info.found) {
-      return `Kept result ${info.id}: no longer available for this token; the call will fail`
-    }
-
-    const size =
-      info.kind === "bytes"
-        ? `${COUNT.format(info.length)} bytes`
-        : `${COUNT.format(info.length)} characters`
-    const from = info.serverId
-      ? `${slugs.get(info.serverId) ?? "(removed server)"}/${info.toolName}`
-      : info.toolName
-
-    return `Kept result ${info.id}: ${info.name ?? "(unnamed)"}, ${info.mediaType}, ${size}, from ${from}, readable until ${info.expiresAt.toISOString()}`
-  })
-}
-
 async function toView(
   ctx: VaultContext,
   row: Row,
@@ -1521,6 +1548,7 @@ async function toView(
     wrapper = null,
     repo = null,
     full = null,
+    files = [],
     ownerOnly = [],
     ...summary
   } = await summarizeRow(ctx, row, publicUrl)
@@ -1551,6 +1579,7 @@ async function toView(
     ].map((line) => visible(line)),
     ownerOnly: ownerOnly.map((line) => visible(line)),
     full,
+    files,
     memory,
     skill,
     wrapper,
@@ -1568,12 +1597,26 @@ async function toView(
     expiresAt: row.expiresAt,
     outcome: readResult(ctx, row),
     outcomeIsError: row.resultIsError,
-    decisions: decisionsFor(kind),
+    decisions:
+      kind === "service_change" && isServiceUpdate(readArgs(ctx, row))
+        ? decisionsFor(kind).map((decision) =>
+            decision.value === "allow_once"
+              ? { ...decision, label: "Update it" }
+              : decision,
+          )
+        : decisionsFor(kind),
     connect:
       finished && row.server && needsConnecting(row.server)
         ? connectLinks(row.server, publicUrl)
         : null,
     secretToEnter: await secretToEnter(ctx, row),
+    secretSites:
+      kind === "secret_sites_change" && status === "pending"
+        ? await showSecretSitesChange(
+            ctx,
+            readArgs(ctx, row) as SecretSitesChangeAsk,
+          )
+        : null,
     offersPrivateAddresses:
       kind === "register" &&
       registersPrivateAddress(readArgs(ctx, row) as RegisterArgs),
@@ -1676,6 +1719,8 @@ function newSecretOf(
   login: string | null
   kind?: "text" | "totp"
   origins?: string[]
+  username?: string | null
+  generate?: PasswordRecipe | null
 } | null {
   if (row.kind === "secret_request") {
     const asked = readArgs(ctx, row) as SecretRequestAsk
@@ -1687,6 +1732,8 @@ function newSecretOf(
       login: null,
       kind: asked.kind,
       origins: asked.origins,
+      username: asked.username ?? null,
+      generate: asked.generate ?? null,
     }
   }
 
@@ -1811,7 +1858,10 @@ function pendingText(view: PermissionView, detail?: string): string {
 
   const told = {
     ...view,
-    lines: view.lines.filter((line) => !view.ownerOnly.includes(line)),
+    lines: [
+      ...view.lines.filter((line) => !view.ownerOnly.includes(line)),
+      ...view.files.map(fileLine),
+    ],
   }
 
   return `Not done yet: this needs the owner's permission.\n\n${summaryText(told)}\n\nThe owner answers on the page at the link below, signed in to PCP.${typed} ${nextMessageCheck(`check_permission with id "${view.id}"`)} It gives the result (and waits a little if they are still on it). The request stays open until ${view.expiresAt.toISOString()}.\n\n${linkLastText(view.url, view.title)}`
@@ -1910,13 +1960,16 @@ export async function withPermission(
                 ask.kind === "browser_handover" ||
                 ask.kind === "secret_use" ||
                 ask.kind === "secret_request" ||
+                ask.kind === "secret_sites_change" ||
                 ask.kind === "script_use"
               ? ask.input.serverId
               : ask.kind === "exit_use"
                 ? (ask.input.browse?.serverId ?? null)
                 : ask.kind === "note_change" && ask.input.target === "server"
                   ? ask.input.id
-                  : null,
+                  : ask.kind === "service_change" && isServiceUpdate(ask.input)
+                    ? ask.input.serviceId
+                    : null,
         toolName: toolNameOf(ask),
         fields:
           ask.kind === "call" && ask.fields ? JSON.stringify(ask.fields) : null,
@@ -2203,6 +2256,9 @@ export async function decidePermission(
     always,
     minutes,
     origins,
+    loginName,
+    generate,
+    sites,
     revision,
     allowPrivate,
     access,
@@ -2224,6 +2280,18 @@ export async function decidePermission(
     secretValue?: string
     /** request_secret: the sites the owner left in, on PCP's page. */
     origins?: string[]
+    /** request_secret: the login name the owner left on PCP's page. */
+    loginName?: string
+    /**
+     * request_secret: the owner's Generate, a password PCP makes here in
+     * place of a typed value (generate-password.ts); never sent back.
+     */
+    generate?: unknown
+    /**
+     * update_secret_sites: the changes the owner ticked, by key, and the
+     * sites as the page showed them (SecretSitesShown `basis`).
+     */
+    sites?: { basis?: string; keep?: string[] }
     /** A memory to share: read it in every conversation, ticked on the page. */
     always?: boolean
     /** "Allow for": how long, one of ALLOW_FOR_MINUTES. */
@@ -2405,11 +2473,43 @@ export async function decidePermission(
   // A secret for the browser: its value (or one the owner added since) and
   // the sites, checked before anything is written, so a mistyped seed can
   // be typed again.
+  // Generate makes the value here, on PCP's machine: it is stored and never
+  // passes through the page or the assistant.
+  let typedValue = secretValue
+
+  if (
+    kind === "secret_request" &&
+    generate !== undefined &&
+    generate !== null
+  ) {
+    try {
+      typedValue = generatePassword(checkPasswordRecipe(generate))
+    } catch (error) {
+      if (isPcpError(error)) {
+        return text(error.message, true)
+      }
+
+      throw error
+    }
+  }
+
+  if (kind === "secret_sites_change") {
+    const problem = await checkSecretSitesAnswer(
+      ctx,
+      readArgs(ctx, row) as SecretSitesChangeAsk,
+      sites ?? {},
+    )
+
+    if (problem) {
+      return text(problem, true)
+    }
+  }
+
   if (kind === "secret_request") {
     const problem = await checkSecretAnswer(
       ctx,
       readArgs(ctx, row) as SecretRequestAsk,
-      { value: secretValue, origins },
+      { value: typedValue, origins, loginName },
     )
 
     if (problem) {
@@ -2516,75 +2616,109 @@ export async function decidePermission(
                         readArgs(ctx, row) as NoteChangeAsk,
                       ),
                     )
-                  : kind === "service_change"
+                  : kind === "service_change" &&
+                      isServiceUpdate(readArgs(ctx, row))
                     ? text(
-                        await applyServiceChange(
+                        await applyServiceUpdate(
                           ctx,
-                          readArgs(ctx, row) as ServiceChangeAsk,
+                          readArgs(ctx, row) as ServiceUpdateAsk,
                           {
-                            tokenId: row.tokenId,
-                            ...(secretValue ? { secretValue } : {}),
-                            access: chosenAccess,
-                            launch: (launchCtx, input) =>
-                              (executor.launchService ?? launchService)(
-                                launchCtx,
-                                input,
+                            update: (updateCtx, id, change) =>
+                              (executor.updateService ?? updateService)(
+                                updateCtx,
+                                id,
                                 { publicUrl },
+                                change,
                               ),
                           },
                         ),
                       )
-                    : kind === "fetch"
-                      ? await executeFetch(ctx, row, publicUrl, executor)
-                      : kind === "browse"
-                        ? await executeBrowse(ctx, row, publicUrl, executor)
-                        : kind === "browser_handover"
-                          ? await executeHandover(ctx, row)
-                          : kind === "secret_use"
-                            ? await executeSecretUse(
-                                ctx,
-                                row,
-                                secretLevel(choice),
-                                publicUrl,
-                                executor,
-                              )
-                            : kind === "script_use"
-                              ? await executeScriptUse(
+                    : kind === "service_change"
+                      ? text(
+                          await applyServiceChange(
+                            ctx,
+                            readArgs(ctx, row) as ServiceChangeAsk,
+                            {
+                              tokenId: row.tokenId,
+                              ...(secretValue ? { secretValue } : {}),
+                              access: chosenAccess,
+                              launch: (launchCtx, input) =>
+                                (executor.launchService ?? launchService)(
+                                  launchCtx,
+                                  input,
+                                  { publicUrl },
+                                ),
+                            },
+                          ),
+                        )
+                      : kind === "fetch"
+                        ? await executeFetch(ctx, row, publicUrl, executor)
+                        : kind === "browse"
+                          ? await executeBrowse(ctx, row, publicUrl, executor)
+                          : kind === "browser_handover"
+                            ? await executeHandover(ctx, row)
+                            : kind === "secret_use"
+                              ? await executeSecretUse(
                                   ctx,
                                   row,
-                                  choice,
+                                  secretLevel(choice),
                                   publicUrl,
                                   executor,
                                 )
-                              : kind === "exit_use"
-                                ? await executeExitUse(
+                              : kind === "script_use"
+                                ? await executeScriptUse(
                                     ctx,
                                     row,
+                                    choice,
                                     publicUrl,
                                     executor,
                                   )
-                                : kind === "secret_request"
-                                  ? text(
-                                      await applySecretRequest(
-                                        ctx,
-                                        row.tokenId,
-                                        readArgs(ctx, row) as SecretRequestAsk,
-                                        {
-                                          value: secretValue,
-                                          origins,
-                                          level: secretLevel(choice),
-                                        },
-                                      ),
-                                    )
-                                  : await executeRegister(
+                                : kind === "exit_use"
+                                  ? await executeExitUse(
                                       ctx,
                                       row,
                                       publicUrl,
                                       executor,
-                                      secretValue,
-                                      allowPrivate === true,
-                                      chosenAccess,
                                     )
+                                  : kind === "secret_request"
+                                    ? text(
+                                        await applySecretRequest(
+                                          ctx,
+                                          row.tokenId,
+                                          readArgs(
+                                            ctx,
+                                            row,
+                                          ) as SecretRequestAsk,
+                                          {
+                                            value: typedValue,
+                                            origins,
+                                            level: secretLevel(choice),
+                                            loginName,
+                                            generated:
+                                              typedValue !== secretValue,
+                                          },
+                                        ),
+                                      )
+                                    : kind === "secret_sites_change"
+                                      ? text(
+                                          await applySecretSitesChange(
+                                            ctx,
+                                            readArgs(
+                                              ctx,
+                                              row,
+                                            ) as SecretSitesChangeAsk,
+                                            sites ?? {},
+                                          ),
+                                        )
+                                      : await executeRegister(
+                                          ctx,
+                                          row,
+                                          publicUrl,
+                                          executor,
+                                          secretValue,
+                                          allowPrivate === true,
+                                          chosenAccess,
+                                        )
   } catch (error) {
     if (!isPcpError(error)) {
       console.error("[permissions] running an allowed request failed", {
@@ -2792,7 +2926,13 @@ async function executeSecretUse(
       ctx,
       row.server,
       "type",
-      { ...asked.call, text: { $secret: secret.name } },
+      {
+        ...asked.call,
+        text: {
+          $secret: secret.name,
+          ...(asked.part === "username" ? { part: "username" } : {}),
+        },
+      },
       { publicUrl, tokenId: row.tokenId, ownerAllowed: true, executor },
     )
   } finally {
@@ -3479,6 +3619,29 @@ export async function getPermissionView(
   })
 
   return row ? toView(ctx, row, publicUrl) : null
+}
+
+/**
+ * A kept result a waiting call's arguments name, opened for the owner's
+ * page (app/api/permissions/[id]/files/[result]/route.ts): only while the
+ * request waits, only a result its arguments name, and only one of the
+ * request's own token, still kept. Null for anything else, which the page
+ * reads as gone.
+ */
+export async function openRequestFile(
+  ctx: VaultContext,
+  input: { permissionId: string; resultId: string },
+  now = new Date(),
+): Promise<OpenedResult | null> {
+  const row = await db().permissionRequest.findFirst({
+    where: { id: input.permissionId, vaultId: ctx.vaultId },
+  })
+
+  if (!row || !requestServes(row, readArgs(ctx, row), input.resultId, now)) {
+    return null
+  }
+
+  return openResult(ctx, { tokenId: row.tokenId, id: input.resultId }, now)
 }
 
 /** A hand-over waiting for the owner, as its tab shows it in the tabs view. */

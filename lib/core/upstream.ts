@@ -24,7 +24,7 @@ import { storeTools, type SyncResult } from "./catalogue"
 import type { VaultContext } from "./context"
 import { asBytes, decryptString, encryptString } from "./crypto"
 import { db } from "./db"
-import { admitSecretUse } from "./browser-secrets"
+import { admitSecretUse, findTypableSecret } from "./browser-secrets"
 import { callBrowserTool } from "./browser/call"
 import { syncBrowserTools } from "./browser/server"
 import { isOwnerNeeded, type SecretTyper } from "./browser/types"
@@ -38,10 +38,28 @@ import { GITHUB_SIGNIN_SECRET } from "./repos/limits"
 import {
   ensureSshConnection,
   openChannel,
+  openSftp,
   sshConnectionAddress,
   sshExec,
   type SshIdentity,
 } from "./ssh/client"
+import { convertStoreStep, type ConversionStep } from "./storage/convert"
+import { deliverStoreUploads, type Delivery } from "./store-uploads"
+import { type OpenedFile, type StorageFolder } from "./storage/files"
+import {
+  callStorageTool,
+  isLocalStore,
+  loadStorageRoot,
+  localConnect,
+  openStoreFolder,
+  syncStorageTools,
+  unreachableReason,
+  withFolder,
+  type LoadedStorage,
+  type StorageConnect,
+  type StoreMode,
+} from "./storage/roots"
+import { remoteFs } from "./storage/sftp"
 import {
   makeExitDialer,
   proxiedTransport,
@@ -87,7 +105,9 @@ import {
   type ServiceAccess,
   type ServiceLaunchInput,
   type ServiceStatus,
+  type ServiceUpdateChoice,
 } from "./services/services"
+import { newerImageOn, type NewerImage } from "./services/updates"
 import {
   AddressBlockedError,
   isOwnAddress,
@@ -119,6 +139,7 @@ import {
 import {
   deleteManagedSecret,
   readSecretValue,
+  readTypedLogin,
   readTypedValue,
   revealSecret,
   writeManagedSecret,
@@ -129,6 +150,7 @@ import {
   isMailKind,
   isServiceKind,
   isSshKind,
+  isStorageKind,
   kindNoun,
   renderAuthValue,
   setServerStatus,
@@ -165,7 +187,10 @@ import {
  * SSH servers (kind "ssh") to lib/core/ssh/hosts.ts, with PCP's key for the
  * server, decrypted here; services (kind "service") to
  * lib/core/services/, with a way to run commands on their SSH server and
- * their variables' values (ServiceAccess), built here. Linked repositories' GitHub client
+ * their variables' values (ServiceAccess), built here; storage roots (kind
+ * "storage") to lib/core/storage/, with a way to open an SFTP session on
+ * their SSH server (StorageConnect), built here with PCP's key. Linked
+ * repositories' GitHub client
  * (lib/core/repos/github.ts) gets its Authorization header from
  * githubCredential, the same way, and search's embeddings provider
  * (lib/core/embeddings/) its header from embeddingProvider.
@@ -1408,6 +1433,161 @@ async function sshIdentity(
 }
 
 /**
+ * How a storage root opens an SFTP session: on its SSH server's long-lived
+ * connection, made with PCP's key for that server, decrypted here when the
+ * session is opened and handed to the ssh module, never further. A host
+ * whose key the owner has not pinned is not connected to (openSftp refuses).
+ */
+export function storageConnect(
+  ctx: VaultContext,
+  loaded: LoadedStorage,
+): StorageConnect {
+  // PCP's own store is in its data folder: no SSH server, no key.
+  if (isLocalStore(loaded.root)) {
+    return localConnect
+  }
+
+  return async () => {
+    const host = loaded.host
+
+    if (!host || !isSshKind(host.kind)) {
+      throw new PcpError(
+        "state",
+        `${loaded.server.name}'s SSH server is no longer in PCP, so PCP cannot reach the folder.`,
+      )
+    }
+
+    const session = await openSftp(
+      host.id,
+      sshTarget(host),
+      await sshIdentity(ctx, host),
+    )
+    return remoteFs(session.sftp, session.release)
+  }
+}
+
+/**
+ * A storage root's folder for the owner's file browser, opened for one
+ * request: `run` gets it, and the session is closed after. Refused while
+ * the root's SSH server is gone or its host key not pinned.
+ */
+export async function withStorageFolder<T>(
+  ctx: VaultContext,
+  serverId: string,
+  { publicUrl }: { publicUrl: string },
+  run: (folder: StorageFolder, loaded: LoadedStorage) => Promise<T>,
+): Promise<T> {
+  const loaded = await loadStorageRoot(ctx, serverId)
+  const unreachable = unreachableReason(loaded, publicUrl)
+
+  if (unreachable) {
+    throw new PcpError("state", unreachable.split("\n")[0]!)
+  }
+
+  return withFolder(ctx, loaded, storageConnect(ctx, loaded), (folder) =>
+    run(folder, loaded),
+  )
+}
+
+/**
+ * Saves files that arrived by upload links made with a store as their
+ * destination (store-uploads.ts), each store opened as the owner's file
+ * browser opens it, with the key this request holds. Run by check_upload
+ * and, after the answer, by any request that brings the vault's key.
+ */
+export function deliverUploads(
+  ctx: VaultContext,
+  {
+    publicUrl,
+    ...options
+  }: {
+    publicUrl: string
+    tokenId?: string
+    uploadLinkId?: string
+    retryNow?: boolean
+  },
+): Promise<Delivery[]> {
+  return deliverStoreUploads(ctx, {
+    ...options,
+    open: (storeId, run) =>
+      withStorageFolder(ctx, storeId, { publicUrl }, (folder, loaded) => {
+        if (loaded.server.readOnly) {
+          throw new PcpError(
+            "state",
+            `${loaded.server.name} is read-only in PCP now, so nothing is saved there.`,
+          )
+        }
+        return run(folder)
+      }),
+  })
+}
+
+/**
+ * One batch of the owner's conversion of a store, encrypted or plain
+ * (storage/convert.ts), on its backend opened for this request.
+ */
+export async function convertStore(
+  ctx: VaultContext,
+  serverId: string,
+  to: StoreMode,
+  { publicUrl }: { publicUrl: string },
+  options?: { budgetMs?: number; maxFiles?: number },
+): Promise<ConversionStep> {
+  const loaded = await loadStorageRoot(ctx, serverId)
+  const unreachable = unreachableReason(loaded, publicUrl)
+
+  if (unreachable) {
+    throw new PcpError("state", unreachable.split("\n")[0]!)
+  }
+
+  return convertStoreStep(ctx, loaded, storageConnect(ctx, loaded), to, options)
+}
+
+/**
+ * One file of a store as a stream, whole or a range (`offset`, `length`),
+ * for the owner's download: decrypted as it is read when the store is
+ * encrypted. The session stays open while the stream is read and closes
+ * when it ends.
+ */
+export async function openStorageDownload(
+  ctx: VaultContext,
+  serverId: string,
+  path: string,
+  { publicUrl }: { publicUrl: string },
+  range?: { offset?: number; length?: number },
+): Promise<OpenedFile> {
+  const loaded = await loadStorageRoot(ctx, serverId)
+  const unreachable = unreachableReason(loaded, publicUrl)
+
+  if (unreachable) {
+    throw new PcpError("state", unreachable.split("\n")[0]!)
+  }
+
+  const { folder, end: close } = await openStoreFolder(
+    ctx,
+    loaded,
+    storageConnect(ctx, loaded),
+  )
+
+  try {
+    const file = await folder.open(path, range)
+    let ended = false
+    const end = () => {
+      if (ended) return
+      ended = true
+      close()
+    }
+    file.stream.once("close", end)
+    file.stream.once("error", end)
+    file.stream.once("end", end)
+    return file
+  } catch (error) {
+    close()
+    throw error
+  }
+}
+
+/**
  * An upstream tool's outputSchema as the catalogue keeps it: an object
  * schema of a bounded size, else nothing (describe then shows none).
  */
@@ -1769,6 +1949,21 @@ async function readServerTools(
     })
   }
 
+  if (isStorageKind(server.kind)) {
+    const loaded = await loadStorageRoot(ctx, server.id)
+
+    return syncStorageTools(
+      ctx,
+      loaded,
+      // Only the owner's check connects: a read for an assistant stores
+      // the tools as they are.
+      byOwner && !unreachableReason(loaded, publicUrl)
+        ? storageConnect(ctx, loaded)
+        : null,
+      { publicUrl },
+    )
+  }
+
   if (isServiceKind(server.kind)) {
     const loaded = await loadService(ctx, server.id)
     let access: ServiceAccess | null = null
@@ -1882,10 +2077,13 @@ async function callEndpoint(
   {
     publicUrl,
     open,
+    keepBytes,
     placed = [],
   }: {
     publicUrl: string
     open?: ResultOpener
+    /** Keeps a file the API answers for the token (a PDF, an image). */
+    keepBytes?: BytesKeeper
     /** Secrets a wrapper's call carries in its arguments (placeSecrets). */
     placed?: string[]
   },
@@ -1898,6 +2096,7 @@ async function callEndpoint(
       authHeaders: headers,
       redact: [...redact, ...placed],
       open,
+      ...(keepBytes ? { keepBytes } : {}),
       ...(reach ? { reach } : {}),
       ...(server.authType === "oauth"
         ? {
@@ -2098,17 +2297,41 @@ async function callBrowser(
     throw new PcpError("state", "The browser is used through a token.")
   }
 
-  const name = found[0]!.name
+  const { name, part } = found[0]!
   const typed: string[] = []
   const secret: SecretTyper = {
     name,
+    part,
     async value(use) {
+      if (part === "username") {
+        // Refused before the owner is asked when there is none to type.
+        const named = await findTypableSecret(ctx, name)
+        if (named) await readTypedLogin(ctx, named.id)
+      }
+
       const admitted = await admitSecretUse(ctx, {
         tokenId,
         serverId: server.id,
         name,
         use,
+        part,
       })
+
+      // The login name is no secret from the assistant (the page's sign-in
+      // note names it), so it is typed through the same gate but not
+      // scrubbed from the answer.
+      if (part === "username") {
+        const login = await readTypedLogin(ctx, admitted.id)
+        noteSecretTyped({
+          vaultId: ctx.vaultId,
+          tokenId,
+          server: server.slug,
+          secret: admitted.name,
+          origin: use.origin,
+        })
+        return login
+      }
+
       const value = await readTypedValue(ctx, admitted.id)
       typed.push(value)
       noteSecretTyped({
@@ -2177,6 +2400,12 @@ async function placeSecrets(
 
   if (server.kind === "browser" || server.kind === "wrapper") {
     throw invalid(`A secret cannot go to ${kindNoun(server.kind)}.`)
+  }
+
+  if (found.some((placeholder) => placeholder.part === "username")) {
+    throw invalid(
+      'A secret\'s login name ("part": "username") goes only into a page, as the browser\'s type text.',
+    )
   }
 
   const bindings = matchGrant(found, grant, `${server.slug}/${toolName}`)
@@ -2314,6 +2543,20 @@ async function dispatchKind(
     })
   }
 
+  if (isStorageKind(server.kind)) {
+    const loaded = await loadStorageRoot(ctx, server.id)
+
+    // The root reads a file to save from the token's kept results itself,
+    // as bytes, before anything connects.
+    return callStorageTool(ctx, loaded, toolName, args, {
+      connect: storageConnect(ctx, loaded),
+      publicUrl,
+      tokenId,
+      keepBytes,
+      open,
+    })
+  }
+
   if (isServiceKind(server.kind)) {
     const loaded = await loadService(ctx, server.id)
     const access = await serviceAccess(ctx, loaded, { publicUrl })
@@ -2333,7 +2576,9 @@ async function dispatchKind(
         ...access,
         env: { ...access.env, redact: [...access.env.redact, ...placed] },
       },
-      { publicUrl },
+      // put_file reads its file from the token's kept results itself, as
+      // bytes, before anything connects; get_file keeps what it reads.
+      { publicUrl, open, keepBytes },
     )
   }
 
@@ -2343,6 +2588,7 @@ async function dispatchKind(
     return callEndpoint(ctx, server, toolName, args, {
       publicUrl,
       open,
+      ...(keepBytes ? { keepBytes } : {}),
       placed,
     })
   }
@@ -2923,14 +3169,33 @@ export async function recreateService(
   return recreateServiceOn(loaded, await requireAccess(ctx, loaded, options))
 }
 
-/** The newest image of the definition's source, pinned, and the container made again. */
+/**
+ * A new image pinned and the container made again (services.ts
+ * updateServiceOn): the newest of the definition's source, the image an
+ * approved proposal names, or for one built from a repository, a commit.
+ */
 export async function updateService(
   ctx: VaultContext,
   id: string,
   options: ServiceOptions,
+  choice: ServiceUpdateChoice = {},
 ): Promise<{ status: ServiceStatus; image: string; changed: boolean }> {
   const loaded = await loadService(ctx, id)
-  return updateServiceOn(loaded, await requireAccess(ctx, loaded, options))
+  return updateServiceOn(
+    loaded,
+    await requireAccess(ctx, loaded, options),
+    choice,
+  )
+}
+
+/** The owner's look for a newer image of a service's source, changing nothing. */
+export async function checkServiceImage(
+  ctx: VaultContext,
+  id: string,
+  options: ServiceOptions,
+): Promise<NewerImage> {
+  const loaded = await loadService(ctx, id)
+  return newerImageOn(loaded, await requireAccess(ctx, loaded, options))
 }
 
 /** Removes the service, its container first (see removeServiceOn). */

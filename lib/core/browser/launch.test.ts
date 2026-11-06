@@ -7,6 +7,7 @@ import { describe, expect, it, vi } from "vitest"
 
 import { displaySwitches } from "./display"
 import {
+  browserLanguages,
   contextOptions,
   exitContextOptions,
   keepOffScreen,
@@ -192,6 +193,38 @@ describe("what Chromium is started with", () => {
       // Not repeated: patchright-core's are enough.
       expect(launchArgs("window")).not.toContain(flag)
     }
+  })
+})
+
+describe("the browser's languages", () => {
+  it("are the host's locale, then its language alone, as a person's Chrome lists them", () => {
+    expect(browserLanguages("en-US")).toEqual(["en-US", "en"])
+    expect(browserLanguages("nl-NL")).toEqual(["nl-NL", "nl"])
+    expect(browserLanguages("pt-BR-u-ca-gregory")).toEqual(["pt-BR", "pt"])
+    expect(browserLanguages("zh-Hans-CN")).toEqual(["zh-CN", "zh"])
+    expect(browserLanguages("es-419")).toEqual(["es-419", "es"])
+    expect(browserLanguages("fr")).toEqual(["fr"])
+  })
+
+  it("are American English for a tag that does not read as one", () => {
+    for (const locale of ["", "und", "not a locale", "x-private"]) {
+      expect(browserLanguages(locale), locale).toEqual(["en-US", "en"])
+    }
+  })
+
+  it("are Chromium's own switches in every mode, and no context's locale", () => {
+    for (const mode of ["window", "virtual", "headless"] as const) {
+      const args = launchArgs(mode, "software", ["nl-NL", "nl"])
+      expect(args, mode).toContain("--lang=nl-NL")
+      expect(args, mode).toContain("--accept-lang=nl-NL,nl")
+      // Playwright's locale would send the bare locale as Accept-Language.
+      expect(contextOptions("153.0.7000.1", mode), mode).not.toHaveProperty(
+        "locale",
+      )
+    }
+    expect(launchArgs("virtual")).toContain(
+      `--accept-lang=${browserLanguages().join(",")}`,
+    )
   })
 })
 
