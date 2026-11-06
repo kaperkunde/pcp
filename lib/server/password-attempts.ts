@@ -2,7 +2,7 @@ import "server-only"
 
 import { verifyDeviceKey } from "@/lib/core/device-keys"
 import { PcpError } from "@/lib/core/errors"
-import { checkRateLimit, refundRateLimit } from "@/lib/core/rate-limit"
+import { checkRateLimit, refundRateLimit } from "@kaperkunde/security"
 import type { ResolvedSession } from "@/lib/core/sessions"
 import { verifyPassword } from "@/lib/core/vault"
 import { field } from "@/lib/server/action-state"
@@ -22,10 +22,10 @@ import { clientIp } from "@/lib/server/client-ip"
 const WINDOW_MS = 15 * 60 * 1000
 const PER_SOURCE = { max: 10, windowMs: WINDOW_MS }
 // Per-address limits trust X-Forwarded-For (lib/server/client-ip.ts), which
-// a client reaching PCP without a proxy can set to anything, and so can one
-// behind a proxy that appends to it unless PCP_TRUSTED_PROXIES names that
-// proxy. This one does not: it caps how many guesses the instance takes at
-// all.
+// a client reaching PCP without a proxy can set to anything, and which
+// names a proxy rather than the client behind more than one unless
+// PCP_TRUSTED_PROXIES names them. This one does not: it caps how many
+// guesses the instance takes at all.
 const GLOBAL = { max: 60, windowMs: WINDOW_MS }
 
 export const TOO_MANY_ATTEMPTS =
@@ -45,7 +45,10 @@ function sessionKeys(kind: SessionKind, sessionId: string): [string, string] {
 }
 
 function within([own, all]: [string, string]): boolean {
-  return checkRateLimit(own, PER_SOURCE) && checkRateLimit(all, GLOBAL)
+  return (
+    checkRateLimit(own, PER_SOURCE).allowed &&
+    checkRateLimit(all, GLOBAL).allowed
+  )
 }
 
 function refund([own, all]: [string, string]): void {

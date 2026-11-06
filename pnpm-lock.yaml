@@ -20,6 +20,9 @@ importers:
       '@kaperkunde/pcpgg-protocol':
         specifier: 0.1.1
         version: 0.1.1
+      '@kaperkunde/security':
+        specifier: 0.2.0
+        version: 0.2.0
       '@mixmark-io/domino':
         specifier: ^2.2.0
         version: 2.2.0
@@ -506,6 +509,10 @@ packages:
   '@kaperkunde/pcpgg-protocol@0.1.1':
     resolution: {integrity: sha512-MFzCqbuppP19cWoDhRMKyIDsJW2oDz2MXknsx2U2tvS0xyEo0bPETHS/0//LsNle6ZncGi4tuwF6NllMcm8smA==}
     engines: {node: '>=24'}
+
+  '@kaperkunde/security@0.2.0':
+    resolution: {integrity: sha512-eb4he2SEO0HJEJ891NRQ5wu8QMpD7cTXrGXqRLsaeRiKwGAXSq1vw6/g7Vj4GDgsYC8Fbxk7DbiJMIPG6i6jBQ==}
+    engines: {node: '>=22'}
 
   '@mixmark-io/domino@2.2.0':
     resolution: {integrity: sha512-Y28PR25bHXUg88kCV7nivXrP2Nj2RueZ3/l/jdx6J9f8J4nsEGcgX0Qe6lt7Pa+J79+kPiJU3LguR6O/6zrLOw==}
@@ -4613,6 +4620,10 @@ snapshots:
     transitivePeerDependencies:
       - bufferutil
       - utf-8-validate
+
+  '@kaperkunde/security@0.2.0':
+    dependencies:
+      undici: 7.30.0
 
   '@mixmark-io/domino@2.2.0': {}
 

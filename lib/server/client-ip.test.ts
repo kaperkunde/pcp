@@ -5,7 +5,9 @@ const sent = vi.hoisted(() => ({ headers: new Headers() }))
 vi.mock("server-only", () => ({}))
 vi.mock("next/headers", () => ({ headers: async () => sent.headers }))
 
-import { clientIp, parseTrustedProxies } from "./client-ip"
+import { parseTrustedProxies } from "@kaperkunde/security"
+
+import { clientIp } from "./client-ip"
 
 async function ipFor(headers: Record<string, string>): Promise<string> {
   sent.headers = new Headers(headers)
@@ -19,8 +21,9 @@ afterEach(() => {
 })
 
 describe("clientIp", () => {
-  it("is the left-most address a proxy reports, as it is", async () => {
-    expect(await ipFor({ "x-forwarded-for": " 203.0.113.7 , 10.0.0.1" })).toBe(
+  it("is the right-most address, the one the proxy in front appended", async () => {
+    // What a client wrote itself sits to the left and is never reached.
+    expect(await ipFor({ "x-forwarded-for": " 6.6.6.6 , 203.0.113.7" })).toBe(
       "203.0.113.7",
     )
     expect(await ipFor({ "x-forwarded-for": "2001:db8::1" })).toBe(
@@ -98,19 +101,25 @@ describe("clientIp behind trusted proxies", () => {
     vi.stubEnv("PCP_TRUSTED_PROXIES", " ")
 
     expect(await ipFor({ "x-forwarded-for": "6.6.6.6, 203.0.113.7" })).toBe(
-      "6.6.6.6",
+      "203.0.113.7",
     )
   })
 })
 
 describe("parseTrustedProxies", () => {
-  it("leaves out what is not an address or a range, with a warning", () => {
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {})
+  it("leaves out what is not an address or a range, and says which", () => {
+    const invalid: string[] = []
     const list = parseTrustedProxies(
       "10.0.0.0/8, nope, 192.0.2.1/33, 2001:db8::/32, 198.51.100.0/24/1, 203.0.113.9/",
+      (entry) => invalid.push(entry),
     )
 
-    expect(warn).toHaveBeenCalledTimes(4)
+    expect(invalid).toEqual([
+      "nope",
+      "192.0.2.1/33",
+      "198.51.100.0/24/1",
+      "203.0.113.9/",
+    ])
     expect(list.check("10.9.9.9", "ipv4")).toBe(true)
     expect(list.check("2001:db8::1", "ipv6")).toBe(true)
     expect(list.check("127.0.0.1", "ipv4")).toBe(true)

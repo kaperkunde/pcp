@@ -2,7 +2,7 @@ import { Readable } from "node:stream"
 
 import { asBytes } from "@/lib/core/crypto"
 import { downloadByLink, uploadByLink } from "@/lib/core/file-links"
-import { checkRateLimit } from "@/lib/core/rate-limit"
+import { checkRateLimit } from "@kaperkunde/security"
 import {
   openStoreLink,
   type StoreLinkFile,
@@ -192,7 +192,7 @@ export async function DELETE(_request: Request, { params }: Params) {
 }
 
 async function rateLimited(): Promise<Response | null> {
-  return checkRateLimit(`file-link:${await clientIp()}`, RATE_LIMIT)
+  return checkRateLimit(`file-link:${await clientIp()}`, RATE_LIMIT).allowed
     ? null
     : problem({
         ok: false,

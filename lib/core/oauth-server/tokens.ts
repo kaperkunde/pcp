@@ -1,5 +1,7 @@
 import { createHash } from "node:crypto"
 
+import { safeEqual } from "@kaperkunde/security"
+
 import {
   endOAuthSignIns,
   liveToken,
@@ -7,7 +9,7 @@ import {
   type ResolvedToken,
 } from "../api-tokens"
 import type { VaultContext } from "../context"
-import { randomSecret, safeEqual, sha256Hex } from "../crypto"
+import { randomSecret, sha256Hex } from "../crypto"
 import { db } from "../db"
 import { newId } from "../ids"
 import { credentialGrantData, unlockWithCredential } from "../keys"

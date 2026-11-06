@@ -1,9 +1,10 @@
-import dns from "node:dns"
 import http from "node:http"
 import https from "node:https"
 import { isIP, type Socket } from "node:net"
 import type { Duplex } from "node:stream"
 import tls from "node:tls"
+
+import { NotPublicError, publicLookup } from "@kaperkunde/security/net"
 
 import { AddressBlockedError, bareHostname, isPublicAddress } from "./address"
 
@@ -128,39 +129,11 @@ function sendPinned(
     return Promise.reject(new AddressBlockedError(host, host))
   }
 
-  const lookup: NonNullable<http.RequestOptions["lookup"]> = (
-    hostname,
-    lookupOptions,
-    callback,
-  ) => {
-    dns.lookup(hostname, { ...lookupOptions, all: true }, (error, found) => {
-      if (error) {
-        return (callback as (error: Error) => void)(error)
-      }
-
-      const addresses = found as dns.LookupAddress[]
-      const bad = addresses.find((entry) => !allowed(entry.address, port))
-
-      if (bad || addresses.length === 0) {
-        return (callback as (error: Error) => void)(
-          new AddressBlockedError(hostname, bad?.address ?? "no address"),
-        )
-      }
-
-      if (lookupOptions.all) {
-        return (callback as (e: null, a: dns.LookupAddress[]) => void)(
-          null,
-          addresses,
-        )
-      }
-
-      return (callback as (e: null, a: string, f: number) => void)(
-        null,
-        addresses[0]!.address,
-        addresses[0]!.family,
-      )
-    })
-  }
+  // The check rides on the socket's own lookup: a name is refused unless
+  // every address it resolves to is allowed at this port.
+  const lookup = publicLookup({
+    allow: (address) => allowed(address, port),
+  })
 
   return new Promise<Response>((resolve, reject) => {
     const transport = url.protocol === "https:" ? https : http
@@ -223,7 +196,13 @@ function sendPinned(
       },
     )
 
-    request.on("error", reject)
+    request.on("error", (error) =>
+      reject(
+        error instanceof NotPublicError
+          ? new AddressBlockedError(error.host, "")
+          : error,
+      ),
+    )
     request.end(init.body)
   })
 }

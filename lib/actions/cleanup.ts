@@ -6,7 +6,7 @@ import { CLEAN_NOW_LIMIT, CLEANUP_SCHEDULES } from "@/lib/core/cleanup/limits"
 import { cleanUp, reconcileCleanup } from "@/lib/core/cleanup/runtime"
 import { describeRemoved, saveCleanupConfig } from "@/lib/core/cleanup/state"
 import { invalid, PcpError } from "@/lib/core/errors"
-import { checkRateLimit } from "@/lib/core/rate-limit"
+import { checkRateLimit } from "@kaperkunde/security"
 import { type ActionState, field, guarded } from "@/lib/server/action-state"
 import { requireContext } from "@/lib/server/session"
 
@@ -59,7 +59,7 @@ export async function cleanUpNowAction(): Promise<CleanupResult> {
   await requireContext()
 
   const result = await guarded(async () => {
-    if (!checkRateLimit("cleanup:now", CLEAN_NOW_LIMIT)) {
+    if (!checkRateLimit("cleanup:now", CLEAN_NOW_LIMIT).allowed) {
       throw new PcpError(
         "forbidden",
         "You cleaned up several times just now. Wait a minute and try again.",

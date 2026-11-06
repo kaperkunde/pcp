@@ -2,7 +2,7 @@ import type { Metadata } from "next"
 
 import { AuthShell } from "@/components/auth-shell"
 import { UploadFiles } from "@/components/upload-files"
-import { checkRateLimit } from "@/lib/core/rate-limit"
+import { checkRateLimit } from "@kaperkunde/security"
 import { uploadPageView } from "@/lib/core/upload-links"
 import { clientIp } from "@/lib/server/client-ip"
 
@@ -31,7 +31,7 @@ export default async function UploadPage({
 }) {
   const { secret } = await params
 
-  if (!checkRateLimit(`file-link:${await clientIp()}`, RATE_LIMIT)) {
+  if (!checkRateLimit(`file-link:${await clientIp()}`, RATE_LIMIT).allowed) {
     return (
       <AuthShell
         title="Upload files"

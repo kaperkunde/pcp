@@ -12,7 +12,6 @@ import {
   newScryptParams,
   parseKdfParams,
   randomSecret,
-  safeEqual,
   sha256Hex,
   unwrapDek,
   wrapDek,
@@ -112,13 +111,10 @@ describe("key grants", () => {
 })
 
 describe("helpers", () => {
-  it("hashes and compares in constant time", () => {
+  it("hashes", () => {
     expect(sha256Hex("abc")).toBe(
       "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
     )
-    expect(safeEqual("a", "a")).toBe(true)
-    expect(safeEqual("a", "b")).toBe(false)
-    expect(safeEqual("a", "ab")).toBe(false)
   })
 
   it("makes URL-safe secrets with 256 bits of entropy", () => {

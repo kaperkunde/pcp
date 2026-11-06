@@ -803,7 +803,7 @@ embeddingProvider`, which hands `embeddings/provider.ts` the header;
   the desktop app only, also carries the version and the owner's install
   request for the wrapper to read), the export download (`app/api/export/route.ts`: a file needs
   `Content-Disposition`, which an action cannot send; it checks the request's
-  origin itself, `lib/server/same-origin.ts`), file links
+  origin itself, `isSameOrigin` from `@kaperkunde/security`), file links
   (`app/api/files/[secret]/`: curl from an assistant's own computer, a
   `share_file` link's download with its Range, and the upload page's PUTs
   and Done, the link's secret its only credential),

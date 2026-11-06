@@ -178,7 +178,7 @@ from one endpoint could be built on it. What that would take:
    `datasource` block; a Postgres host generates its own migration history
    (`prisma migrate dev` against Postgres) and runs migrations as a deploy
    step instead of at boot (`instrumentation.ts` → `applyMigrations()` is
-   for a single instance). Rate limits (`lib/core/rate-limit.ts`) and
+   for a single instance). Rate limits (`@kaperkunde/security`) and
    pacing's state (`lib/core/pacing/pace.ts`) are per-process and would
    move to a shared store.
 5. **None of it lives in this repository.** No admin API, no "create vault"
@@ -444,9 +444,11 @@ change an endpoint decides where PCP sends requests:
 - **Public addresses only.** What an assistant registers has `public_only`
   set, and only the owner can clear it. Such an endpoint refuses loopback,
   private, link-local, carrier-grade NAT and multicast addresses, cloud
-  host addresses and the IPv6 forms that wrap one (`openapi/address.ts`), for
+  host addresses and the IPv6 forms that wrap one (`isPublicAddress` from
+  `@kaperkunde/security/net`, through `openapi/address.ts`), for
   its calls and for any schema download. The check is made on the address the
-  socket connects to (`openapi/transport.ts` resolves the name itself and
+  socket connects to (`openapi/transport.ts` resolves the name itself, with
+  the package's `publicLookup`, and
   checks every answer), so a name that resolves to a public address for a
   check and a private one for the connection cannot get through. The owner
   turns it off per endpoint, for an API on their own network, with the
@@ -3451,7 +3453,7 @@ says nothing of it.
 Assistants act far faster than a person, and a site that sees a quick run of
 automated actions can take the owner's account for a robot and flag it; a
 small server or a busy page can be overloaded by one. The rate limits
-(`lib/core/rate-limit.ts`) only refuse past a count; pacing
+(`checkRateLimit`, `@kaperkunde/security`) only refuse past a count; pacing
 (`lib/core/pacing/`) spaces actions out, the same way whatever made them.
 
 **Where it applies.** At two places, which every way of calling passes
@@ -3735,7 +3737,8 @@ with one it holds the password to; on the setup page there is no password
 yet, and whoever reaches that page could set up instead. Both are
 rate-limited like password attempts. The download is a route handler (an
 action cannot send a file), so it checks the request's origin itself
-(`lib/server/same-origin.ts`), which Server Actions get built in.
+(`isSameOrigin` from `@kaperkunde/security`), which Server Actions get built
+in.
 
 ## Reaching PCP: pcp.gg, dynamic DNS and HTTPS
 
@@ -4463,7 +4466,7 @@ While the request waits, the owner can look at a file before answering, and
 download it: `app/api/permissions/[id]/files/[result]` is a route handler (a
 file needs Content-Type and Content-Disposition, which an action cannot
 send) that checks the request came from PCP's own page
-(`lib/server/same-origin.ts`) and the owner's session, and serves only a
+(`isSameOrigin`, `@kaperkunde/security`) and the owner's session, and serves only a
 result that waiting call's arguments name, of the request's own token
 (`openRequestFile`: pending and not expired, `requestServes`; then
 `openResult` with the request's token, which also checks the day it is kept

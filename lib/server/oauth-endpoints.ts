@@ -2,7 +2,7 @@ import "server-only"
 
 import { OAuthError } from "@/lib/core/oauth-server/errors"
 import { readCapped } from "@/lib/core/openapi/http"
-import { checkRateLimit } from "@/lib/core/rate-limit"
+import { checkRateLimit } from "@kaperkunde/security"
 import { clientIp } from "@/lib/server/client-ip"
 
 /**
@@ -80,7 +80,7 @@ export async function oauthRateLimit(
   endpoint: string,
   limit: { max: number; windowMs: number },
 ): Promise<Response | null> {
-  if (checkRateLimit(`oauth-${endpoint}:${await clientIp()}`, limit)) {
+  if (checkRateLimit(`oauth-${endpoint}:${await clientIp()}`, limit).allowed) {
     return null
   }
 

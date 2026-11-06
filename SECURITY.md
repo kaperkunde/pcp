@@ -237,10 +237,11 @@ has a budget of its own rather than spending the password's. scrypt makes
 each guess expensive. The address is the one the proxy in front of PCP
 reports (`X-Forwarded-For`), which a client reaching port 3000 directly can
 set to anything; the 60 for the whole instance holds either way. PCP takes
-the left-most address in that header, which behind a proxy that appends to
-it (most do) is whatever the client sent: set `PCP_TRUSTED_PROXIES` to your
-proxies' addresses, and PCP reads the header from the right, past them and
-loopback, to the client they saw (see
+the right-most address in that header: the one the proxy in front of PCP
+appended, or the only one behind a proxy that replaces the header. Behind
+more than one proxy, set `PCP_TRUSTED_PROXIES` to your proxies' addresses,
+and PCP reads the header from the right, past them and loopback, to the
+client they saw (see
 [docs/self-hosting.md](docs/self-hosting.md#i-already-have-a-proxy)). The counts
 are kept in memory, so a restart starts them again.
 

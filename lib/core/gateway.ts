@@ -151,7 +151,7 @@ import {
 import { MAX_PATCH_OPERATIONS } from "./openapi/limits"
 import { ANSWERED_WINDOW_MS, MAX_ANSWERED_NOTED } from "./permission-rules"
 import type { SchemaProblem } from "./openapi/lint"
-import { checkRateLimit } from "./rate-limit"
+import { checkRateLimit } from "@kaperkunde/security"
 import { appendRequestLog, noteOwnerAsked, withLogNote } from "./request-log"
 import {
   requireEncryptedOrPrivate as requireCalDavEncryptedOrPrivate,
@@ -4137,7 +4137,7 @@ export function buildGatewayServer(
           !checkRateLimit(
             `endpoint-register:${scope.tokenId}`,
             ENDPOINT_CHANGES,
-          )
+          ).allowed
         ) {
           return tooManyCalls(
             "That is a lot of registrations in a short time. Wait a few minutes.",
@@ -4361,7 +4361,7 @@ export function buildGatewayServer(
           !checkRateLimit(
             `endpoint-register:${scope.tokenId}`,
             ENDPOINT_CHANGES,
-          )
+          ).allowed
         ) {
           return tooManyCalls(
             "That is a lot of API registrations in a short time. Wait a few minutes.",
@@ -4443,7 +4443,7 @@ export function buildGatewayServer(
           !checkRateLimit(
             `endpoint-register:${scope.tokenId}`,
             ENDPOINT_CHANGES,
-          )
+          ).allowed
         ) {
           return tooManyCalls(
             "That is a lot of registrations in a short time. Wait a few minutes.",
@@ -4505,7 +4505,7 @@ export function buildGatewayServer(
           !checkRateLimit(
             `endpoint-register:${scope.tokenId}`,
             ENDPOINT_CHANGES,
-          )
+          ).allowed
         ) {
           return tooManyCalls(
             "That is a lot of registrations in a short time. Wait a few minutes.",
@@ -4611,6 +4611,7 @@ export function buildGatewayServer(
     async run(args: { changes: AccessChange[] }) {
       if (
         !checkRateLimit(`access-propose:${scope.tokenId}`, ACCESS_PROPOSALS)
+          .allowed
       ) {
         return tooManyCalls(
           "That is a lot of proposals in a short time. Wait a few minutes.",
@@ -4745,6 +4746,7 @@ export function buildGatewayServer(
         // changes are limited per token, apart from the request limit.
         if (
           !checkRateLimit(`endpoint-admin:${scope.tokenId}`, ENDPOINT_CHANGES)
+            .allowed
         ) {
           return tooManyCalls(
             "That is a lot of endpoint changes in a short time. Wait a few minutes.",
@@ -5043,7 +5045,7 @@ export function buildGatewayServer(
         "That is a lot of wrapper requests in a short time. Wait a few minutes.",
       )
     const allowed = () =>
-      checkRateLimit(`wrapper-admin:${scope.tokenId}`, WRAPPER_CHANGES)
+      checkRateLimit(`wrapper-admin:${scope.tokenId}`, WRAPPER_CHANGES).allowed
 
     register({
       name: "get_wrapper",
@@ -5626,7 +5628,7 @@ export function buildGatewayServer(
       async run(args: MemoryCommand) {
         if (
           isMemoryWrite(args.command) &&
-          !checkRateLimit(`memory:${scope.tokenId}`, MEMORY_WRITES)
+          !checkRateLimit(`memory:${scope.tokenId}`, MEMORY_WRITES).allowed
         ) {
           return tooManyCalls(
             "That is a lot of memory changes in a short time. Wait a few minutes.",
@@ -5722,7 +5724,9 @@ export function buildGatewayServer(
       // sites an assistant reads is the owner's to see on the token's page.
       quiet: true,
       async run(args: FetchInput) {
-        if (!checkRateLimit(`web_fetch:${scope.tokenId}`, WEB_FETCHES)) {
+        if (
+          !checkRateLimit(`web_fetch:${scope.tokenId}`, WEB_FETCHES).allowed
+        ) {
           return tooManyCalls(
             "That is a lot of web requests in a short time. Wait a few minutes.",
           )
@@ -5924,7 +5928,7 @@ export function buildGatewayServer(
           args: { code: string; language?: string; rerun?: boolean },
           ctx,
         ) {
-          if (!checkRateLimit(`run_code:${scope.tokenId}`, CODE_RUNS)) {
+          if (!checkRateLimit(`run_code:${scope.tokenId}`, CODE_RUNS).allowed) {
             return tooManyCalls(
               "That is a lot of programs in a short time. Wait a few minutes.",
             )
