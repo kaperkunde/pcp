@@ -42,6 +42,11 @@ so in the summary; the bump itself waits for the request.
 
 ## Boundaries
 
+- Shared code lives in `@kaperkunde/*` (kaperkunde/common-public); check
+  there before writing a helper, and change it upstream rather than
+  copying it here. PCP's own rules ride on top as thin layers
+  (`lib/core/tools/` over `@kaperkunde/mcp`, `lib/server/action-state.ts`
+  over `@kaperkunde/next-kit`).
 - `lib/core` is framework-free. No `next/*`, no React, no `lib/actions`,
   no `lib/server` (ESLint enforces it). Everything takes a `VaultContext`
   explicitly. If a core function needs something from the request, the
