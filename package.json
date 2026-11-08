@@ -47,7 +47,7 @@
     "ical.js": "2.2.1",
     "imapflow": "^2.2.2",
     "lucide-react": "^1.48.0",
-    "next": "15.5.27",
+    "next": "15.5.29",
     "node-cron": "^4.6.0",
     "nodemailer": "^10.0.14",
     "patchright-core": "1.63.0",
