@@ -51,7 +51,7 @@
     "node-cron": "^4.6.0",
     "nodemailer": "^10.0.14",
     "patchright-core": "1.63.0",
-    "prisma": "7.10.0",
+    "prisma": "7.10.1",
     "quickjs-emscripten-core": "0.32.0",
     "react": "19.1.0",
     "react-dom": "19.1.0",
