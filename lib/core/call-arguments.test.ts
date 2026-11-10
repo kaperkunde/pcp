@@ -65,4 +65,32 @@ describe("an answer given where a file goes", () => {
       expect(!checked.fits && checked.hint).toBeUndefined()
     }
   })
+
+  it("adds nothing when the failure is elsewhere and the answer sits where an object goes", async () => {
+    const checked = await checkCallArguments(
+      { kind: "mcp" },
+      "upload",
+      JSON.stringify({
+        type: "object",
+        properties: { data: { type: "object" }, n: { type: "number" } },
+      }),
+      { data: ENVELOPE, n: "x" },
+    )
+
+    expect(checked.fits).toBe(false)
+    expect(!checked.fits && checked.hint).toBeUndefined()
+  })
+
+  it("names the answer when a problem is under it, and once", async () => {
+    const checked = await checkCallArguments(
+      { kind: "storage" },
+      "save_file",
+      null,
+      { path: "a.pdf", file: ENVELOPE },
+    )
+
+    expect(!checked.fits && checked.hint?.match(/whole answer/g)).toHaveLength(
+      1,
+    )
+  })
 })
