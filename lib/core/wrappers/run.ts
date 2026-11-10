@@ -43,7 +43,11 @@ import {
   type WrapperTool,
 } from "./definition"
 import { FLOW_RUN_TIMEOUT_MS, WRAPPER_RUN_TIMEOUT_MS } from "./limits"
-import type { SecretGrant } from "./placeholders"
+import {
+  findPlaceholders,
+  type FoundPlaceholder,
+  type SecretGrant,
+} from "./placeholders"
 import { checkCallArguments } from "../call-arguments"
 import {
   ok,
@@ -335,6 +339,71 @@ function finished(
   )
 }
 
+/**
+ * The first placeholder in a call's arguments that no binding the owner
+ * approved names, by its place and name. A malformed one is left for
+ * upstream.ts to refuse in its own words.
+ */
+function unboundSecret(
+  args: Record<string, unknown>,
+  grant: SecretGrant,
+): FoundPlaceholder | null {
+  let found: FoundPlaceholder[]
+
+  try {
+    found = findPlaceholders(args)
+  } catch {
+    return null
+  }
+
+  return (
+    found.find(
+      (placeholder) =>
+        !grant.some(
+          (binding) =>
+            binding.pointer === placeholder.pointer &&
+            binding.name === placeholder.name,
+        ),
+    ) ?? null
+  )
+}
+
+/**
+ * The refusal of a call whose secret has no place the owner approved: the
+ * exact place to add with update_wrapper, which asks the owner. For the
+ * browser's type, also that a name written as it is in the program is found
+ * when the wrapper is changed (definition.ts), for a secret PCP holds.
+ */
+export function unboundSecretFix({
+  wrapper,
+  tool,
+  target,
+  browser,
+  placeholder,
+}: {
+  wrapper: string
+  tool: string
+  target: string
+  browser: boolean
+  placeholder: FoundPlaceholder
+}): string {
+  const entry = JSON.stringify({
+    secret: placeholder.name,
+    tool: target,
+    argument: placeholder.pointer || "/",
+  })
+
+  return [
+    `The owner has not allowed the secret "${placeholder.name}" in ${target} at ${placeholder.pointer || "/"} for the wrapper ${wrapper}, so its tool ${tool}'s call was not made.`,
+    `Fix it with update_wrapper: add ${entry} to secrets (the whole list, so keep the places get_wrapper shows). The owner sees it and decides; a secret PCP does not hold yet they type in then.`,
+    ...(browser
+      ? [
+          `A secret the program types into pages with its name written as it is, {"$secret": "${placeholder.name}"}, needs no entry once PCP holds it: any update_wrapper finds it in the program and shows it to the owner. Typing it still asks the owner at a site the secret is not bound to.`,
+        ]
+      : []),
+  ].join(" ")
+}
+
 /** One call a wrapper tool's program makes. */
 async function innerCall(
   env: WrapperEnv,
@@ -456,6 +525,25 @@ async function innerCall(
   }
 
   notes.push(...fixes)
+
+  // A secret the owner has not allowed here is refused before anything is
+  // sent or asked, saying what to propose (upstream.ts refuses it again).
+  const unbound = unboundSecret(checked.args, secrets)
+
+  if (unbound) {
+    return {
+      ok: false,
+      refused: true,
+      error: unboundSecretFix({
+        wrapper,
+        tool: tool.name,
+        target: `${slug}/${name}`,
+        browser: target.kind === "browser" && name === "type",
+        placeholder: unbound,
+      }),
+    }
+  }
+
   lookedUp?.(await markedReadOnly(target.id, name))
 
   // The same Write or Destructive call the token made a little while ago,

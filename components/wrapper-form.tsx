@@ -192,7 +192,10 @@ function DefinitionGuide({ secretNames }: { secretNames: string[] }) {
         (server/tool), <code>argument</code> (a JSON Pointer such as{" "}
         <code>&quot;/api_key&quot;</code>) and optionally <code>template</code>{" "}
         (<code>&quot;Bearer {"{{secret}}"}&quot;</code>); the program writes{" "}
-        <code>{'{"$secret": "<name>"}'}</code> there.
+        <code>{'{"$secret": "<name>"}'}</code> there. A secret a program types
+        into a page with <code>browser/type</code> needs none when its name is
+        written as it is: PCP finds it and types it only at the sites you bound
+        it to, or after asking you.
       </dd>
       <dt className="text-foreground">Your secrets</dt>
       <dd className="m-0 break-words">

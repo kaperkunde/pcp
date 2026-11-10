@@ -55,6 +55,8 @@ import {
 } from "./definition"
 import { flowSites, type FlowSites } from "./flow-sites"
 import { MAX_WRAPPERS } from "./limits"
+import type { SecretPart } from "./placeholders"
+import { secretLiterals } from "./secret-literals"
 
 /**
  * Making and changing wrappers. An assistant only ever asks: create_wrapper,
@@ -105,6 +107,12 @@ export type WrapperShownSecret = {
   template: string
   /** The owner types its value in on the page. */
   isNew: boolean
+  /**
+   * PCP found it written as it is in a program that types it into pages
+   * (definition.ts SecretBinding `found`), with what the programs type of
+   * it. Left out of a request made before places were found.
+   */
+  found?: { parts: SecretPart[] }
 }
 
 /** What the owner is shown, worked out when the request is made. */
@@ -167,8 +175,16 @@ export type WrapperView = {
       replaces: string[]
     }
   >
+  /** The places given by name; not the ones found in the programs. */
   secrets: Array<SecretBindingInput & { template: string }>
+  /**
+   * The secrets the programs type into pages by name as written, whose
+   * places PCP made (definition.ts SecretBinding `found`).
+   */
+  foundSecrets: string[]
 }
+
+type InputSecret = SecretBindingInput & { template: string; found?: true }
 
 function basisOf(
   server: { name: string; description: string },
@@ -195,7 +211,7 @@ async function slugsById(
 async function toInput(
   ctx: VaultContext,
   definition: WrapperDefinition,
-): Promise<Pick<WrapperView, "tools" | "secrets">> {
+): Promise<Pick<WrapperView, "tools"> & { secrets: InputSecret[] }> {
   const servers = await slugsById(ctx, [
     ...definition.tools.flatMap((tool) =>
       [...tool.calls, ...tool.replaces].map((ref) => ref.serverId),
@@ -222,8 +238,16 @@ async function toInput(
       tool: ref(binding.serverId, binding.tool),
       argument: binding.argument,
       template: binding.template,
+      ...(binding.found ? { found: binding.found } : {}),
     })),
   }
+}
+
+/** The places given by name, as a change or the owner's form takes them. */
+function givenSecrets(
+  secrets: InputSecret[],
+): Array<SecretBindingInput & { template: string }> {
+  return secrets.flatMap(({ found, ...binding }) => (found ? [] : [binding]))
 }
 
 async function loadWrapper(
@@ -254,6 +278,7 @@ export async function getWrapper(
   where: { slug: string } | { id: string },
 ): Promise<WrapperView> {
   const { server, definition } = await loadWrapper(ctx, where)
+  const { tools, secrets } = await toInput(ctx, definition)
 
   return {
     id: server.id,
@@ -263,7 +288,15 @@ export async function getWrapper(
     enabled: server.enabled,
     callLevels: definition.callLevels ?? "token",
     flow: isFlow(definition, await browserServerIds(ctx)),
-    ...(await toInput(ctx, definition)),
+    tools,
+    secrets: givenSecrets(secrets),
+    foundSecrets: [
+      ...new Set(
+        definition.secrets.flatMap((binding) =>
+          binding.found ? [binding.secret] : [],
+        ),
+      ),
+    ],
   }
 }
 
@@ -370,6 +403,9 @@ async function describe(
       argument: binding.argument,
       template: binding.template,
       isNew: binding.secretId === null,
+      ...(binding.found
+        ? { found: { parts: typedParts(after!, binding.secret) } }
+        : {}),
     }),
   )
   const replaced = [
@@ -442,9 +478,11 @@ async function describe(
         ]
       : []
 
-  const secretWarning =
-    secrets.length > 0
-      ? `PCP will put ${secrets
+  const given = secrets.filter((binding) => !binding.found)
+  const typed = secrets.filter((binding) => binding.found)
+  const givenWarning =
+    given.length > 0
+      ? `PCP will put ${given
           .map(
             (binding) =>
               `your secret "${binding.secret}"${binding.isNew ? " (new: you type its value in below)" : ""} into the argument ${binding.argument} of ${binding.tool} (${binding.serverName}, ${binding.url})`,
@@ -453,6 +491,20 @@ async function describe(
             "; ",
           )}. The programs never see it and PCP takes it out of what that tool answers, but what the tool does with it is up to the tool: allow it only where that argument is meant for a credential.`
       : null
+  const typedWarning =
+    typed.length > 0
+      ? `Found in the programs: they type ${typed
+          .map(
+            (binding) =>
+              `your secret "${binding.secret}" (${partsLabel(binding.found!.parts)})`,
+          )
+          .join(
+            ", ",
+          )} into pages with ${[...new Set(typed.map((binding) => binding.tool))].join(", ")}. PCP types it only at the sites you bound it to, or after asking you, never anywhere else; the programs never see it.`
+      : null
+  const secretWarning =
+    [givenWarning, typedWarning].filter((part) => part !== null).join(" ") ||
+    null
   const warning =
     [
       approvedCalls.length > 0
@@ -472,6 +524,30 @@ async function describe(
     tools,
     secrets,
   }
+}
+
+/** What the programs that type a secret type of it, for the owner. */
+function typedParts(
+  definition: WrapperDefinition,
+  secret: string,
+): SecretPart[] {
+  const parts = new Set(
+    definition.tools.flatMap((tool) =>
+      secretLiterals(tool.program).flatMap((found) =>
+        found.name === secret ? found.parts : [],
+      ),
+    ),
+  )
+
+  return (["username", "password"] as const).filter((part) => parts.has(part))
+}
+
+function partsLabel(parts: SecretPart[]): string {
+  return parts.length === 2
+    ? "its login name and password"
+    : parts[0] === "username"
+      ? "its login name"
+      : "its password"
 }
 
 /**
@@ -714,7 +790,9 @@ export async function proposeWrapperChange(
       name: changes.name ?? server.name,
       description: changes.description ?? server.description,
       tools,
-      secrets: changes.secrets ?? current.secrets,
+      // The places found in the programs are found again, in the programs
+      // as they will be.
+      secrets: changes.secrets ?? givenSecrets(current.secrets),
       callLevels: changes.callLevels ?? definition.callLevels ?? "token",
     },
     {
