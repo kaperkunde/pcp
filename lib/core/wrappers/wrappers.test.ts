@@ -2127,7 +2127,7 @@ describe("a wrapper whose calls no longer fit", () => {
       '"query" is not an argument of this tool (it takes: key, q).',
     )
     expect(result.text).toContain(
-      `The wrapper ${wrapper.slug}'s tool lookup needs migrating: fix it with update_wrapper (edit tool lookup's program so this call fits things/echo's inputSchema, which describe gives).`,
+      `The wrapper ${wrapper.slug}'s tool lookup needs migrating: fix it with update_wrapper (edit tool lookup's program so this call fits things/echo's inputSchema, which search with its ref gives).`,
     )
     expect(api.requests).toHaveLength(0)
   })

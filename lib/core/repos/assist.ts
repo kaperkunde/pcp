@@ -140,7 +140,7 @@ export async function searchRepoChanges(
         description:
           pending.kind === "conflict"
             ? "Both the vault and the repository changed it; the owner may want help merging."
-            : "Waiting for the owner's review; describe it for the files and PCP's flags.",
+            : "Waiting for the owner's review; search with its ref for the files and PCP's flags.",
       })
     }
   }

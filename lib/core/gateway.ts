@@ -2123,7 +2123,7 @@ export function buildGatewayServer(
 
     return failure(
       tools.length > 1
-        ? `Several servers have a tool called ${ref}: ${tools.map((item) => `${item.server}/${item.tool}`).join(", ")}. Describe one by server/tool.`
+        ? `Several servers have a tool called ${ref}: ${tools.map((item) => `${item.server}/${item.tool}`).join(", ")}. Give one as server/tool.`
         : `Nothing is called "${ref}". search finds tools, skills and memories by a few words; search takes a ref as it gave it, as ref.`,
     )
   }

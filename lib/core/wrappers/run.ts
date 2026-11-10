@@ -450,7 +450,7 @@ async function innerCall(
         }),
         fixes.length > 0
           ? fixes.join("\n")
-          : `The wrapper ${wrapper}'s tool ${tool.name} needs migrating: fix it with update_wrapper (edit tool ${tool.name}'s program so this call fits ${slug}/${name}'s inputSchema, which describe gives). The wrapper ${wrapper}'s tool ${tool.name} built these arguments from its own, so a value that does not fit may be one the caller handed ${tool.name} as it is.`,
+          : `The wrapper ${wrapper}'s tool ${tool.name} needs migrating: fix it with update_wrapper (edit tool ${tool.name}'s program so this call fits ${slug}/${name}'s inputSchema, which search with its ref gives). The wrapper ${wrapper}'s tool ${tool.name} built these arguments from its own, so a value that does not fit may be one the caller handed ${tool.name} as it is.`,
       ].join("\n\n"),
     }
   }
