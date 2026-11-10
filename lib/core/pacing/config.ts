@@ -64,6 +64,15 @@ export type PacingConfig = {
    * browser's classes: the owner's own bounds, where they set them.
    */
   assistant: Partial<Record<BrowserPacingClass, PaceRange>>
+  /**
+   * Classes and bounds a newer PCP wrote, which this one does not know:
+   * never followed, but carried through every write, so a restore here
+   * and back loses nothing.
+   */
+  unknown?: {
+    classes: Record<string, PacingOverride>
+    assistant: Record<string, PaceRange>
+  }
 }
 
 export const EMPTY_PACING: PacingConfig = {
@@ -110,25 +119,45 @@ const ConfigSchema = z.strictObject({
       }),
     )
     .max(MAX_PACED_SITES),
-  // Left out by a PCP from before assistants could set a pace.
-  assistant: z
-    .partialRecord(z.enum(BROWSER_PACING_CLASSES), RangeSchema)
-    .optional(),
+  // Left out by a PCP from before assistants could set a pace; by any
+  // name, as classes are.
+  assistant: z.record(z.string().min(1).max(64), RangeSchema).optional(),
 })
 
+/** Splits what this PCP knows from what a newer one wrote. */
 function known(parsed: z.infer<typeof ConfigSchema>): PacingConfig {
   const classes: PacingConfig["classes"] = {}
+  const assistant: PacingConfig["assistant"] = {}
+  const unknown: NonNullable<PacingConfig["unknown"]> = {
+    classes: {},
+    assistant: {},
+  }
 
-  for (const name of PACING_CLASSES) {
-    const override = parsed.classes[name]
-    if (override !== undefined) classes[name] = override
+  for (const [name, override] of Object.entries(parsed.classes)) {
+    if ((PACING_CLASSES as readonly string[]).includes(name)) {
+      classes[name as PacingClass] = override
+    } else {
+      unknown.classes[name] = override
+    }
+  }
+
+  for (const [name, range] of Object.entries(parsed.assistant ?? {})) {
+    if ((BROWSER_PACING_CLASSES as readonly string[]).includes(name)) {
+      assistant[name as BrowserPacingClass] = range
+    } else {
+      unknown.assistant[name] = range
+    }
   }
 
   return {
     classes,
     servers: parsed.servers,
     sites: parsed.sites,
-    assistant: parsed.assistant ?? {},
+    assistant,
+    ...(Object.keys(unknown.classes).length > 0 ||
+    Object.keys(unknown.assistant).length > 0
+      ? { unknown }
+      : {}),
   }
 }
 
@@ -156,16 +185,23 @@ async function writePacingConfig(
   ctx: VaultContext,
   config: PacingConfig,
 ): Promise<void> {
+  // What a newer PCP wrote goes back as it was, beside this one's.
+  const stored = {
+    classes: { ...config.unknown?.classes, ...config.classes },
+    servers: config.servers,
+    sites: config.sites,
+    assistant: { ...config.unknown?.assistant, ...config.assistant },
+  }
   const empty =
-    Object.keys(config.classes).length === 0 &&
-    Object.keys(config.servers).length === 0 &&
-    config.sites.length === 0 &&
-    Object.keys(config.assistant).length === 0
+    Object.keys(stored.classes).length === 0 &&
+    Object.keys(stored.servers).length === 0 &&
+    stored.sites.length === 0 &&
+    Object.keys(stored.assistant).length === 0
 
   await setSetting(
     ctx,
     SETTING_PACING,
-    empty ? null : JSON.stringify(ConfigSchema.parse(config)),
+    empty ? null : JSON.stringify(ConfigSchema.parse(stored)),
   )
 }
 
@@ -283,7 +319,12 @@ export function setPacingClass(
 /** Every class back to PCP's defaults; servers and sites stay. */
 export async function resetPacingClasses(ctx: VaultContext): Promise<void> {
   const config = await readPacingConfig(ctx.vaultId)
-  await writePacingConfig(ctx, { ...config, classes: {} })
+  await writePacingConfig(ctx, {
+    ...config,
+    classes: {},
+    // Every class: a newer PCP's too.
+    ...(config.unknown ? { unknown: { ...config.unknown, classes: {} } } : {}),
+  })
 }
 
 /**

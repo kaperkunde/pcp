@@ -322,6 +322,7 @@ describe("the owner's pace", () => {
     expect(await readPacingConfig(ctx.vaultId)).toEqual({
       ...EMPTY_PACING,
       classes: { browser_act: CLASS },
+      unknown: { classes: { browser_scroll: CLASS }, assistant: {} },
     })
   })
 })
