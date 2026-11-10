@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto"
+import { createHash, randomUUID } from "node:crypto"
 
 import type { CallToolResult } from "@modelcontextprotocol/server"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
@@ -38,7 +38,11 @@ import {
   type RegisterArgs,
 } from "./permissions"
 import { closePendingRequests } from "./permission-close"
-import { REUSE_VALUE_MAX_CHARS } from "./permission-rules"
+import {
+  REUSE_VALUE_MAX_CHARS,
+  canonicalJson,
+  requestHash,
+} from "./permission-rules"
 import { decryptString } from "./crypto"
 import { finishHandover } from "./browser/call"
 import { createFakeCalDav } from "./caldav/fake-caldav"
@@ -239,6 +243,34 @@ describe("asking the owner", () => {
       scope,
       call(server, "send_postcard", { to: "Bob", message: "Hi" }),
     )
+    expect(await db().permissionRequest.count()).toBe(2)
+  })
+
+  it("finds a request by a hash keyed under the vault key, and an old plain hash by nothing", async () => {
+    const { ctx, scope, server } = await setup()
+    const args = { to: "Ada", message: "Hi" }
+    const asked = call(server, "send_postcard", args)
+
+    await withPermission(scope, asked)
+    const id = await onlyRequestId()
+    const row = await db().permissionRequest.findUniqueOrThrow({
+      where: { id },
+    })
+    const plain = createHash("sha256")
+      .update(`call\n${server.id}/send_postcard\n${canonicalJson(args)}`)
+      .digest("hex")
+
+    expect(row.argsHash).toBe(
+      requestHash(ctx.dek, "call", `${server.id}/send_postcard`, args),
+    )
+    expect(row.argsHash).not.toContain(plain)
+
+    // A row stored before the hash was keyed: the same call is a new request.
+    await db().permissionRequest.update({
+      where: { id },
+      data: { argsHash: plain },
+    })
+    await withPermission(scope, asked)
     expect(await db().permissionRequest.count()).toBe(2)
   })
 

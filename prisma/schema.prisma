@@ -396,8 +396,11 @@ model PermissionRequest {
   /// The arguments (or the new server's settings) as JSON, AES-256-GCM under
   /// the vault's data key with "permission_request:<id>" as associated data.
   argsCiphertext   Bytes      @map("args_ciphertext")
-  /// sha256 of the kind, the target and the canonical arguments, so the same
-  /// request asked twice finds the row it already has.
+  /// HMAC-SHA256 of the kind, the target and the canonical arguments under a
+  /// key derived from the vault's data key, prefixed "h1:" (requestHash), so
+  /// the same request asked twice finds the row it already has and the
+  /// column confirms no guess without the key. Older rows hold a plain
+  /// sha256 and match nothing.
   argsHash         String     @map("args_hash")
   /// What the request is about (a skill, a shared memory, a note's item),
   /// as an HMAC under a key derived from the vault's data key, so the target

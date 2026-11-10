@@ -4783,8 +4783,11 @@ nothing changes for it. The owner's answers to a request ("Always allow",
 A call to an "ask" tool becomes a `permission_request` row
 (`lib/core/permissions.ts`): the
 arguments encrypted under the vault's key with the row id as associated
-data, a hash of the call so the same call asked twice finds the same row,
-and a day to answer. The result is text for the assistant: what was asked,
+data, a hash of the call so the same call asked twice finds the same row
+(`args_hash`: an HMAC of the kind, target and canonical arguments under a key
+derived from the vault's, prefixed `h1:`, so the column and a backup's copy
+cannot confirm a guess at the arguments; `keyedHash` in `crypto.ts`, as
+`target_key` and call handles are made), and a day to answer. The result is text for the assistant: what was asked,
 the link to `/permissions/<id>` to end its reply with, and to call
 `check_permission` on the owner's next message, whatever it says. The signed-in
 owner answers on that page, and only there (the header's bell lists every

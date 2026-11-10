@@ -1,5 +1,6 @@
-import { createHash, createHmac, hkdfSync, timingSafeEqual } from "node:crypto"
+import { createHash, createHmac, timingSafeEqual } from "node:crypto"
 
+import { labelKey } from "./crypto"
 import { canonicalJson } from "./permission-rules"
 
 /**
@@ -119,7 +120,7 @@ function decodeRef(ref: string): string | null {
 
 /** The key handles are made with: the vault's, never stored. */
 function handleKey(dek: Buffer): Buffer {
-  return Buffer.from(hkdfSync("sha256", dek, Buffer.alloc(0), KEY_LABEL, 32))
+  return labelKey(dek, KEY_LABEL)
 }
 
 /** The hash of a stored inputSchema (JSON text), key order aside. */
