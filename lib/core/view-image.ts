@@ -11,7 +11,7 @@ import {
   MAX_IMAGE_SIDE,
   VIEW_IMAGE_SIDE,
 } from "./code/limits"
-import { compressImage, imageSize } from "./code/media"
+import { decodeImage, encodeJpeg } from "./code/media"
 import { runProgram } from "./code/run"
 import { sandboxLanguages } from "./code/sandbox"
 import { isPcpError } from "./errors"
@@ -68,6 +68,8 @@ export type FittedImage = {
   quality: number
   /** Below 1 when it was made smaller than asked, to pass on. */
   scale: number
+  /** The size the original shows at. */
+  source: { width: number; height: number }
 }
 
 /** The image types view_image shows, by their first bytes. */
@@ -111,48 +113,60 @@ export function viewKind(
 class Refused extends Error {}
 
 /**
- * The image in `bytes` as a JPEG that fits `inlineBytes`: cropped and grey
- * as asked, its longest side at most VIEW_IMAGE_SIDE (its width at most
- * maxWidth), then its quality and size stepped down until it fits.
+ * The image in `bytes` as a JPEG that fits `inlineBytes`: decoded once,
+ * cropped and grey as asked, its longest side at most VIEW_IMAGE_SIDE (its
+ * width at most maxWidth), then encoded from those pixels with its quality
+ * and size stepped down until it fits. A signal that aborts stops it
+ * between steps.
  */
 export async function fitImage(
   bytes: Buffer,
   settings: ViewSettings,
-  inlineBytes = INLINE_IMAGE_BYTES,
+  {
+    inlineBytes = INLINE_IMAGE_BYTES,
+    signal,
+  }: { inlineBytes?: number; signal?: AbortSignal } = {},
 ): Promise<{ ok: true; image: FittedImage } | { ok: false; error: string }> {
-  const top = {
-    width: Math.min(settings.maxWidth ?? VIEW_IMAGE_SIDE, VIEW_IMAGE_SIDE),
-    height: VIEW_IMAGE_SIDE,
+  const gone = {
+    ok: false as const,
+    error: "The request went away, so PCP stopped making the picture.",
   }
-  /** The size at full scale, once the first picture says it. */
-  let base: { width: number; height: number } | null = null
+
+  if (signal?.aborted) {
+    return gone
+  }
+
+  const decoded = await decodeImage(bytes, {
+    ...(settings.crop ? { crop: settings.crop } : {}),
+    ...(settings.grayscale ? { grayscale: true } : {}),
+    maxWidth: Math.min(settings.maxWidth ?? VIEW_IMAGE_SIDE, VIEW_IMAGE_SIDE),
+    maxHeight: VIEW_IMAGE_SIDE,
+  })
+
+  if (!decoded.ok) {
+    return decoded
+  }
+
+  const { raw } = decoded
   const sizes = new Map<Buffer, { width: number; height: number }>()
 
   const capture = async (shot: Shot): Promise<Buffer> => {
-    const bound = base ?? top
-    const made = await compressImage(bytes, {
-      options: {
-        ...(settings.crop ? { crop: settings.crop } : {}),
-        ...(settings.grayscale ? { grayscale: true } : {}),
-        format: "jpeg",
-        quality: shot.quality,
-        maxWidth: Math.max(1, Math.round(bound.width * shot.scale)),
-        maxHeight: Math.max(1, Math.round(bound.height * shot.scale)),
-      },
-      name: null,
-      maxBytes: Number.MAX_SAFE_INTEGER,
+    if (signal?.aborted) {
+      throw new Refused(gone.error)
+    }
+
+    const made = await encodeJpeg(raw, {
+      quality: shot.quality,
+      width: Math.max(1, Math.round(raw.width * shot.scale)),
+      height: Math.max(1, Math.round(raw.height * shot.scale)),
     })
 
     if (!made.ok) {
       throw new Refused(made.error)
     }
 
-    base ??= { width: made.image.width, height: made.image.height }
-    sizes.set(made.image.bytes, {
-      width: made.image.width,
-      height: made.image.height,
-    })
-    return made.image.bytes
+    sizes.set(made.bytes, { width: made.width, height: made.height })
+    return made.bytes
   }
 
   try {
@@ -174,6 +188,7 @@ export async function fitImage(
         height: size.height,
         quality: picture.quality,
         scale: picture.scale,
+        source: decoded.shown,
       },
     }
   } catch (error) {
@@ -213,20 +228,25 @@ async function show(
   bytes: Buffer,
   args: ViewImageArgs,
   what: string,
+  signal: AbortSignal | undefined,
 ): Promise<Outcome> {
-  const source = await imageSize(bytes)
-  const fitted = await fitImage(bytes, {
-    ...(args.max_width !== undefined ? { maxWidth: args.max_width } : {}),
-    ...(args.crop ? { crop: args.crop } : {}),
-    ...(args.grayscale ? { grayscale: true } : {}),
-    ...(args.quality !== undefined ? { quality: args.quality } : {}),
-  })
+  const fitted = await fitImage(
+    bytes,
+    {
+      ...(args.max_width !== undefined ? { maxWidth: args.max_width } : {}),
+      ...(args.crop ? { crop: args.crop } : {}),
+      ...(args.grayscale ? { grayscale: true } : {}),
+      ...(args.quality !== undefined ? { quality: args.quality } : {}),
+    },
+    signal ? { signal } : {},
+  )
 
   if (!fitted.ok) {
     return toolError(fitted.error, { code: "validation" })
   }
 
   const { image } = fitted
+  const source = image.source
   const done = [
     ...(args.crop
       ? [
@@ -242,7 +262,7 @@ async function show(
     ...(image.scale < 1 ? ["made smaller to pass on"] : []),
   ]
   const lines = [
-    `${what}: ${source ? `${source.width} × ${source.height} pixels, ` : ""}${sized(bytes.length)}. Shown at ${image.width} × ${image.height}, JPEG quality ${image.quality}${done.length > 0 ? `, ${done.join(", ")}` : ""}.`,
+    `${what}: ${source.width} × ${source.height} pixels, ${sized(bytes.length)}. Shown at ${image.width} × ${image.height}, JPEG quality ${image.quality}${done.length > 0 ? `, ${done.join(", ")}` : ""}.`,
     "To look closer at a part, call view_image again with crop (x, y, width, height in pixels of the original, from its top left corner). read_image reads its text (OCR).",
   ]
   const result: CallToolResult = {
@@ -366,7 +386,7 @@ export async function viewImage(
 
   switch (kind) {
     case "image":
-      return show(bytes, args, `${nameOf(opened)}, ${type}`)
+      return show(bytes, args, `${nameOf(opened)}, ${type}`, deps.signal)
     case "svg":
       return refuse(
         `${nameOf(opened)} is an SVG, which PCP does not show as a picture: it is text (markup that can hold scripts and links). Read it with read_result.`,
@@ -404,11 +424,12 @@ export async function viewImage(
         picture.bytes(),
         args,
         `The frame at ${frame.t} s of ${nameOf(opened)}${frame.duration > 0 ? ` (${frame.duration.toFixed(1)} s long)` : ""}, kept as ${handleText(picture.id)} (pass that to view_image to crop it); image/jpeg`,
+        deps.signal,
       )
     }
     default:
       return refuse(
-        `${nameOf(opened)} is ${type}, not a picture, PDF or video PCP shows. view_image takes PNG, JPEG, WebP and GIF pictures, PDFs and videos.`,
+        `${nameOf(opened)} is ${type}, not a picture or video PCP shows. view_image takes PNG, JPEG, WebP and GIF pictures and videos (a PDF's page: convert_document to "png" first).`,
       )
   }
 }

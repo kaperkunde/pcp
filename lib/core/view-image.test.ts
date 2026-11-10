@@ -7,17 +7,43 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { createApiToken, resolveApiToken } from "./api-tokens"
 import { INLINE_IMAGE_BYTES } from "./browser/screenshot"
 import { VIEW_IMAGE_SIDE } from "./code/limits"
+import { decodeImage, encodeJpeg } from "./code/media"
 import { sandboxLanguages } from "./code/sandbox"
+import type { Executor } from "./code/types"
 import type { VaultContext } from "./context"
 import { buildGatewayServer, type GatewayScope } from "./gateway"
 import { scratchDatabase } from "./test-db"
 import { keepBytes } from "./tool-results"
 import { setupVault } from "./vault"
-import { viewKind } from "./view-image"
+import { fitImage, viewKind } from "./view-image"
 
 // view_image at /mcp: a kept picture shown as image content, made to fit;
-// what it refuses. A PDF's page (a provider's work) is tested with the
-// other capabilities, against fake providers (capabilities.test.ts).
+// a video's frame through a fake sandbox; what it refuses. A PDF's page
+// (convert_document's, a provider's work) is tested with the capabilities,
+// against fake providers (capabilities.test.ts).
+
+const sandbox = vi.hoisted(() => ({
+  languages: [] as string[],
+  executor: null as Executor | null,
+}))
+
+vi.mock("./code/sandbox", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./code/sandbox")>()),
+  sandboxLanguages: () => sandbox.languages,
+  sandboxRuns: () => false,
+  sandboxExecutor: () => sandbox.executor!,
+}))
+
+// The codec's two steps, counted: the original is decoded once.
+vi.mock("./code/media", async (importOriginal) => {
+  const media = await importOriginal<typeof import("./code/media")>()
+
+  return {
+    ...media,
+    decodeImage: vi.fn(media.decodeImage),
+    encodeJpeg: vi.fn(media.encodeJpeg),
+  }
+})
 
 vi.mock("./request-log", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./request-log")>()),
@@ -44,6 +70,10 @@ beforeEach(async () => {
 })
 
 afterEach(async () => {
+  sandbox.languages = []
+  sandbox.executor = null
+  vi.mocked(decodeImage).mockClear()
+  vi.mocked(encodeJpeg).mockClear()
   await cleanup()
 })
 
@@ -162,6 +192,37 @@ describe("view_image on a picture", () => {
     expect(answer.text).toMatch(
       /quality lowered from 90 to pass on|made smaller to pass on/,
     )
+    // Every step of the ladder encodes from the pixels decoded once.
+    expect(vi.mocked(decodeImage)).toHaveBeenCalledTimes(1)
+    expect(vi.mocked(encodeJpeg).mock.calls.length).toBeGreaterThan(1)
+  }, 60_000)
+
+  it("stops between steps once the request went away", async () => {
+    const noise = await sharp(randomBytes(1600 * 1600 * 3), {
+      raw: { width: 1600, height: 1600, channels: 3 },
+    })
+      .jpeg({ quality: 95 })
+      .toBuffer()
+    const controller = new AbortController()
+    const real = (
+      await vi.importActual<typeof import("./code/media")>("./code/media")
+    ).encodeJpeg
+    vi.mocked(encodeJpeg).mockImplementationOnce(async (raw, options) => {
+      controller.abort()
+      return real(raw, options)
+    })
+
+    const fitted = await fitImage(
+      noise,
+      { quality: 90 },
+      { signal: controller.signal, inlineBytes: 1_000 },
+    )
+
+    expect(fitted).toEqual({
+      ok: false,
+      error: "The request went away, so PCP stopped making the picture.",
+    })
+    expect(vi.mocked(encodeJpeg)).toHaveBeenCalledTimes(1)
   }, 60_000)
 
   it("refuses a crop past the picture's edge", async () => {
@@ -176,6 +237,76 @@ describe("view_image on a picture", () => {
     expect(answer.text).toContain("300 × 200")
     expect(answer.image).toBeNull()
   })
+})
+
+describe("view_image on a video", () => {
+  it("shows a frame the sandbox took, kept so a closer look reuses it", async () => {
+    const mp4 = Buffer.concat([
+      Buffer.from([0, 0, 0, 0x18]),
+      Buffer.from("ftypisom"),
+      Buffer.alloc(32),
+    ])
+    const video = await kept(mp4, "video/mp4", "clip.mp4")
+    const frame = await sharp(await gradient(640, 360))
+      .jpeg()
+      .toBuffer()
+    const asked: string[] = []
+    sandbox.languages = ["python"]
+    // The runner, as sandbox/pcp.py's frames uses the bridge: it reads the
+    // video, keeps a JPEG, and prints its answer as the last line.
+    sandbox.executor = async ({ code, bridge }) => {
+      asked.push(code)
+      const read = await bridge("read", { id: video, as: "base64" })
+      expect(read).toMatchObject({ ok: true })
+      const keptFrame = await bridge("keep", {
+        value: frame.toString("base64"),
+        encoding: "base64",
+        type: "image/jpeg",
+        name: "frame-1.jpg",
+      })
+      const handle = "value" in keptFrame ? keptFrame.value : null
+      const answer = {
+        value: {
+          duration: 10,
+          width: 640,
+          height: 360,
+          frames: [{ t: 2.5, handle }],
+        },
+      }
+
+      return {
+        kind: "done",
+        returned: null,
+        output: `${JSON.stringify(answer)}\n`,
+        dropped: 0,
+      }
+    }
+
+    const answer = await view({ file: { $result: video }, time_s: 2.5 })
+
+    expect(answer.isError, answer.text).toBe(false)
+    expect(asked).toHaveLength(1)
+    expect(asked[0]).toContain("2.5")
+    expect(answer.text).toContain("The frame at 2.5 s of clip.mp4")
+    expect(await sharp(answer.image!.bytes).metadata()).toMatchObject({
+      width: 640,
+      height: 360,
+    })
+    const reused = /kept as \{"\$result":"([^"]+)"\}/.exec(answer.text)?.[1]
+    expect(reused).toBeTruthy()
+
+    const closer = await view({
+      file: { $result: reused },
+      crop: { x: 0, y: 0, width: 320, height: 180 },
+    })
+
+    expect(closer.isError, closer.text).toBe(false)
+    expect(asked).toHaveLength(1)
+    expect(await sharp(closer.image!.bytes).metadata()).toMatchObject({
+      width: 320,
+      height: 180,
+    })
+  }, 60_000)
 })
 
 describe("view_image refuses", () => {

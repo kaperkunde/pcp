@@ -1,4 +1,4 @@
-import type { OutputInfo } from "sharp"
+import type { OutputInfo, Sharp } from "sharp"
 import type SharpType from "sharp"
 
 import { bareType, sniffMediaType } from "../media-types"
@@ -295,27 +295,6 @@ function codec(): Promise<typeof SharpType> {
   return loaded
 }
 
-/**
- * An image's size as it shows (turned as its EXIF says), read from its
- * header alone; null when the codec cannot read it.
- */
-export async function imageSize(
-  bytes: Buffer,
-): Promise<{ width: number; height: number } | null> {
-  try {
-    const sharp = await codec()
-    const metadata = await sharp(bytes, {
-      limitInputPixels: false,
-      autoOrient: true,
-      pages: 1,
-    }).metadata()
-
-    return metadata.autoOrient
-  } catch {
-    return null
-  }
-}
-
 /** Images take turns: one is decoded at a time in the process. */
 let lane: Promise<unknown> = Promise.resolve()
 
@@ -361,13 +340,35 @@ export function compressImage(
   return turn
 }
 
-async function compress(
+/** The input options every image is read with. */
+const INPUT = {
+  limitInputPixels: MAX_IMAGE_PIXELS,
+  failOn: "error" as const,
+  // The picture as it shows, turned as its EXIF says; a GIF's first frame.
+  autoOrient: true,
+  pages: 1,
+}
+
+type Shaping = {
+  crop?: ImageOptions["crop"]
+  maxWidth?: number
+  maxHeight?: number
+}
+
+/**
+ * The image in `bytes` read, cropped and made to fit, not yet encoded: the
+ * pipeline and the size it shows at; or why not.
+ */
+async function shaped(
   bytes: Buffer,
-  options: ImageOptions,
-  name: string | null,
-  maxBytes: number,
+  { crop, maxWidth, maxHeight }: Shaping,
 ): Promise<
-  { ok: true; image: CompressedImage } | { ok: false; error: string }
+  | {
+      ok: true
+      pipeline: Sharp
+      shown: { width: number; height: number }
+    }
+  | { ok: false; error: string }
 > {
   let sharp: typeof SharpType
 
@@ -379,20 +380,14 @@ async function compress(
     })
     return { ok: false, error: "PCP could not load its image codec." }
   }
-  const input = {
-    limitInputPixels: MAX_IMAGE_PIXELS,
-    failOn: "error" as const,
-    // The picture as it shows, turned as its EXIF says; a GIF's first frame.
-    autoOrient: true,
-    pages: 1,
-  }
+
   let shown: { width: number; height: number }
 
   try {
     // Only the header is read here, with no limit, so that a picture too
     // large is refused by its size rather than a codec's error.
     const metadata = await sharp(bytes, {
-      ...input,
+      ...INPUT,
       limitInputPixels: false,
     }).metadata()
 
@@ -411,8 +406,6 @@ async function compress(
     }
   }
 
-  const { crop } = options
-
   if (
     crop &&
     (crop.x + crop.width > shown.width || crop.y + crop.height > shown.height)
@@ -423,8 +416,7 @@ async function compress(
     }
   }
 
-  const quality = options.quality ?? DEFAULT_IMAGE_QUALITY
-  let pipeline = sharp(bytes, input).timeout({ seconds: IMAGE_TIMEOUT_S })
+  let pipeline = sharp(bytes, INPUT).timeout({ seconds: IMAGE_TIMEOUT_S })
 
   if (crop) {
     pipeline = pipeline.extract({
@@ -435,14 +427,34 @@ async function compress(
     })
   }
 
-  if (options.maxWidth !== undefined || options.maxHeight !== undefined) {
+  if (maxWidth !== undefined || maxHeight !== undefined) {
     pipeline = pipeline.resize({
-      ...(options.maxWidth !== undefined ? { width: options.maxWidth } : {}),
-      ...(options.maxHeight !== undefined ? { height: options.maxHeight } : {}),
+      ...(maxWidth !== undefined ? { width: maxWidth } : {}),
+      ...(maxHeight !== undefined ? { height: maxHeight } : {}),
       fit: "inside",
       withoutEnlargement: true,
     })
   }
+
+  return { ok: true, pipeline, shown }
+}
+
+async function compress(
+  bytes: Buffer,
+  options: ImageOptions,
+  name: string | null,
+  maxBytes: number,
+): Promise<
+  { ok: true; image: CompressedImage } | { ok: false; error: string }
+> {
+  const read = await shaped(bytes, options)
+
+  if (!read.ok) {
+    return read
+  }
+
+  const quality = options.quality ?? DEFAULT_IMAGE_QUALITY
+  let { pipeline } = read
 
   if (options.grayscale) {
     // One channel where the format has one (JPEG, PNG): a third the size.
@@ -502,6 +514,119 @@ async function compress(
       name: nameFor(name, options.format),
     },
   }
+}
+
+/** Pixels as sharp hands them over: no format, nothing lost. */
+export type RawImage = {
+  data: Buffer
+  width: number
+  height: number
+  channels: 1 | 2 | 3 | 4
+}
+
+/**
+ * The image in `bytes` decoded once, cropped, made to fit and grey as
+ * asked, as raw pixels to encode from as often as needed (encodeJpeg):
+ * view_image's ladder of qualities and sizes decodes the original only
+ * here. With the size the original shows at.
+ */
+export function decodeImage(
+  bytes: Buffer,
+  options: Shaping & { grayscale?: boolean },
+): Promise<
+  | { ok: true; raw: RawImage; shown: { width: number; height: number } }
+  | { ok: false; error: string }
+> {
+  const turn = lane.then(async () => {
+    const read = await shaped(bytes, options)
+
+    if (!read.ok) {
+      return read
+    }
+
+    const pipeline = options.grayscale
+      ? read.pipeline.grayscale().toColourspace("b-w")
+      : read.pipeline
+
+    try {
+      const { data, info } = await pipeline
+        .raw()
+        .toBuffer({ resolveWithObject: true })
+
+      return {
+        ok: true as const,
+        raw: {
+          data,
+          width: info.width,
+          height: info.height,
+          channels: info.channels,
+        },
+        shown: read.shown,
+      }
+    } catch (error) {
+      return {
+        ok: false as const,
+        error: `PCP could not read that image: ${codecMessage(error)}`,
+      }
+    }
+  })
+  lane = turn.catch(() => {})
+  return turn
+}
+
+/**
+ * Raw pixels (decodeImage) as a JPEG of the quality asked, made to fit
+ * `width` by `height` when they are smaller; what was clear shows white.
+ */
+export function encodeJpeg(
+  raw: RawImage,
+  {
+    quality,
+    width,
+    height,
+  }: { quality: number; width: number; height: number },
+): Promise<
+  | { ok: true; bytes: Buffer; width: number; height: number }
+  | { ok: false; error: string }
+> {
+  const turn = lane.then(async () => {
+    try {
+      const sharp = await codec()
+      let pipeline = sharp(raw.data, {
+        raw: {
+          width: raw.width,
+          height: raw.height,
+          channels: raw.channels,
+        },
+      })
+        .timeout({ seconds: IMAGE_TIMEOUT_S })
+        .resize({ width, height, fit: "inside", withoutEnlargement: true })
+        .flatten({ background: "#ffffff" })
+
+      // Grey pixels stay one channel: a third the size.
+      if (raw.channels <= 2) {
+        pipeline = pipeline.toColourspace("b-w")
+      }
+
+      const { data, info } = await pipeline
+        .jpeg({ quality, mozjpeg: true })
+        .toBuffer({ resolveWithObject: true })
+
+      return {
+        ok: true as const,
+        bytes: data,
+        width: info.width,
+        height: info.height,
+      }
+    } catch (error) {
+      return {
+        ok: false as const,
+        error: `PCP could not make that image: ${codecMessage(error)}`,
+      }
+    }
+  })
+  lane = turn.catch(() => {})
+  return turn
 }
 
 /**
