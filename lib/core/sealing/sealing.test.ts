@@ -33,7 +33,7 @@ import {
 } from "../settings"
 import { scratchDatabase } from "../test-db"
 import { downloadByLink, shareResult } from "../file-links"
-import { keepResult } from "../tool-results"
+import { describeResults, keepResult, openResult } from "../tool-results"
 import { createUploadLink, uploadPageView } from "../upload-links"
 import { setupVault } from "../vault"
 import { deleteVault } from "../vault-reset"
@@ -417,14 +417,51 @@ describe("names", () => {
       publicUrl: "https://pcp.example",
     })
 
-    // The kept result's own name is phase 2 of #96; the link's is sealed.
+    // The kept result's own name is sealed under the vault's key, the
+    // link's under the link's.
     expect(
       await db().$queryRawUnsafe(`SELECT "name" FROM "file_link"`),
     ).toEqual([{ name: null }])
+    expect(
+      await db().$queryRawUnsafe(`SELECT "name" FROM "tool_result"`),
+    ).toEqual([{ name: null }])
+    expect(await onDisk("FILE-NAME-MARKER")).toBe(false)
+    expect((await openResult(ctx, { tokenId, id: kept.id }))?.name).toBe(
+      "FILE-NAME-MARKER.txt",
+    )
+    expect((await describeResults(ctx, tokenId, [kept.id]))[0]).toMatchObject({
+      found: true,
+      name: "FILE-NAME-MARKER.txt",
+    })
     expect(await downloadByLink(link.url.split("/").pop()!)).toMatchObject({
       ok: true,
       name: "FILE-NAME-MARKER.txt",
     })
+  })
+
+  it("reads a kept file's name from before, and seals it on a request", async () => {
+    const { id: tokenId } = await claude()
+    const kept = await keepResult(ctx, {
+      tokenId,
+      serverId: null,
+      toolName: "read",
+      text: "hello",
+      mediaType: "text/plain",
+      name: "x.txt",
+    })
+    await db().$executeRawUnsafe(
+      `UPDATE "tool_result" SET "name" = 'OLD-RESULT-NAME.txt', "sealed_name" = NULL WHERE "id" = ?`,
+      kept.id,
+    )
+
+    expect((await openResult(ctx, { tokenId, id: kept.id }))?.name).toBe(
+      "OLD-RESULT-NAME.txt",
+    )
+    expect(await ensureSealed(ctx)).toBe(true)
+    expect(await onDisk("OLD-RESULT-NAME")).toBe(false)
+    expect((await openResult(ctx, { tokenId, id: kept.id }))?.name).toBe(
+      "OLD-RESULT-NAME.txt",
+    )
   })
 
   it("shows the asking token's name on an upload page with the link alone", async () => {

@@ -26,7 +26,7 @@ import { appendRequestLog } from "../request-log"
 import { createServer } from "../servers"
 import { scratchDatabase } from "../test-db"
 import { EMPTY_CONFIG, saveResourceConfig } from "../resources/state"
-import { keepBytes, keepResult, openResult } from "../tool-results"
+import { keepBytes, keepResult, openResult, resultName } from "../tool-results"
 import { writeToolAccess } from "../tool-access"
 import { setupVault } from "../vault"
 import {
@@ -1647,10 +1647,14 @@ describe("a run that outlives its call", () => {
     expect(ran.map((call) => call.tool)).toEqual(["archive", "slow_send"])
 
     // Kept as a result of the token's own, encrypted.
-    const row = await db().toolResult.findFirstOrThrow({
-      where: { name: `${id}.txt` },
+    const row = (await db().toolResult.findMany()).find(
+      (kept) => resultName(ctx, kept) === `${id}.txt`,
+    )!
+    expect(row).toMatchObject({
+      tokenId: scope.tokenId,
+      toolName: "run_code",
+      plainName: null,
     })
-    expect(row).toMatchObject({ tokenId: scope.tokenId, toolName: "run_code" })
     expect(Buffer.from(row.ciphertext).toString("utf8")).not.toContain(
       "It returned",
     )

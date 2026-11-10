@@ -26,7 +26,7 @@ import {
 import { newId } from "./ids"
 import { openLinkName, sealLinkName } from "./link-names"
 import { TOKEN_NAME_SELECT, tokenName } from "./token-names"
-import { RESULT_TTL_MS } from "./tool-results"
+import { RESULT_TTL_MS, resultName } from "./tool-results"
 
 /**
  * Upload links: a page the owner opens on their phone or computer
@@ -398,6 +398,11 @@ async function arrivedFiles(
    * waiting files are counted, unnamed.
    */
   slotKey?: (slot: { id: string; wrappedKey: Uint8Array | null }) => Buffer,
+  /**
+   * The vault's key, which a kept file's name is sealed under: without
+   * it (the page itself), a file the token took already is unnamed.
+   */
+  ctx?: VaultContext,
 ): Promise<ArrivedFile[]> {
   const ids = resultIdsOf(page)
   const [waiting, kept] = await Promise.all([
@@ -427,7 +432,8 @@ async function arrivedFiles(
       },
       select: {
         id: true,
-        name: true,
+        plainName: true,
+        sealedName: true,
         mediaType: true,
         length: true,
         expiresAt: true,
@@ -449,7 +455,7 @@ async function arrivedFiles(
   for (const row of kept) {
     byId.set(row.id, {
       resultId: row.id,
-      name: row.name,
+      name: ctx ? resultName(ctx, row) : row.plainName,
       mediaType: row.mediaType,
       size: row.length,
       readableUntil: row.expiresAt,
@@ -772,8 +778,12 @@ export async function uploadStatus(
 
   const [empty, files] = await Promise.all([
     emptySlots(page),
-    arrivedFiles(page, now, (slot) =>
-      decrypt(ctx.dek, Buffer.from(slot.wrappedKey!), keyAad(slot.id)),
+    arrivedFiles(
+      page,
+      now,
+      (slot) =>
+        decrypt(ctx.dek, Buffer.from(slot.wrappedKey!), keyAad(slot.id)),
+      ctx,
     ),
   ])
   const open = takesFiles(page, empty.length, now)

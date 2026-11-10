@@ -7,6 +7,7 @@ import { isSealedKind, sealedRuleKey } from "../fetch-rule-keys"
 import { sealedSecretMeta } from "../secret-meta"
 import { isSealedText } from "../sealed"
 import { sealedTokenName } from "../token-names"
+import { sealedResultName } from "../tool-results"
 import { PLAIN_SETTINGS, storedSetting } from "../settings"
 import { sealingState } from "./state"
 
@@ -231,6 +232,22 @@ export const SEAL_CONVERTERS: Converter[] = [
         })
         return true
       })
+    },
+  }),
+  converter({
+    table: "tool_result",
+    read: (ctx, limit) =>
+      db().toolResult.findMany({
+        where: { vaultId: ctx.vaultId, plainName: { not: null } },
+        select: { id: true, plainName: true },
+        take: limit,
+      }),
+    write: async (ctx, row) => {
+      const { count } = await db().toolResult.updateMany({
+        where: { id: row.id, plainName: row.plainName },
+        data: sealedResultName(ctx, row.id, row.plainName),
+      })
+      return count === 1
     },
   }),
   converter({
