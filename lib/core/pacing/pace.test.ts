@@ -461,9 +461,16 @@ describe("takeTurn", () => {
     await vi.advanceTimersByTimeAsync(600)
     const refused = await asking
 
+    // The action before it is still going: no pause can be named.
     expect(refused).toMatchObject({
-      message: expect.stringContaining("Paced: a.test"),
+      message: expect.stringContaining(
+        "Paced: another action at a.test is still running",
+      ),
+      retryAfterMs: 500,
     })
+    expect((refused as { message: string }).message).not.toContain(
+      "next action in",
+    )
     expect("release" in refused).toBe(false)
 
     first.release()
