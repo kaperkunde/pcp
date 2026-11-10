@@ -49,6 +49,7 @@ import {
 import { SKILL_FILE, SKILL_ROOT } from "./skills"
 import { scratchDatabase } from "./test-db"
 import { setupVault } from "./vault"
+import { entryCall, listEveryTool } from "./test-handles"
 
 // Memories against a scratch database: what a token reads and writes on its
 // own, what has to wait for the owner, and the owner's own edits.
@@ -1504,24 +1505,25 @@ describe("memory migration", () => {
     const client = new Client({ name: "test", version: "1.0.0" })
     await client.connect(clientSide)
     expect(client.getInstructions()).toContain(STEPS)
-    const memory = (await client.listTools()).tools.find(
+    const memory = (await listEveryTool(client)).tools.find(
       (tool) => tool.name === "memory",
     )!
     // The one way it changes is migration_done; no argument names the flag.
     expect(Object.keys(memory.inputSchema.properties ?? {})).not.toContain(
       "memory_migration",
     )
-    const refused = await client.callTool({
-      name: "memory",
-      arguments: { command: "migration_done", path: "/skills/x/SKILL.md" },
-    })
+    const refused = await client.callTool(
+      entryCall("memory", {
+        command: "migration_done",
+        path: "/skills/x/SKILL.md",
+      }),
+    )
     expect(refused.isError).toBe(true)
     expect(await migrating(alice)).toBe(true)
 
-    const done = await client.callTool({
-      name: "memory",
-      arguments: { command: "migration_done" },
-    })
+    const done = await client.callTool(
+      entryCall("memory", { command: "migration_done" }),
+    )
     await client.close()
     expect(done.isError).toBeFalsy()
     expect(await migrating(alice)).toBe(false)

@@ -21,6 +21,7 @@ import {
   openResult,
   resultNotice,
 } from "../tool-results"
+import { runEntryFor } from "../tool-tiers"
 import { loadResourceLimits, type ResourceLimits } from "../resources/state"
 import {
   DUPLICATE_RUN_MS,
@@ -79,8 +80,8 @@ import type { Bridge, BridgeReply, Executor, RunResult } from "./types"
  * - `call` goes to the gateway's caller, which looks the tool up among the
  *   token's own, at the token's level: blocked is an error, "ask" stops the
  *   run with the owner's permission link (the request is the same one a
- *   call_tool would leave), and an allowed tool runs through the same
- *   upstream path as call_tool (permissions.ts runCodeCall). Every call is
+ *   execute would leave), and an allowed tool runs through the same
+ *   upstream path as execute (permissions.ts runCodeCall). Every call is
  *   in the request log, under run_code, by server and tool.
  * - `read` opens one of the token's own kept results, as text, or as
  *   base64 for a file's bytes.
@@ -284,7 +285,7 @@ export async function runCode(
     /** Run it even when the same program runs, or ran a moment ago. */
     rerun?: boolean
     /**
-     * The tier of the entry it came through (run_code_<tier>): the same
+     * The tier of the entry it came through (run_<tier>): the same
      * program through another entry is another run.
      */
     tier?: ToolTier
@@ -343,7 +344,7 @@ export async function runCode(
     {
       code: input.code,
       // Its calls are logged under the entry it came through.
-      logAs: `run_code_${input.tier ?? "destructive"}`,
+      logAs: runEntryFor(input.tier ?? "destructive"),
     },
     { ...options, runId: record.id, trace: record.trace },
   )

@@ -25,7 +25,7 @@ import { readWrapperOperation } from "./wrappers/definition"
  *      tool without hints is Destructive).
  *
  * Everything that asks whether a tool reads, writes or destroys asks here:
- * the entry tools' gate (call_tool_<tier>, run_code_<tier>), markedReadOnly
+ * the entry tools' gate (execute_<tier>, run_<tier>), markedReadOnly
  * (read-only.ts: pacing, a run's trace), the permission page's warning,
  * the wrapper review's badges, describe, list_tools, search and pcp.tools,
  * and the annotations PCP advertises for its own tools. Derived tiers are
@@ -81,14 +81,33 @@ export function tierAllows(entry: ToolTier, tool: ToolTier): boolean {
   return RANK[tool] <= RANK[entry]
 }
 
-/** The entry tool that runs a tool of this tier by call_handle. */
+/**
+ * The entry tool that runs a tool of this tier: one of the owner's by
+ * call_handle, or one of PCP's own by its name.
+ */
 export function callEntryFor(tier: ToolTier): string {
-  return `call_tool_${tier}`
+  return `execute_${tier}`
 }
 
 /** The entry tool whose programs may call tools of this tier. */
 export function runEntryFor(tier: ToolTier): string {
-  return `run_code_${tier}`
+  return `run_${tier}`
+}
+
+/**
+ * The entry tools' names before PCP's tools were collapsed into search,
+ * execute_<tier> and run_<tier> (#113), each with the one that took over:
+ * still answered for one release, unlisted, with a line saying so
+ * (docs/breaking-changes.md), then refused.
+ */
+export const RETIRED_ENTRIES: Readonly<Record<string, string>> = {
+  describe: "search",
+  call_tool_read: "execute_read",
+  call_tool_write: "execute_write",
+  call_tool_destructive: "execute_destructive",
+  run_code_read: "run_read",
+  run_code_write: "run_write",
+  run_code_destructive: "run_destructive",
 }
 
 /** Annotations as stored (JSON text), read; anything else as none. */

@@ -101,7 +101,7 @@ export default async function SettingsPage({
               />
             }
             title="Connection address"
-            description="Add this as a remote MCP server in your assistant, with an API token as the bearer token. It offers search, describe and the call_tool tools (Read, Write and Destructive), which reach every server you connected, and your skills."
+            description="Add this as a remote MCP server in your assistant, with an API token as the bearer token. It offers search and the execute and run tools (Read, Write and Destructive), which reach every server you connected, your skills and the rest of PCP."
           >
             <div className="basis-full">
               <CopyableValue value={`${publicUrl}/mcp`} />
@@ -119,7 +119,7 @@ export default async function SettingsPage({
             href="/settings/tools"
             icon={<IconTile icon={Wrench} size="sm" />}
             title="PCP's own tools"
-            description="Read, Write or Destructive for search, the call_tool and run_code tools, memory and the rest: what assistants' apps are told each one can do"
+            description="Read, Write or Destructive for memory, web fetch, files and the rest: what assistants' apps are told each one can do"
           />
           <EmbeddingsCard overview={embeddings} />
         </List>

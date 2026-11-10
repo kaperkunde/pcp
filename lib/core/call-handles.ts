@@ -4,7 +4,7 @@ import { labelKey } from "./crypto"
 import { canonicalJson } from "./permission-rules"
 
 /**
- * Call handles: what describe hands an assistant and call_tool_<tier> takes in
+ * Call handles: what describe hands an assistant and execute_<tier> takes in
  * place of a server and a tool name, so a tool is always described before
  * it is called. A handle is stateless (/mcp keeps no session): it names the
  * tool's catalogue row and carries two MACs under a key derived from the

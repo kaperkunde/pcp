@@ -68,6 +68,7 @@ import {
 import { scratchDatabase } from "./test-db"
 import { copyTokenAccess, writeToolAccess } from "./tool-access"
 import { setupVault } from "./vault"
+import { entryCall, listEveryTool } from "./test-handles"
 
 // Skills against a scratch database: the SKILL.md format, what a skill may
 // hold, which tokens see which, an assistant's change that waits for the
@@ -1050,7 +1051,7 @@ describe("search and describe", () => {
     name: string,
     args: Record<string, unknown>,
   ) {
-    const result = await client.callTool({ name, arguments: args })
+    const result = await client.callTool(entryCall(name, args))
     return { isError: result.isError === true, text: textOf(result) }
   }
 
@@ -1075,7 +1076,7 @@ describe("search and describe", () => {
     // The tool and the skill both name the task; the memory only mentions it.
     expect(lines.slice(0, 2).sort()).toEqual([
       "skill skill:send-postcards — Send a postcard to a friend: who, what to write, and when.",
-      "tool postcards/send_postcard [destructive: call_tool_destructive] — send postcards for the owner.",
+      "tool postcards/send_postcard [destructive: execute_destructive] — send postcards for the owner.",
     ])
     expect(lines.slice(2)).toContain(
       "memory /memories/shared/friends.md — Grace likes postcards from the sea.",
@@ -1088,7 +1089,7 @@ describe("search and describe", () => {
     })
     expect(friend.text).toContain("skill skill:send-postcards")
     expect(friend.text).toContain("memory /memories/shared/friends.md")
-    // (PCP's own call_tool_write is named by "write": not a server's tool.)
+    // (PCP's own execute_write is named by "write": not a server's tool.)
     expect(
       friend.text.split("\n").filter((line) => line.startsWith("tool ")),
     ).toEqual([])
@@ -1141,7 +1142,7 @@ describe("search and describe", () => {
       "- skill:send-postcards/addresses.md (20 characters)",
     )
     expect(described.text).toMatch(
-      /- postcards\/send_postcard \(asks the owner first; Destructive, run with call_tool_destructive\): call_handle ch_\S+/,
+      /- postcards\/send_postcard \(asks the owner first; Destructive, run with execute_destructive\): call_handle ch_\S+/,
     )
     expect(described.text).toContain(
       "- postcards/gone_tool: not a tool this token can call",
@@ -1194,7 +1195,7 @@ describe("search and describe", () => {
 
   it("no longer has search_tools and describe_tool, whose release has passed", async () => {
     const client = await connect()
-    const names = (await client.listTools()).tools.map((tool) => tool.name)
+    const names = (await listEveryTool(client)).tools.map((tool) => tool.name)
 
     expect(names).toContain("search")
     expect(names).toContain("describe")
@@ -1272,7 +1273,7 @@ description: "Keep a diary of the day's work."
     return {
       client,
       call: async (name: string, args: Record<string, unknown>) =>
-        textOf(await client.callTool({ name, arguments: args })),
+        textOf(await client.callTool(entryCall(name, args))),
     }
   }
 

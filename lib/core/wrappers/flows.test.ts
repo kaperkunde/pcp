@@ -25,7 +25,7 @@ import { setPacingSite } from "../pacing/config"
 import { resetPacing, setPacingClock } from "../pacing/pace"
 import { decidePermission } from "../permissions"
 import { scratchDatabase } from "../test-db"
-import { withCallHandle } from "../test-handles"
+import { entryCall, withCallHandle } from "../test-handles"
 import { writeToolAccess } from "../tool-access"
 import { setupVault } from "../vault"
 import { setFetchPrivate, setFetchSite } from "../web-fetch"
@@ -119,13 +119,14 @@ async function call(name: string, args: Record<string, unknown>) {
   )
   client = new Client({ name: "test", version: "1.0.0" })
   await client.connect(clientSide)
-  const result = await client.callTool({
-    name,
-    arguments:
-      name === "call_tool_destructive"
+  const result = await client.callTool(
+    entryCall(
+      name,
+      name === "execute_destructive"
         ? await withCallHandle(client, args)
         : args,
-  })
+    ),
+  )
   const text = (result.content as Array<{ type: string; text?: string }>)
     .map((part) => part.text ?? "")
     .join("")
@@ -209,7 +210,7 @@ describe.skipIf(!executable)("a browser flow", { timeout: 90_000 }, () => {
       arguments: { url: `${api.origin}/thread`, text: "hello there" },
     }
 
-    const first = await call("call_tool_destructive", args)
+    const first = await call("execute_destructive", args)
     expect(first.isError, first.text).toBe(false)
     expect(JSON.parse(first.text)).toEqual({
       ok: true,
@@ -219,13 +220,13 @@ describe.skipIf(!executable)("a browser flow", { timeout: 90_000 }, () => {
 
     // The same call again is not run twice (calls/guard.ts): the answer
     // says the first one succeeded.
-    const repeated = await call("call_tool_destructive", args)
+    const repeated = await call("execute_destructive", args)
     expect(repeated.isError).toBe(true)
     expect(repeated.text).toContain("Not run again: chat/post_message")
     expect(messages).toEqual(["hello there"])
 
     // Made again on purpose, the flow finds its message there already.
-    const again = await call("call_tool_destructive", {
+    const again = await call("execute_destructive", {
       ...args,
       rerun: true,
       reason: "Check that the message is there.",
@@ -258,7 +259,7 @@ describe.skipIf(!executable)("a browser flow", { timeout: 90_000 }, () => {
     })
     await approvedFlow()
 
-    const result = await call("run_code_destructive", {
+    const result = await call("run_destructive", {
       code: `
         const url = ${JSON.stringify(`${api.origin}/thread`)}
         const first = await pcp.call("chat", "post_message", { url, text: "from a program" })
@@ -282,7 +283,7 @@ describe.skipIf(!executable)("a browser flow", { timeout: 90_000 }, () => {
   it("names the step that failed, on a page it did not expect", async () => {
     await approvedFlow()
 
-    const result = await call("call_tool_destructive", {
+    const result = await call("execute_destructive", {
       server: "chat",
       tool: "post_message",
       arguments: { url: `${api.origin}/moved`, text: "lost" },

@@ -7,8 +7,8 @@
  * stay the same in every session so a client's "Always allow" holds:
  *
  * - mirrorInstructions: the app does not show the model the server's
- *   instructions, so their key rules are repeated in answers (read_memory
- *   every, and the first search or describe of a session).
+ *   instructions, so their key rules are repeated in answers (search with
+ *   no arguments, read_memory every, and the first search of a session).
  * - linkStyle: how a link for the owner is written. Every app known today
  *   reads a markdown link; another style is added here and in owner-link.ts.
  *

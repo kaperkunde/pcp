@@ -154,14 +154,14 @@ test("a tool nobody decided on asks first, through a link, even for a client tha
     arguments: { a: 19, b: 23 },
   }
 
-  const asked = await callTool(baseURL!, token, "call_tool_destructive", args)
+  const asked = await callTool(baseURL!, token, "execute_destructive", args)
   expect(asked.body.result?.isError ?? false, toolText(asked)).toBe(false)
   expect(toolText(asked)).toContain("Not done yet")
   const { path, id } = permissionFrom(toolText(asked))
   expect(callsOf("add_numbers")).toBe(0)
 
   // Asking again waits on the same request.
-  const again = await callTool(baseURL!, token, "call_tool_destructive", args)
+  const again = await callTool(baseURL!, token, "execute_destructive", args)
   expect(permissionFrom(toolText(again)).id).toBe(id)
 
   // The link comes last, on a line of its own: some apps hide what an
@@ -195,7 +195,7 @@ test("a tool nobody decided on asks first, through a link, even for a client tha
   expect(toolText(outcome)).toContain("42")
 
   // "Always allow" settled it: the next call runs at once.
-  const direct = await callTool(baseURL!, token, "call_tool_destructive", {
+  const direct = await callTool(baseURL!, token, "execute_destructive", {
     ...args,
     arguments: { a: 1, b: 1 },
   })
@@ -208,7 +208,7 @@ test("a tool nobody decided on asks first, through a link, even for a client tha
   const prompted = await mcpToolCall2026(
     baseURL!,
     token,
-    "call_tool_destructive",
+    "execute_destructive",
     echo,
     {
       capabilities: PROMPTS_AND_PANELS,
@@ -240,7 +240,7 @@ test("an assistant lists its open requests and withdraws one it no longer needs"
   page,
   baseURL,
 }) => {
-  const asked = await callTool(baseURL!, token, "call_tool_destructive", {
+  const asked = await callTool(baseURL!, token, "execute_destructive", {
     server: SLUG,
     tool: "send_postcard",
     arguments: { to: "Bob", message: "Never mind" },
@@ -284,12 +284,7 @@ test("a blocked tool is hidden from the assistant and refused; a copy of the acc
     tool: "send_postcard",
     arguments: { to: "Ada", message: "Hi" },
   }
-  const asked = await callTool(
-    baseURL!,
-    token,
-    "call_tool_destructive",
-    postcard,
-  )
+  const asked = await callTool(baseURL!, token, "execute_destructive", postcard)
   // The handle describe gave before the owner blocked the tool.
   const described = await describeForCall(
     baseURL!,
@@ -315,7 +310,7 @@ test("a blocked tool is hidden from the assistant and refused; a copy of the acc
   })
   expect(hidden.body.result?.isError).toBe(true)
 
-  const refused = await callTool(baseURL!, token, "call_tool_destructive", {
+  const refused = await callTool(baseURL!, token, "execute_destructive", {
     call_handle: handle,
     arguments: postcard.arguments,
   })
@@ -342,7 +337,7 @@ test("a blocked tool is hidden from the assistant and refused; a copy of the acc
     page.getByRole("status").filter({ hasText: "Copied." }),
   ).toBeVisible()
 
-  const echoed = await callTool(baseURL!, second, "call_tool_destructive", {
+  const echoed = await callTool(baseURL!, second, "execute_destructive", {
     server: SLUG,
     tool: "echo_auth",
     arguments: {},
@@ -352,7 +347,7 @@ test("a blocked tool is hidden from the assistant and refused; a copy of the acc
   const secondRefused = await callTool(
     baseURL!,
     second,
-    "call_tool_destructive",
+    "execute_destructive",
     postcard,
   )
   expect(secondRefused.body.result?.isError).toBe(true)
@@ -420,13 +415,13 @@ test("an assistant proposes tool levels and tiers; nothing changes until you sav
 
   expect(await levelOf(baseURL!, proposer, "add_numbers")).toBe("allowed")
   expect(await levelOf(baseURL!, proposer, "echo_auth")).toBe("ask")
-  const ran = await callTool(baseURL!, proposer, "call_tool_destructive", {
+  const ran = await callTool(baseURL!, proposer, "execute_destructive", {
     server: SLUG,
     tool: "add_numbers",
     arguments: { a: 2, b: 3 },
   })
   expect(toolText(ran)).toBe("5")
-  const refused = await callTool(baseURL!, proposer, "call_tool_destructive", {
+  const refused = await callTool(baseURL!, proposer, "execute_destructive", {
     server: SLUG,
     tool: "send_postcard",
     arguments: { to: "Ada", message: "Hi" },
@@ -449,7 +444,7 @@ test("Allow for lets a tool run without asking until the time is up or you end i
   const asked = await callTool(
     baseURL!,
     assistant,
-    "call_tool_destructive",
+    "execute_destructive",
     add(4, 5),
   )
   expect(toolText(asked)).toContain("Not done yet")
@@ -461,7 +456,7 @@ test("Allow for lets a tool run without asking until the time is up or you end i
   // For now it runs at once, and the tool's level is as it was.
   expect(
     toolText(
-      await callTool(baseURL!, assistant, "call_tool_destructive", add(1, 2)),
+      await callTool(baseURL!, assistant, "execute_destructive", add(1, 2)),
     ),
   ).toBe("3")
 
@@ -476,7 +471,7 @@ test("Allow for lets a tool run without asking until the time is up or you end i
   await expect(page.getByText("Allowed for now")).toHaveCount(0)
   expect(
     toolText(
-      await callTool(baseURL!, assistant, "call_tool_destructive", add(6, 7)),
+      await callTool(baseURL!, assistant, "execute_destructive", add(6, 7)),
     ),
   ).toContain("Not done yet")
 })
@@ -664,7 +659,7 @@ test("an OAuth server an assistant proposes is connected through a link", async 
   ).toMatchObject({ connected: true, toolCount: 3 })
 
   // Its tools ask first, like any other.
-  const call = await callTool(baseURL!, token, "call_tool_destructive", {
+  const call = await callTool(baseURL!, token, "execute_destructive", {
     server: connect.slug,
     tool: "echo_auth",
     arguments: {},
@@ -685,7 +680,7 @@ test("answering a request takes you to the next one waiting, oldest first, until
   const ask = async (tool: string, args: Record<string, unknown>) =>
     permissionFrom(
       toolText(
-        await callTool(baseURL!, walker, "call_tool_destructive", {
+        await callTool(baseURL!, walker, "execute_destructive", {
           server: SLUG,
           tool,
           arguments: args,

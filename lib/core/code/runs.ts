@@ -91,8 +91,8 @@ export function newRunId(): string {
 /**
  * What tells one program from another for the duplicate guard: its
  * language, its text and the tier of the entry it came through, so the
- * same program sent again through run_code_destructive after
- * run_code_read refused a call runs rather than answering with that run.
+ * same program sent again through run_destructive after
+ * run_read refused a call runs rather than answering with that run.
  */
 export function programKey(
   language: string,

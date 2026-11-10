@@ -125,9 +125,9 @@ export function lastToolText(response: McpResponse): string {
 
 /** The gateway's tools that take a call_handle rather than a name. */
 const HANDLED = new Set([
-  "call_tool_read",
-  "call_tool_write",
-  "call_tool_destructive",
+  "execute_read",
+  "execute_write",
+  "execute_destructive",
 ])
 
 /**

@@ -617,7 +617,7 @@ const INPUTS: readonly BrowserToolInput[] = [
     name: "upload_file",
     title: "Choose files to upload",
     description:
-      "Puts files into a file field (ref or target: the field, or the button that opens its file picker), as a person choosing them would; the form is sent only as it would be then, usually by clicking its button. Each file is a result PCP kept for this token, named by its handle ({\"$result\": id}: from download, a mail attachment, or a run_code_* program's keep), with a name and type of your own if you like; its bytes never pass through you. Answers with the page's snapshot.",
+      "Puts files into a file field (ref or target: the field, or the button that opens its file picker), as a person choosing them would; the form is sent only as it would be then, usually by clicking its button. Each file is a result PCP kept for this token, named by its handle ({\"$result\": id}: from download, a mail attachment, or a run program's keep), with a name and type of your own if you like; its bytes never pass through you. Answers with the page's snapshot.",
     input: z.strictObject({
       tab,
       ref: ref.optional(),

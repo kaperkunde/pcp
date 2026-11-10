@@ -24,6 +24,7 @@ import {
   listRepoItems,
 } from "./store"
 import { addFromRepo, syncItem } from "./sync"
+import { entryCall } from "../test-handles"
 
 // An assistant helping with a conflict: only a token that may manage
 // endpoints finds it, reads both sides, and writes /repos/<id>/…; its
@@ -115,7 +116,7 @@ async function connect(manageEndpoints: boolean) {
   await client.connect(clientSide)
 
   return async (name: string, args: Record<string, unknown>) => {
-    const result = await client.callTool({ name, arguments: args })
+    const result = await client.callTool(entryCall(name, args))
     return {
       isError: result.isError === true,
       text: (result.content as Array<{ text?: string }>)

@@ -14,7 +14,7 @@ import { pacingNow, waitForSlot, type PacedRefusal } from "./pace"
  * One pacing for everything an assistant does (limits.ts says why), applied
  * at two places, which every way of calling passes, and to search's
  * embeddings requests (paceEmbeddings): upstream.ts
- * callServerTool for a server's tools (call_tool_<tier>, run_code_<tier>'s
+ * callServerTool for a server's tools (execute_<tier>, run_<tier>'s
  * pcp.call, a wrapper's calls, a call the owner allowed; the
  * browser's actions are paced inside browser/call.ts by the tab's site),
  * and web fetch's request path (fetch/fetch.ts each request and redirect,
@@ -42,7 +42,7 @@ export type PaceOptions = {
 }
 
 /**
- * The deadline of a call made straight from an assistant's request (call_tool_<tier>,
+ * The deadline of a call made straight from an assistant's request (execute_<tier>,
  * web_fetch) or from the owner's answer to one: its wait
  * comes to PACING_CALL_WAIT_MS at most.
  */

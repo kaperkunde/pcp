@@ -45,7 +45,7 @@ function browse(
   tool: string,
   args: Record<string, unknown> = {},
 ): Promise<McpResponse> {
-  return callTool(baseURL, token, "call_tool_destructive", {
+  return callTool(baseURL, token, "execute_destructive", {
     server: "browser",
     tool,
     arguments: args,

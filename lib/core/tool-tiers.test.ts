@@ -72,8 +72,8 @@ describe("a tier from annotations", () => {
     expect(tierAllows("write", "write")).toBe(true)
     expect(tierAllows("write", "destructive")).toBe(false)
     expect(tierAllows("read", "write")).toBe(false)
-    expect(callEntryFor("write")).toBe("call_tool_write")
-    expect(runEntryFor("read")).toBe("run_code_read")
+    expect(callEntryFor("write")).toBe("execute_write")
+    expect(runEntryFor("read")).toBe("run_read")
   })
 
   it("says a tier as the hints PCP advertises, keeping the other two", () => {
@@ -231,33 +231,33 @@ describe("the owner's tiers", () => {
     const names = own.map((tool) => tool.name)
     expect(names).toEqual(
       expect.arrayContaining([
-        "call_tool_read",
-        "call_tool_write",
-        "call_tool_destructive",
-        "run_code_read",
-        "run_code_write",
-        "run_code_destructive",
+        "execute_read",
+        "execute_write",
+        "execute_destructive",
+        "run_read",
+        "run_write",
+        "run_destructive",
         "search",
       ]),
     )
-    expect(own.find((tool) => tool.name === "call_tool_destructive")).toEqual(
+    expect(own.find((tool) => tool.name === "execute_destructive")).toEqual(
       expect.objectContaining({ derived: "destructive", override: null }),
     )
 
-    await chooseOwnToolTier(ctx, "call_tool_destructive", "write")
+    await chooseOwnToolTier(ctx, "execute_destructive", "write")
     expect(await readOwnToolTiers(ctx)).toEqual({
-      call_tool_destructive: "write",
+      execute_destructive: "write",
     })
     expect(
       (await listOwnToolTiers(ctx)).find(
-        (tool) => tool.name === "call_tool_destructive",
+        (tool) => tool.name === "execute_destructive",
       ),
     ).toMatchObject({ derived: "destructive", override: "write" })
 
     await expect(chooseOwnToolTier(ctx, "call_tool", "read")).rejects.toThrow(
       /no tool called call_tool/,
     )
-    await chooseOwnToolTier(ctx, "call_tool_destructive", null)
+    await chooseOwnToolTier(ctx, "execute_destructive", null)
     expect(await readOwnToolTiers(ctx)).toEqual({})
   })
 })

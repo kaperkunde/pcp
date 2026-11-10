@@ -12,6 +12,7 @@ import {
 } from "./search"
 import { scratchDatabase } from "./test-db"
 import { setupVault } from "./vault"
+import { listEveryTool } from "./test-handles"
 
 // Search with no embeddings provider, as an assistant met it in #61: PCP's
 // own tools as the gateway registers them (their real descriptions), beside
@@ -177,7 +178,7 @@ beforeAll(async () => {
   await buildGatewayServer(scope, []).connect(serverSide)
   client = new Client({ name: "test", version: "1.0.0" })
   await client.connect(clientSide)
-  pcp = (await client.listTools()).tools.map((tool) => ({
+  pcp = (await listEveryTool(client)).tools.map((tool) => ({
     name: tool.name,
     title: tool.title ?? tool.name,
     description: tool.description ?? "",

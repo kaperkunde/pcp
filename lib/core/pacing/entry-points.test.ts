@@ -13,7 +13,7 @@ import {
 import { json, startTestApi, type TestApi } from "../openapi/test-api"
 import { decidePermission } from "../permissions"
 import { scratchDatabase } from "../test-db"
-import { withCallHandle } from "../test-handles"
+import { withCallHandle, entryCall } from "../test-handles"
 import { writeToolAccess } from "../tool-access"
 import { setupVault } from "../vault"
 import { setFetchPrivate, setFetchSite } from "../web-fetch"
@@ -137,13 +137,14 @@ async function connect(): Promise<Client> {
 
 async function call(name: string, args: Record<string, unknown>) {
   const connected = await connect()
-  const result = await connected.callTool({
-    name,
-    arguments:
-      name === "call_tool_destructive"
+  const result = await connected.callTool(
+    entryCall(
+      name,
+      name === "execute_destructive"
         ? await withCallHandle(connected, args)
         : args,
-  })
+    ),
+  )
   const text = (result.content as Array<{ type: string; text?: string }>)
     .map((part) => part.text ?? "")
     .join("")
@@ -159,9 +160,9 @@ const COUNT = { server: "things", tool: "count", arguments: {} }
 
 describe("pacing, whatever the way in", () => {
   it("holds call_tool to the server's pace", async () => {
-    expect((await call("call_tool_destructive", COUNT)).isError).toBe(false)
+    expect((await call("execute_destructive", COUNT)).isError).toBe(false)
     expect(waits).toEqual([])
-    expect((await call("call_tool_destructive", COUNT)).isError).toBe(false)
+    expect((await call("execute_destructive", COUNT)).isError).toBe(false)
     expect(waits).toEqual([5_000])
     expect(api.requests).toHaveLength(2)
   })
@@ -172,8 +173,8 @@ describe("pacing, whatever the way in", () => {
       jitterMs: 0,
       burst: null,
     })
-    await call("call_tool_destructive", COUNT)
-    const second = await call("call_tool_destructive", COUNT)
+    await call("execute_destructive", COUNT)
+    const second = await call("execute_destructive", COUNT)
 
     expect(second.isError).toBe(true)
     expect(second.text).toContain(
@@ -193,8 +194,8 @@ describe("pacing, whatever the way in", () => {
       jitterMs: 0,
       burst: null,
     })
-    await call("call_tool_destructive", COUNT)
-    const second = await call("call_tool_destructive", COUNT)
+    await call("execute_destructive", COUNT)
+    const second = await call("execute_destructive", COUNT)
 
     expect(second.isError).toBe(false)
     expect(waits).toEqual([PACING_CALL_WAIT_MS])
@@ -207,7 +208,7 @@ describe("pacing, whatever the way in", () => {
       jitterMs: 0,
       burst: null,
     })
-    const result = await call("run_code_destructive", {
+    const result = await call("run_destructive", {
       code: `await pcp.call("things", "count", {}); await pcp.call("things", "count", {}); return "done"`,
     })
 
@@ -222,7 +223,7 @@ describe("pacing, whatever the way in", () => {
       jitterMs: 0,
       burst: null,
     })
-    const result = await call("run_code_destructive", {
+    const result = await call("run_destructive", {
       code: `await pcp.call("things", "count", {})
 try {
   await pcp.call("things", "count", {})
@@ -240,7 +241,7 @@ try {
   })
 
   it("holds run_code's pcp.call to it", async () => {
-    const result = await call("run_code_destructive", {
+    const result = await call("run_destructive", {
       code: `await pcp.call("things", "count", {}); await pcp.call("things", "count", {}); return "done"`,
     })
 
@@ -274,7 +275,7 @@ try {
     })
     await writeToolAccess(scope.tokenId, wrapper.id, "count_twice", "allowed")
 
-    const result = await call("call_tool_destructive", {
+    const result = await call("execute_destructive", {
       server: "twice",
       tool: "count_twice",
       arguments: {},
@@ -286,8 +287,8 @@ try {
   })
 
   it("holds a call the owner allowed to it", async () => {
-    await call("call_tool_destructive", COUNT)
-    const asked = await call("call_tool_destructive", {
+    await call("execute_destructive", COUNT)
+    const asked = await call("execute_destructive", {
       server: "things",
       tool: "echo",
       arguments: { q: "hi" },
@@ -363,8 +364,8 @@ try {
     await setPacingClass(ctx, "server_read", "unpaced")
     await setPacingClass(ctx, "server_change", "unpaced")
 
-    await call("call_tool_destructive", COUNT)
-    await call("call_tool_destructive", COUNT)
+    await call("execute_destructive", COUNT)
+    await call("execute_destructive", COUNT)
     expect(waits).toEqual([])
   })
   it("paces a call as a read or a change by the tool's tier, the owner's choice included", async () => {
@@ -373,14 +374,14 @@ try {
     await setPacingClass(ctx, "server_change", PAUSE)
 
     // count is a GET: Read, so unpaced.
-    await call("call_tool_destructive", COUNT)
-    await call("call_tool_destructive", COUNT)
+    await call("execute_destructive", COUNT)
+    await call("execute_destructive", COUNT)
     expect(waits).toEqual([])
 
     // The owner says Write: paced as a change.
     await setToolTier(ctx, endpointId, "count", "write")
-    await call("call_tool_destructive", COUNT)
-    await call("call_tool_destructive", COUNT)
+    await call("execute_destructive", COUNT)
+    await call("execute_destructive", COUNT)
     expect(waits).toEqual([5_000])
   })
 })

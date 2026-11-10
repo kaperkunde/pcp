@@ -27,7 +27,7 @@ import {
   saveResourceConfig,
 } from "../resources/state"
 import { scratchDatabase } from "../test-db"
-import { describedHandle } from "../test-handles"
+import { describedHandle, entryCall } from "../test-handles"
 import { writeToolAccess } from "../tool-access"
 import {
   keepBytes,
@@ -474,7 +474,7 @@ describe.skipIf(!executable)(
 
       try {
         const result = await client.callTool({
-          name: "run_code_destructive",
+          name: "run_destructive",
           arguments: {
             code: `
 const form = await pcp.call("browser", "tabs", { action: "open", url: "${api.origin}/form" })
@@ -545,7 +545,7 @@ return { file: got.file, sent: sent.includes("Thank you") }
       }
       const browser = async (tool: string, args: Record<string, unknown>) =>
         client.callTool({
-          name: "call_tool_destructive",
+          name: "execute_destructive",
           arguments: {
             call_handle: await describedHandle(client, "browser", tool),
             arguments: args,
@@ -558,10 +558,9 @@ return { file: got.file, sent: sent.includes("Thank you") }
         // In: a file from the assistant's computer, into the page's form.
         const receive = JSON.parse(
           answer(
-            await client.callTool({
-              name: "receive_file",
-              arguments: { name: "scan.pdf" },
-            }),
+            await client.callTool(
+              entryCall("receive_file", { name: "scan.pdf" }),
+            ),
           ),
         ) as { url: string; result: { $result: string } }
         const sentByCurl = await uploadByLink(
@@ -603,10 +602,9 @@ return { file: got.file, sent: sent.includes("Thank you") }
         expect(got.note).toContain("share_result")
         const shared = JSON.parse(
           answer(
-            await client.callTool({
-              name: "share_result",
-              arguments: { id: got.file.$result },
-            }),
+            await client.callTool(
+              entryCall("share_result", { id: got.file.$result }),
+            ),
           ),
         ) as { url: string; name: string; curl: string }
         expect(shared.name).toBe("invoice-42.pdf")

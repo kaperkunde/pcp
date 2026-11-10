@@ -571,7 +571,7 @@ export async function runCall(
     executor?: PermissionExecutor
     /**
      * The latest the call may still go, under pacing: by default the budget
-     * of a call straight from a request (call_tool, the owner's answer).
+     * of a call straight from a request (execute, the owner's answer).
      */
     deadline?: number
   } & AnswerShape,
@@ -2060,7 +2060,7 @@ type CallAsk = Extract<PermissionAsk, { kind: "call" }>
 /**
  * A program's call to a tool that asks (run_code's pcp.call): the value of
  * the run the owner allowed once, when this is that same call made again
- * within REUSE_EXECUTED_MS, and otherwise the owner asked, as for call_tool.
+ * within REUSE_EXECUTED_MS, and otherwise the owner asked, as for execute.
  */
 export async function askCodeCall(
   scope: PermissionScope,

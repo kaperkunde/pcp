@@ -168,6 +168,27 @@ export async function serveTool(
 }
 
 /**
+ * What a call of a registered tool may become before it is served: another
+ * tool with its own arguments (execute_<tier> naming one of PCP's own tools,
+ * gateway.ts), or null to serve the tool itself. A note goes in front of the
+ * answer (a client prefix read as the bare name).
+ */
+export type Dispatch = (
+  sent: unknown,
+) => { tool: Tool; args: unknown; note?: string | null } | null
+
+/** How a tool is registered beyond the package's own. */
+export type RegisterOptions = {
+  /**
+   * A line in front of every answer, for a name kept only for a while
+   * (docs/breaking-changes.md): what to call instead.
+   */
+  note?: string
+  /** What a call may become instead (Dispatch). */
+  dispatch?: Dispatch
+}
+
+/**
  * Registers a tool on an MCP server, served as above: the package's
  * registerTool, but for its handler, which is PCP's serveTool so the lead
  * goes in front of the answer.
@@ -176,6 +197,7 @@ export function registerTool(
   server: McpServer,
   tool: Tool,
   hooks: ServeHooks,
+  { note, dispatch }: RegisterOptions = {},
 ): void {
   const output = tool.output
     ? publishedSchema(() => tool.outputSchema()!)
@@ -191,6 +213,46 @@ export function registerTool(
       annotations: tool.annotations,
       ...(tool.meta ? { _meta: tool.meta } : {}),
     },
-    (args, ctx) => serveTool(tool, args, ctx, hooks),
+    async (args, ctx) => {
+      const routed = dispatch?.(args) ?? null
+      const result = routed
+        ? await serveTool(routed.tool, routed.args, ctx, hooks)
+        : await serveTool(tool, args, ctx, hooks)
+      const lead = [note, routed?.note].filter(
+        (line): line is string => typeof line === "string" && line !== "",
+      )
+
+      return lead.length > 0 ? withLeadText(result, lead.join("\n")) : result
+    },
   )
+}
+
+/**
+ * What tools/list answers: these tools only, as registerTool publishes
+ * them. Every other registered tool still answers a call by its name (one
+ * kept for a while, or one reached through another), unlisted. Called
+ * once the tools are registered, it takes the place of the SDK's listing.
+ */
+export function listOnly(server: McpServer, tools: Tool[]): void {
+  server.server.setRequestHandler("tools/list", () => ({
+    tools: tools.map((tool) => ({
+      name: tool.name,
+      title: tool.title,
+      description: tool.description,
+      inputSchema: tool.inputSchema() as {
+        type: "object"
+        [key: string]: unknown
+      },
+      ...(tool.output
+        ? {
+            outputSchema: tool.outputSchema() as {
+              type: "object"
+              [key: string]: unknown
+            },
+          }
+        : {}),
+      annotations: tool.annotations,
+      ...(tool.meta ? { _meta: tool.meta } : {}),
+    })),
+  }))
 }

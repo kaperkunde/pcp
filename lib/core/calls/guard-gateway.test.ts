@@ -91,7 +91,7 @@ describe("a call that asks and fails before the request is made", () => {
 
     failing.ask = true
     const failed = await client.callTool({
-      name: "call_tool_destructive",
+      name: "execute_destructive",
       arguments: args,
     })
     expect(failed.isError).toBe(true)
@@ -99,7 +99,7 @@ describe("a call that asks and fails before the request is made", () => {
 
     failing.ask = false
     const asked = await client.callTool({
-      name: "call_tool_destructive",
+      name: "execute_destructive",
       arguments: args,
     })
     expect(JSON.stringify(asked.content)).toContain("Not done yet")

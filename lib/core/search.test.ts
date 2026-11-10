@@ -6,7 +6,7 @@ import {
   describeOwnTool,
   listTools,
   normalName,
-  PCP_TOOL_NOTE,
+  pcpToolNote,
   searchEverything,
   searchTools,
   stem,
@@ -215,8 +215,8 @@ describe("listTools", () => {
       ]).split("\n"),
     ).toEqual([
       "porkbun: 2 tools, 1 allowed and 1 ask the owner first.",
-      "porkbun/delete_domain [ask, destructive: call_tool_destructive] — Deletes a domain.",
-      "porkbun/list_domains [allowed, read: call_tool_read] — Lists domains.",
+      "porkbun/delete_domain [ask, destructive: execute_destructive] — Deletes a domain.",
+      "porkbun/list_domains [allowed, read: execute_read] — Lists domains.",
     ])
   })
 
@@ -431,7 +431,9 @@ describe("PCP's own tools in search (#41)", () => {
       ref: "check_permission",
       title: "Check a permission request",
     })
-    expect(first!.description.endsWith(PCP_TOOL_NOTE)).toBe(true)
+    expect(
+      first!.description.endsWith(pcpToolNote("check_permission", first!.tier)),
+    ).toBe(true)
 
     // delete_wrapper's description names check_permission; its name does not.
     expect(refs("owner answered")).not.toContain("pcp delete_wrapper")

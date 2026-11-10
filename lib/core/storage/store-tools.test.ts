@@ -14,6 +14,7 @@ import { scratchDatabase } from "../test-db"
 import { setServerToolAccess, setToolAccess } from "../tool-access"
 import { setupVault } from "../vault"
 import { ensureOwnStore } from "./roots"
+import { entryCall } from "../test-handles"
 
 // PCP's own store tools at /mcp: the default way to a store, PCP's own
 // unless the call names another, at the token's levels for that store's
@@ -72,10 +73,9 @@ function textOf(result: Awaited<ReturnType<Client["callTool"]>>): string {
 describe("the store tools", () => {
   it("make PCP's own store on first use, and ask the owner at its levels", async () => {
     const mcp = await connect()
-    const asked = await mcp.callTool({
-      name: "save_file",
-      arguments: { path: "notes.txt", text: "kept" },
-    })
+    const asked = await mcp.callTool(
+      entryCall("save_file", { path: "notes.txt", text: "kept" }),
+    )
 
     // Made for this vault, with its tools, which ask by default.
     const own = await ensureOwnStore(ctx)
@@ -91,34 +91,30 @@ describe("the store tools", () => {
     await setToolAccess(ctx, tokenId, own, "delete", "blocked")
     const mcp = await connect()
 
-    const saved = await mcp.callTool({
-      name: "save_file",
-      arguments: { path: "notes.txt", text: "kept" },
-    })
+    const saved = await mcp.callTool(
+      entryCall("save_file", { path: "notes.txt", text: "kept" }),
+    )
     expect(saved.isError, textOf(saved)).toBeFalsy()
     expect(JSON.parse(textOf(saved))).toMatchObject({
       path: "notes.txt",
       saved: "created",
     })
 
-    const read = await mcp.callTool({
-      name: "get_file",
-      arguments: { path: "notes.txt" },
-    })
+    const read = await mcp.callTool(
+      entryCall("get_file", { path: "notes.txt" }),
+    )
     expect(JSON.parse(textOf(read))).toMatchObject({ text: "kept" })
 
-    const listed = await mcp.callTool({
-      name: "list_folder",
-      arguments: { store: "pcp-files" },
-    })
+    const listed = await mcp.callTool(
+      entryCall("list_folder", { store: "pcp-files" }),
+    )
     expect(JSON.parse(textOf(listed))).toMatchObject({
       entries: [expect.objectContaining({ name: "notes.txt" })],
     })
 
-    const blocked = await mcp.callTool({
-      name: "delete",
-      arguments: { path: "notes.txt" },
-    })
+    const blocked = await mcp.callTool(
+      entryCall("delete", { path: "notes.txt" }),
+    )
     expect(blocked.isError).toBe(true)
     expect(textOf(blocked)).toMatch(/blocked/)
     expect(await db().storageEntry.count()).toBe(1)
@@ -138,17 +134,13 @@ describe("the store tools", () => {
     await setServerToolAccess(ctx, tokenId, own, "allowed")
     const mcp = await connect()
 
-    const both = await mcp.callTool({
-      name: "save_file",
-      arguments: { path: "a.txt" },
-    })
+    const both = await mcp.callTool(entryCall("save_file", { path: "a.txt" }))
     expect(both.isError).toBe(true)
     expect(textOf(both)).toMatch(/file or text/)
 
-    const unknown = await mcp.callTool({
-      name: "list_folder",
-      arguments: { store: "scans" },
-    })
+    const unknown = await mcp.callTool(
+      entryCall("list_folder", { store: "scans" }),
+    )
     expect(unknown.isError).toBe(true)
     expect(textOf(unknown)).toMatch(/no store called scans.*pcp-files/s)
     expect(await db().storageEntry.count()).toBe(0)
@@ -159,9 +151,8 @@ describe("the store tools", () => {
     await setServerToolAccess(ctx, tokenId, own, "allowed")
     const mcp = await connect()
 
-    const answer = await mcp.callTool({
-      name: "save_file",
-      arguments: {
+    const answer = await mcp.callTool(
+      entryCall("save_file", {
         path: "plan.pdf",
         file: {
           name: "plan.pdf",
@@ -169,8 +160,8 @@ describe("the store tools", () => {
           size: 9,
           result: { $result: "abc123" },
         },
-      },
-    })
+      }),
+    )
 
     expect(answer.isError).toBe(true)
     expect(textOf(answer)).toContain("/file/result")

@@ -34,10 +34,10 @@ describe("PCP's suggested instructions", () => {
       "check_permission",
       "link",
       "memory",
-      "run_code_read",
-      "call_tool_read",
-      "call_tool_write",
-      "call_tool_destructive",
+      "run_read",
+      "execute_read",
+      "execute_write",
+      "execute_destructive",
     ]) {
       expect(text).toContain(word)
     }
@@ -70,7 +70,7 @@ describe("PCP's suggested instructions", () => {
 
     expect(v3).toContain("call_tool, run_code")
     expect(v4).not.toContain("call_tool, run_code")
-    expect(v4).toContain("call_tool_destructive")
+    expect(v4).toContain("execute_destructive")
     expect(mergeLines(v3, v3, v4)).toEqual({ text: v4, conflicts: 0 })
   })
 

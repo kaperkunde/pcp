@@ -28,6 +28,7 @@ import {
   uploadToPage,
 } from "./upload-links"
 import { setupVault } from "./vault"
+import { entryCall, listEveryTool } from "./test-handles"
 
 // Upload links: a page the owner sends an assistant files from, by the link
 // alone. How many files it takes and for how long, what each becomes and
@@ -455,7 +456,7 @@ describe("through the gateway", () => {
 
   it("offers the tools only to a token the owner let move files", async () => {
     const plain = await connect(false)
-    const plainTools = (await plain.client.listTools()).tools.map(
+    const plainTools = (await listEveryTool(plain.client)).tools.map(
       (tool) => tool.name,
     )
     expect(plainTools).not.toContain("create_upload_link")
@@ -463,7 +464,7 @@ describe("through the gateway", () => {
     expect(plain.client.getInstructions()).not.toContain("create_upload_link")
 
     const mover = await connect(true)
-    const tools = (await mover.client.listTools()).tools
+    const tools = (await listEveryTool(mover.client)).tools
     const create = tools.find((tool) => tool.name === "create_upload_link")
     expect(create?.description).toMatch(
       /^Get files from the owner, to receive, store or move a file they have: an upload link/,
@@ -482,10 +483,12 @@ describe("through the gateway", () => {
   it("hands the owner a link, and check_upload the handles that arrived", async () => {
     const { client, scope } = await connect(true)
 
-    const made = (await client.callTool({
-      name: "create_upload_link",
-      arguments: { purpose: "The scan of your passport", max_files: 2 },
-    })) as Answer
+    const made = (await client.callTool(
+      entryCall("create_upload_link", {
+        purpose: "The scan of your passport",
+        max_files: 2,
+      }),
+    )) as Answer
     const owner = made.structuredContent as {
       kind: string
       reason: string
@@ -520,10 +523,9 @@ describe("through the gateway", () => {
     await uploadToPage(secret, body(PDF), sent("passport.pdf"))
     await uploadToPage(secret, body(JPEG), sent("back.jpg", "image/jpeg"))
 
-    const checked = (await client.callTool({
-      name: "check_upload",
-      arguments: { id: owner.upload.id },
-    })) as Answer
+    const checked = (await client.callTool(
+      entryCall("check_upload", { id: owner.upload.id }),
+    )) as Answer
     const status = checked.structuredContent as {
       open: boolean
       files: Array<{ handle: { $result: string }; name: string }>
@@ -549,20 +551,18 @@ describe("through the gateway", () => {
 
   it("check_upload waits while the link is open, until the owner says Done", async () => {
     const { client } = await connect(true)
-    const made = (await client.callTool({
-      name: "create_upload_link",
-      arguments: { purpose: "A photo of the meter" },
-    })) as Answer
+    const made = (await client.callTool(
+      entryCall("create_upload_link", { purpose: "A photo of the meter" }),
+    )) as Answer
     const owner = made.structuredContent as {
       url: string
       upload: { id: string }
     }
     const secret = secretOf(owner.url)
 
-    const checking = client.callTool({
-      name: "check_upload",
-      arguments: { id: owner.upload.id },
-    }) as Promise<Answer>
+    const checking = client.callTool(
+      entryCall("check_upload", { id: owner.upload.id }),
+    ) as Promise<Answer>
     await new Promise((resolve) => setTimeout(resolve, 200))
     await uploadToPage(secret, body(JPEG), sent("meter.jpg", "image/jpeg"))
     await closeUploadPage(secret)
@@ -576,16 +576,14 @@ describe("through the gateway", () => {
       files: [{ name: "meter.jpg", type: "image/jpeg", size: JPEG.length }],
     })
 
-    const missing = (await client.callTool({
-      name: "check_upload",
-      arguments: { id: "nope" },
-    })) as Answer
+    const missing = (await client.callTool(
+      entryCall("check_upload", { id: "nope" }),
+    )) as Answer
     expect(missing.isError).toBe(true)
 
-    const tooMany = (await client.callTool({
-      name: "create_upload_link",
-      arguments: { purpose: "x", max_files: 50 },
-    })) as Answer
+    const tooMany = (await client.callTool(
+      entryCall("create_upload_link", { purpose: "x", max_files: 50 }),
+    )) as Answer
     expect(tooMany.isError).toBe(true)
 
     await client.close()

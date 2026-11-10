@@ -21,7 +21,7 @@ import {
 } from "../gateway"
 import { setDuplicateCallWindow } from "../calls/config"
 import { decidePermission, type PermissionExecutor } from "../permissions"
-import { withCallHandle } from "../test-handles"
+import { withCallHandle, entryCall, listEveryTool } from "../test-handles"
 import { appendRequestLog } from "../request-log"
 import { createServer } from "../servers"
 import { scratchDatabase } from "../test-db"
@@ -196,7 +196,7 @@ afterEach(async () => {
 async function run(
   code: string,
   extra: Record<string, unknown> = {},
-  entry = "run_code_destructive",
+  entry = "run_destructive",
 ) {
   const result = await client.callTool({
     name: entry,
@@ -223,8 +223,8 @@ function logLines(): Array<Record<string, unknown>> {
 describe("the token right", () => {
   it("is off unless the owner turns it on, and only then is there a tool", async () => {
     await connect(false)
-    const { tools } = await client.listTools()
-    expect(tools.map((tool) => tool.name)).not.toContain("run_code_destructive")
+    const { tools } = await listEveryTool(client)
+    expect(tools.map((tool) => tool.name)).not.toContain("run_destructive")
     expect(scope.runCode).toBe(false)
 
     await updateApiToken(ctx, scope.tokenId, {
@@ -239,9 +239,9 @@ describe("the token right", () => {
   })
 
   it("is in the instructions of a token that has it, and no other", () => {
-    expect(buildInstructions([])).not.toContain("run_code_destructive")
+    expect(buildInstructions([])).not.toContain("run_destructive")
     expect(buildInstructions([], { runCode: true })).toContain(
-      "run_code_destructive",
+      "run_destructive",
     )
   })
 })
@@ -278,8 +278,8 @@ describe("a program's calls", () => {
         .filter((line) => line.upstreamTool)
         .map((line) => [line.tool, line.server, line.upstreamTool, line.ok]),
     ).toEqual([
-      ["run_code_destructive", "postcards", "list_cards", true],
-      ["run_code_destructive", "postcards", "broken", false],
+      ["run_destructive", "postcards", "list_cards", true],
+      ["run_destructive", "postcards", "broken", false],
     ])
     expect(JSON.stringify(lines)).not.toContain("catch")
   })
@@ -344,13 +344,13 @@ describe("a program's calls", () => {
     expect(
       lines.find((line) => line.upstreamTool === "send_postcard"),
     ).toMatchObject({
-      tool: "run_code_destructive",
+      tool: "run_destructive",
       asked: true,
       request: request.id,
     })
     expect(
       lines.find(
-        (line) => line.tool === "run_code_destructive" && !line.upstreamTool,
+        (line) => line.tool === "run_destructive" && !line.upstreamTool,
       ),
     ).toMatchObject({ asked: true, request: request.id })
     expect(
@@ -680,8 +680,8 @@ describe("a program's calls", () => {
   })
 
   it("says in its description what the program has, and that no sandbox runs", async () => {
-    const { tools } = await client.listTools()
-    const tool = tools.find((entry) => entry.name === "run_code_destructive")
+    const { tools } = await listEveryTool(client)
+    const tool = tools.find((entry) => entry.name === "run_destructive")
     const code = (
       tool?.inputSchema.properties as Record<string, { description?: string }>
     ).code
@@ -715,10 +715,9 @@ describe("a program's calls", () => {
 
     const id = text.match(/kept the value as result ([\w-]+)/)?.[1]
     expect(id).toBeDefined()
-    const read = await client.callTool({
-      name: "read_result",
-      arguments: { id, length: 20 },
-    })
+    const read = await client.callTool(
+      entryCall("read_result", { id, length: 20 }),
+    )
     expect(JSON.stringify(read.content)).toContain('[{\\"id\\":0')
   })
 
@@ -886,7 +885,7 @@ describe("images and videos", () => {
     // The run is in the request log, as every run is; the image is not, as
     // a kept result is not.
     expect(logLines()).toEqual([
-      expect.objectContaining({ tool: "run_code_destructive", ok: true }),
+      expect.objectContaining({ tool: "run_destructive", ok: true }),
     ])
     expect(logLines()[0]).not.toHaveProperty("server")
   })
@@ -1263,8 +1262,8 @@ describe("the sandbox's languages", () => {
   it("offers bash and Python only while a runner is connected, and runs them there", async () => {
     await connect()
     const schema = async () =>
-      (await client.listTools()).tools.find(
-        (tool) => tool.name === "run_code_destructive",
+      (await listEveryTool(client)).tools.find(
+        (tool) => tool.name === "run_destructive",
       )!.inputSchema.properties as Record<string, { enum?: string[] }>
 
     expect(Object.keys(await schema())).toEqual(["code", "rerun"])
@@ -1291,7 +1290,7 @@ describe("the sandbox's languages", () => {
       ])
 
       const result = await client.callTool({
-        name: "run_code_destructive",
+        name: "run_destructive",
         arguments: { code: "echo hi", language: "bash" },
       })
       const text = JSON.stringify(result.content)
@@ -1634,10 +1633,7 @@ describe("a run that outlives its call", () => {
       `Call check_run with this id (${id}) for how it ends; don't start it again.`,
     )
 
-    const checked = await client.callTool({
-      name: "check_run",
-      arguments: { id },
-    })
+    const checked = await client.callTool(entryCall("check_run", { id }))
     const text = JSON.stringify(checked.content)
     expect(checked.isError).not.toBe(true)
     expect(text).toContain(`Run ${id}: finished`)
@@ -1687,7 +1683,7 @@ describe("a run that outlives its call", () => {
 
     await client.callTool(
       {
-        name: "run_code_destructive",
+        name: "run_destructive",
         arguments: { code: `await pcp.call("postcards", "slow_send")` },
       },
       { onprogress: (progress) => seen.push(progress) },
@@ -1730,7 +1726,7 @@ describe("a run that outlives its call", () => {
 })
 
 describe("a program's tier", () => {
-  it("lets run_code_read call Read tools only, and refuses the rest as an error the program catches, before asking", async () => {
+  it("lets run_read call Read tools only, and refuses the rest as an error the program catches, before asking", async () => {
     await connect()
     const result = await run(
       `await pcp.call("postcards", "list_cards")
@@ -1742,43 +1738,43 @@ describe("a program's tier", () => {
       }
       return refused`,
       {},
-      "run_code_read",
+      "run_read",
     )
 
     expect(result.isError).toBe(false)
     expect(result.text).toContain("postcards/archive is a Destructive tool")
-    expect(result.text).toContain("run the program with run_code_destructive")
+    expect(result.text).toContain("run the program with run_destructive")
     expect(ran.map((call) => call.tool)).toEqual(["list_cards"])
     expect(await db().permissionRequest.count()).toBe(0)
     // Its calls are logged under the entry it came through.
-    expect(logLines().map((line) => line.tool)).toContain("run_code_read")
+    expect(logLines().map((line) => line.tool)).toContain("run_read")
   })
 
   it("is a run of its own per tier: the same program through another entry runs again", async () => {
     await connect()
     const program = `return await pcp.call("postcards", "list_cards")`
 
-    expect((await run(program, {}, "run_code_read")).text).toContain("finished")
-    const again = await run(program, {}, "run_code_destructive")
+    expect((await run(program, {}, "run_read")).text).toContain("finished")
+    const again = await run(program, {}, "run_destructive")
     expect(again.text).not.toContain("PCP did not start it again")
     expect(ran).toHaveLength(2)
   })
 
   it("advertises each entry's tier in its annotations", async () => {
     await connect()
-    const { tools } = await client.listTools()
+    const { tools } = await listEveryTool(client)
     const hints = (name: string) =>
       tools.find((tool) => tool.name === name)?.annotations
 
-    expect(hints("run_code_read")).toMatchObject({
+    expect(hints("run_read")).toMatchObject({
       readOnlyHint: true,
       destructiveHint: false,
     })
-    expect(hints("run_code_write")).toMatchObject({
+    expect(hints("run_write")).toMatchObject({
       readOnlyHint: false,
       destructiveHint: false,
     })
-    expect(hints("run_code_destructive")).toMatchObject({
+    expect(hints("run_destructive")).toMatchObject({
       readOnlyHint: false,
       destructiveHint: true,
     })
@@ -1821,10 +1817,7 @@ describe("the same program again", () => {
     expect(runIdOf(rerun.text)).not.toBe(id)
     expect(ran).toHaveLength(3)
 
-    const checked = await client.callTool({
-      name: "check_run",
-      arguments: { id },
-    })
+    const checked = await client.callTool(entryCall("check_run", { id }))
     expect(JSON.stringify(checked.content)).toContain(
       "run_code's own answer carried its outcome",
     )
@@ -1846,8 +1839,7 @@ describe("the same program again", () => {
 
     expect(
       JSON.stringify(
-        (await client.callTool({ name: "check_run", arguments: { id } }))
-          .content,
+        (await client.callTool(entryCall("check_run", { id }))).content,
       ),
     ).toContain('It returned:\\n\\"sent\\"')
     expect(ran.map((call) => call.tool)).toEqual(["slow_send"])
@@ -1912,10 +1904,9 @@ describe("the same program again", () => {
     ).toContain("stopped at")
     const request = await db().permissionRequest.findFirstOrThrow()
 
-    const described = await client.callTool({
-      name: "describe",
-      arguments: { server: "postcards", tool: "send_postcard" },
-    })
+    const described = await client.callTool(
+      entryCall("describe", { server: "postcards", tool: "send_postcard" }),
+    )
     const handle = /"call_handle": "(ch_[a-z0-9_]+)"/.exec(
       (described.content as Array<{ text?: string }>)
         .map((part) => part.text ?? "")
@@ -1924,7 +1915,7 @@ describe("the same program again", () => {
 
     for (const text of [written, { $result: note.id }]) {
       const asked = await client.callTool({
-        name: "call_tool_destructive",
+        name: "execute_destructive",
         arguments: { call_handle: handle, arguments: { text } },
       })
       expect(JSON.stringify(asked.content)).toContain(request.id)
@@ -1952,7 +1943,7 @@ describe("the same call again (#115)", () => {
     extra: Record<string, unknown> = {},
   ) {
     const result = await client.callTool({
-      name: "call_tool_destructive",
+      name: "execute_destructive",
       arguments: {
         ...(await withCallHandle(client, {
           server: "postcards",

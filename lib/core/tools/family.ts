@@ -14,7 +14,7 @@ import { ERROR_META_KEY, PCP_META, type ToolErrorCode } from "./outcome"
 import { placeholdersFor, type ValidateOptions } from "./validate"
 
 /**
- * The tools of PCP's own families behind call_tool (the browser, mail and
+ * The tools of PCP's own families behind execute (the browser, mail and
  * calendar accounts, SSH servers, services, storage folders), defined
  * through @kaperkunde/mcp's defineInnerTool, the same interface as PCP's own
  * tools at /mcp (define.ts), and checked by the same validator:
@@ -22,7 +22,7 @@ import { placeholdersFor, type ValidateOptions } from "./validate"
  *   defineInnerTool({ name, title, description, input, output?,
  *                     annotations, aliases?, retired?, synonyms?, rules? })
  *
- * They are not served at /mcp: the gateway reaches them through call_tool
+ * They are not served at /mcp: the gateway reaches them through execute
  * and run_code, a wrapper's program through its calls, and each family runs
  * them with what it holds (a credential, a tab). So an inner tool has no
  * `run`; it publishes its schemas for the catalogue and checks a call's

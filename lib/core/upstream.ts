@@ -2179,7 +2179,7 @@ export type CallOptions = {
 
 /**
  * Runs one tool of a server. Every real call passes here, whatever made it
- * (call_tool, run_code, a wrapper, the owner's answer to a request), so
+ * (execute, run_code, a wrapper, the owner's answer to a request), so
  * this is where a server's calls are paced (lib/core/pacing/): by the
  * server, before anything is read or sent. The browser paces its actions
  * by the tab's site instead (browser/call.ts), and a wrapper's tool is
@@ -2248,7 +2248,7 @@ export async function callServerTool(
  * field is at then, and only here is it let through (browser-secrets.ts
  * admitSecretUse: the secret's origins and the token's allowance, or a
  * request to the owner) and decrypted (secrets.ts; a TOTP secret's code of
- * the moment). That is every way a type call comes: call_tool, run_code, a
+ * the moment). That is every way a type call comes: execute, run_code, a
  * wrapper or a browser flow (which needs the owner's binding for it too),
  * and the owner's own answer. The value is taken out of the answer and any
  * error, and the request log notes the secret's name and the origin.

@@ -42,7 +42,7 @@ export type GatewayTool = Pick<
   access: ToolAccess
   /**
    * Its effective tier (lib/core/tool-tiers.ts): which entry tools run it
-   * (call_tool_<tier> and the ones above).
+   * (execute_<tier> and the ones above).
    */
   tier: ToolTier
   /** The owner's tier for it, when they chose one (else its default). */
