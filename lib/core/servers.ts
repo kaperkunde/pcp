@@ -1,5 +1,3 @@
-import type { McpServer } from "@/lib/generated/prisma/client"
-
 import {
   DEFAULT_HEADER_NAME,
   DEFAULT_VALUE_TEMPLATE,
@@ -20,6 +18,15 @@ import { invalid, notFound, PcpError } from "./errors"
 import { newId } from "./ids"
 import { closeSshConnections } from "./ssh/client"
 import { normalizeAuthorizeParams } from "./oauth-client"
+import {
+  byServerName,
+  openServer,
+  openServers,
+  type OpenServer,
+  serverCreateData,
+  updateServerRow,
+  writeServer,
+} from "./server-meta"
 import {
   checkNewSecret,
   createSecret,
@@ -576,7 +583,7 @@ export async function extraAuthHeaders(
  * assistant's argument may never set one of them.
  */
 export async function authHeaderNames(
-  server: Pick<McpServer, "id" | "authType" | "authHeaderName">,
+  server: Pick<OpenServer, "id" | "authType" | "authHeaderName">,
 ): Promise<string[]> {
   // Basic authentication is the Authorization header, whatever the row says.
   if (server.authType === "basic") {
@@ -897,10 +904,9 @@ export async function listServers(ctx: VaultContext): Promise<ServerSummary[]> {
   const rows = await db().mcpServer.findMany({
     where: { vaultId: ctx.vaultId },
     include: { _count: { select: { tools: true } } },
-    orderBy: { name: "asc" },
   })
 
-  return rows.map(summarize)
+  return openServers(ctx, rows).sort(byServerName).map(summarize)
 }
 
 export async function getServer(ctx: VaultContext, id: string) {
@@ -916,13 +922,18 @@ export async function getServer(ctx: VaultContext, id: string) {
     throw notFound("That server")
   }
 
-  return row
+  return openServer(ctx, row)
 }
 
-export async function getServerBySlug(ctx: VaultContext, slug: string) {
-  return db().mcpServer.findUnique({
+export async function getServerBySlug(
+  ctx: VaultContext,
+  slug: string,
+): Promise<OpenServer | null> {
+  const row = await db().mcpServer.findUnique({
     where: { vaultId_slug: { vaultId: ctx.vaultId, slug } },
   })
+
+  return row ? openServer(ctx, row) : null
 }
 
 export async function createServer(
@@ -938,21 +949,26 @@ export async function createServer(
   await withNewSecret(ctx, newSecret, async (secretId) =>
     db().mcpServer.create({
       data: {
-        id,
-        vaultId: ctx.vaultId,
-        slug: await uniqueSlug(ctx.vaultId, slugify(data.name)),
-        ...data,
-        ...(definition
-          ? { definitionId: definition.id, description: definition.description }
-          : {}),
-        ...secretColumns(data, secretId),
+        ...serverCreateData(ctx, {
+          id,
+          vaultId: ctx.vaultId,
+          slug: await uniqueSlug(ctx.vaultId, slugify(data.name)),
+          ...data,
+          ...(definition
+            ? {
+                definitionId: definition.id,
+                description: definition.description,
+              }
+            : {}),
+          ...secretColumns(data, secretId),
+        }),
         authHeaders: extraAuthHeadersWrite(authExtraHeaders, {
           replace: false,
         }),
       },
     }),
   )
-  await ensureDefinition(id)
+  await ensureDefinition(ctx, id)
 
   return { id }
 }
@@ -999,17 +1015,14 @@ export async function updateServer(
 
   await withNewSecret(ctx, newSecret, async (secretId) => {
     Object.assign(data, secretColumns(data, secretId))
-    await db().mcpServer.update({
-      where: { id },
-      data: {
-        ...data,
-        authHeaders: extraAuthHeadersWrite(authExtraHeaders, {
-          replace: true,
-        }),
-        ...(dropTokens
-          ? { oauthTokensId: null, oauthConnectedAt: null, status: "unknown" }
-          : {}),
-      },
+    await writeServer(ctx, id, {
+      ...data,
+      authHeaders: extraAuthHeadersWrite(authExtraHeaders, {
+        replace: true,
+      }),
+      ...(dropTokens
+        ? { oauthTokensId: null, oauthConnectedAt: null, status: "unknown" }
+        : {}),
     })
   })
 
@@ -1018,7 +1031,7 @@ export async function updateServer(
   }
 
   // The description is the definition's: every instance carries it.
-  await shareDescription(id)
+  await shareDescription(ctx, id)
 
   return {
     reconnect:
@@ -1036,13 +1049,15 @@ export async function updateServer(
  * whether anything changed.
  */
 export async function setMcpHeaderCredential(
-  vaultId: string,
+  ctx: VaultContext,
   id: string,
   credential: { headerName: string; valueTemplate: string; secretId: string },
 ): Promise<boolean> {
-  const row = await db().mcpServer.findFirst({
+  const vaultId = ctx.vaultId
+  const found = await db().mcpServer.findFirst({
     where: { id, vaultId, kind: "mcp" },
   })
+  const row = found ? openServer(ctx, found) : null
 
   if (!row || (row.authType !== "none" && row.authType !== "header")) {
     return false
@@ -1081,18 +1096,15 @@ export async function setMcpHeaderCredential(
     )
   }
 
-  await db().mcpServer.update({
-    where: { id },
-    data: {
-      authType: "header",
-      authHeaderName: headerName,
-      authValueTemplate: template,
-      authSecretId: credential.secretId,
-      // Another credential can mean other tools: read them again.
-      status: "unknown",
-      statusMessage: "",
-      lastSyncedAt: null,
-    },
+  await writeServer(ctx, id, {
+    authType: "header",
+    authHeaderName: headerName,
+    authValueTemplate: template,
+    authSecretId: credential.secretId,
+    // Another credential can mean other tools: read them again.
+    status: "unknown",
+    statusMessage: "",
+    lastSyncedAt: null,
   })
 
   return true
@@ -1176,15 +1188,12 @@ async function writeOAuthClient(
     client.oauthClientId !== existing.oauthClientId
 
   await withNewSecret(ctx, newSecret, (secretId) =>
-    db().mcpServer.update({
-      where: { id: existing.id },
-      data: {
-        ...client,
-        oauthClientSecretId: secretId ?? client.oauthClientSecretId,
-        ...(dropTokens
-          ? { oauthTokensId: null, oauthConnectedAt: null, status: "unknown" }
-          : {}),
-      },
+    writeServer(ctx, existing.id, {
+      ...client,
+      oauthClientSecretId: secretId ?? client.oauthClientSecretId,
+      ...(dropTokens
+        ? { oauthTokensId: null, oauthConnectedAt: null, status: "unknown" }
+        : {}),
     }),
   )
 
@@ -1241,7 +1250,7 @@ export async function setServerPublicOnly(
   ctx: VaultContext,
   id: string,
   publicOnly: boolean,
-): Promise<McpServer> {
+): Promise<OpenServer> {
   const existing = await getServer(ctx, id)
 
   if (existing.kind !== "mcp" && existing.kind !== "openapi") {
@@ -1251,7 +1260,7 @@ export async function setServerPublicOnly(
     )
   }
 
-  return db().mcpServer.update({ where: { id }, data: { publicOnly } })
+  return updateServerRow(ctx, id, { publicOnly })
 }
 
 export async function deleteServer(ctx: VaultContext, id: string) {
@@ -1334,17 +1343,24 @@ export async function setToolDescription(
     data: { descriptionOverride: trimmed },
   })
   // A tool's description is the definition's: every instance gets it.
-  await shareToolDescription(serverId, toolName, trimmed)
+  await shareToolDescription(ctx, serverId, toolName, trimmed)
 }
 
+/**
+ * What the last contact with a server found. The message is sealed with
+ * the server's other values, so only a request that holds the vault's key
+ * writes one.
+ */
 export async function setServerStatus(
+  ctx: VaultContext,
   serverId: string,
   status: ServerStatus,
   message = "",
   extra: { lastSyncedAt?: Date } = {},
 ): Promise<void> {
-  await db().mcpServer.update({
-    where: { id: serverId },
-    data: { status, statusMessage: message.slice(0, 500), ...extra },
+  await writeServer(ctx, serverId, {
+    status,
+    statusMessage: message.slice(0, 500),
+    ...extra,
   })
 }

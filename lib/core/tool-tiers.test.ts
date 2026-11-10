@@ -139,7 +139,7 @@ describe("the owner's tiers", () => {
       await db().mcpServer.update({ where: { id }, data: { definitionId } })
     }
 
-    await storeTools(id, [
+    await storeTools(ctx, id, [
       {
         name: "list",
         description: "Lists.",
@@ -172,11 +172,11 @@ describe("the owner's tiers", () => {
     })
 
     // The tool drops out of a refresh and comes back: the choice stays.
-    await storeTools(first, [
+    await storeTools(ctx, first, [
       { name: "list", description: "Lists.", inputSchema: { type: "object" } },
     ])
     expect(await db().toolTier.count()).toBe(1)
-    await storeTools(first, [
+    await storeTools(ctx, first, [
       { name: "burn", description: "Burns.", inputSchema: { type: "object" } },
     ])
     expect(await toolTier(first, "burn")).toBe("write")

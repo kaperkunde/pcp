@@ -1,12 +1,17 @@
 import type { CallToolResult } from "@modelcontextprotocol/server"
 
 import type {
-  McpServer,
   McpTool,
   PermissionRequest,
   Prisma,
 } from "@/lib/generated/prisma/client"
 
+import {
+  openServer,
+  openServers,
+  type OpenServer,
+  SERVER_NAME_SELECT,
+} from "./server-meta"
 import {
   answerValue,
   readFields,
@@ -335,7 +340,7 @@ export type RegisterArgs = Omit<ServerInput, "authExtraHeaders"> & {
 export type PermissionAsk =
   | ({
       kind: "call"
-      server: McpServer
+      server: OpenServer
       /** Only the name is read: the gateway keeps a slimmer tool than the row. */
       tool: Pick<McpTool, "name">
       args: Record<string, unknown>
@@ -500,7 +505,7 @@ export type PermissionView = {
 }
 
 type Row = PermissionRequest & {
-  server: McpServer | null
+  server: OpenServer | null
   token: {
     name: string
     revokedAt: Date | null
@@ -550,7 +555,7 @@ export function permissionUrl(publicUrl: string, id: string): string {
  */
 export async function runCall(
   ctx: VaultContext,
-  server: McpServer,
+  server: OpenServer,
   toolName: string,
   args: Record<string, unknown>,
   {
@@ -649,7 +654,7 @@ export async function runCall(
  */
 async function ownerFirst(
   error: unknown,
-  { ctx, tokenId, publicUrl, server }: PermissionScope & { server: McpServer },
+  { ctx, tokenId, publicUrl, server }: PermissionScope & { server: OpenServer },
 ): Promise<CallToolResult | null> {
   // The browser needs the owner first: a site to allow, or a tab handed
   // over. Asked like any other request.
@@ -709,7 +714,7 @@ export type CodeCallOutcome =
  */
 export async function runCodeCall(
   ctx: VaultContext,
-  server: McpServer,
+  server: OpenServer,
   toolName: string,
   args: Record<string, unknown>,
   {
@@ -983,9 +988,10 @@ type LoadedRow = Prisma.PermissionRequestGetPayload<{
 
 /** A row as loaded, its token's name opened (token-names.ts). */
 function named(ctx: VaultContext, row: LoadedRow): Row {
-  const { token, ...rest } = row
+  const { token, server, ...rest } = row
   return {
     ...rest,
+    server: server ? openServer(ctx, server) : null,
     token: {
       name: tokenName(ctx, token),
       revokedAt: token.revokedAt,
@@ -1265,9 +1271,9 @@ async function summarizeRow(
           ],
         },
       },
-      select: { id: true, name: true, slug: true },
+      select: SERVER_NAME_SELECT,
     })
-    const asked = describeAccessAsk(levels, servers, tiers)
+    const asked = describeAccessAsk(levels, openServers(ctx, servers), tiers)
 
     return { ...asked, lines: [...asked.lines, asker] }
   }
@@ -1543,7 +1549,7 @@ async function summarizeRow(
  */
 async function wrapperCallLines(
   ctx: VaultContext,
-  server: McpServer,
+  server: OpenServer,
   operation: string | null,
 ): Promise<string[]> {
   const { calls, callLevels } = readWrapperOperation(operation)
@@ -3383,7 +3389,7 @@ async function executeRegister(
   // or nothing is made.
   if (
     asked.definition &&
-    (await definitionBasis(asked.definition.id)) !== asked.definition.basis
+    (await definitionBasis(ctx, asked.definition.id)) !== asked.definition.basis
   ) {
     throw new PcpError(
       "state",
@@ -3855,10 +3861,12 @@ export async function checkPermission(
   // says it needs connecting, so say where it is now.
   const added =
     view.kind === "register" && view.serverId
-      ? await db().mcpServer.findFirst({
-          where: { id: view.serverId, vaultId: scope.ctx.vaultId },
-          include: { _count: { select: { tools: true } } },
-        })
+      ? await db()
+          .mcpServer.findFirst({
+            where: { id: view.serverId, vaultId: scope.ctx.vaultId },
+            include: { _count: { select: { tools: true } } },
+          })
+          .then((found) => found && openServer(scope.ctx, found))
       : null
 
   if (added?.authType === "oauth") {

@@ -1,6 +1,10 @@
 import type { VaultContext } from "../context"
 import { db } from "../db"
-import { shareDescription, uniqueDefinitionSlug } from "../definition-rows"
+import {
+  shareDescription,
+  uniqueDefinitionSlug,
+  writeDefinition,
+} from "../definition-rows"
 import type { CloneInput } from "../definitions"
 import {
   changeEndpoint,
@@ -11,6 +15,7 @@ import {
 import { invalid, PcpError } from "../errors"
 import { checkPersonalNote, setPersonalNote } from "../personal-notes"
 import { findTextSecretByName } from "../secrets"
+import { writeServer } from "../server-meta"
 import {
   createServer,
   getServer,
@@ -349,13 +354,12 @@ async function settle(
         row.definitionId,
       )) === document.name
 
-    await db().serverDefinition.update({
-      where: { id: row.definitionId },
-      data: {
-        name: document.displayName,
-        ...(free ? { slug: document.name } : {}),
-      },
-    })
+    await writeDefinition(
+      ctx,
+      row.definitionId,
+      { name: document.displayName },
+      free ? { slug: document.name } : {},
+    )
   }
 
   await db().mcpServer.updateMany({
@@ -400,10 +404,10 @@ async function writeDescription(
   }).description
 
   if (row.description !== text) {
-    await db().mcpServer.update({ where: { id }, data: { description: text } })
+    await writeServer(ctx, id, { description: text })
   }
 
-  await shareDescription(id)
+  await shareDescription(ctx, id)
 }
 
 async function applySkill(
@@ -675,7 +679,7 @@ async function applyEndpoint(
   } else {
     // What the definition holds, and nothing of the instance's own.
     const existing = await getServer(ctx, id)
-    const stored = await storedSpec(id)
+    const stored = await storedSpec(ctx, id)
     const newText = stored?.text !== document.spec.text
 
     await changeEndpoint(ctx, id, {
@@ -783,7 +787,7 @@ async function applyService(
   }
 
   // What the definition holds, and nothing of the instance's own.
-  await writeServiceDefinition(id, document.definition)
+  await writeServiceDefinition(ctx, id, document.definition)
   await writeDescription(ctx, id, document.description)
   await settle(ctx, id, document)
 

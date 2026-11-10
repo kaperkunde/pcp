@@ -25,6 +25,7 @@ import {
   setToolDescription,
   updateServer,
 } from "./servers"
+import { writeServer } from "./server-meta"
 import { scratchDatabase } from "./test-db"
 import { callServerTool, syncServerTools } from "./upstream"
 import { setupVault } from "./vault"
@@ -426,7 +427,7 @@ describe("downloaded schemas", () => {
         authType: "none",
       })
       body = "<html>moved</html>"
-      const result = await syncEndpointTools(await getServer(ctx, id))
+      const result = await syncEndpointTools(ctx, await getServer(ctx, id))
 
       expect(result.status).toBe("error")
       const server = await getServer(ctx, id)
@@ -659,13 +660,9 @@ describe("tools an earlier PCP built", () => {
       where: { serverId: id },
       data: { builtWith: "0.0.1" },
     })
-    await db().mcpServer.update({
-      where: { id },
-      data: {
-        status: "ok",
-        statusMessage:
-          "The schema at its URL has changed since it was approved.",
-      },
+    await writeServer(ctx, id, {
+      status: "ok",
+      statusMessage: "The schema at its URL has changed since it was approved.",
     })
 
     return id
@@ -677,7 +674,10 @@ describe("tools an earlier PCP built", () => {
       where: { serverId: id },
     })
 
-    expect(await rebuildOutdatedEndpoints()).toEqual({ rebuilt: 1, failed: [] })
+    expect(await rebuildOutdatedEndpoints(ctx)).toEqual({
+      rebuilt: 1,
+      failed: [],
+    })
 
     const server = await getServer(ctx, id)
     const listPets = server.tools.find((tool) => tool.name === "listPets")!
@@ -694,7 +694,10 @@ describe("tools an earlier PCP built", () => {
     expect(after.builtWith).toBe(PCP_VERSION)
     expect(after.fetchedAt).toEqual(before.fetchedAt)
 
-    expect(await rebuildOutdatedEndpoints()).toEqual({ rebuilt: 0, failed: [] })
+    expect(await rebuildOutdatedEndpoints(ctx)).toEqual({
+      rebuilt: 0,
+      failed: [],
+    })
   })
 
   it("stay as they are when the kept schema no longer builds, to be tried again", async () => {
@@ -706,7 +709,7 @@ describe("tools an earlier PCP built", () => {
       },
     })
 
-    const result = await rebuildOutdatedEndpoints()
+    const result = await rebuildOutdatedEndpoints(ctx)
     expect(result.rebuilt).toBe(0)
     expect(result.failed).toEqual([
       { serverId: id, message: expect.any(String) },
@@ -727,6 +730,7 @@ describe("tools an earlier PCP built", () => {
     const builds = await builtByEarlierPcp()
     expect(
       await endpointMigration(
+        ctx,
         await db().mcpServer.findUniqueOrThrow({ where: { id: builds } }),
       ),
     ).toBeNull()
@@ -749,7 +753,7 @@ describe("tools an earlier PCP built", () => {
       where: { id: broken },
     })
 
-    const message = await endpointMigration(server)
+    const message = await endpointMigration(ctx, server)
     expect(message).toMatch(/^This endpoint needs migrating: /)
     expect(message).toContain("update_endpoint's add_patches")
     // Its tools stay as they were, and it is not built again for nothing.
@@ -758,7 +762,7 @@ describe("tools an earlier PCP built", () => {
         (tool) => tool.description === "stale",
       ),
     ).toBe(true)
-    expect(await endpointMigration(server)).toBe(message)
+    expect(await endpointMigration(ctx, server)).toBe(message)
   })
 
   it("are marked with the version that built them", async () => {
@@ -857,10 +861,7 @@ describe("a credential in several headers", () => {
     const echo = await startTestApi((req, res) =>
       json(res, 200, { echoed: req.headers["x-secret-api-key"] }),
     )
-    await db().mcpServer.update({
-      where: { id },
-      data: { url: `${echo.origin}/api` },
-    })
+    await writeServer(ctx, id, { url: `${echo.origin}/api` })
 
     try {
       const result = await callServerTool(
@@ -1054,10 +1055,7 @@ describe("a user name and password (Basic authentication)", () => {
     const echo = await startTestApi((req, res) =>
       json(res, 200, { youSent: req.headers.authorization }),
     )
-    await db().mcpServer.update({
-      where: { id },
-      data: { url: `${echo.origin}/api` },
-    })
+    await writeServer(ctx, id, { url: `${echo.origin}/api` })
 
     try {
       const result = await callServerTool(
@@ -1213,10 +1211,7 @@ describe("calling an endpoint tool", () => {
       }
       json(res, 200, { youSent: req.headers["x-api-key"] })
     })
-    await db().mcpServer.update({
-      where: { id: server.id },
-      data: { url: `${reflecting.origin}/api` },
-    })
+    await writeServer(ctx, server.id, { url: `${reflecting.origin}/api` })
     const moved = await getServer(ctx, server.id)
 
     try {

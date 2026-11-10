@@ -21,6 +21,7 @@ import {
   type PermissionExecutor,
   type PermissionScope,
 } from "./permissions"
+import { serverCreateData } from "./server-meta"
 import { scratchDatabase } from "./test-db"
 import { copyTokenAccess } from "./tool-access"
 import { setupVault } from "./vault"
@@ -778,13 +779,13 @@ describe("a site's check of its visitors", () => {
     // A token with other servers than the browser.
     const otherId = newId()
     await db().mcpServer.create({
-      data: {
+      data: serverCreateData(ctx, {
         id: otherId,
         vaultId: ctx.vaultId,
         name: "Other",
         slug: "other",
         url: "https://other.example/mcp",
-      },
+      }),
     })
     await updateApiToken(ctx, tokenId, {
       name: "Claude",

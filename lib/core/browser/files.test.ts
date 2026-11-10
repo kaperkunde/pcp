@@ -13,8 +13,6 @@ import {
   vi,
 } from "vitest"
 
-import type { McpServer } from "@/lib/generated/prisma/client"
-
 import { createApiToken, resolveApiToken } from "../api-tokens"
 import type { VaultContext } from "../context"
 import { db } from "../db"
@@ -43,6 +41,8 @@ import { chromiumExecutable } from "./executable"
 import { closeAllBrowsers, runningBrowser } from "./runtime"
 import { createBrowserServer } from "./server"
 import { browserTools } from "./tools"
+import type { OpenServer } from "../server-meta"
+import { openServer } from "../server-meta"
 
 // Files in and out of the browser, against a real headless Chromium and
 // pages served on this machine: a download kept as the token's result (and
@@ -66,7 +66,7 @@ let api: TestApi
 let elsewhere: TestApi
 let ctx: VaultContext
 let tokenId: string
-let server: McpServer
+let server: OpenServer
 
 const FILES = `<!doctype html><title>Files</title>
 <a href="/invoice">Invoice</a>
@@ -100,9 +100,12 @@ beforeEach(async () => {
     allowAllServers: true,
   })
   tokenId = (await resolveApiToken(token))!.tokenId
-  server = await db().mcpServer.findUniqueOrThrow({
-    where: { id: (await createBrowserServer(ctx)).id },
-  })
+  server = openServer(
+    ctx,
+    await db().mcpServer.findUniqueOrThrow({
+      where: { id: (await createBrowserServer(ctx)).id },
+    }),
+  )
   elsewhere = await startTestApi((_, res) => {
     res.setHeader("content-type", "application/pdf")
     res.setHeader("content-disposition", 'attachment; filename="other.pdf"')

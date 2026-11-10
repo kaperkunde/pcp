@@ -4,6 +4,7 @@ import {
   type Server,
   type ServerResponse,
 } from "node:http"
+import { writeServer } from "../server-meta"
 import { mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs"
 import type { AddressInfo } from "node:net"
 
@@ -1013,10 +1014,11 @@ describe("a running service", { timeout: 30_000 }, () => {
   it("never reaches a tunnelled service's endpoint from PCP's machine", async () => {
     const { endpoint } = await launched()
     // Its SSH server's host key forgotten: no channel, and no way around.
-    await db().mcpServer.updateMany({
+    for (const { id } of await db().mcpServer.findMany({
       where: { kind: "ssh" },
-      data: { sshHostKey: null },
-    })
+    })) {
+      await writeServer(ctx, id, { sshHostKey: null })
+    }
     closeAllSshConnections()
 
     await expect(
@@ -1071,6 +1073,7 @@ describe("a running service", { timeout: 30_000 }, () => {
     // server sends nothing new until the container is made again.
     mcpAuthorization = `Bearer ${API_KEY}`
     await writeServiceDefinition(
+      ctx,
       launched.id,
       parseServiceDefinition(definition({ registers: MCP_WITH_AUTH })),
     )
@@ -1144,6 +1147,7 @@ describe("a running service", { timeout: 30_000 }, () => {
       },
     })
     await writeServiceDefinition(
+      ctx,
       launched.id,
       parseServiceDefinition(definition({ registers: MCP_WITH_AUTH })),
     )
@@ -1188,6 +1192,7 @@ describe("a running service", { timeout: 30_000 }, () => {
       },
     })
     await writeServiceDefinition(
+      ctx,
       launched.id,
       parseServiceDefinition(definition({ registers: MCP_WITH_AUTH })),
     )

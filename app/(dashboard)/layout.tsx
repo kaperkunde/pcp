@@ -9,6 +9,7 @@ import { listOwnerNotices } from "@/lib/core/owner-notices"
 import { listPendingRequests } from "@/lib/core/permissions"
 import { runDueSyncs } from "@/lib/core/repos/sync"
 import { ensureSealed } from "@/lib/core/sealing/convert"
+import { catchUpVault } from "@/lib/core/vault-upkeep"
 import { deliverUploads, reconcileServices } from "@/lib/core/upstream"
 import { availableUpdate } from "@/lib/core/updates/state"
 import { getVault } from "@/lib/core/vault"
@@ -41,11 +42,16 @@ export default async function DashboardLayout({
   // Linked repositories due a sync are synced once this page is sent, with
   // the key the owner's session brought: nothing holds one in between.
   after(() => runDueSyncs(ctx))
-  // What an older PCP kept in plain text is sealed, a batch at a time.
+  // What an older PCP kept in plain text is sealed, a batch at a time;
+  // and what once ran at boot (endpoints another version built, the
+  // browser's tools) runs once per process, now that a key is here.
   after(() =>
-    ensureSealed(ctx).catch((error) =>
-      console.error("[sealing] could not seal the vault's rows", error),
-    ),
+    Promise.all([
+      ensureSealed(ctx).catch((error) =>
+        console.error("[sealing] could not seal the vault's rows", error),
+      ),
+      catchUpVault(ctx),
+    ]),
   )
   // Services you left running whose container stopped (the SSH server
   // restarted) are started again the same way, throttled.

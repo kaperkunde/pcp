@@ -17,6 +17,7 @@ import { createServer } from "./servers"
 import { createSkill, setTokenSkills } from "./skills"
 import { createSession, resolveSession } from "./sessions"
 import { SETTING_PUBLIC_URL, setSetting } from "./settings"
+import { serverCreateData } from "./server-meta"
 import { scratchDatabase } from "./test-db"
 import { keepResult } from "./tool-results"
 import { createUploadLink } from "./upload-links"
@@ -84,7 +85,7 @@ async function populate() {
   })
   // A service on an SSH server: rows only, nothing connects here.
   await db().mcpServer.create({
-    data: {
+    data: serverCreateData(ctx, {
       id: "svc1",
       vaultId,
       kind: "service",
@@ -101,11 +102,11 @@ async function populate() {
           registeredId: server.id,
         },
       },
-    },
+    }),
   })
   // A storage root on an SSH server: rows only, nothing connects here.
   await db().mcpServer.create({
-    data: {
+    data: serverCreateData(ctx, {
       id: "files1",
       vaultId,
       kind: "storage",
@@ -117,9 +118,9 @@ async function populate() {
         create: { id: "entry1", nameKey: "k", meta: new Uint8Array([1]) },
       },
       storagePending: { create: { objectId: "0".repeat(32) } },
-    },
+    }),
   })
-  await storeTools(server.id, [
+  await storeTools(ctx, server.id, [
     { name: "alpha", description: "First", inputSchema: { type: "object" } },
   ])
   const { id: tokenId, token } = await createApiToken(ctx, {

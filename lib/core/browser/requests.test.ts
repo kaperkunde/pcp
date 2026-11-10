@@ -1,8 +1,6 @@
 import type { CallToolResult } from "@modelcontextprotocol/server"
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
 
-import type { McpServer } from "@/lib/generated/prisma/client"
-
 import { createApiToken, resolveApiToken } from "../api-tokens"
 import type { VaultContext } from "../context"
 import { db } from "../db"
@@ -27,6 +25,7 @@ import {
 } from "../browser-scripts"
 import { createBrowserServer, findBrowserServer } from "./server"
 import { OwnerNeeded } from "./types"
+import type { OpenServer } from "../server-meta"
 
 // The browser's requests to the owner, with the browser itself replaced:
 // a site to open, asked like a web fetch and answered per site, and a tab
@@ -35,7 +34,7 @@ import { OwnerNeeded } from "./types"
 let cleanup: () => Promise<void>
 let ctx: VaultContext
 let tokenId: string
-let server: McpServer
+let server: OpenServer
 let token = ""
 
 async function resolveApiTokenFor() {

@@ -8,6 +8,12 @@ import { sealedSecretMeta } from "../secret-meta"
 import { isSealedText } from "../sealed"
 import { sealedTokenName } from "../token-names"
 import { sealedResultName } from "../tool-results"
+import {
+  plainServerMeta,
+  sealedServerMeta,
+  SERVER_META_SELECT,
+} from "../server-meta"
+import { sealedDefinitionMeta } from "../definition-rows"
 import { PLAIN_SETTINGS, storedSetting } from "../settings"
 import { sealingState } from "./state"
 
@@ -246,6 +252,59 @@ export const SEAL_CONVERTERS: Converter[] = [
       const { count } = await db().toolResult.updateMany({
         where: { id: row.id, plainName: row.plainName },
         data: sealedResultName(ctx, row.id, row.plainName),
+      })
+      return count === 1
+    },
+  }),
+  converter({
+    table: "mcp_server",
+    read: (ctx, limit) =>
+      db().mcpServer.findMany({
+        where: { vaultId: ctx.vaultId, meta: null },
+        select: { ...SERVER_META_SELECT, updatedAt: true },
+        take: limit,
+      }),
+    write: async (ctx, row) => {
+      // Every write of these values since seals the whole row, so a row
+      // still without meta is still as it was read.
+      const { count } = await db().mcpServer.updateMany({
+        where: { id: row.id, meta: null },
+        data: {
+          ...sealedServerMeta(ctx, row.id, plainServerMeta(row)),
+          updatedAt: row.updatedAt,
+        },
+      })
+      return count === 1
+    },
+  }),
+  converter({
+    table: "server_definition",
+    read: (ctx, limit) =>
+      db().serverDefinition.findMany({
+        where: { vaultId: ctx.vaultId, meta: null },
+        select: {
+          id: true,
+          plainName: true,
+          plainDescription: true,
+          updatedAt: true,
+        },
+        take: limit,
+      }),
+    write: async (ctx, row) => {
+      const { count } = await db().serverDefinition.updateMany({
+        where: {
+          id: row.id,
+          meta: null,
+          plainName: row.plainName,
+          plainDescription: row.plainDescription,
+        },
+        data: {
+          ...sealedDefinitionMeta(ctx, row.id, {
+            name: row.plainName,
+            description: row.plainDescription,
+          }),
+          updatedAt: row.updatedAt,
+        },
       })
       return count === 1
     },

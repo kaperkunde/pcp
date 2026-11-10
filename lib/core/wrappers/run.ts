@@ -1,7 +1,5 @@
 import type { CallToolResult } from "@modelcontextprotocol/server"
 
-import type { McpServer } from "@/lib/generated/prisma/client"
-
 import { isConnectResult } from "../connect"
 import type { VaultContext } from "../context"
 import { runProgram } from "../code/run"
@@ -60,6 +58,7 @@ import {
   type Rename,
 } from "../tools/family"
 import { argumentsRefusal, validate } from "../tools/validate"
+import { findServer, type OpenServer } from "../server-meta"
 
 /**
  * A call to a wrapper's tool: its program, run as run_code's are (one
@@ -170,7 +169,7 @@ export function wrapperRunTimeout(flow: boolean): number {
 async function callWrapperTool(
   env: WrapperEnv,
   base: PermissionExecutor,
-  server: McpServer,
+  server: OpenServer,
   toolName: string,
   args: Record<string, unknown>,
   {
@@ -356,10 +355,9 @@ async function innerCall(
   // On the owner's approval the calls are the wrapper's own: any enabled
   // server of the vault, whether or not this token reaches it.
   const onApproval = definition.callLevels === "approved"
-  const target: McpServer | undefined = onApproval
-    ? ((await db().mcpServer.findFirst({
-        where: { vaultId: env.ctx.vaultId, slug },
-      })) ?? undefined)
+  const target: OpenServer | undefined = onApproval
+    ? ((await findServer(env.ctx, { vaultId: env.ctx.vaultId, slug })) ??
+      undefined)
     : servers.find((entry) => entry.slug === slug)
   const declared =
     target &&

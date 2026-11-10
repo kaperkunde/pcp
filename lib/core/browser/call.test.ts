@@ -9,8 +9,6 @@ import {
   vi,
 } from "vitest"
 
-import type { McpServer } from "@/lib/generated/prisma/client"
-
 import { createApiToken, resolveApiToken } from "../api-tokens"
 import type { VaultContext } from "../context"
 import { db } from "../db"
@@ -37,6 +35,8 @@ import { closeAllBrowsers, closeBrowser, runningBrowser } from "./runtime"
 import { refsOf } from "./refs"
 import { createBrowserServer } from "./server"
 import { isOwnerNeeded, type OwnerNeeded } from "./types"
+import type { OpenServer } from "../server-meta"
+import { openServer } from "../server-meta"
 
 // The browser's tools against a real headless Chromium and pages served on
 // this machine. Skipped where no Chromium is installed (`pnpm exec
@@ -61,7 +61,7 @@ let api: TestApi
 let elsewhere: TestApi
 let ctx: VaultContext
 let tokenId: string
-let server: McpServer
+let server: OpenServer
 
 const FORM = `<!doctype html><title>Form</title>
 <h1 id="greeting">Who are you?</h1>
@@ -194,9 +194,12 @@ beforeEach(async () => {
     allowAllServers: true,
   })
   tokenId = (await resolveApiToken(token))!.tokenId
-  server = await db().mcpServer.findUniqueOrThrow({
-    where: { id: (await createBrowserServer(ctx)).id },
-  })
+  server = openServer(
+    ctx,
+    await db().mcpServer.findUniqueOrThrow({
+      where: { id: (await createBrowserServer(ctx)).id },
+    }),
+  )
   elsewhere = await startTestApi((_, res) => {
     res.setHeader("content-type", "text/html; charset=utf-8")
     res.end("<title>Elsewhere</title><h1>Elsewhere</h1>")

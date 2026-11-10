@@ -1,7 +1,4 @@
-import type {
-  McpServer as McpServerRow,
-  McpTool,
-} from "@/lib/generated/prisma/client"
+import type { McpTool } from "@/lib/generated/prisma/client"
 
 import { allowanceHolds, loadToolAllowances } from "./allowances"
 import type { ResolvedToken } from "./api-tokens"
@@ -9,6 +6,7 @@ import type { DetectedClient } from "./clients/detect"
 import type { ToolAccess, ToolTier } from "./constants"
 import { db } from "./db"
 import { readServerNote } from "./personal-notes"
+import { byServerName, openServer, type OpenServer } from "./server-meta"
 import { accessKey, effectiveAccess, loadToolAccess } from "./tool-access"
 import { loadToolTiers } from "./tool-tiers"
 import { readWrapperOperation } from "./wrappers/definition"
@@ -54,7 +52,7 @@ export type GatewayTool = Pick<
   hiddenBy?: string
 }
 
-export type GatewayServer = McpServerRow & {
+export type GatewayServer = OpenServer & {
   tools: GatewayTool[]
   /**
    * The owner's own note on the server (lib/core/personal-notes.ts),
@@ -106,32 +104,35 @@ export async function loadGatewayServers(
           },
         },
       },
-      orderBy: { name: "asc" },
     }),
     loadToolAccess(scope.ctx.vaultId, scope.tokenId),
     loadToolAllowances(scope.tokenId, now),
   ])
 
   const tiers = await loadToolTiers(scope.ctx.vaultId, servers)
-  const loaded: GatewayServer[] = servers.map((server) => ({
-    ...server,
-    note: readServerNote(scope.ctx, server),
-    tools: server.tools.map((tool) => {
-      const level = effectiveAccess(stored, server.id, tool.name)
-      const until = allowances.get(accessKey(server.id, tool.name))
+  const loaded: GatewayServer[] = servers
+    .map((row) => openServer(scope.ctx, row))
+    .sort(byServerName)
+    .map((server) => ({
+      ...server,
+      note: readServerNote(scope.ctx, server),
+      tools: server.tools.map((tool) => {
+        const level = effectiveAccess(stored, server.id, tool.name)
+        const until = allowances.get(accessKey(server.id, tool.name))
 
-      return {
-        ...tool,
-        tier: tiers.get(accessKey(server.id, tool.name))?.tier ?? "destructive",
-        tierOverride:
-          tiers.get(accessKey(server.id, tool.name))?.override ?? null,
-        access:
-          level === "ask" && allowanceHolds(until, now.getTime())
-            ? "allowed"
-            : level,
-      }
-    }),
-  }))
+        return {
+          ...tool,
+          tier:
+            tiers.get(accessKey(server.id, tool.name))?.tier ?? "destructive",
+          tierOverride:
+            tiers.get(accessKey(server.id, tool.name))?.override ?? null,
+          access:
+            level === "ask" && allowanceHolds(until, now.getTime())
+              ? "allowed"
+              : level,
+        }
+      }),
+    }))
 
   return applyWrappers(loaded)
 }

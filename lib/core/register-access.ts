@@ -1,3 +1,4 @@
+import type { VaultContext } from "./context"
 import { calendarTools } from "./caldav/tools"
 import { contentInstance } from "./definition-rows"
 import { generateEndpointTools, storedSpec } from "./endpoints"
@@ -17,15 +18,16 @@ import {
  * tools are known once PCP reads them.
  */
 export async function knownRegisterTools(
+  ctx: VaultContext,
   input: RegisterArgs,
 ): Promise<KnownTool[] | null> {
   if (input.endpoint) {
     // Another endpoint of a definition: the schema they share.
     const source =
       !input.endpoint.spec && input.definition
-        ? await contentInstance(input.definition.id)
+        ? await contentInstance(ctx, input.definition.id)
         : null
-    const spec = source ? (await storedSpec(source.id))?.text : null
+    const spec = source ? (await storedSpec(ctx, source.id))?.text : null
 
     return generateEndpointTools(spec ?? input.endpoint.spec, {
       readOnly: input.endpoint.readOnly,
@@ -57,6 +59,7 @@ export async function knownRegisterTools(
 
 /** register_server's tool_access, read against what it would add. */
 export async function proposeRegisterAccess(
+  ctx: VaultContext,
   input: RegisterArgs,
   arg: ToolAccessArg | undefined,
 ): Promise<ProposedAccess | null> {
@@ -64,7 +67,7 @@ export async function proposeRegisterAccess(
     return null
   }
 
-  const tools = await knownRegisterTools(input)
+  const tools = await knownRegisterTools(ctx, input)
 
   return proposeToolAccess(arg, {
     ...(tools ? { tools } : {}),
@@ -80,10 +83,11 @@ export async function proposeRegisterAccess(
 
 /** The request with what the assistant proposed for its tools, if anything. */
 export async function withRegisterAccess(
+  ctx: VaultContext,
   input: RegisterArgs,
   arg: ToolAccessArg | undefined,
 ): Promise<RegisterArgs> {
-  const proposedAccess = await proposeRegisterAccess(input, arg)
+  const proposedAccess = await proposeRegisterAccess(ctx, input, arg)
 
   return proposedAccess ? { ...input, proposedAccess } : input
 }

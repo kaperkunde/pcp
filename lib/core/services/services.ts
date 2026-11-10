@@ -2,7 +2,7 @@ import type { Duplex } from "node:stream"
 
 import type { CallToolResult } from "@modelcontextprotocol/server"
 
-import type { McpServer, ServiceSpec } from "@/lib/generated/prisma/client"
+import type { ServiceSpec } from "@/lib/generated/prisma/client"
 
 import { storeTools, type SyncResult } from "../catalogue"
 import type { VaultContext } from "../context"
@@ -118,6 +118,15 @@ import {
 } from "./tools"
 import { checkUpdateImage, prepareServiceUpdate } from "./updates"
 import { SECRET_META_SELECT, secretName } from "../secret-meta"
+import {
+  findServer,
+  openServer,
+  type OpenServer,
+  SERVER_META_SELECT,
+  serverCreateData,
+  serverName,
+  writeServer,
+} from "../server-meta"
 
 /**
  * Services: containers PCP runs with the owner's own Docker or Podman, on
@@ -209,7 +218,9 @@ export function proxySecretName(serviceId: string): string {
 }
 
 export type LoadedService = {
-  server: McpServer
+  /** The request's: what opens the service's sealed values and writes them. */
+  ctx: VaultContext
+  server: OpenServer
   spec: ServiceSpec
   definition: ServiceDefinition
   publish: ServicePublish
@@ -222,7 +233,7 @@ export type LoadedService = {
   /** What the owner asked of it last. */
   intent: ServiceIntent
   /** The SSH server it runs on; null once that was deleted. */
-  host: McpServer | null
+  host: OpenServer | null
 }
 
 function engineOf(value: string): ServiceEngine {
@@ -244,10 +255,12 @@ export async function loadService(
   }
 
   const { serviceSpec: spec, ...row } = server
-  const { host, ...bare } = spec
+  const { host: hostRow, ...bare } = spec
+  const host = hostRow ? openServer(ctx, hostRow) : null
 
   return {
-    server: row,
+    ctx,
+    server: openServer(ctx, row),
     spec: bare,
     definition: readServiceDefinition(spec.definition),
     publish: readPublish(spec.publish),
@@ -328,7 +341,7 @@ function pageOf(serverId: string, publicUrl: string): string {
   return `${publicUrl.replace(/\/+$/, "")}/servers/${serverId}`
 }
 
-function sshHostOf(host: McpServer): string {
+function sshHostOf(host: OpenServer): string {
   return parseSshAddress(host.url).host
 }
 
@@ -357,7 +370,7 @@ export type PreparedLaunch = {
   name: string
   description: string
   note: string | null
-  host: McpServer
+  host: OpenServer
   definition: ServiceDefinition
   definitionId: string | null
   publish: ServicePublish
@@ -379,8 +392,9 @@ export async function prepareLaunch(
 ): Promise<PreparedLaunch> {
   const { name, description } = normalizeNameAndDescription(input)
   const note = checkPersonalNote(input.note)
-  const host = await db().mcpServer.findFirst({
-    where: { id: input.hostId, vaultId: ctx.vaultId },
+  const host = await findServer(ctx, {
+    id: input.hostId,
+    vaultId: ctx.vaultId,
   })
 
   if (!host || host.kind !== "ssh") {
@@ -617,7 +631,7 @@ export async function launchServiceOn(
 
     await db().$transaction([
       db().mcpServer.create({
-        data: {
+        data: serverCreateData(ctx, {
           id,
           vaultId: ctx.vaultId,
           kind: "service",
@@ -628,7 +642,7 @@ export async function launchServiceOn(
           authType: "none",
           authSecretId: credentialId,
           definitionId: definitionRow?.id ?? null,
-        },
+        }),
       }),
       db().serviceSpec.create({
         data: {
@@ -648,13 +662,14 @@ export async function launchServiceOn(
       }),
     ])
     made = true
-    await ensureDefinition(id)
+    await ensureDefinition(ctx, id)
 
     // Another of a definition built here: its siblings pin the image built.
     if (rebuilt && definitionRow) {
-      await writeServiceDefinition(id, prepared.definition)
+      await writeServiceDefinition(ctx, id, prepared.definition)
     }
     await storeTools(
+      ctx,
       id,
       serviceTools({
         service: prepared.name,
@@ -679,7 +694,7 @@ export async function launchServiceOn(
       })
     }
 
-    await setServerStatus(id, "ok", "", { lastSyncedAt: new Date() })
+    await setServerStatus(ctx, id, "ok", "", { lastSyncedAt: new Date() })
 
     return {
       id,
@@ -1318,6 +1333,7 @@ async function recordStatus(
     status.health !== "unhealthy"
 
   await setServerStatus(
+    loaded.ctx,
     loaded.server.id,
     fine ? "ok" : "error",
     fine ? "" : statusWords(loaded.server.name, status),
@@ -1426,7 +1442,11 @@ export async function recreateServiceOn(
 
   if (image !== loaded.definition.image) {
     loaded.definition = { ...loaded.definition, image }
-    await writeServiceDefinition(loaded.server.id, loaded.definition)
+    await writeServiceDefinition(
+      loaded.ctx,
+      loaded.server.id,
+      loaded.definition,
+    )
   }
 
   await engineCall(() => removeContainer(access.host, loaded.engine, name))
@@ -1515,20 +1535,17 @@ async function followRegisteredAuth(
   }
 
   try {
-    await setMcpHeaderCredential(loaded.server.vaultId, id, {
+    await setMcpHeaderCredential(loaded.ctx, id, {
       headerName: auth.header,
       valueTemplate: auth.template,
       secretId,
     })
     return null
   } catch (error) {
-    const registered = await db().mcpServer.findUnique({
-      where: { id },
-      select: { name: true },
-    })
+    const registered = await findServer(loaded.ctx, { id })
     const note = `${loaded.server.name} was made again, but the MCP server it registered${registered ? ` (${registered.name})` : ""} could not take ${auth.env}'s secret in ${auth.header} and sends what it did before: ${error instanceof Error ? error.message : String(error)}`
 
-    await setServerStatus(id, "error", note).catch(() => {})
+    await setServerStatus(loaded.ctx, id, "error", note).catch(() => {})
     return note
   }
 }
@@ -1570,6 +1587,7 @@ async function failedRecreate(
     error instanceof Error ? error.message : String(error),
   )
   await setServerStatus(
+    loaded.ctx,
     loaded.server.id,
     "error",
     `${loaded.server.name} could not be made again and has no container now: Start makes it again once what stopped it is fixed. ${said}`,
@@ -1682,7 +1700,7 @@ export async function updateServiceOn(
     JSON.stringify(definition) !== JSON.stringify(loaded.definition)
 
   if (changed) {
-    await writeServiceDefinition(loaded.server.id, definition)
+    await writeServiceDefinition(loaded.ctx, loaded.server.id, definition)
   }
 
   const next = { ...loaded, definition }
@@ -1702,6 +1720,7 @@ export async function updateServiceOn(
  * run the old one until each is updated.
  */
 export async function writeServiceDefinition(
+  ctx: VaultContext,
   id: string,
   definition: ServiceDefinition,
 ): Promise<void> {
@@ -1716,7 +1735,7 @@ export async function writeServiceDefinition(
 
   const instances = [id]
 
-  for (const sibling of await siblingInstances(id)) {
+  for (const sibling of await siblingInstances(ctx, id)) {
     if (sibling.kind === "service") {
       await db().serviceSpec.updateMany({
         where: { serverId: sibling.id, hash: { not: hash } },
@@ -1729,17 +1748,22 @@ export async function writeServiceDefinition(
   // Its tools follow the definition: put_file and get_file come and go
   // with a files folder.
   for (const serverId of instances) {
-    const row = await db().mcpServer.findUnique({
+    const found = await db().mcpServer.findUnique({
       where: { id: serverId },
-      select: { name: true, serviceSpec: { select: { host: true } } },
+      select: {
+        ...SERVER_META_SELECT,
+        serviceSpec: { select: { host: { select: SERVER_META_SELECT } } },
+      },
     })
 
-    if (row) {
+    if (found) {
+      const host = found.serviceSpec?.host
       await storeTools(
+        ctx,
         serverId,
         serviceTools({
-          service: row.name.replace(/ service$/, ""),
-          host: row.serviceSpec?.host?.name ?? "its SSH server",
+          service: serverName(ctx, found).replace(/ service$/, ""),
+          host: host ? serverName(ctx, host) : "its SSH server",
           files: checked.files?.path ?? null,
         }),
       )
@@ -1783,13 +1807,13 @@ export async function saveServiceSettings(
     JSON.stringify(values) !== JSON.stringify(loaded.values)
 
   await db().$transaction([
-    db().mcpServer.update({ where: { id }, data: { name, description } }),
     db().serviceSpec.update({
       where: { serverId: id },
       data: { env: JSON.stringify(env), plainValues: JSON.stringify(values) },
     }),
   ])
-  await shareDescription(id)
+  await writeServer(ctx, id, { name, description })
+  await shareDescription(ctx, id)
 
   return { envChanged }
 }
@@ -1849,6 +1873,7 @@ export async function syncServiceTools(
   { byOwner }: { byOwner: boolean },
 ): Promise<SyncResult> {
   const toolCount = await storeTools(
+    loaded.ctx,
     loaded.server.id,
     serviceTools({
       service: loaded.server.name.replace(/ service$/, ""),
@@ -1875,7 +1900,7 @@ export async function syncServiceTools(
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
-    await setServerStatus(loaded.server.id, "error", message)
+    await setServerStatus(loaded.ctx, loaded.server.id, "error", message)
     return { status: "error", message, toolCount }
   }
 }
@@ -2423,7 +2448,7 @@ export async function reconcileServicesWith(
         if (outcome.started) {
           started.push(serverId)
         } else if (outcome.reason) {
-          await setServerStatus(serverId, "error", outcome.reason)
+          await setServerStatus(ctx, serverId, "error", outcome.reason)
         }
       } catch {
         // One service that cannot be read leaves the others to go on.
@@ -2445,14 +2470,14 @@ export async function servicesOnHost(
     where: { hostId, server: { vaultId: ctx.vaultId } },
     select: {
       containerName: true,
-      server: { select: { id: true, name: true } },
+      server: { select: SERVER_META_SELECT },
     },
     orderBy: { createdAt: "asc" },
   })
 
   return specs.map((spec) => ({
     id: spec.server.id,
-    name: spec.server.name,
+    name: serverName(ctx, spec.server),
     containerName: spec.containerName,
   }))
 }
@@ -2558,7 +2583,7 @@ export async function exitServiceDefinitions(
     where: { server: { vaultId: ctx.vaultId, definitionId: { not: null } } },
     select: {
       definition: true,
-      server: { select: { definitionId: true, name: true } },
+      server: { select: { ...SERVER_META_SELECT, definitionId: true } },
     },
     orderBy: { createdAt: "asc" },
   })
@@ -2576,7 +2601,7 @@ export async function exitServiceDefinitions(
 
       if (definition.registers.kind === "exit") {
         found.set(id, {
-          name: spec.server.name.replace(/ service$/i, ""),
+          name: serverName(ctx, spec.server).replace(/ service$/i, ""),
           image: definition.image ?? "",
         })
       }

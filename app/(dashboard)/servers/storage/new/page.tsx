@@ -8,7 +8,7 @@ import {
   StorageFolderForm,
 } from "@/components/storage-folder-form"
 import { IconTile } from "@/components/ui/icon-tile"
-import { db } from "@/lib/core/db"
+import { findServer } from "@/lib/core/server-meta"
 import { requireContext } from "@/lib/server/session"
 
 export const metadata: Metadata = { title: "Add a storage folder" }
@@ -26,9 +26,7 @@ export default async function NewStorageFolderPage({
   const query = await searchParams
   const hostId = typeof query.host === "string" ? query.host : ""
   const host = hostId
-    ? await db().mcpServer.findFirst({
-        where: { id: hostId, vaultId: ctx.vaultId, kind: "ssh" },
-      })
+    ? await findServer(ctx, { id: hostId, vaultId: ctx.vaultId, kind: "ssh" })
     : null
 
   if (!host) {

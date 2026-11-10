@@ -5,6 +5,7 @@ import type { VaultContext } from "./context"
 import { db } from "./db"
 import { PcpError } from "./errors"
 import { forgetSealedVault } from "./sealing/state"
+import { forgetVaultUpkeep } from "./vault-upkeep"
 import { deleteRequestLog } from "./request-log"
 import { forgetSetupState } from "./vault"
 
@@ -44,6 +45,7 @@ export async function deleteVault(ctx: VaultContext): Promise<void> {
 
   forgetSetupState()
   forgetSealedVault(ctx.vaultId)
+  forgetVaultUpkeep(ctx.vaultId)
   await deleteRequestLog()
   // secure_delete zeroed the rows as they went; the log's older pages and
   // whatever an older PCP freed without zeroing go with the file's rebuild.

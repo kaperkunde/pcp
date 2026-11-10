@@ -18,8 +18,6 @@ import {
   type StoredOAuthTokens,
 } from "@modelcontextprotocol/client"
 
-import type { McpServer } from "@/lib/generated/prisma/client"
-
 import { storeTools, type SyncResult } from "./catalogue"
 import type { VaultContext } from "./context"
 import { asBytes, decryptString, encryptString } from "./crypto"
@@ -29,7 +27,7 @@ import { callBrowserTool } from "./browser/call"
 import { syncBrowserTools } from "./browser/server"
 import { isOwnerNeeded, type SecretTyper } from "./browser/types"
 import { callEndpointTool, syncEndpointTools } from "./endpoints"
-import { invalid, isPcpError, PcpError } from "./errors"
+import { invalid, isPcpError, notFound, PcpError } from "./errors"
 import { callCalendarTool, syncCalendarTools } from "./caldav/accounts"
 import { callMailTool, syncMailTools } from "./mail/accounts"
 import type { MailCredential } from "./mail/types"
@@ -176,6 +174,7 @@ import {
   type SecretGrant,
 } from "./wrappers/placeholders"
 import { SECRET_META_SELECT, secretName } from "./secret-meta"
+import { findServer, type OpenServer, writeServer } from "./server-meta"
 
 /**
  * Talking to the servers in the registry: opening a connection with the
@@ -206,7 +205,7 @@ const CONNECT_TIMEOUT_MS = 20_000
 const CALL_TIMEOUT_MS = 120_000
 const OAUTH_STATE_TTL_MS = 15 * 60 * 1000
 
-export function managedSecretName(server: Pick<McpServer, "id">): string {
+export function managedSecretName(server: Pick<OpenServer, "id">): string {
   return `oauth/${server.id}`
 }
 
@@ -215,7 +214,7 @@ export function managedSecretName(server: Pick<McpServer, "id">): string {
  * or its refresh failed (the provider clears oauthConnectedAt then).
  */
 export function needsConnecting(
-  server: Pick<McpServer, "authType" | "oauthConnectedAt">,
+  server: Pick<OpenServer, "authType" | "oauthConnectedAt">,
 ): boolean {
   return server.authType === "oauth" && server.oauthConnectedAt === null
 }
@@ -263,7 +262,7 @@ export class PcpOAuthProvider implements OAuthClientProvider {
 
   constructor(
     private readonly ctx: VaultContext,
-    private readonly server: McpServer,
+    private readonly server: OpenServer,
     private readonly options: {
       redirectUrl: string
       publicUrl: string
@@ -615,7 +614,7 @@ export class PcpOAuthProvider implements OAuthClientProvider {
  */
 export function endpointDiscovery(
   server: Pick<
-    McpServer,
+    OpenServer,
     "kind" | "url" | "oauthAuthorizationUrl" | "oauthTokenUrl"
   >,
 ): OAuthDiscoveryState | undefined {
@@ -647,7 +646,7 @@ export function endpointDiscovery(
 export function endpointAddressesMatch(
   metadata:
     { authorization_endpoint?: string; token_endpoint?: string } | undefined,
-  server: Pick<McpServer, "oauthAuthorizationUrl" | "oauthTokenUrl">,
+  server: Pick<OpenServer, "oauthAuthorizationUrl" | "oauthTokenUrl">,
 ): boolean {
   const same = (given: string | undefined, approved: string | null) => {
     try {
@@ -678,7 +677,7 @@ export function endpointAddressesMatch(
  * goes under the endpoint's address rule, like its other OAuth requests.
  */
 export async function verifiedEndpointDiscovery(
-  server: McpServer,
+  server: OpenServer,
   fixed: OAuthDiscoveryState,
 ): Promise<{
   discovery: OAuthDiscoveryState
@@ -733,7 +732,7 @@ function publicServerAddress(address: string, port: number): boolean {
  * Undefined means the SDK's own fetch.
  */
 export function serverFetch(
-  server: Pick<McpServer, "kind" | "publicOnly">,
+  server: Pick<OpenServer, "kind" | "publicOnly">,
 ): FetchLike | undefined {
   if (!server.publicOnly) {
     return undefined
@@ -774,7 +773,7 @@ const RENEW_MARGIN_MS = 60_000
  */
 async function endpointToken(
   ctx: VaultContext,
-  server: McpServer,
+  server: OpenServer,
   { publicUrl, renew = false }: { publicUrl: string; renew?: boolean },
 ): Promise<{ access: string; refresh: string | undefined }> {
   const provider = new PcpOAuthProvider(ctx, server, {
@@ -852,7 +851,7 @@ export type OAuthConnection = {
 
 export async function describeOAuthConnection(
   ctx: VaultContext,
-  server: McpServer,
+  server: OpenServer,
 ): Promise<OAuthConnection | null> {
   if (server.authType !== "oauth" || !server.oauthConnectedAt) {
     return null
@@ -881,20 +880,17 @@ export async function describeOAuthConnection(
 
 export async function forgetOAuthTokens(
   ctx: VaultContext,
-  server: McpServer,
+  server: OpenServer,
 ): Promise<void> {
   if (server.oauthTokensId) {
     await deleteManagedSecret(ctx, server.oauthTokensId)
   }
 
-  await db().mcpServer.update({
-    where: { id: server.id },
-    data: {
-      oauthTokensId: null,
-      oauthConnectedAt: null,
-      status: "unknown",
-      statusMessage: "",
-    },
+  await writeServer(ctx, server.id, {
+    oauthTokensId: null,
+    oauthConnectedAt: null,
+    status: "unknown",
+    statusMessage: "",
   })
 }
 
@@ -914,7 +910,7 @@ export type Credential = {
 
 async function credential(
   ctx: VaultContext,
-  server: McpServer,
+  server: OpenServer,
   {
     publicUrl,
     renew = false,
@@ -1112,7 +1108,7 @@ export async function embeddingProvider(
   // A service's endpoint (text-embeddings-inference): reached through its
   // SSH server when PCP reaches the service that way, and started again
   // once if a request finds it stopped and the owner left it running.
-  let service: McpServer | null = null
+  let service: OpenServer | null = null
   const notOwn = (address: string, port: number) => !isOwnAddress(address, port)
 
   switch (config.provider) {
@@ -1137,8 +1133,10 @@ export async function embeddingProvider(
       }
       break
     case "endpoint": {
-      const server = await db().mcpServer.findFirst({
-        where: { id: config.serverId, vaultId: ctx.vaultId, kind: "openapi" },
+      const server = await findServer(ctx, {
+        id: config.serverId,
+        vaultId: ctx.vaultId,
+        kind: "openapi",
       })
 
       if (!server || !server.enabled) {
@@ -1205,7 +1203,7 @@ export async function embeddingProvider(
 
 async function basicCredential(
   ctx: VaultContext,
-  server: McpServer,
+  server: OpenServer,
 ): Promise<Credential> {
   if (!server.authSecretId || !server.authUsername) {
     throw new PcpError(
@@ -1243,7 +1241,7 @@ async function basicCredential(
  */
 async function mailCredential(
   ctx: VaultContext,
-  server: McpServer,
+  server: OpenServer,
   { publicUrl }: { publicUrl: string },
 ): Promise<MailCredential> {
   const { headers, redact, login } = await credential(ctx, server, {
@@ -1335,7 +1333,7 @@ async function failureSecrets(
  */
 export async function openUpstream(
   ctx: VaultContext,
-  server: McpServer,
+  server: OpenServer,
   { publicUrl }: { publicUrl: string },
 ): Promise<UpstreamConnection> {
   const provider =
@@ -1421,7 +1419,7 @@ export type { SyncResult }
  */
 async function sshIdentity(
   ctx: VaultContext,
-  server: McpServer,
+  server: OpenServer,
 ): Promise<SshIdentity> {
   if (!server.authSecretId) {
     throw new PcpError(
@@ -1666,8 +1664,9 @@ export async function openExit(
   // here, before anything connects.
   const proxy = exit.kind === "service" ? await exitProxy(ctx, exit) : null
 
-  const server = await db().mcpServer.findFirst({
-    where: { id: exit.serverId, vaultId: ctx.vaultId },
+  const server = await findServer(ctx, {
+    id: exit.serverId,
+    vaultId: ctx.vaultId,
   })
 
   if (!server || !isSshKind(server.kind)) {
@@ -1888,7 +1887,7 @@ export function browserExitsFor(
  */
 export async function syncServerTools(
   ctx: VaultContext,
-  server: McpServer,
+  server: OpenServer,
   options: Parameters<typeof readServerTools>[2],
 ): Promise<SyncResult> {
   const result = await readServerTools(ctx, server, options)
@@ -1904,7 +1903,7 @@ export async function syncServerTools(
 
 async function readServerTools(
   ctx: VaultContext,
-  server: McpServer,
+  server: OpenServer,
   {
     publicUrl,
     byOwner = false,
@@ -1924,7 +1923,7 @@ async function readServerTools(
       reach = await serviceTunnel(ctx, server, publicUrl)
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
-      await setServerStatus(server.id, "error", message)
+      await setServerStatus(ctx, server.id, "error", message)
       return {
         status: "error",
         message,
@@ -1932,19 +1931,22 @@ async function readServerTools(
       }
     }
 
-    return syncEndpointTools(server, { byOwner, ...(reach ? { reach } : {}) })
+    return syncEndpointTools(ctx, server, {
+      byOwner,
+      ...(reach ? { reach } : {}),
+    })
   }
 
   if (server.kind === "browser") {
-    return syncBrowserTools(server)
+    return syncBrowserTools(ctx, server)
   }
 
   if (server.kind === "wrapper") {
-    return syncWrapperTools(server)
+    return syncWrapperTools(ctx, server)
   }
 
   if (isSshKind(server.kind)) {
-    return syncSshTools(server, await sshIdentity(ctx, server), {
+    return syncSshTools(ctx, server, await sshIdentity(ctx, server), {
       publicUrl,
       byOwner,
     })
@@ -1973,7 +1975,7 @@ async function readServerTools(
       access = byOwner ? await serviceAccess(ctx, loaded, { publicUrl }) : null
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
-      await setServerStatus(server.id, "error", message)
+      await setServerStatus(ctx, server.id, "error", message)
       return { status: "error", message, toolCount: 0 }
     }
 
@@ -1987,13 +1989,13 @@ async function readServerTools(
       signIn = await mailCredential(ctx, server, { publicUrl })
     } catch (error) {
       const result = describeFailure(server, error, null)
-      await setServerStatus(server.id, result.status, result.message)
+      await setServerStatus(ctx, server.id, result.status, result.message)
       return { ...result, toolCount: 0 }
     }
 
     return isCalendarKind(server.kind)
-      ? syncCalendarTools(server, signIn)
-      : syncMailTools(server, signIn)
+      ? syncCalendarTools(ctx, server, signIn)
+      : syncMailTools(ctx, server, signIn)
   }
 
   let connection: UpstreamConnection | null = null
@@ -2006,6 +2008,7 @@ async function readServerTools(
     // Assistants read these words too, so the credential is taken out.
     const scrub = makeRedactor(await connection.secrets())
     const toolCount = await storeTools(
+      ctx,
       server.id,
       tools.map((tool) => ({
         name: tool.name,
@@ -2031,9 +2034,8 @@ async function readServerTools(
     const given = connection.client.getInstructions()?.trim()
     const instructions = given === undefined ? undefined : scrub.text(given)
     if (instructions && !server.description) {
-      await db().mcpServer.update({
-        where: { id: server.id },
-        data: { description: instructions.slice(0, 1000) },
+      await writeServer(ctx, server.id, {
+        description: instructions.slice(0, 1000),
       })
     }
 
@@ -2047,7 +2049,7 @@ async function readServerTools(
             )}${misnamed.length > 5 ? ` and ${misnamed.length - 5} more` : ""}.`
         : ""
 
-    await setServerStatus(server.id, "ok", message, {
+    await setServerStatus(ctx, server.id, "ok", message, {
       lastSyncedAt: new Date(),
     })
 
@@ -2057,7 +2059,7 @@ async function readServerTools(
     result.message = makeRedactor(await failureSecrets(error, connection)).text(
       result.message,
     )
-    await setServerStatus(server.id, result.status, result.message)
+    await setServerStatus(ctx, server.id, result.status, result.message)
 
     return { ...result, toolCount: 0 }
   } finally {
@@ -2072,7 +2074,7 @@ async function readServerTools(
  */
 async function callEndpoint(
   ctx: VaultContext,
-  server: McpServer,
+  server: OpenServer,
   toolName: string,
   args: Record<string, unknown>,
   {
@@ -2093,7 +2095,7 @@ async function callEndpoint(
     const { headers, redact } = await credential(ctx, server, { publicUrl })
     const reach = await serviceTunnel(ctx, server, publicUrl)
 
-    return await callEndpointTool(server, toolName, args, {
+    return await callEndpointTool(ctx, server, toolName, args, {
       authHeaders: headers,
       redact: [...redact, ...placed],
       open,
@@ -2114,7 +2116,7 @@ async function callEndpoint(
   } catch (error) {
     if (error instanceof UnauthorizedError) {
       const message = `${server.name} needs to be connected: open it in PCP and choose Connect.`
-      await setServerStatus(server.id, "auth_required", message)
+      await setServerStatus(ctx, server.id, "auth_required", message)
       throw new PcpError("unauthorized", message)
     }
 
@@ -2187,7 +2189,7 @@ export type CallOptions = {
  */
 export async function callServerTool(
   ctx: VaultContext,
-  server: McpServer,
+  server: OpenServer,
   toolName: string,
   args: Record<string, unknown>,
   options: CallOptions,
@@ -2255,7 +2257,7 @@ export async function callServerTool(
  */
 async function callBrowser(
   ctx: VaultContext,
-  server: McpServer,
+  server: OpenServer,
   toolName: string,
   args: Record<string, unknown>,
   options: CallOptions,
@@ -2388,7 +2390,7 @@ async function callBrowser(
  */
 async function placeSecrets(
   ctx: VaultContext,
-  server: McpServer,
+  server: OpenServer,
   toolName: string,
   args: Record<string, unknown>,
   grant: SecretGrant | undefined,
@@ -2439,7 +2441,7 @@ async function placeSecrets(
  */
 async function dispatchCall(
   ctx: VaultContext,
-  server: McpServer,
+  server: OpenServer,
   toolName: string,
   args: Record<string, unknown>,
   options: CallOptions,
@@ -2491,7 +2493,7 @@ async function dispatchCall(
 
 async function dispatchKind(
   ctx: VaultContext,
-  server: McpServer,
+  server: OpenServer,
   toolName: string,
   args: Record<string, unknown>,
   {
@@ -2537,7 +2539,7 @@ async function dispatchKind(
     // Before anything connects: an unknown id never reaches the server.
     const resolved = open ? await resolveHandles(args, open) : args
 
-    return callSshTool(server, toolName, resolved, {
+    return callSshTool(ctx, server, toolName, resolved, {
       identity: await sshIdentity(ctx, server),
       publicUrl,
       redact: placed,
@@ -2605,7 +2607,7 @@ async function dispatchKind(
       }
 
       const failure = describeFailure(server, error, null)
-      await setServerStatus(server.id, failure.status, failure.message)
+      await setServerStatus(ctx, server.id, failure.status, failure.message)
       throw new PcpError(
         failure.status === "auth_required" ||
           failure.status === "client_required"
@@ -2618,6 +2620,7 @@ async function dispatchKind(
     if (isCalendarKind(server.kind)) {
       // Nothing a calendar tool takes is a file: a handle stands for its text.
       return callCalendarTool(
+        ctx,
         server,
         toolName,
         open ? await resolveHandles(args, open) : args,
@@ -2625,7 +2628,7 @@ async function dispatchKind(
       )
     }
 
-    return callMailTool(server, toolName, args, {
+    return callMailTool(ctx, server, toolName, args, {
       credential: { ...signIn, redact: [...signIn.redact, ...placed] },
       keep,
       keepBytes,
@@ -2675,7 +2678,7 @@ async function dispatchKind(
       ...placed,
       ...(await failureSecrets(error, connection)),
     ]).text(failure.message)
-    await setServerStatus(server.id, failure.status, failure.message)
+    await setServerStatus(ctx, server.id, failure.status, failure.message)
 
     // "unauthorized" tells the gateway the server needs connecting (or its
     // credential was refused), not that it could not be reached. A server
@@ -2711,7 +2714,7 @@ function addressBlocked(error: unknown): boolean {
 }
 
 function describeFailure(
-  server: McpServer,
+  server: OpenServer,
   error: unknown,
   connection: UpstreamConnection | null,
 ): {
@@ -2817,7 +2820,7 @@ export function refusalReason(
 }
 
 /** What to tell the owner about a server that refused a request. */
-function refusedMessage(server: McpServer, said: string): string {
+function refusedMessage(server: OpenServer, said: string): string {
   if (server.authType === "header") {
     return `${server.name} refused the secret PCP sent (${said}). Check the secret under Advanced on its page, then choose Refresh tools.`
   }
@@ -2862,7 +2865,7 @@ export type ServiceOptions = {
  */
 async function serviceConnection(
   ctx: VaultContext,
-  host: McpServer,
+  host: OpenServer,
   { publicUrl }: { publicUrl: string },
 ): Promise<{
   host: ServiceHost
@@ -3014,7 +3017,7 @@ async function rereadRegisteredTools(
   }
 
   try {
-    const server = await db().mcpServer.findUnique({ where: { id } })
+    const server = await findServer(ctx, { id })
 
     if (!server) {
       return null
@@ -3041,7 +3044,7 @@ async function rereadRegisteredTools(
  */
 async function serviceTunnel(
   ctx: VaultContext,
-  server: Pick<McpServer, "id" | "kind" | "name">,
+  server: Pick<OpenServer, "id" | "kind" | "name">,
   publicUrl: string,
 ): Promise<Pick<SendOptions, "dial"> | null> {
   if (server.kind !== "mcp" && server.kind !== "openapi") {
@@ -3141,9 +3144,12 @@ export async function launchService(
   }
 
   if (result.registeredId && result.registeredKind === "mcp") {
-    const registered = await db().mcpServer.findUniqueOrThrow({
-      where: { id: result.registeredId },
-    })
+    const registered = await findServer(ctx, { id: result.registeredId })
+
+    if (!registered) {
+      throw notFound("The server it registered")
+    }
+
     const sync = await syncServerTools(ctx, registered, {
       publicUrl: options.publicUrl,
       byOwner: true,
@@ -3294,7 +3300,7 @@ export async function restartServicesUsingSecret(
       })
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
-      await setServerStatus(id, "error", message).catch(() => {})
+      await setServerStatus(ctx, id, "error", message).catch(() => {})
       outcomes.push({ id, ok: false, message })
     }
   }
@@ -3310,7 +3316,7 @@ export async function restartServicesUsingSecret(
  */
 async function wakeService(
   ctx: VaultContext,
-  server: McpServer,
+  server: OpenServer,
   publicUrl: string,
 ): Promise<Awaited<ReturnType<typeof startOnDemand>> | null> {
   try {
@@ -3351,7 +3357,7 @@ export async function reconcileServices(
  */
 async function serviceFailure(
   ctx: VaultContext,
-  server: McpServer,
+  server: OpenServer,
   publicUrl: string,
 ): Promise<string | null> {
   try {
@@ -3377,7 +3383,7 @@ async function serviceFailure(
  */
 export async function serviceStateLine(
   ctx: VaultContext,
-  server: Pick<McpServer, "id" | "kind" | "name">,
+  server: Pick<OpenServer, "id" | "kind" | "name">,
   publicUrl: string,
 ): Promise<string | null> {
   try {

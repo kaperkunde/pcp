@@ -9,6 +9,7 @@ import { isClientProfileId, type ClientProfileId } from "./clients/profiles"
 import type { VaultContext } from "./context"
 import { newHkdfParams, randomSecret } from "./crypto"
 import { db } from "./db"
+import { SERVER_META_SELECT, serverName } from "./server-meta"
 import { invalid, notFound, PcpError } from "./errors"
 import { newId } from "./ids"
 import { newTokenInstructions, openInstructions } from "./instructions"
@@ -142,7 +143,7 @@ export type ResolvedToken = {
 
 function summaryInclude(now: Date) {
   return {
-    servers: { include: { server: { select: { id: true, name: true } } } },
+    servers: { include: { server: { select: SERVER_META_SELECT } } },
     _count: {
       select: {
         permissionRequests: {
@@ -174,7 +175,7 @@ type SummaryRow = {
   oauthClientName: string | null
   clientProfile: string | null
   clientSeen: string | null
-  servers: Array<{ server: { id: string; name: string } }>
+  servers: Array<{ server: Parameters<typeof serverName>[1] }>
   _count: { permissionRequests: number }
 }
 
@@ -191,7 +192,10 @@ function toSummary(ctx: VaultContext, row: SummaryRow): ApiTokenSummary {
     runCode: row.runCode,
     manageWrappers: row.manageWrappers,
     shareFiles: row.shareFiles,
-    servers: row.servers.map((link) => link.server),
+    servers: row.servers.map((link) => ({
+      id: link.server.id,
+      name: serverName(ctx, link.server),
+    })),
     expiresAt: row.expiresAt,
     revokedAt: row.revokedAt,
     createdAt: row.createdAt,

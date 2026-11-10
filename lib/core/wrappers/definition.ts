@@ -6,6 +6,7 @@ import { checkSyntax } from "../code/quickjs"
 import type { VaultContext } from "../context"
 import { SECRET_PLACEHOLDER } from "../constants"
 import { db } from "../db"
+import { openServers, SERVER_NAME_SELECT } from "../server-meta"
 import { invalid } from "../errors"
 import { hiddenCharacter, withoutPresentation } from "../memories"
 import { outlineSchema } from "../openapi/outline"
@@ -427,10 +428,13 @@ export async function resolveDefinition(
     slugs.add(split.slug)
   }
 
-  const servers: KnownServer[] = await db().mcpServer.findMany({
-    where: { vaultId: ctx.vaultId, slug: { in: [...slugs] } },
-    select: { id: true, slug: true, name: true, kind: true, url: true },
-  })
+  const servers: KnownServer[] = openServers(
+    ctx,
+    await db().mcpServer.findMany({
+      where: { vaultId: ctx.vaultId, slug: { in: [...slugs] } },
+      select: SERVER_NAME_SELECT,
+    }),
+  ).map(({ id, slug, name, kind, url }) => ({ id, slug, name, kind, url }))
   const bySlug = new Map(servers.map((server) => [server.slug, server]))
   const tools = await db().mcpTool.findMany({
     where: { serverId: { in: servers.map((server) => server.id) } },

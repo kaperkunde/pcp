@@ -1,13 +1,14 @@
-import type { McpServer } from "@/lib/generated/prisma/client"
-
 import type { VaultContext } from "./context"
 import { sha256Hex } from "./crypto"
 import { db } from "./db"
 import {
   contentInstance,
+  DEFINITION_META_SELECT,
   ensureDefinition,
   hasDefinition,
   newDefinitionFor,
+  openDefinition,
+  sealedDefinitionMeta,
   type DefinitionKind,
 } from "./definition-rows"
 import { createEndpoint } from "./endpoints"
@@ -17,6 +18,7 @@ import { canonicalJson } from "./permission-rules"
 import { createServer, getServer, type ExtraAuthHeaderInput } from "./servers"
 import { getSetting, setSetting } from "./settings"
 import { copyToolTiers, mergeToolTiers } from "./tool-tiers"
+import { findServers, type OpenServer, writeServer } from "./server-meta"
 
 /**
  * Definitions and instances, as the owner works with them.
@@ -72,7 +74,7 @@ export type DefinitionView = {
   instances: DefinitionInstance[]
 }
 
-function instanceOf(row: McpServer): DefinitionInstance {
+function instanceOf(row: OpenServer): DefinitionInstance {
   return {
     id: row.id,
     name: row.name,
@@ -87,9 +89,9 @@ export async function instancesOf(
   ctx: VaultContext,
   definitionId: string,
 ): Promise<DefinitionInstance[]> {
-  const rows = await db().mcpServer.findMany({
-    where: { definitionId, vaultId: ctx.vaultId },
-    orderBy: { createdAt: "asc" },
+  const rows = await findServers(ctx, {
+    definitionId,
+    vaultId: ctx.vaultId,
   })
 
   return rows.map(instanceOf)
@@ -99,13 +101,15 @@ async function viewOf(
   ctx: VaultContext,
   definitionId: string,
 ): Promise<DefinitionView | null> {
-  const row = await db().serverDefinition.findFirst({
+  const found = await db().serverDefinition.findFirst({
     where: { id: definitionId, vaultId: ctx.vaultId },
   })
 
-  if (!row || !hasDefinition(row.kind)) {
+  if (!found || !hasDefinition(found.kind)) {
     return null
   }
+
+  const row = { ...openDefinition(ctx, found), kind: found.kind }
 
   return {
     id: row.id,
@@ -136,7 +140,7 @@ export async function definitionOf(
   serverId: string,
 ): Promise<DefinitionView | null> {
   const server = await getServer(ctx, serverId)
-  const definitionId = await ensureDefinition(server.id)
+  const definitionId = await ensureDefinition(ctx, server.id)
 
   return definitionId ? viewOf(ctx, definitionId) : null
 }
@@ -204,7 +208,7 @@ export async function cloneServer(
     )
   }
 
-  const definitionId = (await ensureDefinition(source.id))!
+  const definitionId = (await ensureDefinition(ctx, source.id))!
   const auth = {
     authHeaderName: input.authHeaderName,
     authValueTemplate: input.authValueTemplate,
@@ -302,7 +306,7 @@ export async function detachServer(
   serverId: string,
 ): Promise<{ definitionId: string }> {
   const server = await getServer(ctx, serverId)
-  const definitionId = await ensureDefinition(server.id)
+  const definitionId = await ensureDefinition(ctx, server.id)
 
   if (!definitionId) {
     throw new PcpError("state", `${server.name} has no definition to detach.`)
@@ -319,7 +323,9 @@ export async function detachServer(
     )
   }
 
-  const detached = await db().$transaction((tx) => newDefinitionFor(tx, server))
+  const detached = await db().$transaction((tx) =>
+    newDefinitionFor(ctx, tx, server),
+  )
   // The owner's tiers for its tools stay what they were (tool-tiers.ts).
   await copyToolTiers(ctx.vaultId, definitionId, detached)
 
@@ -545,8 +551,11 @@ export async function mergeDefinitions(
     )
   }
 
-  const source = await contentInstance(keepId)
-  const kept = rows.find((row) => row.id === keepId)!
+  const source = await contentInstance(ctx, keepId)
+  const kept = openDefinition(
+    ctx,
+    rows.find((row) => row.id === keepId)!,
+  )
   const name = options.name?.trim()
 
   if (!source) {
@@ -557,27 +566,39 @@ export async function mergeDefinitions(
   // along for tools it has none for, before their definitions go.
   await mergeToolTiers(ctx.vaultId, keepId, others)
 
-  await db().$transaction([
-    db().mcpServer.updateMany({
+  await db().$transaction(async (tx) => {
+    const moving = await tx.mcpServer.findMany({
       where: { definitionId: { in: others }, vaultId: ctx.vaultId },
-      data: {
-        definitionId: keepId,
-        description: kept.description,
-        specSource: source.specSource,
-        specUrl: source.specUrl,
-        specUrlFromAssistant: source.specUrlFromAssistant,
-      },
-    }),
-    db().serverDefinition.deleteMany({ where: { id: { in: others } } }),
-    ...(name && name !== kept.name
-      ? [
-          db().serverDefinition.update({
-            where: { id: keepId },
-            data: { name: name.slice(0, 200) },
-          }),
-        ]
-      : []),
-  ])
+      select: { id: true },
+    })
+
+    for (const server of moving) {
+      await writeServer(
+        ctx,
+        server.id,
+        {
+          definitionId: keepId,
+          description: kept.description,
+          specSource: source.specSource,
+          specUrl: source.specUrl,
+          specUrlFromAssistant: source.specUrlFromAssistant,
+        },
+        tx,
+      )
+    }
+
+    await tx.serverDefinition.deleteMany({ where: { id: { in: others } } })
+
+    if (name && name !== kept.name) {
+      await tx.serverDefinition.update({
+        where: { id: keepId },
+        data: sealedDefinitionMeta(ctx, keepId, {
+          name: name.slice(0, 200),
+          description: kept.description,
+        }),
+      })
+    }
+  })
 
   return (await viewOf(ctx, keepId))!
 }
@@ -585,7 +606,7 @@ export async function mergeDefinitions(
 // ---- What an assistant may make another server of ---------------------------
 
 /** A server as far as finding its definition needs it. */
-type Visible = Pick<McpServer, "id" | "slug" | "kind" | "definitionId">
+type Visible = Pick<OpenServer, "id" | "slug" | "kind" | "definitionId">
 
 export type BindableDefinition = {
   id: string
@@ -622,7 +643,7 @@ export async function findBindableDefinition(
       ? "MCP server, API endpoint or service"
       : "MCP server or API endpoint"
   const byServer = fitting.find((server) => server.slug === name)
-  let definitionId = byServer ? await ensureDefinition(byServer.id) : null
+  let definitionId = byServer ? await ensureDefinition(ctx, byServer.id) : null
 
   if (!definitionId && name) {
     const row = await db().serverDefinition.findUnique({
@@ -652,7 +673,7 @@ export async function findBindableDefinition(
     name: view.name,
     description: view.description,
     instances: view.instances,
-    basis: await definitionBasis(view.id),
+    basis: await definitionBasis(ctx, view.id),
   }
 }
 
@@ -663,18 +684,23 @@ export async function findBindableDefinition(
  * make on a definition is made only while this is what the owner was
  * shown.
  */
-export async function definitionBasis(definitionId: string): Promise<string> {
-  const [definition, source] = await Promise.all([
+export async function definitionBasis(
+  ctx: VaultContext,
+  definitionId: string,
+): Promise<string> {
+  const [row, source] = await Promise.all([
     db().serverDefinition.findUnique({
       where: { id: definitionId },
-      select: { kind: true, description: true },
+      select: { ...DEFINITION_META_SELECT, kind: true },
     }),
-    contentInstance(definitionId),
+    contentInstance(ctx, definitionId),
   ])
 
-  if (!definition || !source) {
+  if (!row || !source) {
     return "gone"
   }
+
+  const definition = { ...openDefinition(ctx, row), kind: row.kind }
 
   const [spec, wrapper, service, tools] = await Promise.all([
     db().openApiSpec.findUnique({

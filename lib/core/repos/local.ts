@@ -1,9 +1,11 @@
-import type { McpServer } from "@/lib/generated/prisma/client"
-
 import { SECRET_PLACEHOLDER } from "../constants"
 import type { VaultContext } from "../context"
 import { db } from "../db"
-import { ensureDefinition } from "../definition-rows"
+import {
+  DEFINITION_META_SELECT,
+  definitionMeta,
+  ensureDefinition,
+} from "../definition-rows"
 import { invalid, notFound } from "../errors"
 import { storedSpec } from "../endpoints"
 import { extraAuthHeaders } from "../servers"
@@ -30,6 +32,13 @@ import {
 } from "./documents"
 import { checkDistinct, itemSlug, type ItemKind } from "./layout"
 import { SECRET_META_SELECT, secretName } from "../secret-meta"
+import {
+  findServer,
+  openServers,
+  type OpenServer,
+  SERVER_META_SELECT,
+  serverName,
+} from "../server-meta"
 
 /**
  * The vault's shareable items as documents (documents.ts): its skills, its
@@ -96,23 +105,29 @@ function skillDocument(entry: SkillEntry): SkillDocument {
 type Named = { slug: string; name: string }
 
 /** The definition a row is an instance of, by its short name and name. */
-async function definitionName(row: McpServer): Promise<Named> {
-  const definitionId = row.definitionId ?? (await ensureDefinition(row.id))
+async function definitionName(
+  ctx: VaultContext,
+  row: OpenServer,
+): Promise<Named> {
+  const definitionId = row.definitionId ?? (await ensureDefinition(ctx, row.id))
   const definition = definitionId
     ? await db().serverDefinition.findUnique({
         where: { id: definitionId },
-        select: { slug: true, name: true },
+        select: { ...DEFINITION_META_SELECT, slug: true },
       })
     : null
 
   return definition
-    ? { slug: itemSlug(definition.slug), name: definition.name }
+    ? {
+        slug: itemSlug(definition.slug),
+        name: definitionMeta(ctx, definition).name,
+      }
     : { slug: itemSlug(row.slug), name: row.name }
 }
 
 async function wrapperDocument(
   ctx: VaultContext,
-  row: McpServer,
+  row: OpenServer,
   named: Named,
 ): Promise<WrapperDocument> {
   const view = await getWrapper(ctx, { id: row.id })
@@ -148,7 +163,7 @@ async function wrapperDocument(
 
 /** A header-authenticated row's headers and their formats, no secret. */
 async function headerAuth(
-  row: McpServer,
+  row: OpenServer,
 ): Promise<EndpointAuthDocument & { kind: "header" }> {
   const extras = await extraAuthHeaders(row.id)
   const headers: HeaderDocument[] = extras.map((extra) => ({
@@ -166,7 +181,7 @@ async function headerAuth(
   }
 }
 
-function oauthAuth(row: McpServer): EndpointAuthDocument & { kind: "oauth" } {
+function oauthAuth(row: OpenServer): EndpointAuthDocument & { kind: "oauth" } {
   return {
     kind: "oauth",
     clientId: null,
@@ -183,7 +198,7 @@ function oauthAuth(row: McpServer): EndpointAuthDocument & { kind: "oauth" } {
  */
 export async function instanceSignIn(
   ctx: VaultContext,
-  row: McpServer,
+  row: OpenServer,
 ): Promise<string[]> {
   const extras = row.authType === "header" ? await extraAuthHeaders(row.id) : []
   const names = await secretNames(ctx, [
@@ -226,7 +241,7 @@ export async function instanceSignIn(
  */
 export async function serviceOwnLines(
   ctx: VaultContext,
-  row: McpServer,
+  row: OpenServer,
 ): Promise<{
   runsOn: string
   published: string
@@ -237,8 +252,8 @@ export async function serviceOwnLines(
   const spec = await db().serviceSpec.findUnique({
     where: { serverId: row.id },
     include: {
-      host: { select: { name: true, vaultId: true } },
-      registered: { select: { name: true, slug: true } },
+      host: { select: { ...SERVER_META_SELECT, vaultId: true } },
+      registered: { select: { ...SERVER_META_SELECT, slug: true } },
     },
   })
 
@@ -259,7 +274,7 @@ export async function serviceOwnLines(
   return {
     runsOn:
       spec.host && spec.host.vaultId === ctx.vaultId
-        ? spec.host.name
+        ? serverName(ctx, spec.host)
         : "(an SSH server since deleted)",
     published:
       publish.ports.length > 0
@@ -274,16 +289,17 @@ export async function serviceOwnLines(
       ([name, id]) => `${name} takes "${names.get(id) ?? "(none)"}"`,
     ),
     registered: spec.registered
-      ? `${spec.registered.name} (${spec.registered.slug})`
+      ? `${serverName(ctx, spec.registered)} (${spec.registered.slug})`
       : null,
   }
 }
 
 async function endpointDocument(
-  row: McpServer,
+  ctx: VaultContext,
+  row: OpenServer,
   named: Named,
 ): Promise<EndpointDocument> {
-  const spec = await storedSpec(row.id)
+  const spec = await storedSpec(ctx, row.id)
 
   if (!spec) {
     throw invalid(`${row.name} has no stored schema to share.`)
@@ -327,7 +343,7 @@ async function endpointDocument(
 }
 
 async function serverDocument(
-  row: McpServer,
+  row: OpenServer,
   named: Named,
 ): Promise<ServerDocument> {
   let auth: ServerAuthDocument
@@ -361,7 +377,7 @@ async function serverDocument(
  * owner's SSH server is never shared.
  */
 async function serviceDocument(
-  row: McpServer,
+  row: OpenServer,
   named: Named,
 ): Promise<ServiceDocument> {
   const spec = await db().serviceSpec.findUnique({
@@ -395,7 +411,7 @@ async function serviceDocument(
 
 async function documentOfRow(
   ctx: VaultContext,
-  row: McpServer,
+  row: OpenServer,
 ): Promise<ItemDocument> {
   if (
     row.kind !== "wrapper" &&
@@ -406,13 +422,13 @@ async function documentOfRow(
     throw invalid(`${row.name} is not something PCP shares in a repository.`)
   }
 
-  const named = await definitionName(row)
+  const named = await definitionName(ctx, row)
 
   switch (row.kind) {
     case "wrapper":
       return wrapperDocument(ctx, row, named)
     case "openapi":
-      return endpointDocument(row, named)
+      return endpointDocument(ctx, row, named)
     case "mcp":
       return serverDocument(row, named)
     case "service":
@@ -436,9 +452,7 @@ export async function localItem(
     return { id, document: skillDocument(entry) }
   }
 
-  const row = await db().mcpServer.findFirst({
-    where: { id, vaultId: ctx.vaultId },
-  })
+  const row = await findServer(ctx, { id, vaultId: ctx.vaultId })
 
   if (!row) {
     throw notFound("That server")
@@ -478,21 +492,24 @@ export function itemKindOfServer(serverKind: string): ItemKind | null {
  * instances that do not stand for theirs, and what a service registered
  * (shared as the service) are left out.
  */
-async function standingRows(ctx: VaultContext): Promise<McpServer[]> {
+async function standingRows(ctx: VaultContext): Promise<OpenServer[]> {
   const registered = (
     await db().serviceSpec.findMany({
       where: { server: { vaultId: ctx.vaultId }, registeredId: { not: null } },
       select: { registeredId: true },
     })
   ).map((spec) => spec.registeredId!)
-  const rows = await db().mcpServer.findMany({
-    where: {
-      vaultId: ctx.vaultId,
-      kind: { in: [...SERVER_KINDS] },
-      id: { notIn: registered },
-    },
-    orderBy: [{ createdAt: "asc" }, { id: "asc" }],
-  })
+  const rows = openServers(
+    ctx,
+    await db().mcpServer.findMany({
+      where: {
+        vaultId: ctx.vaultId,
+        kind: { in: [...SERVER_KINDS] },
+        id: { notIn: registered },
+      },
+      orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+    }),
+  )
   const linked = new Set(
     (
       await db().repoItem.findMany({
@@ -501,7 +518,7 @@ async function standingRows(ctx: VaultContext): Promise<McpServer[]> {
       })
     ).map((item) => item.serverId),
   )
-  const chosen = new Map<string, McpServer>()
+  const chosen = new Map<string, OpenServer>()
 
   for (const row of rows) {
     const key = row.definitionId ?? row.id

@@ -12,8 +12,6 @@ import {
   vi,
 } from "vitest"
 
-import type { McpServer } from "@/lib/generated/prisma/client"
-
 import { createApiToken, resolveApiToken } from "../api-tokens"
 import {
   allowScriptOnce,
@@ -34,6 +32,8 @@ import { holdSecret, maskTyped, typedInto } from "./held"
 import { closeAllBrowsers, runningBrowser } from "./runtime"
 import { createBrowserServer } from "./server"
 import { isOwnerNeeded, type OwnerNeeded } from "./types"
+import type { OpenServer } from "../server-meta"
+import { openServer } from "../server-meta"
 
 // What #56 added to the browser: a point clicked, scrolled and dragged
 // with DevTools mouse events, evaluate (asked per site, kept at its site
@@ -57,7 +57,7 @@ let elsewhere: TestApi
 let sockets: { origin: string; upgrades: string[]; close: () => void }
 let ctx: VaultContext
 let tokenId: string
-let server: McpServer
+let server: OpenServer
 let kept: Array<{ text?: string; bytes?: Buffer; name?: string | null }>
 
 /** A page that draws on a canvas and says where the mouse did what. */
@@ -87,9 +87,12 @@ beforeEach(async () => {
     allowAllServers: true,
   })
   tokenId = (await resolveApiToken(token))!.tokenId
-  server = await db().mcpServer.findUniqueOrThrow({
-    where: { id: (await createBrowserServer(ctx)).id },
-  })
+  server = openServer(
+    ctx,
+    await db().mcpServer.findUniqueOrThrow({
+      where: { id: (await createBrowserServer(ctx)).id },
+    }),
+  )
   kept = []
   elsewhere = await startTestApi((_, res) => res.end("elsewhere"))
   const upgrades: string[] = []

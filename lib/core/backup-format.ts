@@ -344,82 +344,116 @@ const SecretBrowserOriginRow = z.strictObject({
   createdAt: date,
 })
 
-const McpServerRow = z.strictObject({
-  id,
-  vaultId: id,
-  name: str,
-  slug: str,
-  description: str,
-  url: str,
-  enabled: z.boolean(),
-  authType: str,
-  authHeaderName: str.nullable(),
-  authValueTemplate: str.nullable(),
-  authSecretId: id.nullable(),
-  oauthClientId: str.nullable(),
-  oauthClientSecretId: id.nullable(),
-  oauthScope: str.nullable(),
-  oauthAuthorizeParams: str.nullable(),
-  oauthTokensId: id.nullable(),
-  oauthConnectedAt: dateOrNull,
-  oauthAuthorizationUrl: str.nullable(),
-  oauthTokenUrl: str.nullable(),
-  status: str,
-  statusMessage: str,
-  lastSyncedAt: dateOrNull,
-  createdAt: date,
-  updatedAt: date,
-  kind: str,
-  specSource: str.nullable(),
-  specUrl: str.nullable(),
-  readOnly: z.boolean(),
-  publicOnly: z.boolean(),
-  specUrlFromAssistant: z.boolean(),
-  // Mail accounts (kinds jmap and imap), added in 0.2: absent from older
-  // exports, which hold none.
-  authUsername: str.nullable().default(null),
-  mailApiUrl: str.nullable().default(null),
-  mailDownloadUrl: str.nullable().default(null),
-  mailUploadUrl: str.nullable().default(null),
-  mailAccountId: str.nullable().default(null),
-  mailSubmission: z.boolean().default(false),
-  smtpUrl: str.nullable().default(null),
-  mailFrom: str.nullable().default(null),
-  // Whether an IMAP account's sent email gets a copy in Sent from PCP, and
-  // what PCP learned of its server, added after 0.4.3: absent from older
-  // exports, whose accounts take the defaults.
-  mailSaveSent: str.default("auto"),
-  mailServerFilesSent: z.boolean().nullable().default(null),
-  // SSH servers, added in 0.3: absent from older exports, which hold none.
-  sshPublicKey: str.nullable().default(null),
-  sshHostKey: str.nullable().default(null),
-  // Calendar accounts (kind caldav), added in 0.4: absent from older
-  // exports, which hold none.
-  davHomeUrl: str.nullable().default(null),
-  // The version of its document in a linked repository, added with them:
-  // absent from older exports, which never synced one.
-  syncVersion: z.number().int().nullable().default(null),
-  // Definitions and the owner's note, added together: absent from older
-  // exports, whose servers each get a definition of their own on restore.
-  definitionId: id.nullable().default(null),
-  personalNote: bytesOrNull.default(null),
-  // Levels the owner saved with an approval, waiting for the server's first
-  // read of its tools: absent from older exports, which had none.
-  pendingAccess: str.nullable().default(null),
-})
+// A server's name, address and the rest of what it is were sealed into
+// meta (#96): an older file names their plain columns by their old names.
+const McpServerRow = renamedFrom(
+  {
+    name: "plainName",
+    description: "plainDescription",
+    url: "plainUrl",
+    statusMessage: "plainStatusMessage",
+    authUsername: "plainAuthUsername",
+    oauthClientId: "plainOauthClientId",
+    oauthScope: "plainOauthScope",
+    oauthAuthorizeParams: "plainOauthAuthorizeParams",
+    oauthAuthorizationUrl: "plainOauthAuthorizationUrl",
+    oauthTokenUrl: "plainOauthTokenUrl",
+    specUrl: "plainSpecUrl",
+    mailApiUrl: "plainMailApiUrl",
+    mailDownloadUrl: "plainMailDownloadUrl",
+    mailUploadUrl: "plainMailUploadUrl",
+    mailAccountId: "plainMailAccountId",
+    smtpUrl: "plainSmtpUrl",
+    mailFrom: "plainMailFrom",
+    sshPublicKey: "plainSshPublicKey",
+    sshHostKey: "plainSshHostKey",
+    davHomeUrl: "plainDavHomeUrl",
+  },
+  z.strictObject({
+    id,
+    vaultId: id,
+    plainName: str,
+    slug: str,
+    plainDescription: str,
+    plainUrl: str,
+    enabled: z.boolean(),
+    authType: str,
+    authHeaderName: str.nullable(),
+    authValueTemplate: str.nullable(),
+    authSecretId: id.nullable(),
+    plainOauthClientId: str.nullable(),
+    oauthClientSecretId: id.nullable(),
+    plainOauthScope: str.nullable(),
+    plainOauthAuthorizeParams: str.nullable(),
+    oauthTokensId: id.nullable(),
+    oauthConnectedAt: dateOrNull,
+    plainOauthAuthorizationUrl: str.nullable(),
+    plainOauthTokenUrl: str.nullable(),
+    status: str,
+    plainStatusMessage: str,
+    lastSyncedAt: dateOrNull,
+    createdAt: date,
+    updatedAt: date,
+    kind: str,
+    specSource: str.nullable(),
+    plainSpecUrl: str.nullable(),
+    readOnly: z.boolean(),
+    publicOnly: z.boolean(),
+    specUrlFromAssistant: z.boolean(),
+    // Mail accounts (kinds jmap and imap), added in 0.2: absent from older
+    // exports, which hold none.
+    plainAuthUsername: str.nullable().default(null),
+    plainMailApiUrl: str.nullable().default(null),
+    plainMailDownloadUrl: str.nullable().default(null),
+    plainMailUploadUrl: str.nullable().default(null),
+    plainMailAccountId: str.nullable().default(null),
+    mailSubmission: z.boolean().default(false),
+    plainSmtpUrl: str.nullable().default(null),
+    plainMailFrom: str.nullable().default(null),
+    // Whether an IMAP account's sent email gets a copy in Sent from PCP, and
+    // what PCP learned of its server, added after 0.4.3: absent from older
+    // exports, whose accounts take the defaults.
+    mailSaveSent: str.default("auto"),
+    mailServerFilesSent: z.boolean().nullable().default(null),
+    // SSH servers, added in 0.3: absent from older exports, which hold none.
+    plainSshPublicKey: str.nullable().default(null),
+    plainSshHostKey: str.nullable().default(null),
+    // Calendar accounts (kind caldav), added in 0.4: absent from older
+    // exports, which hold none.
+    plainDavHomeUrl: str.nullable().default(null),
+    // The version of its document in a linked repository, added with them:
+    // absent from older exports, which never synced one.
+    syncVersion: z.number().int().nullable().default(null),
+    // Definitions and the owner's note, added together: absent from older
+    // exports, whose servers each get a definition of their own on restore.
+    definitionId: id.nullable().default(null),
+    personalNote: bytesOrNull.default(null),
+    // Levels the owner saved with an approval, waiting for the server's first
+    // read of its tools: absent from older exports, which had none.
+    pendingAccess: str.nullable().default(null),
+    // The sealed values: absent from older files, whose servers hold them in
+    // the plain columns until the vault's rows are sealed.
+    meta: bytesOrNull.default(null),
+  }),
+)
 
 // Definitions, added with the owner's notes: absent from older exports.
-const ServerDefinitionRow = z.strictObject({
-  id,
-  vaultId: id,
-  kind: str,
-  slug: str,
-  name: str,
-  description: str,
-  formatVersion: z.number().int(),
-  createdAt: date,
-  updatedAt: date,
-})
+const ServerDefinitionRow = renamedFrom(
+  { name: "plainName", description: "plainDescription" },
+  z.strictObject({
+    id,
+    vaultId: id,
+    kind: str,
+    slug: str,
+    plainName: str,
+    plainDescription: str,
+    // Sealed since (#96): absent from older files.
+    meta: bytesOrNull.default(null),
+    formatVersion: z.number().int(),
+    createdAt: date,
+    updatedAt: date,
+  }),
+)
 
 const ServerAuthHeaderRow = z.strictObject({
   id,

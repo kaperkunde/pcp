@@ -12,7 +12,7 @@ import {
   DEFAULT_HEADER_NAME,
   DEFAULT_VALUE_TEMPLATE,
 } from "@/lib/core/constants"
-import { db } from "@/lib/core/db"
+import { byServerName, findServers } from "@/lib/core/server-meta"
 import { isPcpError } from "@/lib/core/errors"
 import { oauthRedirectUrl } from "@/lib/core/oauth-client"
 import type {
@@ -147,11 +147,9 @@ export default async function ImportPage({
     const service = fetched.document
     const review = reviewItem(null, service)
     const hosts = (
-      await db().mcpServer.findMany({
-        where: { vaultId: ctx.vaultId, kind: "ssh" },
-        orderBy: { name: "asc" },
-      })
+      await findServers(ctx, { vaultId: ctx.vaultId, kind: "ssh" })
     )
+      .sort(byServerName)
       // A service's commands go only to a server whose host key is pinned.
       .filter((server) => server.sshHostKey)
       .map((server) => ({

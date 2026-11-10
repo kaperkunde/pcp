@@ -1,6 +1,8 @@
 import type { CallToolResult } from "@modelcontextprotocol/server"
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
 
+import { openServer } from "./server-meta"
+
 import { listTokenAllowances, pruneAllowances } from "./allowances"
 import { createApiToken, resolveApiToken } from "./api-tokens"
 import {
@@ -739,9 +741,12 @@ describe("request_secret", () => {
   })
 
   it("is a request the owner answers on PCP's page, and a tool error for a name PCP holds", async () => {
-    const server = await db().mcpServer.findUniqueOrThrow({
-      where: { id: serverId },
-    })
+    const server = openServer(
+      ctx,
+      await db().mcpServer.findUniqueOrThrow({
+        where: { id: serverId },
+      }),
+    )
     const options = { publicUrl: PUBLIC_URL, tokenId }
 
     const asked = await runCall(ctx, server, "request_secret", ASK, options)
@@ -901,9 +906,12 @@ describe("request_secret with a login name and a made password", () => {
   }
 
   async function requested(args: Record<string, unknown> = ASK) {
-    const server = await db().mcpServer.findUniqueOrThrow({
-      where: { id: serverId },
-    })
+    const server = openServer(
+      ctx,
+      await db().mcpServer.findUniqueOrThrow({
+        where: { id: serverId },
+      }),
+    )
     const asked = await runCall(ctx, server, "request_secret", args, {
       publicUrl: PUBLIC_URL,
       tokenId,
@@ -930,9 +938,12 @@ describe("request_secret with a login name and a made password", () => {
     ).rejects.toThrow(/8 to 128/)
 
     // The tool's own schema says the same before anything runs.
-    const server = await db().mcpServer.findUniqueOrThrow({
-      where: { id: serverId },
-    })
+    const server = openServer(
+      ctx,
+      await db().mcpServer.findUniqueOrThrow({
+        where: { id: serverId },
+      }),
+    )
     const refused = await runCall(
       ctx,
       server,
@@ -1029,9 +1040,12 @@ describe("update_secret_sites", () => {
   })
 
   async function proposed(args: Record<string, unknown>) {
-    const server = await db().mcpServer.findUniqueOrThrow({
-      where: { id: serverId },
-    })
+    const server = openServer(
+      ctx,
+      await db().mcpServer.findUniqueOrThrow({
+        where: { id: serverId },
+      }),
+    )
     return runCall(ctx, server, "update_secret_sites", args, {
       publicUrl: PUBLIC_URL,
       tokenId,

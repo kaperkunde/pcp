@@ -238,6 +238,7 @@ import {
   validateUsername,
   type AuthType,
 } from "./servers"
+import { openServer } from "./server-meta"
 import { collectHandleIds, missingResultMessage } from "./result-handles"
 import { capabilityProviders } from "./capabilities/candidates"
 import { sniffMediaType } from "./media-types"
@@ -1730,7 +1731,7 @@ export function buildGatewayServer(
 
     // An endpoint another PCP version built is built again first, or says
     // how to fix the schema that no longer builds.
-    const migration = await endpointMigration(found.server)
+    const migration = await endpointMigration(scope.ctx, found.server)
     const row = await toolRow(found.server.id, found.tool.name)
 
     if (!row) {
@@ -2498,7 +2499,7 @@ export function buildGatewayServer(
     })
     // An endpoint whose schema no longer builds says how to fix it, with
     // whatever its call comes to.
-    const migration = await endpointMigration(target)
+    const migration = await endpointMigration(scope.ctx, target)
 
     if ("refusal" in unfit) {
       return toolError(
@@ -3725,8 +3726,8 @@ export function buildGatewayServer(
     annotations: READS,
     log: serverNamed("server"),
     async run(args: { server: string }, ctx) {
-      const find = () =>
-        db().mcpServer.findFirst({
+      const find = async () => {
+        const found = await db().mcpServer.findFirst({
           where: {
             vaultId: scope.ctx.vaultId,
             slug: args.server,
@@ -3734,6 +3735,8 @@ export function buildGatewayServer(
           },
           include: { _count: { select: { tools: true } } },
         })
+        return found && openServer(scope.ctx, found)
+      }
       const first = await find()
       // While the owner signs in, hold the call until they are done and the
       // tools are read: the sign-in lands a moment before its tools do.
@@ -4853,6 +4856,7 @@ export function buildGatewayServer(
           return asked({
             kind: "register",
             input: await withRegisterAccess(
+              scope.ctx,
               {
                 ...common,
                 name: normalizeNameAndDescription({
@@ -5007,7 +5011,7 @@ export function buildGatewayServer(
 
       const ask = await asked({
         kind: "register",
-        input: await withRegisterAccess(input, args.tool_access),
+        input: await withRegisterAccess(scope.ctx, input, args.tool_access),
       })
 
       // The assistant hears about mistakes PCP found in the schema, with

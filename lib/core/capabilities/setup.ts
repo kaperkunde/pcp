@@ -1,5 +1,6 @@
 import type { VaultContext } from "../context"
 import { db } from "../db"
+import { SERVER_META_SELECT, serverName } from "../server-meta"
 import { isPcpError } from "../errors"
 import { commonRepository } from "../repos/common"
 import { itemRoot } from "../repos/layout"
@@ -53,7 +54,7 @@ async function runningItems(
   const names = new Set(items.map((item) => item.name))
   const specs = await db().serviceSpec.findMany({
     where: { server: { vaultId: ctx.vaultId } },
-    select: { definition: true, server: { select: { id: true, name: true } } },
+    select: { definition: true, server: { select: SERVER_META_SELECT } },
     orderBy: { createdAt: "asc" },
   })
 
@@ -65,7 +66,13 @@ async function runningItems(
       )
 
       return item && names.has(item.name)
-        ? [{ id: spec.server.id, name: spec.server.name, item: item.title }]
+        ? [
+            {
+              id: spec.server.id,
+              name: serverName(ctx, spec.server),
+              item: item.title,
+            },
+          ]
         : []
     } catch {
       return []

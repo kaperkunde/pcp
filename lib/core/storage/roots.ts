@@ -1,6 +1,6 @@
 import type { CallToolResult } from "@modelcontextprotocol/server"
 
-import type { McpServer, StorageRoot } from "@/lib/generated/prisma/client"
+import type { StorageRoot } from "@/lib/generated/prisma/client"
 
 import { storeTools, type SyncResult } from "../catalogue"
 import type { VaultContext } from "../context"
@@ -48,6 +48,13 @@ import { globMatcher, normalizeRootPath, splitPath } from "./paths"
 import { storeRoom } from "./quota"
 import { FileTooLargeError, type RemoteFs } from "./sftp"
 import { isStorageWrite, storageTool, storageTools } from "./tools"
+import {
+  findServer,
+  openServer,
+  type OpenServer,
+  serverCreateData,
+  writeServer,
+} from "../server-meta"
 
 /**
  * Stores: servers of kind "storage", each a place assistants read and write
@@ -87,10 +94,12 @@ export type StorageRootInput = {
 }
 
 export type LoadedStorage = {
-  server: McpServer
+  /** The request's: what opens the store's sealed values and writes them. */
+  ctx: VaultContext
+  server: OpenServer
   root: StorageRoot
   /** The SSH server; null for the local store, or once it was deleted. */
-  host: McpServer | null
+  host: OpenServer | null
 }
 
 /**
@@ -154,10 +163,8 @@ function normalize(input: StorageRootInput) {
   }
 }
 
-async function sshHost(ctx: VaultContext, hostId: string): Promise<McpServer> {
-  const host = await db().mcpServer.findFirst({
-    where: { id: hostId, vaultId: ctx.vaultId },
-  })
+async function sshHost(ctx: VaultContext, hostId: string): Promise<OpenServer> {
+  const host = await findServer(ctx, { id: hostId, vaultId: ctx.vaultId })
 
   if (!host || host.kind !== "ssh") {
     throw invalid("Choose one of your SSH servers for the folder.")
@@ -197,7 +204,7 @@ export async function createStorageRoot(
   const id = newId()
 
   await db().mcpServer.create({
-    data: {
+    data: serverCreateData(ctx, {
       id,
       vaultId: ctx.vaultId,
       kind: "storage",
@@ -218,11 +225,11 @@ export async function createStorageRoot(
             : {}),
         },
       },
-    },
+    }),
   })
 
   const loaded = await loadStorageRoot(ctx, id)
-  await storeTools(id, toolsOf(loaded))
+  await storeTools(ctx, id, toolsOf(loaded))
   return { id }
 }
 
@@ -243,18 +250,15 @@ export async function updateStorageRoot(
 
   const data = normalize(input)
 
-  await db().mcpServer.update({
-    where: { id },
-    data: {
-      name: data.name,
-      description: data.description,
-      readOnly: data.readOnly,
-      storageRoot: {
-        update: { path: data.path, writeAs: data.writeAs, umask: data.umask },
-      },
+  await writeServer(ctx, id, {
+    name: data.name,
+    description: data.description,
+    readOnly: data.readOnly,
+    storageRoot: {
+      update: { path: data.path, writeAs: data.writeAs, umask: data.umask },
     },
   })
-  await storeTools(id, toolsOf(await loadStorageRoot(ctx, id)))
+  await storeTools(ctx, id, toolsOf(await loadStorageRoot(ctx, id)))
 }
 
 export async function loadStorageRoot(
@@ -280,7 +284,7 @@ export async function loadStorageRoot(
   }
 
   const { host, ...own } = root
-  return { server, root: own, host }
+  return { ctx, server, root: own, host: host ? openServer(ctx, host) : null }
 }
 
 /** The roots on one SSH server, for its page. */
@@ -294,7 +298,13 @@ export async function listStorageRoots(
     orderBy: { path: "asc" },
   })
 
-  return rows.map((row) => viewOf(row.server, row, row.host))
+  return rows.map((row) =>
+    viewOf(
+      openServer(ctx, row.server),
+      row,
+      row.host ? openServer(ctx, row.host) : null,
+    ),
+  )
 }
 
 export type StorageRootView = {
@@ -316,9 +326,9 @@ export type StorageRootView = {
 }
 
 function viewOf(
-  server: McpServer,
+  server: OpenServer,
   root: StorageRoot,
-  host: McpServer | null,
+  host: OpenServer | null,
 ): StorageRootView {
   const login = host?.authUsername ?? ""
 
@@ -357,7 +367,7 @@ function toolsOf(loaded: LoadedStorage) {
   })
 }
 
-function pageOf(server: Pick<McpServer, "id" | "name">, publicUrl: string) {
+function pageOf(server: Pick<OpenServer, "id" | "name">, publicUrl: string) {
   return markdownLink(
     `Open ${server.name}'s page in PCP`,
     `${publicUrl.replace(/\/+$/, "")}/servers/${server.id}`,
@@ -507,18 +517,23 @@ async function failure(
 
   if (error instanceof SshAuthError) {
     const message = `${host.name} did not let PCP sign in. ${reason} The owner finds PCP's key on its page:\n${pageOf(host, publicUrl)}`
-    await setServerStatus(loaded.server.id, "auth_required", message)
+    await setServerStatus(
+      loaded.ctx,
+      loaded.server.id,
+      "auth_required",
+      message,
+    )
     return { status: "auth_required", message }
   }
 
   if (error instanceof SshHostKeyError) {
     const message = `PCP did not connect. ${reason} Its page:\n${pageOf(host, publicUrl)}`
-    await setServerStatus(loaded.server.id, "error", message)
+    await setServerStatus(loaded.ctx, loaded.server.id, "error", message)
     return { status: "error", message }
   }
 
   const message = `${loaded.server.name} could not be reached: ${reason}`
-  await setServerStatus(loaded.server.id, "error", message)
+  await setServerStatus(loaded.ctx, loaded.server.id, "error", message)
   return { status: "error", message }
 }
 
@@ -533,11 +548,11 @@ export async function syncStorageTools(
   connect: StorageConnect | null,
   { publicUrl }: { publicUrl: string },
 ): Promise<SyncResult> {
-  const toolCount = await storeTools(loaded.server.id, toolsOf(loaded))
+  const toolCount = await storeTools(ctx, loaded.server.id, toolsOf(loaded))
   const unreachable = unreachableReason(loaded, publicUrl)
 
   if (unreachable) {
-    await setServerStatus(loaded.server.id, "error", unreachable)
+    await setServerStatus(loaded.ctx, loaded.server.id, "error", unreachable)
     return { status: "error", message: unreachable, toolCount }
   }
 
@@ -555,7 +570,7 @@ export async function syncStorageTools(
         await folder.probeWrite()
       }
     })
-    await setServerStatus(loaded.server.id, "ok", "", {
+    await setServerStatus(loaded.ctx, loaded.server.id, "ok", "", {
       lastSyncedAt: new Date(),
     })
     return { status: "ok", message: "", toolCount }
@@ -564,7 +579,7 @@ export async function syncStorageTools(
       const message = isLocalStore(loaded.root)
         ? error.message
         : `${loaded.root.path}: ${error.message}`
-      await setServerStatus(loaded.server.id, "error", message)
+      await setServerStatus(loaded.ctx, loaded.server.id, "error", message)
       return { status: "error", message, toolCount }
     }
 
@@ -726,7 +741,9 @@ export async function callStorageTool(
     )
 
     if (server.status !== "ok") {
-      await setServerStatus(server.id, "ok", "", { lastSyncedAt: new Date() })
+      await setServerStatus(ctx, server.id, "ok", "", {
+        lastSyncedAt: new Date(),
+      })
     }
 
     return withNotes(jsonToolResult(value), notes)
@@ -956,7 +973,7 @@ export async function ensureOwnStore(ctx: VaultContext): Promise<string> {
     const id = newId()
 
     await db().mcpServer.create({
-      data: {
+      data: serverCreateData(ctx, {
         id,
         vaultId: ctx.vaultId,
         kind: "storage",
@@ -974,9 +991,9 @@ export async function ensureOwnStore(ctx: VaultContext): Promise<string> {
             umask: 0o077,
           },
         },
-      },
+      }),
     })
-    await storeTools(id, toolsOf(await loadStorageRoot(ctx, id)))
+    await storeTools(ctx, id, toolsOf(await loadStorageRoot(ctx, id)))
     return id
   })()
 
@@ -999,7 +1016,13 @@ export async function listStores(
   })
 
   return rows
-    .map((row) => viewOf(row.server, row, row.host))
+    .map((row) =>
+      viewOf(
+        openServer(ctx, row.server),
+        row,
+        row.host ? openServer(ctx, row.host) : null,
+      ),
+    )
     .sort((a, b) =>
       a.backend !== b.backend
         ? a.backend === "local"

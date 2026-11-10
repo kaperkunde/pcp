@@ -4,6 +4,7 @@ import { ALLOW_FOR_MINUTES, type AllowForMinutes } from "./constants"
 import type { VaultContext } from "./context"
 import { keyedHash } from "./crypto"
 import { db } from "./db"
+import { SERVER_META_SELECT, serverName } from "./server-meta"
 import { invalid } from "./errors"
 import { openText, sealText, type Sealed } from "./sealed"
 import { accessKey } from "./tool-access"
@@ -203,7 +204,7 @@ export async function listTokenAllowances(
   const [tools, sites, secrets] = await Promise.all([
     db().apiTokenToolAllowance.findMany({
       where: { tokenId, until: { gt: now } },
-      include: { server: { select: { name: true } } },
+      include: { server: { select: SERVER_META_SELECT } },
     }),
     db().apiTokenSiteAllowance.findMany({
       where: { tokenId, until: { gt: now } },
@@ -215,7 +216,7 @@ export async function listTokenAllowances(
     ...tools.map((row): TokenAllowance => ({
       kind: "tool",
       serverId: row.serverId,
-      serverName: row.server.name,
+      serverName: serverName(ctx, row.server),
       toolName: row.toolName,
       until: row.until,
     })),

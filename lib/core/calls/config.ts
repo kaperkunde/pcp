@@ -2,6 +2,7 @@ import { z } from "zod"
 
 import type { VaultContext } from "../context"
 import { db } from "../db"
+import { byServerName, openServer, SERVER_NAME_SELECT } from "../server-meta"
 import { invalid, notFound } from "../errors"
 import { getSetting, setSetting } from "../settings"
 import { accessKey } from "../tool-access"
@@ -222,14 +223,15 @@ export async function duplicateCallsOverview(
     await db().mcpServer.findMany({
       where: { vaultId: ctx.vaultId },
       select: {
-        id: true,
-        name: true,
-        kind: true,
+        ...SERVER_NAME_SELECT,
+        definitionId: true,
         tools: { select: { name: true }, orderBy: { name: "asc" } },
       },
-      orderBy: { name: "asc" },
     })
-  ).filter((server) => !UNGUARDED_KINDS.has(server.kind))
+  )
+    .map((row) => openServer(ctx, row))
+    .sort(byServerName)
+    .filter((server) => !UNGUARDED_KINDS.has(server.kind))
   const tiers = await loadToolTiers(ctx.vaultId, servers)
   const choices: DuplicateCallsTool[] = []
   const known = new Map<string, DuplicateCallsTool>()

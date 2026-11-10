@@ -3,6 +3,7 @@ import YAML from "yaml"
 import { createBrowserServer } from "../browser/server"
 import type { VaultContext } from "../context"
 import { db } from "../db"
+import { serverCreateData } from "../server-meta"
 import { createEndpoint } from "../endpoints"
 import { createSecret, writeManagedSecret } from "../secrets"
 import { ensureDefinition } from "../definition-rows"
@@ -380,7 +381,7 @@ export async function addService(
   const id = newId()
 
   await db().mcpServer.create({
-    data: {
+    data: serverCreateData(ctx, {
       id,
       vaultId: ctx.vaultId,
       kind: "service",
@@ -405,9 +406,9 @@ export async function addService(
           registeredId,
         },
       },
-    },
+    }),
   })
-  await ensureDefinition(id)
+  await ensureDefinition(ctx, id)
 
   return { id, hostId, registeredId }
 }

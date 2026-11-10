@@ -2,8 +2,6 @@ import { createHash } from "node:crypto"
 
 import type { CallToolResult } from "@modelcontextprotocol/client"
 
-import type { McpServer } from "@/lib/generated/prisma/client"
-
 import { storeTools, type SyncResult } from "./catalogue"
 import type { VaultContext } from "./context"
 import { db } from "./db"
@@ -67,6 +65,15 @@ import {
   type ExtraAuthHeaderInput,
 } from "./servers"
 import { PCP_VERSION } from "./version"
+import {
+  findServer,
+  openServer,
+  type OpenServer,
+  serverCreateData,
+  type ServerWrite,
+  updateServerRow,
+  writeServer,
+} from "./server-meta"
 
 /**
  * API endpoints: HTTP APIs described by an OpenAPI schema. Each is a server
@@ -336,7 +343,7 @@ function fallbackDescription(generated: Generated): string {
  */
 function statusNotes(
   server: Pick<
-    McpServer,
+    OpenServer,
     "url" | "authType" | "oauthAuthorizationUrl" | "oauthTokenUrl"
   >,
   sent: string[],
@@ -409,8 +416,13 @@ function schemaServerUrl(
   }
 }
 
-function storeGenerated(serverId: string, generated: Generated) {
+function storeGenerated(
+  ctx: VaultContext,
+  serverId: string,
+  generated: Generated,
+) {
   return storeTools(
+    ctx,
     serverId,
     generated.tools.map((tool) => ({
       name: tool.name,
@@ -425,13 +437,14 @@ function storeGenerated(serverId: string, generated: Generated) {
 }
 
 async function applySpec(
-  server: McpServer,
+  ctx: VaultContext,
+  server: OpenServer,
   text: string,
   patches: PatchOperation[],
   generated: Generated,
   fetchedFrom: string | null,
 ): Promise<SyncResult> {
-  const toolCount = await storeGenerated(server.id, generated)
+  const toolCount = await storeGenerated(ctx, server.id, generated)
 
   const hash = specHash(text)
   const stored = await db().openApiSpec.findUnique({
@@ -458,10 +471,7 @@ async function applySpec(
   if (!server.description) {
     const description = fallbackDescription(generated)
     if (description) {
-      await db().mcpServer.update({
-        where: { id: server.id },
-        data: { description },
-      })
+      await writeServer(ctx, server.id, { description })
     }
   }
 
@@ -471,12 +481,14 @@ async function applySpec(
     generated,
     schemaServerUrl(generated, fetchedFrom ?? server.specUrl),
   )
-  await setServerStatus(server.id, "ok", message, { lastSyncedAt: fetchedAt })
+  await setServerStatus(ctx, server.id, "ok", message, {
+    lastSyncedAt: fetchedAt,
+  })
 
   // The schema, its edits and the description are the definition's: every
   // other instance takes them and rebuilds its tools.
-  await shareSpec(server, { text, hash, patches: edits, fetchedAt })
-  await shareDescription(server.id)
+  await shareSpec(ctx, server, { text, hash, patches: edits, fetchedAt })
+  await shareDescription(ctx, server.id)
 
   return { status: "ok", message, toolCount }
 }
@@ -489,10 +501,11 @@ async function applySpec(
  * One that does not build keeps its tools and says why in its status.
  */
 async function shareSpec(
-  server: McpServer,
+  ctx: VaultContext,
+  server: OpenServer,
   spec: { text: string; hash: string; patches: string; fetchedAt: Date },
 ): Promise<void> {
-  const siblings = (await siblingInstances(server.id)).filter(
+  const siblings = (await siblingInstances(ctx, server.id)).filter(
     (sibling) => sibling.kind === "openapi",
   )
 
@@ -508,7 +521,7 @@ async function shareSpec(
       sibling.specUrl !== shared.specUrl ||
       sibling.specUrlFromAssistant !== shared.specUrlFromAssistant
     ) {
-      await db().mcpServer.update({ where: { id: sibling.id }, data: shared })
+      await writeServer(ctx, sibling.id, shared)
     }
 
     const stored = await db().openApiSpec.findUnique({
@@ -532,7 +545,7 @@ async function shareSpec(
       create: { serverId: sibling.id, ...columns },
       update: columns,
     })
-    await rebuildFromCopy({ ...sibling, ...shared })
+    await rebuildFromCopy(ctx, { ...sibling, ...shared })
   }
 }
 
@@ -540,9 +553,12 @@ async function shareSpec(
  * Rebuilds one endpoint's tools from the copy of its schema PCP holds, and
  * says how that went in its status. Nothing is shared from here.
  */
-async function rebuildFromCopy(server: McpServer): Promise<void> {
+async function rebuildFromCopy(
+  ctx: VaultContext,
+  server: OpenServer,
+): Promise<void> {
   try {
-    const spec = await storedSpec(server.id)
+    const spec = await storedSpec(ctx, server.id)
 
     if (!spec) {
       throw invalid("PCP has no copy of this schema.")
@@ -554,12 +570,13 @@ async function rebuildFromCopy(server: McpServer): Promise<void> {
       patches: spec.patches,
     })
 
-    await storeGenerated(server.id, generated)
+    await storeGenerated(ctx, server.id, generated)
     await db().openApiSpec.update({
       where: { serverId: server.id },
       data: { builtWith: PCP_VERSION },
     })
     await setServerStatus(
+      ctx,
       server.id,
       "ok",
       statusNotes(
@@ -572,6 +589,7 @@ async function rebuildFromCopy(server: McpServer): Promise<void> {
     )
   } catch (error) {
     await setServerStatus(
+      ctx,
       server.id,
       "error",
       (isPcpError(error)
@@ -585,7 +603,10 @@ async function rebuildFromCopy(server: McpServer): Promise<void> {
 /**
  * Rebuilds the tools of every endpoint another PCP version built, from the
  * copy and edits PCP keeps: the schema the owner approved, read by today's
- * generator. Run at boot. Without it an endpoint keeps what the PCP that
+ * generator. Run for each vault by the first request this process sees
+ * with its key (lib/core/vault-upkeep.ts): the schemas and tools are
+ * sealed under it, so nothing reads them at boot. Without it an endpoint
+ * keeps what the PCP that
  * added it made of its schema (no outline of its answers, a header PCP now
  * sends itself still asked for) until its schema is read again, which for
  * an uploaded schema, or a URL whose document has since changed, is never.
@@ -594,14 +615,18 @@ async function rebuildFromCopy(server: McpServer): Promise<void> {
  * tools: not when it was read, not its status or what that says (that the
  * document at its URL changed, say, or that it waits to be signed in to).
  * An endpoint whose schema no longer builds keeps the tools it has and is
- * tried again at the next boot.
+ * tried again by the next process (and on its next describe or call,
+ * endpointMigration).
  */
-export async function rebuildOutdatedEndpoints(): Promise<{
+export async function rebuildOutdatedEndpoints(ctx: VaultContext): Promise<{
   rebuilt: number
   failed: Array<{ serverId: string; message: string }>
 }> {
   const outdated = await db().openApiSpec.findMany({
-    where: { OR: [{ builtWith: null }, { builtWith: { not: PCP_VERSION } }] },
+    where: {
+      server: { vaultId: ctx.vaultId },
+      OR: [{ builtWith: null }, { builtWith: { not: PCP_VERSION } }],
+    },
     select: { serverId: true },
   })
   const failed: Array<{ serverId: string; message: string }> = []
@@ -610,10 +635,8 @@ export async function rebuildOutdatedEndpoints(): Promise<{
   // One at a time: each holds a whole schema in memory.
   for (const { serverId } of outdated) {
     try {
-      const server = await db().mcpServer.findUnique({
-        where: { id: serverId },
-      })
-      const spec = await storedSpec(serverId)
+      const server = await findServer(ctx, { id: serverId })
+      const spec = await storedSpec(ctx, serverId)
 
       if (!server || server.kind !== "openapi" || !spec) {
         continue
@@ -625,7 +648,7 @@ export async function rebuildOutdatedEndpoints(): Promise<{
         patches: spec.patches,
       })
 
-      await storeGenerated(serverId, generated)
+      await storeGenerated(ctx, serverId, generated)
       await db().openApiSpec.update({
         where: { serverId },
         data: { builtWith: PCP_VERSION },
@@ -659,8 +682,9 @@ const unbuilt = new Map<string, { basis: string; message: string }>()
  * include_problems proposes when there are any.
  */
 export async function endpointMigration(
-  server: Pick<McpServer, "id" | "kind" | "readOnly" | "authType"> &
-    Partial<McpServer>,
+  ctx: VaultContext,
+  server: Pick<OpenServer, "id" | "kind" | "readOnly" | "authType"> &
+    Partial<OpenServer>,
 ): Promise<string | null> {
   if (server.kind !== "openapi") {
     return null
@@ -680,13 +704,13 @@ export async function endpointMigration(
   let message = known?.basis === basis ? known.message : null
 
   if (message === null) {
-    const spec = await storedSpec(server.id)
+    const spec = await storedSpec(ctx, server.id)
 
     if (!spec) {
       return null
     }
 
-    const headers = await authHeaderNames(server as McpServer)
+    const headers = await authHeaderNames(server as OpenServer)
 
     try {
       const generated = generateEndpointTools(spec.text, {
@@ -695,7 +719,7 @@ export async function endpointMigration(
         patches: spec.patches,
       })
 
-      await storeGenerated(server.id, generated)
+      await storeGenerated(ctx, server.id, generated)
       await db().openApiSpec.update({
         where: { serverId: server.id },
         data: { builtWith: PCP_VERSION },
@@ -733,7 +757,10 @@ export function specHash(text: string): string {
 }
 
 /** What PCP keeps of an endpoint's schema: the text and its edits. */
-export async function storedSpec(serverId: string): Promise<{
+export async function storedSpec(
+  ctx: VaultContext,
+  serverId: string,
+): Promise<{
   text: string
   hash: string
   patches: PatchOperation[]
@@ -845,12 +872,15 @@ export function previewEndpoint(
  * description, and the schema, its edits and where it is read from as
  * another instance holds them (the copy, not a new download).
  */
-async function definitionContent(definition: {
-  id: string
-  description: string
-}): Promise<Partial<EndpointInput>> {
-  const source = await contentInstance(definition.id)
-  const spec = source ? await storedSpec(source.id) : null
+async function definitionContent(
+  ctx: VaultContext,
+  definition: {
+    id: string
+    description: string
+  },
+): Promise<Partial<EndpointInput>> {
+  const source = await contentInstance(ctx, definition.id)
+  const spec = source ? await storedSpec(ctx, source.id) : null
 
   if (!source || !spec) {
     throw invalid(
@@ -879,7 +909,7 @@ export async function createEndpoint(
     ? await definitionForNew(ctx, given.definitionId, "openapi")
     : null
   const input = definition
-    ? { ...given, ...(await definitionContent(definition)) }
+    ? { ...given, ...(await definitionContent(ctx, definition)) }
     : given
   const data = await normalizeEndpoint(ctx, input)
   let text: string
@@ -920,46 +950,52 @@ export async function createEndpoint(
   const id = newId()
 
   return withNewSecret(ctx, data.newSecret, async (secretId) => {
-    const server = await db().mcpServer.create({
-      data: {
-        id,
-        vaultId: ctx.vaultId,
-        kind: "openapi",
-        enabled: input.enabled !== false,
-        slug: await uniqueSlug(ctx.vaultId, slugify(data.name)),
-        name: data.name,
-        description: data.description,
-        url: baseUrl,
-        specSource: data.specSource,
-        specUrl: data.specUrl,
-        readOnly: data.readOnly,
-        publicOnly: data.publicOnly,
-        specUrlFromAssistant:
-          data.specSource === "url" && input.specUrlFromAssistant === true,
-        definitionId: definition?.id ?? null,
-        authType: data.authType,
-        authUsername: data.authUsername,
-        authHeaderName: data.authHeaderName,
-        authValueTemplate: data.authValueTemplate,
-        ...secretColumns(data, secretId),
-        authHeaders: extraAuthHeadersWrite(data.authExtraHeaders, {
-          replace: false,
-        }),
-        oauthClientId: data.oauthClientId,
-        oauthAuthorizeParams: data.oauthAuthorizeParams,
-        ...oauth,
-      },
-    })
+    const server = openServer(
+      ctx,
+      await db().mcpServer.create({
+        data: {
+          ...serverCreateData(ctx, {
+            id,
+            vaultId: ctx.vaultId,
+            kind: "openapi",
+            enabled: input.enabled !== false,
+            slug: await uniqueSlug(ctx.vaultId, slugify(data.name)),
+            name: data.name,
+            description: data.description,
+            url: baseUrl,
+            specSource: data.specSource,
+            specUrl: data.specUrl,
+            readOnly: data.readOnly,
+            publicOnly: data.publicOnly,
+            specUrlFromAssistant:
+              data.specSource === "url" && input.specUrlFromAssistant === true,
+            definitionId: definition?.id ?? null,
+            authType: data.authType,
+            authUsername: data.authUsername,
+            authHeaderName: data.authHeaderName,
+            authValueTemplate: data.authValueTemplate,
+            ...secretColumns(data, secretId),
+            oauthClientId: data.oauthClientId,
+            oauthAuthorizeParams: data.oauthAuthorizeParams,
+            ...oauth,
+          }),
+          authHeaders: extraAuthHeadersWrite(data.authExtraHeaders, {
+            replace: false,
+          }),
+        },
+      }),
+    )
 
     try {
       const sync = await applySpec(
+        ctx,
         server,
         text,
         patches,
         generated,
         fetchedFrom,
       )
-      await ensureDefinition(id)
+      await ensureDefinition(ctx, id)
 
       return { id, sync }
     } catch (error) {
@@ -991,7 +1027,7 @@ function originOf(address: string | null): string | null {
  * send the secret wherever that document says.
  */
 function baseUrlForUpdate(
-  existing: McpServer,
+  existing: OpenServer,
   data: {
     ownerBaseUrl: string | null
     authType: string
@@ -1031,7 +1067,7 @@ export async function updateEndpoint(
   const data = await normalizeEndpoint(ctx, input)
   // The page's switch sets it (setServerPublicOnly); the form leaves it out.
   const publicOnly = input.publicOnly ?? existing.publicOnly
-  const stored = await storedSpec(id)
+  const stored = await storedSpec(ctx, id)
 
   let text: string
   let fetchedFrom: string | null = null
@@ -1083,30 +1119,27 @@ export async function updateEndpoint(
       baseUrl !== existing.url)
 
   const server = await withNewSecret(ctx, data.newSecret, (secretId) =>
-    db().mcpServer.update({
-      where: { id },
-      data: {
-        name: data.name,
-        description: data.description,
-        url: baseUrl,
-        specSource: data.specSource,
-        specUrl: data.specUrl,
-        readOnly: data.readOnly,
-        publicOnly,
-        specUrlFromAssistant,
-        authType: data.authType,
-        authUsername: data.authUsername,
-        authHeaderName: data.authHeaderName,
-        authValueTemplate: data.authValueTemplate,
-        ...secretColumns(data, secretId),
-        authHeaders: extraAuthHeadersWrite(data.authExtraHeaders, {
-          replace: true,
-        }),
-        oauthClientId: data.oauthClientId,
-        oauthAuthorizeParams: data.oauthAuthorizeParams,
-        ...oauth,
-        ...(dropTokens ? { oauthTokensId: null, oauthConnectedAt: null } : {}),
-      },
+    updateServerRow(ctx, id, {
+      name: data.name,
+      description: data.description,
+      url: baseUrl,
+      specSource: data.specSource,
+      specUrl: data.specUrl,
+      readOnly: data.readOnly,
+      publicOnly,
+      specUrlFromAssistant,
+      authType: data.authType,
+      authUsername: data.authUsername,
+      authHeaderName: data.authHeaderName,
+      authValueTemplate: data.authValueTemplate,
+      ...secretColumns(data, secretId),
+      authHeaders: extraAuthHeadersWrite(data.authExtraHeaders, {
+        replace: true,
+      }),
+      oauthClientId: data.oauthClientId,
+      oauthAuthorizeParams: data.oauthAuthorizeParams,
+      ...oauth,
+      ...(dropTokens ? { oauthTokensId: null, oauthConnectedAt: null } : {}),
     }),
   )
 
@@ -1115,7 +1148,7 @@ export async function updateEndpoint(
   }
 
   return {
-    sync: await applySpec(server, text, patches, generated, fetchedFrom),
+    sync: await applySpec(ctx, server, text, patches, generated, fetchedFrom),
   }
 }
 
@@ -1146,34 +1179,43 @@ export type EndpointChanges = {
    * than made to an endpoint the owner has since taken over or enabled.
    */
   unchanged?: Pick<
-    McpServer,
+    OpenServer,
     "url" | "enabled" | "authType" | "publicOnly" | "specUrl"
   >
 }
 
 /** Writes a change's columns, only to the endpoint as `unchanged` says. */
 async function writeChange(
+  ctx: VaultContext,
   id: string,
-  data: Record<string, unknown>,
+  data: ServerWrite,
   unchanged: EndpointChanges["unchanged"],
-): Promise<McpServer> {
+): Promise<OpenServer> {
   if (!unchanged) {
-    return db().mcpServer.update({ where: { id }, data })
+    return updateServerRow(ctx, id, data)
   }
 
-  const where = { id, ...unchanged }
-  const { count } = Object.keys(data).length
-    ? await db().mcpServer.updateMany({ where, data })
-    : { count: await db().mcpServer.count({ where }) }
+  // The address and the schema's are sealed: compared opened, in the same
+  // transaction as the write, so nothing comes between.
+  return db().$transaction(async (tx) => {
+    const now = await findServer(ctx, { id }, tx)
 
-  if (count === 0) {
-    throw new PcpError(
-      "state",
-      "The endpoint changed while this change was being made, so nothing changed. Read it again with get_endpoint and try again.",
-    )
-  }
+    if (
+      !now ||
+      now.url !== unchanged.url ||
+      now.enabled !== unchanged.enabled ||
+      now.authType !== unchanged.authType ||
+      now.publicOnly !== unchanged.publicOnly ||
+      now.specUrl !== unchanged.specUrl
+    ) {
+      throw new PcpError(
+        "state",
+        "The endpoint changed while this change was being made, so nothing changed. Read it again with get_endpoint and try again.",
+      )
+    }
 
-  return db().mcpServer.findUniqueOrThrow({ where: { id } })
+    return updateServerRow(ctx, id, data, tx)
+  })
 }
 
 /**
@@ -1253,15 +1295,15 @@ export async function changeEndpoint(
   if (!regenerate) {
     const server =
       Object.keys(data).length || changes.unchanged
-        ? await writeChange(id, data, changes.unchanged)
+        ? await writeChange(ctx, id, data, changes.unchanged)
         : existing
 
     if (offEverywhere) {
-      await disableOtherInstances(id)
+      await disableOtherInstances(ctx, id)
     }
 
     if (data.description !== undefined) {
-      await shareDescription(id)
+      await shareDescription(ctx, id)
     }
 
     return {
@@ -1273,7 +1315,7 @@ export async function changeEndpoint(
     }
   }
 
-  const stored = await storedSpec(id)
+  const stored = await storedSpec(ctx, id)
   const text = changes.specText ?? changes.fetched?.text ?? stored?.text
 
   if (text === undefined) {
@@ -1286,14 +1328,20 @@ export async function changeEndpoint(
     authHeaderNames: await authHeaderNames(existing),
     patches,
   })
-  const server = await writeChange(id, { ...data, readOnly }, changes.unchanged)
+  const server = await writeChange(
+    ctx,
+    id,
+    { ...data, readOnly },
+    changes.unchanged,
+  )
 
   if (offEverywhere) {
-    await disableOtherInstances(id)
+    await disableOtherInstances(ctx, id)
   }
 
   return {
     sync: await applySpec(
+      ctx,
       server,
       text,
       patches,
@@ -1310,7 +1358,7 @@ export async function changeEndpoint(
  * whose own loopback is another one.
  */
 export async function downloadSpec(
-  server: Pick<McpServer, "id" | "name" | "specUrl" | "publicOnly">,
+  server: Pick<OpenServer, "id" | "name" | "specUrl" | "publicOnly">,
   reach?: Pick<SendOptions, "dial">,
 ): Promise<{ text: string; url: string }> {
   if (!server.specUrl) {
@@ -1352,7 +1400,8 @@ async function reachedThroughService(serverId: string): Promise<boolean> {
  * words every assistant reads, by changing the file.
  */
 export async function syncEndpointTools(
-  server: McpServer,
+  ctx: VaultContext,
+  server: OpenServer,
   {
     byOwner = false,
     fromCopy = false,
@@ -1368,7 +1417,7 @@ export async function syncEndpointTools(
   try {
     let text: string
     let fetchedFrom: string | null = null
-    const stored = await storedSpec(server.id)
+    const stored = await storedSpec(ctx, server.id)
 
     if (
       server.specSource === "url" &&
@@ -1385,7 +1434,7 @@ export async function syncEndpointTools(
       ) {
         const message =
           "The schema at its URL has changed since it was approved. The tools are still built from the approved copy; re-read it in PCP to take the new one."
-        await setServerStatus(server.id, "ok", message, {
+        await setServerStatus(ctx, server.id, "ok", message, {
           lastSyncedAt: new Date(),
         })
 
@@ -1411,14 +1460,14 @@ export async function syncEndpointTools(
       patches,
     })
 
-    return await applySpec(server, text, patches, generated, fetchedFrom)
+    return await applySpec(ctx, server, text, patches, generated, fetchedFrom)
   } catch (error) {
     const message = (
       isPcpError(error)
         ? error.message
         : `The schema could not be read: ${error instanceof Error ? error.message : String(error)}`
     ).slice(0, 500)
-    await setServerStatus(server.id, "error", message)
+    await setServerStatus(ctx, server.id, "error", message)
 
     return { status: "error", message, toolCount: 0 }
   }
@@ -1527,7 +1576,8 @@ async function openUploads(
 }
 
 export async function callEndpointTool(
-  server: McpServer,
+  ctx: VaultContext,
+  server: OpenServer,
   toolName: string,
   args: Record<string, unknown>,
   {
@@ -1637,7 +1687,7 @@ export async function callEndpointTool(
           0,
           500,
         )
-      await setServerStatus(server.id, "error", message)
+      await setServerStatus(ctx, server.id, "error", message)
       throw new PcpError("upstream", message)
     }
   }
@@ -1653,6 +1703,7 @@ export async function callEndpointTool(
 
   if (outcome.status === 401) {
     await setServerStatus(
+      ctx,
       server.id,
       "auth_required",
       `${server.name} rejected the credentials PCP sent (HTTP 401).`,

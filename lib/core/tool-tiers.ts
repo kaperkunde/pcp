@@ -413,7 +413,7 @@ async function placeFor(
     throw notFound("That server")
   }
 
-  const definitionId = await ensureDefinition(serverId)
+  const definitionId = await ensureDefinition(ctx, serverId)
   return definitionId ? { definitionId } : { serverId }
 }
 

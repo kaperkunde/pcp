@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto"
 
+import type { VaultContext } from "./context"
 import { db } from "./db"
 import { inheritedToolDescriptions } from "./definition-rows"
 
@@ -55,11 +56,12 @@ export function canRereadTools(server: {
 }
 
 export async function storeTools(
+  ctx: VaultContext,
   serverId: string,
   tools: CatalogueTool[],
 ): Promise<number> {
   const names = new Set<string>()
-  const inherited = await inheritedToolDescriptions(serverId)
+  const inherited = await inheritedToolDescriptions(ctx, serverId)
 
   // One transaction: a schema with hundreds of operations is one write,
   // not hundreds, and a failure leaves the previous list in place.
