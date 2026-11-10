@@ -46,7 +46,7 @@ test("an assistant is told about it, finds it with search and reads it with desc
     .token
 
   const { tools, instructions } = await initialize(baseURL!, token)
-  expect(tools).toEqual(expect.arrayContaining(["search", "describe"]))
+  expect(tools).toEqual(expect.arrayContaining(["search", "execute_read"]))
   expect(instructions).toContain(`- skill:${NAME}: ${DESCRIPTION}`)
   expect(instructions).toContain("procedures the owner approved")
 

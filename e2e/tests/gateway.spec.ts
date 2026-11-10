@@ -227,14 +227,14 @@ test("finds, describes and calls an upstream tool with the secret added by PCP",
   expect(unknown.body.result?.isError).toBe(true)
   expect(toolText(unknown)).toContain("no tool called no_such_tool")
 
-  // call_tool takes only describe's call_handle. A name in its place
+  // execute takes only search's call_handle. A name in its place
   // answers with the tool described, so the next call can be the right one.
   const named = await callTool(baseURL!, token, "execute_destructive", {
     call_handle: `${SLUG}/add_numbers`,
     arguments: { a: 1, b: 2 },
   })
   expect(named.body.result?.isError).toBe(true)
-  expect(toolText(named)).toContain("not a tool's name")
+  expect(toolText(named)).toContain("not its name")
   const handle = /"call_handle": "(ch_[a-z0-9_]+)"/.exec(toolText(named))?.[1]
   expect(handle, toolText(named)).toBeTruthy()
   const retried = await callTool(baseURL!, token, "execute_destructive", {
@@ -254,7 +254,7 @@ test("finds, describes and calls an upstream tool with the secret added by PCP",
   expect(upstream.calls.length).toBe(calls)
 })
 
-test("your tier for a tool decides which call_tool runs it", async ({
+test("your tier for a tool decides which execute entry runs it", async ({
   page,
   baseURL,
 }) => {

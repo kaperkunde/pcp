@@ -248,10 +248,10 @@ test("an assistant finds and calls the operations, with the secret added by PCP,
   expect(toolText(gone)).toContain(`No server called ${SLUG}`)
 })
 
+/** PCP's tools for a token: the entries a client lists, and PCP's own behind them. */
 const GATEWAY_TOOLS = [
   "search",
   "list_tools",
-  "describe",
   "execute_read",
   "execute_write",
   "execute_destructive",
@@ -280,7 +280,7 @@ test("a token reads and changes endpoints only when the owner says so", async ({
   baseURL,
 }) => {
   const { tools } = await initialize(baseURL!, token)
-  expect(tools).toEqual(GATEWAY_TOOLS)
+  expect([...tools].sort()).toEqual([...GATEWAY_TOOLS].sort())
 
   for (const [name, args] of [
     ["update_endpoint", { endpoint: SLUG, name: "Hijacked" }],
@@ -301,12 +301,14 @@ test("a token reads and changes endpoints only when the owner says so", async ({
   ).token
 
   const manager = await initialize(baseURL!, managerToken)
-  expect(manager.tools).toEqual([
-    ...GATEWAY_TOOLS,
-    "update_endpoint",
-    "get_endpoint",
-    "list_secrets",
-  ])
+  expect([...manager.tools].sort()).toEqual(
+    [
+      ...GATEWAY_TOOLS,
+      "update_endpoint",
+      "get_endpoint",
+      "list_secrets",
+    ].sort(),
+  )
   expect(manager.instructions).toContain("get_endpoint reads one")
 })
 
