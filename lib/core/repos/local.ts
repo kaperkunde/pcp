@@ -123,6 +123,7 @@ async function wrapperDocument(
     displayName: named.name,
     description: view.description,
     callLevels: view.callLevels,
+    ...(view.pace ? { pace: view.pace } : {}),
     tools: view.tools.map((tool) => ({
       name: tool.name,
       title: tool.title ?? null,

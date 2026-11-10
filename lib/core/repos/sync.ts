@@ -1,4 +1,5 @@
 import type { VaultContext } from "../context"
+import { assistantBounds, readPacingConfig } from "../pacing/config"
 import { db } from "../db"
 import { invalid, isPcpError, PcpError } from "../errors"
 
@@ -462,7 +463,9 @@ export async function pendingChange(
     pending,
     local,
     incoming,
-    review: reviewItem(local, incoming.document),
+    review: reviewItem(local, incoming.document, {
+      paceBounds: assistantBounds(await readPacingConfig(ctx.vaultId)),
+    }),
     resolved: await resolveItem(ctx, incoming.document, { onto: true }),
   }
 }

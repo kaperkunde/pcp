@@ -23,7 +23,7 @@ import {
 import type { ServiceLaunchInput } from "../services/services"
 import { writeServiceDefinition } from "../services/services"
 import { saveSkillByOwner } from "../skills"
-import { getWrapper, saveWrapperByOwner } from "../wrappers/admin"
+import { saveWrapperByOwner } from "../wrappers/admin"
 import {
   browserServerIds,
   splitRef,
@@ -115,6 +115,7 @@ export function wrapperInput(document: WrapperDocument): WrapperInput {
     name: document.displayName,
     description: document.description,
     callLevels: document.callLevels,
+    pace: document.pace ?? null,
     tools: document.tools.map((tool) => ({
       name: tool.name,
       title: tool.title,
@@ -442,8 +443,6 @@ async function applyWrapper(
   if (id !== null) {
     // The wrapper keeps its own name: only what it does is the definition's.
     input.name = (await getServer(ctx, id)).name
-    // Its pace is not in a document (yet): the one it has stays.
-    input.pace = (await getWrapper(ctx, { id })).pace ?? null
   }
 
   const saved = await saveWrapperByOwner(ctx, id, input)

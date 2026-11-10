@@ -239,7 +239,11 @@ so in the summary; the bump itself waits for the request.
   and leaves `services/` alone. Format 4 adds `auth` on a service's MCP
   server and a service's `files`; only a service document that has either
   is written as format 4 (`serviceFormat`), and a format-3 one naming
-  either is refused. PCP's common items,
+  either is refused. Format 5 adds a wrapper's or flow's own `pace`
+  (snake_case, as `create_wrapper` takes it); only one that has a pace is
+  written as format 5 (`wrapperFormat`), an older-format one naming it is
+  refused, and a pace change is never `textOnly` (its review flags it, and
+  says where it goes past the owner's bounds). PCP's common items,
   `kaperkunde/pcp-gg-common` (`repos/common.ts`), are offered in one click,
   linked read-only and untrusted (pinned imports), read without a sign-in.
   A push is one commit per item, fast-forward only, and

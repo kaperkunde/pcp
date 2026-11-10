@@ -715,7 +715,6 @@ describe("format 5: a wrapper's pace", () => {
 
   it("writes a flow with a pace of its own in format 5, and only that one, and reads it back the same", async () => {
     const ctx = await freshVault()
-    await createBrowserServer(ctx)
     const { ids } = await populate(ctx)
     const flow = await getWrapper(ctx, { id: ids.flow })
     await saveWrapperByOwner(ctx, ids.flow, {
@@ -781,7 +780,6 @@ describe("format 5: a wrapper's pace", () => {
 
   it("applies a document's pace onto the wrapper, and takes it away when the document has none", async () => {
     const ctx = await freshVault()
-    await createBrowserServer(ctx)
     const { ids } = await populate(ctx)
     const { document } = await localItem(ctx, "flow", ids.flow)
 
@@ -865,7 +863,7 @@ describe("format 3: services", () => {
     const text = files["services/docling-service.yaml"]!
     expect(text).toContain(`pcp_format: ${FORMAT_OF_KIND.service}\n`)
     expect(FORMAT_OF_KIND.service).toBe(3)
-    expect(PCP_FORMAT).toBe(4)
+    expect(PCP_FORMAT).toBe(5)
     expect(text).toContain(`image: ${DOCLING.image}`)
     // Nothing of the instance: not its SSH server, address, container,
     // secrets or what it registered.

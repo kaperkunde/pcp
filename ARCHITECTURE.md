@@ -1854,7 +1854,13 @@ the GitHub client and sync itself build on it.
   format 4 (`documents.ts serviceFormat`); every other one keeps its format
   and its hash, so an older PCP refuses just that document as written by a
   newer PCP rather than failing on an unknown key; a format-3 document that
-  names either is refused here too.
+  names either is refused here too. Format 5 added a wrapper's or flow's
+  own `pace` (the pace of its browser calls, in `create_wrapper`'s
+  snake_case shape); only a wrapper document that has one is written as
+  format 5 (`documents.ts wrapperFormat`), and an older-format one naming
+  it is refused. A new or changed pace raises the review's `pace` flag
+  (with what goes past the owner's bounds for assistants), so it waits for
+  the owner like any wrapper change.
 - **Versions.** Each document carries `version`, a whole number: a skill's
   own version; for a server, endpoint or wrapper, `mcp_server.sync_version`
   (null reads as 1), which applying an item sets to the document's. PCP's
@@ -3583,9 +3589,9 @@ the most any goes to). A tab's pace outside them is a `tab_pace` request
 (the tab, the pace, the bounds then); the owner's yes sets it on that tab
 alone (`applyTabPace`) and never writes the vault's setting. A wrapper's
 outside them is flagged on its `wrapper_change` page (`paceOutside`, and
-the warning), and only the owner's yes there makes it. A wrapper's pace is
-not in a linked repository's document yet: a document applied keeps the
-wrapper's own.
+the warning), and only the owner's yes there makes it. A wrapper's pace
+travels in its linked repository's document (format 5, Linked
+repositories).
 
 `PCP_PACING=off` turns it off for a process: the unit and end-to-end suites
 set it (`vitest.config.mts`, `playwright.config.ts`), and the tests that
