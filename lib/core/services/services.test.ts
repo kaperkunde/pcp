@@ -1280,6 +1280,63 @@ describe("a running service", { timeout: 30_000 }, () => {
       expect(await toolNames(launched.registeredId!)).toEqual(["split"])
     })
 
+    it("are read again when an assistant's start makes a missing container again", async () => {
+      const launched = await launchedMcp()
+      const service = await getServer(ctx, launched.id)
+      mcpTools = [{ name: "split", description: "Splits a document" }]
+      docker.update((state) => {
+        delete state.containers["pcp-docs"]
+      })
+
+      const answer = await callServerTool(ctx, service, "start", {}, FAST)
+
+      expect(answer.isError).toBeFalsy()
+      expect(docker.state().containers["pcp-docs"]!.state).toBe("running")
+      expect(await toolNames(launched.registeredId!)).toEqual(["split"])
+    })
+
+    it("take a changed schema at an assistant's address only from the owner's remake", async () => {
+      const { service, endpoint } = await launched()
+      const changed = JSON.stringify({
+        ...JSON.parse(SPEC),
+        paths: {
+          ...JSON.parse(SPEC).paths,
+          "/more": {
+            get: {
+              operationId: "list_more",
+              responses: { "200": { description: "ok" } },
+            },
+          },
+        },
+      })
+      await db().mcpServer.update({
+        where: { id: endpoint.id },
+        data: { specUrlFromAssistant: true },
+      })
+      answers["/openapi.json"] = { status: 200, body: changed }
+      const gone = () =>
+        docker.update((state) => {
+          delete state.containers["pcp-docs"]
+        })
+      const names = () => toolNames(endpoint.id)
+
+      expect(await names()).toEqual(["list_things"])
+
+      // An assistant's start: the tools are read, but from the copy the
+      // owner approved.
+      gone()
+      await callServerTool(ctx, service, "start", {}, FAST)
+      expect(await names()).toEqual(["list_things"])
+      expect((await getServer(ctx, endpoint.id)).statusMessage).toMatch(
+        /has changed since it was approved/,
+      )
+
+      // The owner's remake takes the new document.
+      gone()
+      await runServiceAction(ctx, service.id, "start", FAST)
+      expect(await names()).toEqual(["list_more", "list_things"])
+    })
+
     it("a read that fails is a note, and the remake still worked", async () => {
       const launched = await launchedMcp()
       // The server now wants a header the registered server does not send.
