@@ -526,6 +526,19 @@ function renderer(annotations: unknown, page: Record<string, unknown>) {
   ] satisfies FakeTool[]
 }
 
+/** A kept PDF, by its first bytes: only those have pages to render. */
+async function pdfFile(type = "application/pdf"): Promise<string> {
+  const kept = await keepBytes(ctx, {
+    tokenId: scope.tokenId,
+    serverId: null,
+    toolName: "test",
+    bytes: Buffer.from("%PDF-1.7\n1 0 obj << >> endobj\n%%EOF\n"),
+    mediaType: type,
+    name: "letter.pdf",
+  })
+  return kept.id
+}
+
 async function png(width: number, height: number): Promise<Buffer> {
   return sharp({
     create: { width, height, channels: 3, background: "#c00" },
@@ -547,7 +560,7 @@ describe("convert_document to a picture of a PDF's page", () => {
 
   it("answers with the owner's link when no tool renders a page, saying what it takes", async () => {
     await server("conv", CONVERTER)
-    const id = await keptFile("letter.pdf", "application/pdf")
+    const id = await pdfFile()
 
     const answer = await call("convert_document", {
       file: { $result: id },
@@ -577,7 +590,7 @@ describe("convert_document to a picture of a PDF's page", () => {
         page_index: { type: "integer", description: "The page, 0-based." },
       }),
     )
-    const id = await keptFile("letter.pdf", "application/pdf")
+    const id = await pdfFile()
     answers["pages/render_page"] = picture(await png(300, 400))
 
     const answer = await call("convert_document", {
@@ -640,7 +653,7 @@ describe("convert_document to a picture of a PDF's page", () => {
       },
     ]
     await server("pdf", PAGE_SERVER)
-    const id = await keptFile("letter.pdf", "application/pdf")
+    const id = await pdfFile()
     const bytes = await png(40, 60)
     answers["pdf/get_file"] = () => ({
       content: [
@@ -682,8 +695,18 @@ describe("convert_document to a picture of a PDF's page", () => {
   })
 
   it("refuses page without to png, and a picture, which view_image shows as it is", async () => {
-    const pdf = await keptFile("letter.pdf", "application/pdf")
-    const photo = await keptFile("photo.png", "image/png")
+    const pdf = await pdfFile()
+    // A picture by its bytes, whatever its type says.
+    const photo = (
+      await keepBytes(ctx, {
+        tokenId: scope.tokenId,
+        serverId: null,
+        toolName: "test",
+        bytes: await png(10, 10),
+        mediaType: "application/octet-stream",
+        name: "photo",
+      })
+    ).id
 
     const paged = await call("convert_document", {
       file: { $result: pdf },
@@ -697,8 +720,48 @@ describe("convert_document to a picture of a PDF's page", () => {
     expect(paged.isError).toBe(true)
     expect(paged.text).toContain('page goes with to "png"')
     expect(pictured.isError).toBe(true)
+    expect(pictured.text).toContain("already a picture")
     expect(pictured.text).toContain("view_image")
     expect(ran).toEqual([])
+  })
+
+  it("refuses a file that is not a PDF by its bytes, whatever its type says", async () => {
+    await server("pages", renderer(WRITES, { page: { type: "integer" } }))
+    const id = await keptFile("letter.docx", "application/pdf")
+
+    const answer = await call("convert_document", {
+      file: { $result: id },
+      to: "png",
+    })
+
+    expect(answer.isError).toBe(true)
+    expect(answer.text).toContain("only a PDF's page")
+    expect(ran).toEqual([])
+  })
+
+  it("answers that the renderer made no picture when its file is none", async () => {
+    await server("pages", renderer(WRITES, { page: { type: "integer" } }))
+    const id = await pdfFile()
+    answers["pages/render_page"] = () => ({
+      content: [
+        {
+          type: "image",
+          data: Buffer.from("%PDF-1.7 not a picture").toString("base64"),
+          mimeType: "image/png",
+        },
+      ],
+    })
+
+    const answer = await call("convert_document", {
+      file: { $result: id },
+      to: "png",
+    })
+
+    expect(answer.isError).toBe(true)
+    expect(answer.text).toContain(
+      "pages/render_page: the renderer answered with no picture",
+    )
+    expect(answer.structured?.kind).not.toBe("page_image")
   })
 })
 
