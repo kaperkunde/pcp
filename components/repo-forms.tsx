@@ -692,11 +692,14 @@ export function ChangeAnswer({
   itemId,
   sha,
   hash,
+  flags,
   conflict,
 }: {
   itemId: string
   sha: string
   hash: string
+  /** How many things that reach further the page showed. */
+  flags: number
   conflict: boolean
 }) {
   // The same way through as a request's answer (components/answer-queue.tsx):
@@ -707,7 +710,11 @@ export function ChangeAnswer({
   )
   const answer = (choice: "approve" | "decline" | "keep") =>
     submit(async () => {
-      const result = await answerChangeAction(itemId, choice, { sha, hash })
+      const result = await answerChangeAction(itemId, choice, {
+        sha,
+        hash,
+        flags,
+      })
 
       return result.status === "ok"
         ? {

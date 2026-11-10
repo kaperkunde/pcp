@@ -43,7 +43,13 @@ import {
   type WrapperTool,
 } from "./definition"
 import { FLOW_RUN_TIMEOUT_MS, WRAPPER_RUN_TIMEOUT_MS } from "./limits"
-import type { SecretGrant } from "./placeholders"
+import {
+  allowsPart,
+  findPlaceholders,
+  type FoundPlaceholder,
+  type SecretGrant,
+} from "./placeholders"
+import { typedPartsLabel } from "./secret-literals"
 import { checkCallArguments } from "../call-arguments"
 import {
   checkPaceRange,
@@ -349,6 +355,101 @@ function finished(
   )
 }
 
+/**
+ * The first placeholder in a call's arguments that no binding the owner
+ * approved names, by its place, name and part, with the binding there for
+ * another part when there is one. A malformed one is left for upstream.ts
+ * to refuse in its own words.
+ */
+function unboundSecret(
+  args: Record<string, unknown>,
+  grant: SecretGrant,
+): {
+  placeholder: FoundPlaceholder
+  /** What the binding at that place lets through, when it lacks this part. */
+  allowed?: SecretGrant[number]["parts"]
+} | null {
+  let found: FoundPlaceholder[]
+
+  try {
+    found = findPlaceholders(args)
+  } catch {
+    return null
+  }
+
+  for (const placeholder of found) {
+    const there = grant.filter(
+      (binding) =>
+        binding.pointer === placeholder.pointer &&
+        binding.name === placeholder.name,
+    )
+
+    if (there.some((binding) => allowsPart(binding, placeholder.part))) {
+      continue
+    }
+
+    return there.length > 0
+      ? {
+          placeholder,
+          allowed: there.flatMap((binding) => binding.parts ?? []),
+        }
+      : { placeholder }
+  }
+
+  return null
+}
+
+/**
+ * The refusal of a call whose secret has no place the owner approved: the
+ * exact place to add with update_wrapper, which asks the owner. For the
+ * browser's type, also that a name written as it is in the program is found
+ * when the wrapper is changed (definition.ts), for a secret PCP holds.
+ */
+export function unboundSecretFix({
+  wrapper,
+  tool,
+  target,
+  browser,
+  placeholder,
+  allowed,
+}: {
+  wrapper: string
+  tool: string
+  target: string
+  browser: boolean
+  placeholder: FoundPlaceholder
+  /** The parts a place found in the program lets through, lacking this one. */
+  allowed?: Array<"username" | "password">
+}): string {
+  const entry = JSON.stringify({
+    secret: placeholder.name,
+    tool: target,
+    argument: placeholder.pointer || "/",
+  })
+
+  if (allowed) {
+    const literal = JSON.stringify({
+      $secret: placeholder.name,
+      ...(placeholder.part === "username" ? { part: "username" } : {}),
+    }).replace(/":/g, '": ')
+
+    return [
+      `The owner allowed only ${typedPartsLabel(allowed).replace(/^its /, "the ")} of the secret "${placeholder.name}" in ${target} at ${placeholder.pointer || "/"} for the wrapper ${wrapper}, as its programs name it; its tool ${tool} typed ${placeholder.part === "username" ? "its login name" : "its password"} there, so the call was not made.`,
+      `Fix it with update_wrapper: write ${literal} in the program as it is, so PCP finds that part too, or add ${entry} to secrets (the whole list, so keep the places get_wrapper shows). The owner sees it and decides.`,
+    ].join(" ")
+  }
+
+  return [
+    `The owner has not allowed the secret "${placeholder.name}" in ${target} at ${placeholder.pointer || "/"} for the wrapper ${wrapper}, so its tool ${tool}'s call was not made.`,
+    `Fix it with update_wrapper: add ${entry} to secrets (the whole list, so keep the places get_wrapper shows). The owner sees it and decides; a secret PCP does not hold yet they type in then.`,
+    ...(browser
+      ? [
+          `A secret the program types into pages with its name written as it is, {"$secret": "${placeholder.name}"}, needs no entry once PCP holds it: any update_wrapper finds it in the program and shows it to the owner. Typing it still asks the owner at a site the secret is not bound to.`,
+        ]
+      : []),
+  ].join(" ")
+}
+
 /** One call a wrapper tool's program makes. */
 async function innerCall(
   env: WrapperEnv,
@@ -429,6 +530,7 @@ async function innerCall(
             secretId: binding.secretId,
             template: binding.template,
             url: binding.url,
+            ...(binding.parts ? { parts: binding.parts } : {}),
           },
         ]
       : [],
@@ -485,6 +587,25 @@ async function innerCall(
   }
 
   notes.push(...fixes)
+
+  // A secret the owner has not allowed here is refused before anything is
+  // sent or asked, saying what to propose (upstream.ts refuses it again).
+  const unbound = unboundSecret(checked.args, secrets)
+
+  if (unbound) {
+    return {
+      ok: false,
+      refused: true,
+      error: unboundSecretFix({
+        wrapper,
+        tool: tool.name,
+        target: `${slug}/${name}`,
+        browser: target.kind === "browser" && name === "type",
+        ...unbound,
+      }),
+    }
+  }
+
   lookedUp?.(await markedReadOnly(target.id, name))
   const sent =
     target.kind === "browser" && name === "tabs"

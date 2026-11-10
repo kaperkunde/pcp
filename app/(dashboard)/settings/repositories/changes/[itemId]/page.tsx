@@ -159,6 +159,7 @@ export default async function ChangePage({
             itemId={item.id}
             sha={pending.sha}
             hash={pending.hash}
+            flags={review.flags.length}
             conflict={conflict}
           />
         ) : conflict ? (
@@ -166,6 +167,7 @@ export default async function ChangePage({
             itemId={item.id}
             sha={pending.sha}
             hash={pending.hash}
+            flags={review.flags.length}
             conflict
           />
         ) : null}

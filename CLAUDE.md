@@ -690,7 +690,19 @@ embeddingProvider`, which hands `embeddings/provider.ts` the header;
   and written in `upstream.ts`, scrubbed from the answer, errors and status
   there, and refused in an assistant's own call. Into the browser it goes
   only as `type`'s text (in a wrapper, a binding for `browser/type` at
-  `/text`, no template), through the browser's own gate below.
+  `/text`, no template), through the browser's own gate below. A binding
+  is unique by place and secret, so a login name and a password share
+  `/text`. A secret a flow's program types by a fixed name
+  (`secret-literals.ts`) gets that binding when the definition is checked,
+  for a secret PCP holds, marked `found` with the `parts` the program
+  names (only those are typed), shown on the review and approved with the
+  wrapper; never for any other tool, never one an assistant or a
+  repository document gives (`toInput` leaves it out), and it changes
+  nothing of the gate. It depends on the vault's secrets, so a repository's
+  review flags each one the wrapper does not have yet against the vault
+  (`repos/found-review.ts reviewInVault`, never text only), and the
+  owner's save and page name them. A call whose secret has no binding is refused
+  before anything is sent, with the `secrets` entry to propose.
   An assistant's create, change and delete are a permission request
   (`wrapper_change`) that shows every program, schema, call, replaced tool
   and secret place in full and writes only that, to the wrapper as it was

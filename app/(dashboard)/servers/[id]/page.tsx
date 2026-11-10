@@ -197,6 +197,33 @@ export default async function ServerPage({
           ),
         }}
         secretNames={secrets.map((secret) => secret.name)}
+        found={
+          wrapper.foundSecrets.length > 0 ? (
+            <p
+              id="found-secrets"
+              className="text-[13px] leading-relaxed text-muted-foreground"
+            >
+              Typed into pages, found in the program:{" "}
+              {wrapper.foundSecrets.map((entry, index) => (
+                <span key={entry.secret}>
+                  {index > 0 ? ", " : null}
+                  <span className="font-medium text-foreground">
+                    {entry.secret}
+                  </span>{" "}
+                  (
+                  {entry.parts
+                    .map((part) =>
+                      part === "username" ? "login name" : "password",
+                    )
+                    .join(" and ")}
+                  )
+                </span>
+              ))}
+              . PCP types them only at the sites you bound them to, or after
+              asking you.
+            </p>
+          ) : null
+        }
       />
     ) : browser ? (
       <BrowserDescribeForm

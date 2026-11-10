@@ -7,6 +7,7 @@ import { readRepo, refOf, serializeItem, type ItemDocument } from "./documents"
 import { localHash } from "./hash"
 import { isOneFileKind, itemRoot, type ItemRef, type RepoFiles } from "./layout"
 import { MAX_REVIEW_CHARS } from "./limits"
+import { reviewInVault } from "./found-review"
 import { reviewItem, type FileChange, type ReviewFlag } from "./review"
 import {
   getRepoItem,
@@ -489,7 +490,12 @@ async function propose(
   // Read as the repository's files are: every check an item goes through.
   const document = await documentOf(pending.ref, files)
   const final = serializeItem(document)
-  const against = reviewItem(change.local, document)
+  const against = await reviewInVault(
+    scope.ctx,
+    change.local,
+    document,
+    change.item.itemId,
+  )
   const fromTheirs = reviewItem(change.incoming.document, document)
   const label = `${repo.owner}/${repo.name}`
   const shown: RepoShown = {
