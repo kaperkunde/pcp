@@ -184,15 +184,60 @@ export function BrowserTabView({
         source?.close()
         if (stopped) return
         attempts += 1
-        setStatus(attempts > 5 ? "closed" : "lost")
-        if (attempts <= 5) retry = setTimeout(connect, 1000 * attempts)
+        setStatus("lost")
+        schedule()
       })
     }
+
+    // A dropped stream is tried again, further apart each time up to 30 s,
+    // and at once when the window comes back. Only the server saying the
+    // tab is closed, or no longer there, ends it.
+    const schedule = () => {
+      if (retry) clearTimeout(retry)
+      retry = setTimeout(() => void probe(), Math.min(1000 * attempts, 30_000))
+    }
+    const probe = async () => {
+      retry = null
+      if (stopped) return
+      if (attempts > 5) {
+        const check = new AbortController()
+        try {
+          const response = await fetch(
+            `/api/browser/tabs/${encodeURIComponent(tabId)}/stream`,
+            { signal: check.signal },
+          )
+          const gone = response.status === 404
+          check.abort()
+          if (gone) {
+            stopped = true
+            setStatus("closed")
+            return
+          }
+        } catch {
+          // Still unreachable: the stream's own attempt decides.
+        }
+        if (stopped) return
+      }
+      connect()
+    }
+    const wake = () => {
+      if (stopped || document.visibilityState === "hidden") return
+      if (retry) {
+        clearTimeout(retry)
+        retry = null
+        attempts = Math.min(attempts, 1)
+        void probe()
+      }
+    }
+    document.addEventListener("visibilitychange", wake)
+    window.addEventListener("focus", wake)
 
     connect()
 
     return () => {
       stopped = true
+      document.removeEventListener("visibilitychange", wake)
+      window.removeEventListener("focus", wake)
       if (retry) clearTimeout(retry)
       source?.close()
     }

@@ -363,6 +363,64 @@ test("the live view: Take over and Hand back switch back and forth without a rel
   await expect(live.getByRole("button", { name: /^Close/ })).toBeEnabled()
 })
 
+test("the live view: a stream that dropped for a while comes back, and the buttons with it", async ({
+  page,
+  baseURL,
+}) => {
+  test.setTimeout(120_000)
+  const opened = toolText(
+    await browse(baseURL!, "tabs", {
+      action: "open",
+      url: `${upstream.browserUrl}/form`,
+    }),
+  )
+  const tab =
+    opened.match(/Opened a new tab: ([^\s.]+)[ .]/)?.[1] ?? tabOf(opened)
+
+  // The first connections fail (an address that answers 404), enough to
+  // use up the quick retries.
+  await page.addInitScript(() => {
+    const Real = window.EventSource
+    let refused = 0
+    const w = window as unknown as { __refused: () => number }
+    w.__refused = () => refused
+    window.EventSource = class extends Real {
+      constructor(url: string | URL, init?: EventSourceInit) {
+        if (refused < 7) {
+          refused += 1
+          super("/api/browser/tabs/none/stream", init)
+        } else {
+          super(url, init)
+        }
+      }
+    } as typeof EventSource
+  })
+  await page.goto(`/browser?tab=${tab}`)
+  const live = page.getByRole("region", { name: "Live tab" })
+
+  // It is not shown as closed for good: once the stream is back, so are
+  // the buttons.
+  await expect
+    .poll(
+      () =>
+        page.evaluate(() =>
+          (window as unknown as { __refused: () => number }).__refused(),
+        ),
+      { timeout: 90_000 },
+    )
+    .toBe(7)
+  await expect(live.getByText("Connection lost")).toHaveCount(0, {
+    timeout: 60_000,
+  })
+  await expect(live.getByText("This tab is closed")).toHaveCount(0)
+  const takeOver = live.getByRole("button", { name: "Take over" })
+  await expect(takeOver).toBeEnabled()
+  await clickHydrated(takeOver)
+  await expect(live.getByRole("button", { name: "Hand back" })).toBeEnabled({
+    timeout: 4_000,
+  })
+})
+
 test("a secret for the browser: its login name, a password PCP makes, and its sites changed on request", async ({
   page,
   baseURL,
