@@ -3477,7 +3477,11 @@ above):
   lane right before the action (`pacedTurn`, `pacing/index.ts
 paceBrowserTurn`), held until the action is done: no two actions at a
   site, from any tab or caller, follow closer than the pause, counted from
-  the previous one's end. A paced call holds its tab `PACED_TURN_WAIT_MS`
+  the previous one's end. The turn is held through the whole action, a
+  navigation's page load and site check included, on purpose: never a
+  double tap, at the cost of a slow page holding the site's other tabs
+  back that long. A download started by a click gives its turn back once
+  the click is done, not while the file comes in. A paced call holds its tab `PACED_TURN_WAIT_MS`
   longer before the tab counts as not responding, and waits at most
   `PACING_MAX_WAIT_MS` for its turn there (`browserTurnDeadline`). A
   wrapper's own tool is not paced; the calls its program makes are.
@@ -3496,8 +3500,8 @@ upload_file, download by a click, handle_dialog, evaluate, scroll): 150 ms
 after the previous action on the site ended and up to 450 more at random,
 as a person moves from one field to the next; `type` fills a field in one
 go, with no pause per key. `browser_navigate` (navigate, back, tabs open,
-download by its address): the page the tab shows settles first (`settle`:
-loaded, a site's check passed), then 400 ms and up to 800 more.
+download by its address): the page the tab shows finishes loading first
+(`domcontentloaded`, at most `SETTLE_MS`), then 400 ms and up to 800 more.
 `web_fetch`: a second and up to 0.75 more. `server_change` (a tool its server does not mark read-only,
 `read-only.ts markedReadOnly`): no pause, at most 30 a minute per server.
 `server_read`: at most 300 a minute. The browser's reading tools (snapshot,

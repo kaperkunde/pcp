@@ -42,6 +42,7 @@ import {
 import {
   BROWSER_PACING_CLASSES,
   PACE_KEY_OF,
+  pacingOff,
   type BrowserPace,
   type PaceRange,
   type PacingPolicy,
@@ -747,11 +748,11 @@ export function fileShownWords(
 }
 
 /** Waits briefly for what an action started to load, and for its check. */
-async function settle(tab: Tab, clock?: CallClock): Promise<void> {
+async function settle(tab: Tab): Promise<void> {
   await tab.page
     .waitForLoadState("domcontentloaded", { timeout: SETTLE_MS })
     .catch(() => {})
-  await passCheck(tab, clock)
+  await passCheck(tab)
 }
 
 /** Why a page could not be opened, in words. */
@@ -1161,9 +1162,13 @@ async function pacedTurn(
     return NO_TURN
   }
 
-  if (pacingClass === "browser_navigate") {
+  // A page opened waits for the one the tab shows to finish loading first
+  // (a site's check is the navigation's own to wait for, not the pause's).
+  if (pacingClass === "browser_navigate" && !pacingOff()) {
     atStep(scope.clock, `waiting for tab ${tab.id}'s page to settle`)
-    await settle(tab, scope.clock)
+    await tab.page
+      .waitForLoadState("domcontentloaded", { timeout: SETTLE_MS })
+      .catch(() => {})
   }
 
   atStep(scope.clock, `waiting for its turn at ${site} under pacing`)

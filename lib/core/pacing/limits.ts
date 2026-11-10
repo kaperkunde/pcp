@@ -67,9 +67,9 @@ export const PACING_DEFAULTS: Record<PacingClass, PacingPolicy> = {
   /**
    * The browser opening a page: navigate, back, tabs opening one, and
    * download by an address. It first waits for the page the tab shows to
-   * settle (loaded, a site's check passed: browser/call.ts settle), not for
-   * a fixed time, then 400 ms and up to 800 more at random, as a person
-   * glances at a page before they leave it.
+   * finish loading (browser/call.ts pacedTurn), not for a fixed time, then
+   * 400 ms and up to 800 more at random, as a person glances at a page
+   * before they leave it.
    */
   browser_navigate: { minIntervalMs: 400, jitterMs: 800, burst: null },
   /**
