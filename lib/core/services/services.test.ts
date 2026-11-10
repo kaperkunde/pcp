@@ -1271,7 +1271,9 @@ describe("a running service", { timeout: 30_000 }, () => {
       const launched = await launchedMcp()
       const service = await getServer(ctx, launched.id)
       mcpTools = [{ name: "split", description: "Splits a document" }]
-      delete docker.state().containers["pcp-docs"]
+      docker.update((state) => {
+        delete state.containers["pcp-docs"]
+      })
 
       await runServiceAction(ctx, service.id, "start", FAST)
 
