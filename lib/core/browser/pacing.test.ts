@@ -379,6 +379,32 @@ describe.skipIf(!executable)(
       })
     })
 
+    it("closes a pace request with its tab", async () => {
+      await setAssistantPaceBounds(ctx, {
+        browser_act: { minMs: 200, maxMs: 2_000 },
+      })
+      const { tab } = await open()
+      const asked = await owner(
+        call("tabs", {
+          action: "pace",
+          tab,
+          pace: { actions: { min_ms: 20, max_ms: 60 } },
+        }),
+      )
+      await withPermission(
+        { ctx, tokenId, publicUrl: PUBLIC_URL },
+        asked.ask as Parameters<typeof withPermission>[1],
+      )
+
+      await call("tabs", { action: "close", tab })
+
+      await expect
+        .poll(
+          async () => (await db().permissionRequest.findFirstOrThrow()).status,
+        )
+        .toBe("closed")
+    })
+
     it("refuses a pace whose shortest wait is past its longest", async () => {
       const { tab } = await open()
       const refused = await call("tabs", {
