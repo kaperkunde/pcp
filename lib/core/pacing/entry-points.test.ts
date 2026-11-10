@@ -378,10 +378,15 @@ try {
     await call("call_tool_destructive", COUNT)
     expect(waits).toEqual([])
 
-    // The owner says Write: paced as a change.
+    // The owner says Write: paced as a change. The second is made again on
+    // purpose, past the duplicate guard (calls/guard.ts).
     await setToolTier(ctx, endpointId, "count", "write")
     await call("call_tool_destructive", COUNT)
-    await call("call_tool_destructive", COUNT)
+    await call("call_tool_destructive", {
+      ...COUNT,
+      rerun: true,
+      reason: "A second count is meant.",
+    })
     expect(waits).toEqual([5_000])
   })
 })
