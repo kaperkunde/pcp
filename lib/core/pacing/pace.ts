@@ -248,6 +248,25 @@ export function pacedMessage(
 }
 
 /**
+ * What a call is told when the action before it at the destination is
+ * still going after all it could wait: no pause can be named, only when to
+ * look again.
+ */
+export function busyMessage(
+  label: string,
+  retryAfterMs: number,
+  budgetMs: number,
+): string {
+  const waited =
+    budgetMs >= 1000
+      ? `for the ${Math.floor(budgetMs / 1000)} s this call can wait`
+      : "and this call has no time left to wait"
+  const seconds = wholeSeconds(retryAfterMs)
+
+  return `Paced: another action at ${label} is still running, ${waited}. Nothing was sent and no turn was kept for it; try again in about ${seconds} s.`
+}
+
+/**
  * How long a call may wait for its turn: up to `deadline` (pacing's clock,
  * in milliseconds) less what the call itself needs, never past
  * PACING_LONGEST_WAIT_MS, and PACING_MAX_WAIT_MS for a caller that names
@@ -399,10 +418,12 @@ export async function takeTurn(
 
     if (!came) {
       passOn()
-      const waitMs = (policy?.minIntervalMs ?? 0) + (policy?.jitterMs ?? 0)
+      // When it ends is not known: as long again as this one waited is a
+      // fair guess (a second, when it could not wait at all).
+      const retryAfterMs = budget > 0 ? budget : 1000
       return {
-        message: pacedMessage(label, Math.max(waitMs, 1000), budget),
-        retryAfterMs: Math.max(waitMs, 1000),
+        message: busyMessage(label, retryAfterMs, budget),
+        retryAfterMs,
       }
     }
   }
