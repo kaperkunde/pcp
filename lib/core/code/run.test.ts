@@ -1819,7 +1819,7 @@ describe("the same program again", () => {
 
     const checked = await client.callTool(entryCall("check_run", { id }))
     expect(JSON.stringify(checked.content)).toContain(
-      "run_code's own answer carried its outcome",
+      "The run's own answer carried its outcome",
     )
   })
 

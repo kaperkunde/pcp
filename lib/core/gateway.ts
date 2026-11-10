@@ -359,6 +359,7 @@ import {
   needsOwner,
   ok,
   passOn,
+  toCallToolResult,
   toolError,
   withLead,
   type Outcome,
@@ -1557,7 +1558,9 @@ export function buildGatewayServer(
     .min(1)
     .max(50)
     .optional()
-    .describe("How many results (default 10).")
+    .describe(
+      "How many results (default 10; with kind pcp and no query, every one of PCP's own tools).",
+    )
 
   type SearchArgs = {
     query: string
@@ -1689,7 +1692,12 @@ export function buildGatewayServer(
           args.server === undefined &&
           args.kind === undefined
         ) {
-          return standingRules()
+          return args.limit === undefined
+            ? standingRules()
+            : failure(
+                "limit goes with query (or server, or kind): it says how many results, and there is nothing to search by. Leave every argument out for the owner's standing rules.",
+                "invalid_arguments",
+              )
         }
 
         return withSessionLines(
@@ -1779,8 +1787,10 @@ export function buildGatewayServer(
       args.query,
       (ctx, config) => embeddingProvider(ctx, config, scope.publicUrl),
     )
+    // PCP's own tools listed whole when asked for by kind alone.
+    const everyOwn = args.kind === "pcp" && args.query.trim() === ""
     const results = searchEverything(items, args.query, {
-      limit: args.limit ?? 10,
+      limit: args.limit ?? (everyOwn ? Math.max(10, ownTools.length) : 10),
       server: args.server,
       kind: args.kind,
       similarities,
@@ -3009,6 +3019,8 @@ export function buildGatewayServer(
       const {
         tool: name,
         arguments: args,
+        rerun,
+        reason,
         ...rest
       } = sent as Record<string, unknown>
 
@@ -3021,14 +3033,139 @@ export function buildGatewayServer(
         return null
       }
 
+      // rerun is a Write or Destructive entry's, and goes with a reason;
+      // anything else is execute's own to refuse.
+      if (
+        (rerun !== undefined || reason !== undefined) &&
+        (tier === "read" ||
+          (rerun !== undefined && typeof rerun !== "boolean") ||
+          (rerun === true &&
+            (typeof reason !== "string" || reason.trim() === "")) ||
+          (reason !== undefined && typeof reason !== "string"))
+      ) {
+        return null
+      }
+
       const found = executable(name)
 
       if (!found || !tierAllows(tier, ownTierOf(found.tool))) {
         return null
       }
 
-      return { tool: found.tool, args: args ?? {}, note: found.note }
+      return {
+        tool: guardedOwnTool(found.tool, rerun === true),
+        args: args ?? {},
+        note: found.note,
+        plain: true,
+      }
     }
+
+  /** Where the duplicate guard files PCP's own tools: a server of their own. */
+  const OWN_TARGET = { id: "pcp", slug: "pcp", kind: "pcp" }
+
+  /**
+   * PCP's own tools that change nothing a repeat would do twice, or whose
+   * inner call is guarded already: the stores' (their tool on the store's
+   * server, by callResolved's own rules) and the capabilities', which make
+   * a new file from one and touch nothing else.
+   */
+  const UNGUARDED_OWN = new Set<string>([
+    ...STORAGE_TOOL_NAMES,
+    "read_image",
+    "view_image",
+    "convert_document",
+    "edit_pdf",
+  ])
+
+  /** Whether a call of one of PCP's own tools only reads, by its arguments. */
+  const onlyReads = (name: string, args: Record<string, unknown>): boolean => {
+    switch (name) {
+      case "memory":
+        return ["view", "search", "every"].includes(String(args.command))
+      case "web_fetch": {
+        const method =
+          typeof args.method === "string" ? args.method.toUpperCase() : "GET"
+        return method === "GET" || method === "HEAD"
+      }
+      default:
+        return false
+    }
+  }
+
+  /**
+   * One of PCP's own tools as execute_<tier> runs it: a Write or
+   * Destructive call made again with the same arguments (as checked) within
+   * the guard's window is answered with how the first went instead of
+   * running twice (calls/guard.ts), as a server's tool through
+   * callResolved is; rerun with a reason makes it again.
+   */
+  const guardedOwnTool = (tool: Tool, rerun: boolean): Tool => {
+    const tier = ownTierOf(tool)
+
+    if (tier === "read" || UNGUARDED_OWN.has(tool.name)) {
+      return tool
+    }
+
+    return {
+      ...tool,
+      async run(args, ctx) {
+        if (onlyReads(tool.name, args as Record<string, unknown>)) {
+          return tool.run(args, ctx)
+        }
+
+        const guarded = await guardCall(
+          scope,
+          { server: OWN_TARGET, tool: tool.name, tier },
+          args,
+          { rerun, again: RERUN_ON_CALL },
+        )
+
+        if ("duplicate" in guarded) {
+          return toolError(guarded.duplicate, { code: "duplicate_call" })
+        }
+
+        if (rerun && guarded.ticket) {
+          noteRerun()
+        }
+
+        const before = noteBefore()
+
+        try {
+          const outcome = await asRerun(rerun, () => tool.run(args, ctx))
+          await endCall(
+            guarded.ticket,
+            outcome.type === "needs_owner"
+              ? {
+                  status: "asked",
+                  requestId:
+                    typeof outcome.owner.request === "string"
+                      ? outcome.owner.request
+                      : null,
+                }
+              : // A tool error of PCP's own is a refusal: nothing it was
+                // asked to do happened, so nothing is held back by it.
+                outcome.type === "error"
+                ? { status: "nothing" }
+                : endOfAnswer(toCallToolResult(outcome), before),
+          )
+
+          return guarded.warning ? withLead(guarded.warning, outcome) : outcome
+        } catch (error) {
+          // A PcpError thrown by PCP's own tool is a refusal too, but for a
+          // failure on the way, which may have gone through.
+          await endCall(
+            guarded.ticket,
+            isPcpError(error) &&
+              error.code !== "upstream" &&
+              error.code !== "unauthorized"
+              ? { status: "nothing" }
+              : endOfThrow(error),
+          )
+          throw error
+        }
+      },
+    }
+  }
 
   /**
    * execute_<tier>'s answer when its tool was not run by name: why, and
@@ -3065,7 +3202,7 @@ export function buildGatewayServer(
     }
 
     return failure(
-      `With tool, execute takes only arguments beside it: fields, decode, keep, rerun and reason are for the owner's tools, by call_handle. Nothing was run or asked.`,
+      `With tool, execute takes only arguments beside it, and on execute_write or execute_destructive rerun with a reason: fields, decode and keep are for the owner's tools, by call_handle. Nothing was run or asked.`,
       "invalid_arguments",
     )
   }
@@ -6315,7 +6452,7 @@ export function buildGatewayServer(
 
       if (args.every === true || args.command === "every") {
         return {
-          refused: `every goes with memories; a skill is read with view or describe.`,
+          refused: `every goes with memories; a skill is read with view or with search's ref.`,
         }
       }
 

@@ -47,6 +47,30 @@ tier in its annotations: `search`, `execute_read` and `run_read` only read
   says the same.
 - The request log names `search`, `execute_<tier>` and `run_<tier>` where
   it named `describe`, `call_tool_<tier>` and `run_code_<tier>`.
+- A Write or Destructive call of one of PCP's own tools through
+  `execute_write` or `execute_destructive` (`register_server`, a
+  `web_fetch` POST, `memory` create…) made again with the same arguments
+  within the duplicate guard's window answers `duplicate_call`, as a
+  server's tool does; pass `rerun: true` with a `reason` beside `tool` to
+  make it again. The stores' and capabilities' tools, and `memory`'s and
+  `web_fetch`'s reading calls (view, search, every; GET, HEAD), are not
+  held back.
+- Through `execute_<tier>`, one of PCP's own tools whose text is the JSON
+  of its structuredContent answers with the text alone (the entry declares
+  no output schema); a needs_owner answer, or one whose text says it in
+  words (`check_permission`), keeps its structuredContent.
+- `search` with `kind: "pcp"` and no query lists every one of PCP's own
+  tools the token has; `limit` alone (no `query`, `server` or `kind`) is
+  refused.
+- A tier you chose under Settings → PCP's own tools for `search`, a
+  `call_tool_<tier>` or `run_code_<tier>` entry, or an `execute`/`run`
+  entry is ignored now (an entry's tier is its name) and dropped the next
+  time you choose one there.
+- PCP's suggested instructions for assistants are at version 7, naming
+  `search`, `execute_<tier>` and `run_<tier>`. A token whose instructions
+  you changed keeps its text, which may still name `describe` and
+  `call_tool_<tier>`: accept the merge PCP offers on the token's page
+  before the next release, when those names stop answering.
 
 For one release every old name is still answered when a client calls it,
 though no longer listed: `describe`, `call_tool_<tier>` and

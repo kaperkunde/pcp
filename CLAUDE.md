@@ -614,7 +614,10 @@ embeddingProvider`, which hands `embeddings/provider.ts` the header;
   answered `duplicate_call` with how the first went, unless the assistant
   passes `rerun` with a `reason`. It sits after the arguments are checked
   in `callResolved` (execute_write/destructive), `forwardCall` (a
-  program's `pcp.call`) and a wrapper's `innerCall`, never in `upstream.ts`.
+  program's `pcp.call`), a wrapper's `innerCall` and execute's dispatch of
+  PCP's own tools by name (`guardedOwnTool`, server id `pcp`: not the
+  stores' or capabilities' tools, nor memory's or web_fetch's reading
+  calls), never in `upstream.ts`.
   Never guarded: the browser, SSH and storage kinds, a capability's calls
   to its provider, a wrapper's calls in a run the owner approved, and
   executions from the owner's page. The lookup and the record are one

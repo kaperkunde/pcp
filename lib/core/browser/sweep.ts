@@ -122,7 +122,7 @@ export function runName(run: Pick<TabRun, "id" | "label">): string {
   }
 
   return run.label === "run_code"
-    ? `run_code run ${run.id}`
+    ? `run ${run.id}`
     : `run ${run.id} (wrapper ${run.label})`
 }
 

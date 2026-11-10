@@ -94,6 +94,17 @@ export function runEntryFor(tier: ToolTier): string {
   return `run_${tier}`
 }
 
+/** search and the execute and run entries, whose tiers are their names. */
+export function isEntryName(name: string): boolean {
+  return (
+    name === "search" ||
+    name in RETIRED_ENTRIES ||
+    TOOL_TIERS.some(
+      (tier) => name === callEntryFor(tier) || name === runEntryFor(tier),
+    )
+  )
+}
+
 /**
  * The entry tools' names before PCP's tools were collapsed into search,
  * execute_<tier> and run_<tier> (#113), each with the one that took over:
@@ -564,7 +575,9 @@ export async function readOwnToolTiers(
 
     if (typeof parsed === "object" && parsed !== null) {
       for (const [name, tier] of Object.entries(parsed)) {
-        if (isToolTier(tier)) {
+        // An entry's tier is its name (#113): a choice saved for one, or for
+        // an old entry's name, is no choice, and the next save drops it.
+        if (isToolTier(tier) && !isEntryName(name)) {
           found[name] = tier
         }
       }

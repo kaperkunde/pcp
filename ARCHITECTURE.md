@@ -4354,7 +4354,8 @@ minute, one message each (`app/mcp/route.ts`). The tools:
   (the owner's instructions, the memories chosen for every conversation,
   the rest by path), or the owner's instructions alone, then the skills the
   token sees as the instructions list them, then the instructions' key
-  rules under "How PCP works:" (`keyRules`); the session has then read the
+  rules under "How PCP works:" (`keyRules`); `limit` alone is refused, as
+  there is nothing to search by. The session has then read the
   memories and has the key rules (clients/sessions.ts). With `ref`, it is
   what `describe` was (`search(ref)`, below). With `query`, it ranks the catalogue, PCP's own
   tools the token has (as `buildGatewayServer` registered them), the skills
@@ -4384,7 +4385,8 @@ minute, one message each (`app/mcp/route.ts`). The tools:
   and its title and lead then score as its name does; never by a word
   further on (which says how it works with the others), nor by a word the
   leads of a fifth of PCP's tools share ("owner", "tool"). With an empty
-  query it comes up only for kind `pcp`. `server` keeps to one server's
+  query it comes up only for kind `pcp`, and then every one of them is
+  listed unless `limit` says fewer. `server` keeps to one server's
   tools, `kind` to one kind (`tool`, `pcp`, `skill`, `memory`). With an
   embeddings provider (Search's embeddings, below), each item's nearness to
   the query is added to its keyword score.
@@ -4410,11 +4412,20 @@ minute, one message each (`app/mcp/route.ts`). The tools:
   tools is named only by the handle `search` gave for its ref, so a tool is
   always looked up before it is called; one of PCP's own tools is named by
   `tool`, its bare name (`pcp/<name>` and an app's prefix read as it), with
-  its own `arguments` and nothing else. That call is served as the tool's
-  own (`registerTool`'s `dispatch`): its own validator, its line in the
-  request log under its own name, the lead; a tool above the entry's tier,
+  its own `arguments` (and, on `execute_write` and `execute_destructive`,
+  `rerun` with a `reason`) and nothing else. That call is served as the
+  tool's own (`registerTool`'s `dispatch`): its own validator, its line in
+  the request log under its own name, the lead. A Write or Destructive one
+  goes through the duplicate guard as a server's tool does (`guardCall` on
+  the arguments as checked, under the server id `pcp`), except the stores'
+  tools (their own tool's call is the one guarded) and the capabilities',
+  and `memory`'s and `web_fetch`'s calls that only read (view, search,
+  every; GET, HEAD). Its structuredContent is dropped when its text already
+  is that JSON (`withoutRepeatedStructure`: the entry declares no output
+  schema, so a client would show it twice), and kept for a needs_owner
+  answer or when the text says it in words. A tool above the entry's tier,
   an entry's name or a name PCP does not have is refused by the entry
-  before anything is checked. For the owner's tool, the entry It checks the arguments against
+  before anything is checked. For the owner's tool, the entry checks the arguments against
   the tool's stored inputSchema, then opens a connection
   to the upstream with the configured credential (header secret or OAuth
   token, refreshed by the SDK when needed), calls the tool, and passes the

@@ -304,7 +304,7 @@ export async function runCode(
 
   if (input.code.length > MAX_CODE_CHARS) {
     return text(
-      `The program is ${input.code.length.toLocaleString("en")} characters; run_code takes ${MAX_CODE_CHARS.toLocaleString("en")} at most.`,
+      `The program is ${input.code.length.toLocaleString("en")} characters; a run takes ${MAX_CODE_CHARS.toLocaleString("en")} at most.`,
       true,
     )
   }
@@ -660,7 +660,7 @@ export async function checkRun(
 
     if (opened) {
       return text(
-        `${head} Its outcome, as run_code would have answered it (kept as result ${record.outcomeId}):\n\n${opened.text()}`,
+        `${head} Its outcome, as the run would have answered it (kept as result ${record.outcomeId}):\n\n${opened.text()}`,
         failed,
       )
     }
@@ -669,7 +669,7 @@ export async function checkRun(
   return text(
     [
       record.answered
-        ? `${head} run_code's own answer carried its outcome.`
+        ? `${head} The run's own answer carried its outcome.`
         : `${head} Its outcome is no longer kept.`,
       `Calls:\n${traceLines(record.trace)}`,
       ...(record.state === "finished" ? [] : effectLines(record.trace)),
@@ -1668,7 +1668,7 @@ async function shownReturn(
   }
 
   if (returned.length > limits.textChars) {
-    return `(${returned.length.toLocaleString("en")} characters of JSON, more than run_code passes on: ${limits.textChars.toLocaleString("en")}. Return less, or keep it with pcp.keep and return the handle.)`
+    return `(${returned.length.toLocaleString("en")} characters of JSON, more than a run passes on: ${limits.textChars.toLocaleString("en")}. Return less, or keep it with pcp.keep and return the handle.)`
   }
 
   const kept = await keepResult(scope.ctx, {

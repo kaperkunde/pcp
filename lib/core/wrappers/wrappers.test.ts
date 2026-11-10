@@ -815,10 +815,30 @@ describe("another wrapper of a definition, a definition of its own, and the owne
         .definitionId,
     ).toBe(first.definitionId)
 
-    const alone = await call("update_wrapper", {
+    // The same detach again is held back as a repeat (it was done);
+    // made again on purpose, it finds nothing left to detach from.
+    const repeat = await call("update_wrapper", {
       wrapper: second.slug,
       detach: true,
     })
+    expect(repeat.text).toContain("Not run again: pcp/update_wrapper")
+    const again = await (
+      await connect()
+    ).callTool({
+      name: "execute_destructive",
+      arguments: {
+        tool: "update_wrapper",
+        arguments: { wrapper: second.slug, detach: true },
+        rerun: true,
+        reason: "Checking it is detached.",
+      },
+    })
+    const alone = {
+      isError: again.isError === true,
+      text: (again.content as Array<{ text?: string }>)
+        .map((part) => part.text ?? "")
+        .join(""),
+    }
     expect(alone.isError).toBe(true)
     expect(alone.text).toContain("only wrapper of its definition")
   })

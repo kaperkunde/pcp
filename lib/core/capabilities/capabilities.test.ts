@@ -211,7 +211,23 @@ async function call(name: string, args: Record<string, unknown>) {
   return {
     isError: result.isError === true,
     text,
-    structured: result.structuredContent as Record<string, unknown>,
+    // Through execute, a value whose text is its JSON comes as the text
+    // alone (tools/serve.ts withoutRepeatedStructure).
+    structured: (result.structuredContent ?? structuredText(result)) as Record<
+      string,
+      unknown
+    >,
+  }
+}
+
+/** The value a result's last text is the JSON of, or undefined. */
+function structuredText(result: CallToolResult): unknown {
+  const last = result.content.filter((part) => part.type === "text").at(-1)
+
+  try {
+    return last?.type === "text" ? JSON.parse(last.text) : undefined
+  } catch {
+    return undefined
   }
 }
 
@@ -788,7 +804,15 @@ describe("read_image with include_image", () => {
     await client.close()
 
     expect(result.isError).toBeFalsy()
-    expect(result.structuredContent).toMatchObject({
+    // Through execute the readings are the text alone, once.
+    expect(result.structuredContent).toBeUndefined()
+    expect(
+      JSON.parse(
+        result.content.flatMap((part) =>
+          part.type === "text" && part.text.startsWith("{") ? [part.text] : [],
+        )[0]!,
+      ),
+    ).toMatchObject({
       kind: "readings",
       readings: [{ provider: "conv/convert_file", text: "STOP" }],
     })

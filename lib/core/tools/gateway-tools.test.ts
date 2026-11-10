@@ -834,8 +834,9 @@ describe("execute_<tier> by name, and the names kept for one release (#113)", ()
       rerun: true,
       reason: "The owner asked for it again.",
     })
+    // It ran: register_server hands back the request still open for it.
     expect(meant.isError).toBe(false)
-    expect(await db().permissionRequest.count()).toBe(2)
+    expect(meant.structured).toMatchObject({ kind: "needs_owner" })
 
     // What only reads is never held back, whatever the tool's tier.
     const view = {
@@ -860,12 +861,16 @@ describe("execute_<tier> by name, and the names kept for one release (#113)", ()
   })
 
   it("answers PCP's own tools through execute without repeating the text as structuredContent", async () => {
+    // list_secrets' text is its value's JSON: once is enough.
+    const secrets = await said("execute_read", { tool: "list_secrets" })
+    expect(secrets.isError).toBe(false)
+    expect(secrets.structured).toBeUndefined()
+    expect(JSON.parse(secrets.texts.at(-1)!)).toHaveProperty("secrets")
+
+    // check_permission says it in words, and its value holds the ids and
+    // links the words do not: it stays.
     const listed = await said("execute_read", { tool: "check_permission" })
-    expect(listed.isError).toBe(false)
-    expect(listed.structured).toBeUndefined()
-    expect(JSON.parse(listed.texts.at(-1)!)).toMatchObject({
-      kind: "requests",
-    })
+    expect(listed.structured).toMatchObject({ kind: "requests" })
   })
 
   it("gives the owner's standing rules for search with no arguments", async () => {

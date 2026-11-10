@@ -1,5 +1,6 @@
 import {
   ownerLinkIn,
+  sameJson,
   serveTool as kitServeTool,
   type CallLine as KitCallLine,
   type ServeEvent,
@@ -173,9 +174,56 @@ export async function serveTool(
  * gateway.ts), or null to serve the tool itself. A note goes in front of the
  * answer (a client prefix read as the bare name).
  */
-export type Dispatch = (
-  sent: unknown,
-) => { tool: Tool; args: unknown; note?: string | null } | null
+export type Dispatch = (sent: unknown) => {
+  tool: Tool
+  args: unknown
+  note?: string | null
+  /**
+   * The entry it came through declares no output schema: structuredContent
+   * that only repeats the text is dropped (withoutRepeatedStructure).
+   */
+  plain?: boolean
+} | null
+
+/**
+ * A result without the structuredContent its text already is, for an entry
+ * that declares no output schema (execute_<tier> running one of PCP's own
+ * tools): a client that shows both would show it twice. A needs_owner
+ * answer keeps it: it is how a client knows the owner is asked (its kind,
+ * reason, request and link), which is more than words to show.
+ */
+export function withoutRepeatedStructure(
+  result: CallToolResult,
+): CallToolResult {
+  const structured = result.structuredContent
+
+  if (
+    structured === undefined ||
+    (structured as { kind?: unknown }).kind === "needs_owner"
+  ) {
+    return result
+  }
+
+  const repeats = result.content.some((part) => {
+    if (part.type !== "text") {
+      return false
+    }
+
+    try {
+      return sameJson(JSON.parse(part.text), structured)
+    } catch {
+      return false
+    }
+  })
+
+  if (!repeats) {
+    return result
+  }
+
+  const rest = { ...result }
+  delete rest.structuredContent
+  return rest
+}
 
 /** How a tool is registered beyond the package's own. */
 export type RegisterOptions = {
@@ -215,9 +263,10 @@ export function registerTool(
     },
     async (args, ctx) => {
       const routed = dispatch?.(args) ?? null
-      const result = routed
+      const served = routed
         ? await serveTool(routed.tool, routed.args, ctx, hooks)
         : await serveTool(tool, args, ctx, hooks)
+      const result = routed?.plain ? withoutRepeatedStructure(served) : served
       const lead = [note, routed?.note].filter(
         (line): line is string => typeof line === "string" && line !== "",
       )
