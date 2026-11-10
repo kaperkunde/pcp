@@ -289,6 +289,42 @@ describe.skipIf(!executable)(
       expect(await db().toolResult.count()).toBe(before)
     })
 
+    it("takes no picture or PDF of a page that shows a secret PCP typed, after its field let go", async () => {
+      const tab = tabOf(
+        await call("tabs", { action: "open", url: `${api.origin}/long` }),
+      )
+      const page = runningBrowser(ctx.vaultId)!.tabs.get(tab)!.page
+      await page.locator("#code").fill("hunter2-hunter2")
+      holdSecret(page, "Bank code", "hunter2-hunter2")
+      // The field lets go, and the page repeats the value as its text.
+      await page.locator("#code").fill("")
+      await page.locator("h1").evaluate((heading) => {
+        const code = document.createElement("code")
+        code.textContent = "Your code: hunter2-hunter2"
+        heading.after(code)
+      })
+      const before = await db().toolResult.count()
+
+      for (const refused of [
+        await call("print_pdf", { tab }),
+        await call("screenshot", { tab, full_page: true }),
+        await call("screenshot", { tab }),
+      ]) {
+        expect(refused.isError, textOf(refused)).toBe(true)
+        expect(textOf(refused)).toContain('shows the secret "Bank code"')
+        expect(refused.content.some((part) => part.type === "image")).toBe(
+          false,
+        )
+      }
+
+      expect(await db().toolResult.count()).toBe(before)
+
+      // Once the page no longer shows it, pictures go again.
+      await page.locator("code").evaluate((code) => code.remove())
+      const picture = await call("screenshot", { tab })
+      expect(picture.isError, textOf(picture)).toBeUndefined()
+    })
+
     it("takes a screenshot of the whole page with full_page", async () => {
       const tab = tabOf(
         await call("tabs", { action: "open", url: `${api.origin}/long` }),
