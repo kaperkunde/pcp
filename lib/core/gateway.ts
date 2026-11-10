@@ -362,6 +362,7 @@ import {
   registerTool,
   type ServeHooks,
 } from "./tools/serve"
+import { answerHint } from "./tools/answer-hint"
 import { argumentsRefusal } from "./tools/validate"
 import { checkCallArguments, familyTool } from "./call-arguments"
 import { endpointMigration } from "./endpoints"
@@ -3225,6 +3226,8 @@ export function buildGatewayServer(
           ),
       }),
       annotations: inner.annotations,
+      // save_file given a whole get_attachment answer: the handle inside it.
+      invalidHint: answerHint,
       async run(args: Record<string, unknown>, ctx) {
         const { store, ...rest } = args
         const target = await storeServer(

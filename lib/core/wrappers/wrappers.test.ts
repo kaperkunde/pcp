@@ -34,6 +34,7 @@ import { catalogueHandle, withCallHandle } from "../test-handles"
 import { writeToolAccess } from "../tool-access"
 import { setToolTier, toolTier, toolTierInfo } from "../tool-tiers"
 import { tierNotices } from "../owner-notices"
+import { keepBytes } from "../tool-results"
 import { setupVault } from "../vault"
 import { setPacingServer } from "../pacing/config"
 import { resetPacing, setPacingClock } from "../pacing/pace"
@@ -2121,6 +2122,44 @@ describe("a wrapper whose calls no longer fit", () => {
     expect(result.text).toContain(
       `The wrapper ${wrapper.slug}'s tool lookup needs migrating: fix it with update_wrapper (edit tool lookup's program so this call fits things/echo's inputSchema, which describe gives).`,
     )
+    expect(api.requests).toHaveLength(0)
+  })
+
+  it("says the arguments came from the wrapper's own, and names the handle inside an answer passed on", async () => {
+    const { wrapper } = await approved([
+      {
+        ...PLAIN_TOOL,
+        input_schema: {
+          type: "object",
+          properties: { file: { type: "object" } },
+        },
+        program:
+          'return await pcp.call("things", "echo", { key: "k", q: args.file })',
+      },
+    ])
+    await writeToolAccess(scope.tokenId, wrapper.id, "lookup", "allowed")
+    const kept = await keepBytes(ctx, {
+      tokenId: scope.tokenId,
+      serverId: null,
+      toolName: "get_attachment",
+      bytes: Buffer.from("%PDF-1.7"),
+      mediaType: "application/pdf",
+      name: "plan.pdf",
+    })
+
+    const result = await call("call_tool_destructive", {
+      server: wrapper.slug,
+      tool: "lookup",
+      arguments: {
+        file: { name: "plan.pdf", size: 9, result: { $result: kept.id } },
+      },
+    })
+
+    expect(result.isError).toBe(true)
+    expect(result.text).toContain(
+      `The wrapper ${wrapper.slug}'s tool lookup built these arguments from its own`,
+    )
+    expect(result.text).toContain("/q/result")
     expect(api.requests).toHaveLength(0)
   })
 

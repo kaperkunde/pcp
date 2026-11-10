@@ -1080,11 +1080,10 @@ describe("a running service", { timeout: 30_000 }, () => {
       authHeaderName: "Authorization",
       authValueTemplate: "Bearer {{secret}}",
       authSecretId: secret.id,
-      // Its tools are read again with the new credential.
-      status: "unknown",
-      lastSyncedAt: null,
+      // Its tools are read again with the new credential, in the same request.
+      status: "ok",
     })
-    expect((await syncServerTools(ctx, after, PUBLIC)).status).toBe("ok")
+    expect(after.lastSyncedAt).not.toBeNull()
     expect(mcpSeen.at(-1)).toBe(`Bearer ${API_KEY}`)
 
     // Another secret bound to the variable: the remake the save asks for
@@ -1211,6 +1210,145 @@ describe("a running service", { timeout: 30_000 }, () => {
     // Made again later, it says the same.
     const again = await recreateService(ctx, launched.id, FAST)
     expect(again.note).toBe(status.note)
+  })
+
+  describe("the tools of the MCP server it registered, after a remake", () => {
+    async function launchedMcp() {
+      const hostId = await pinnedHost()
+      const launched = await launchService(
+        ctx,
+        await launchInput(hostId, {
+          definition: definition({ registers: MCP }),
+        }),
+        FAST,
+      )
+
+      return launched
+    }
+
+    async function toolNames(serverId: string): Promise<string[]> {
+      return (
+        await db().mcpTool.findMany({
+          where: { serverId },
+          orderBy: { name: "asc" },
+        })
+      ).map((tool) => tool.name)
+    }
+
+    it("are read again at once when an update changes them", async () => {
+      const launched = await launchedMcp()
+      expect(await toolNames(launched.registeredId!)).toEqual(["convert"])
+
+      mcpTools = [
+        { name: "convert", description: "Converts a document" },
+        { name: "merge", description: "Merges documents" },
+      ]
+      await updateService(ctx, launched.id, FAST)
+
+      expect(await toolNames(launched.registeredId!)).toEqual([
+        "convert",
+        "merge",
+      ])
+      expect(await getServer(ctx, launched.registeredId!)).toMatchObject({
+        status: "ok",
+      })
+    })
+
+    it("are read again when a secret it takes changes", async () => {
+      const launched = await launchedMcp()
+      const secret = await db().secret.findFirstOrThrow({
+        where: { name: "docs-key" },
+      })
+      mcpTools = [{ name: "split", description: "Splits a document" }]
+      await updateSecret(ctx, secret.id, { value: "sk-rotated-value-5678" })
+
+      await restartServicesUsingSecret(ctx, secret.id, FAST)
+
+      expect(await toolNames(launched.registeredId!)).toEqual(["split"])
+    })
+
+    it("are read again when the owner's Start makes a missing container again", async () => {
+      const launched = await launchedMcp()
+      const service = await getServer(ctx, launched.id)
+      mcpTools = [{ name: "split", description: "Splits a document" }]
+      docker.update((state) => {
+        delete state.containers["pcp-docs"]
+      })
+
+      await runServiceAction(ctx, service.id, "start", FAST)
+
+      expect(await toolNames(launched.registeredId!)).toEqual(["split"])
+    })
+
+    it("are read again when an assistant's start makes a missing container again", async () => {
+      const launched = await launchedMcp()
+      const service = await getServer(ctx, launched.id)
+      mcpTools = [{ name: "split", description: "Splits a document" }]
+      docker.update((state) => {
+        delete state.containers["pcp-docs"]
+      })
+
+      const answer = await callServerTool(ctx, service, "start", {}, FAST)
+
+      expect(answer.isError).toBeFalsy()
+      expect(docker.state().containers["pcp-docs"]!.state).toBe("running")
+      expect(await toolNames(launched.registeredId!)).toEqual(["split"])
+    })
+
+    it("take a changed schema at an assistant's address only from the owner's remake", async () => {
+      const { service, endpoint } = await launched()
+      const changed = JSON.stringify({
+        ...JSON.parse(SPEC),
+        paths: {
+          ...JSON.parse(SPEC).paths,
+          "/more": {
+            get: {
+              operationId: "list_more",
+              responses: { "200": { description: "ok" } },
+            },
+          },
+        },
+      })
+      await db().mcpServer.update({
+        where: { id: endpoint.id },
+        data: { specUrlFromAssistant: true },
+      })
+      answers["/openapi.json"] = { status: 200, body: changed }
+      const gone = () =>
+        docker.update((state) => {
+          delete state.containers["pcp-docs"]
+        })
+      const names = () => toolNames(endpoint.id)
+
+      expect(await names()).toEqual(["list_things"])
+
+      // An assistant's start: the tools are read, but from the copy the
+      // owner approved.
+      gone()
+      await callServerTool(ctx, service, "start", {}, FAST)
+      expect(await names()).toEqual(["list_things"])
+      expect((await getServer(ctx, endpoint.id)).statusMessage).toMatch(
+        /has changed since it was approved/,
+      )
+
+      // The owner's remake takes the new document.
+      gone()
+      await runServiceAction(ctx, service.id, "start", FAST)
+      expect(await names()).toEqual(["list_more", "list_things"])
+    })
+
+    it("a read that fails is a note, and the remake still worked", async () => {
+      const launched = await launchedMcp()
+      // The server now wants a header the registered server does not send.
+      mcpAuthorization = "Bearer something-else"
+
+      const { status } = await updateService(ctx, launched.id, FAST)
+
+      expect(status.state).toBe("running")
+      expect(status.note).toMatch(/could not read its tools/)
+      expect(statusWords("Docs", status)).toContain(status.note)
+      expect(await toolNames(launched.registeredId!)).toEqual(["convert"])
+    })
   })
 
   it("names the service among what uses its secret, which cannot be deleted under it", async () => {
