@@ -346,6 +346,7 @@ test("a secret for the browser: its login name, a password PCP makes, and its si
   const login = page.getByLabel("Login name")
   await expect(login).toHaveValue("ada@example.com")
   await expect(login).toHaveAttribute("autocomplete", "username")
+  await expect(login).toHaveAttribute("autocapitalize", "off")
   const generate = page.getByRole("switch", {
     name: /Have PCP make a new password/,
   })
@@ -359,9 +360,26 @@ test("a secret for the browser: its login name, a password PCP makes, and its si
     "true",
   )
   await clickHydrated(generate)
+  // Not generating: the password follows the login name in one real form,
+  // under the plain pair of hints (Safari puts a "new-password" into the
+  // login name), and Allow submits that form.
+  const password = page.getByLabel(`Value of the secret "${name}"`)
+  await expect(password).toHaveAttribute("autocomplete", "current-password")
+  await expect(password).toHaveAttribute("name", "password")
+  const form = page.locator("form", { has: login })
+  await expect(form.locator("input:not([type=checkbox])")).toHaveCount(2)
   await expect(
-    page.getByLabel(`Value of the secret "${name}"`),
-  ).toHaveAttribute("autocomplete", "new-password")
+    form.locator("input:not([type=checkbox])").nth(0),
+  ).toHaveAttribute("name", "username")
+  await expect(
+    form.locator("input:not([type=checkbox])").nth(1),
+  ).toHaveAttribute("name", "password")
+  await expect(
+    page.getByRole("button", { name: "Save, allow one use" }),
+  ).toHaveAttribute("type", "submit")
+  await expect(
+    page.getByRole("button", { name: "Save, allow one use" }),
+  ).toHaveAttribute("form", (await form.getAttribute("id")) ?? "")
   await clickHydrated(generate)
 
   await clickHydrated(page.getByRole("button", { name: "Save, allow one use" }))

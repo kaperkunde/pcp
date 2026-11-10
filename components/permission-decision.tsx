@@ -163,6 +163,8 @@ export function PermissionDecision({
     access ? initialAccessRows(access) : [],
   )
 
+  const credentialForm = `permission-${id}-credentials`
+
   function decide(value: Decision) {
     const agrees = AGREES.includes(value)
 
@@ -302,10 +304,12 @@ export function PermissionDecision({
       <Input
         id={`permission-${id}-secret`}
         type="password"
-        // A browser password: what a password manager offers to make
-        // or fill, saved with the login name above.
-        name={credential ? "new-password" : undefined}
-        autoComplete={credential ? "new-password" : "off"}
+        // A browser password, right after the login name: what a password
+        // manager fills or saves as one sign-in. Safari takes "new-password"
+        // for a login name and puts the password there, so it is the plain
+        // pair; PCP's own Generate covers a new one.
+        name={credential ? "password" : undefined}
+        autoComplete={credential ? "current-password" : "off"}
         value={secretValue}
         onChange={(event) => setSecretValue(event.target.value)}
         disabled={pending}
@@ -319,25 +323,32 @@ export function PermissionDecision({
         // The login name and the password together, for a password manager
         // to save as one sign-in; the sites stay outside, out of its reach.
         <form
+          id={credentialForm}
           className="flex flex-col gap-5"
           autoComplete="on"
-          onSubmit={(event) => event.preventDefault()}
+          onSubmit={(event) => {
+            event.preventDefault()
+            if (primary) decide(primary.value)
+          }}
         >
           <Field
             label="Login name"
             htmlFor={`permission-${id}-username`}
-            hint="The user name or email address it signs in with, kept with the secret. An assistant types it with the password's name and part username, at the same sites; leave it empty for none."
+            hint="The user name or email address it signs in with, kept with the secret. An assistant types it by the secret's name with part username, at the same sites; leave it empty for none."
           >
             <Input
               id={`permission-${id}-username`}
               name="username"
               autoComplete="username"
+              autoCapitalize="off"
+              autoCorrect="off"
               spellCheck={false}
               value={username}
               onChange={(event) => setUsername(event.target.value)}
               disabled={pending}
             />
           </Field>
+          {generate ? null : valueField}
           <List>
             <SwitchRow
               id={`permission-${id}-generate`}
@@ -416,9 +427,7 @@ export function PermissionDecision({
                 />
               </Field>
             </fieldset>
-          ) : (
-            valueField
-          )}
+          ) : null}
         </form>
       ) : (
         valueField
@@ -600,11 +609,14 @@ export function PermissionDecision({
         primary={
           primary ? (
             <Button
-              type="button"
+              // With a login name and password it submits their form, so
+              // Enter in a field and a password manager's save both mean Allow.
+              type={credential ? "submit" : "button"}
+              form={credential ? credentialForm : undefined}
               size="lg"
               className={DECISION_BUTTON}
               disabled={pending}
-              onClick={() => decide(primary.value)}
+              onClick={credential ? undefined : () => decide(primary.value)}
             >
               {labelOf(primary)}
             </Button>
