@@ -321,6 +321,48 @@ test("the tabs view: a hand-over answered on its tab, old links led there, a sta
   ).toContainText("This tab is closed")
 })
 
+test("the live view: Take over and Hand back switch back and forth without a reload", async ({
+  page,
+  baseURL,
+}) => {
+  const opened = toolText(
+    await browse(baseURL!, "tabs", {
+      action: "open",
+      url: `${upstream.browserUrl}/form`,
+    }),
+  )
+  const tab =
+    opened.match(/Opened a new tab: ([^\s.]+)[ .]/)?.[1] ?? tabOf(opened)
+
+  // The page's own refresh is slow (a busy page makes the tab list slow to
+  // draw): the buttons must not wait for it.
+  await page.route(/\/browser\?.*_rsc=/, async (route) => {
+    if (route.request().method() !== "GET") return route.continue()
+    await new Promise((resolve) => setTimeout(resolve, 15_000))
+    await route.continue().catch(() => {})
+  })
+  await page.goto(`/browser?tab=${tab}`)
+  const live = page.getByRole("region", { name: "Live tab" })
+  await expect(page.getByTestId("browser-frame")).toBeVisible()
+
+  // Each switch leaves the button enabled and offering the opposite action.
+  for (let round = 0; round < 2; round += 1) {
+    const takeOver = live.getByRole("button", { name: "Take over" })
+    await expect(takeOver).toBeEnabled()
+    await clickHydrated(takeOver)
+
+    const handBack = live.getByRole("button", { name: "Hand back" })
+    await expect(handBack).toBeVisible()
+    await expect(handBack).toBeEnabled({ timeout: 4_000 })
+    await clickHydrated(handBack)
+  }
+
+  await expect(live.getByRole("button", { name: "Take over" })).toBeEnabled({
+    timeout: 4_000,
+  })
+  await expect(live.getByRole("button", { name: /^Close/ })).toBeEnabled()
+})
+
 test("a secret for the browser: its login name, a password PCP makes, and its sites changed on request", async ({
   page,
   baseURL,
