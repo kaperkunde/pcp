@@ -199,6 +199,34 @@ export async function GET(
   })
 }
 
+/**
+ * Whether the stream would open, without opening it: the same origin,
+ * session and tab checks as GET, and no place among the viewers taken. The
+ * live view asks before it reconnects, to tell a tab that is gone or a
+ * signed-out owner from a connection that merely dropped.
+ */
+export async function HEAD(
+  request: Request,
+  { params }: { params: Promise<{ id: string }> },
+): Promise<Response> {
+  if (!isSameOrigin(request)) {
+    return new Response(null, { status: 403 })
+  }
+
+  const session = await currentSession()
+
+  if (!session) {
+    return new Response(null, { status: 401 })
+  }
+
+  const { id } = await params
+
+  return new Response(null, {
+    status: getTab(session.ctx.vaultId, id) ? 200 : 404,
+    headers: { "Cache-Control": "no-store" },
+  })
+}
+
 function problem(status: number, error: string): Response {
   return Response.json(
     { error },

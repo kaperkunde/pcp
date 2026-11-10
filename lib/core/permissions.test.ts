@@ -20,6 +20,7 @@ import { permissionLinkIn } from "./tools/serve"
 import {
   askCodeCall,
   checkPermission,
+  checkPermissions,
   decidePermission,
   getPermissionView,
   listAnsweredRequests,
@@ -833,6 +834,136 @@ describe("check_permission", () => {
   })
 })
 
+describe("check_permission on several requests", () => {
+  async function two() {
+    const made = await setup()
+    await withPermission(made.scope, call(made.server, "add_numbers", { a: 1 }))
+    await withPermission(made.scope, call(made.server, "add_numbers", { a: 2 }))
+    const rows = await db().permissionRequest.findMany({
+      orderBy: { createdAt: "asc" },
+    })
+    return { ...made, a: rows[0].id, b: rows[1].id }
+  }
+
+  it("any: returns as soon as one is answered, with the rest's status", async () => {
+    const { ctx, scope, a, b } = await two()
+    const { executor } = stub()
+
+    const checked = checkPermissions(scope, [a, b], { waitMs: 10_000 })
+    setTimeout(() => {
+      void decidePermission(
+        ctx,
+        b,
+        "allow_once",
+        { publicUrl: PUBLIC_URL },
+        executor,
+      )
+    }, 200)
+    const result = await checked
+
+    expect(result.entries).toEqual([
+      { id: a, status: "pending" },
+      { id: b, status: "executed", outcome: expect.stringContaining("ran") },
+    ])
+    expect(result.told).toEqual([b])
+    expect(result.text).toContain(`/permissions/${a}`)
+    expect(result.text.split("\n").at(-1)).toContain(`/permissions/${a}`)
+  })
+
+  it("all: waits until none is waiting", async () => {
+    const { ctx, scope, a, b } = await two()
+    const { executor } = stub()
+    const decide = (id: string, delay: number) =>
+      setTimeout(() => {
+        void decidePermission(
+          ctx,
+          id,
+          "allow_once",
+          { publicUrl: PUBLIC_URL },
+          executor,
+        )
+      }, delay)
+    decide(a, 100)
+    decide(b, 1_500)
+
+    const started = Date.now()
+    const result = await checkPermissions(scope, [a, b], {
+      mode: "all",
+      waitMs: 10_000,
+    })
+
+    expect(Date.now() - started).toBeGreaterThanOrEqual(1_400)
+    expect(result.entries.map((entry) => entry.status)).toEqual([
+      "executed",
+      "executed",
+    ])
+    expect(result.told).toEqual([a, b])
+  })
+
+  it("on timeout lists every status, and an unknown id stays one entry", async () => {
+    const { ctx, scope, a, b } = await two()
+    await decidePermission(
+      ctx,
+      b,
+      "decline",
+      { publicUrl: PUBLIC_URL },
+      stub().executor,
+    )
+
+    const result = await checkPermissions(scope, [a, "nope", b], {
+      mode: "all",
+      waitMs: 50,
+    })
+
+    expect(result.entries).toEqual([
+      { id: a, status: "pending" },
+      { id: "nope", status: "unknown" },
+      {
+        id: b,
+        status: "declined",
+        outcome: expect.stringContaining("said no"),
+      },
+    ])
+    expect(result.told).toEqual([b])
+  })
+
+  it("stops waiting at once when the client goes away", async () => {
+    const { scope, a, b } = await two()
+    const gone = new AbortController()
+    const started = Date.now()
+    const checked = checkPermissions(scope, [a, b], {
+      mode: "all",
+      waitMs: 30_000,
+      signal: gone.signal,
+    })
+    setTimeout(() => gone.abort(), 100)
+    const result = await checked
+
+    expect(Date.now() - started).toBeLessThan(5_000)
+    expect(result.entries.map((entry) => entry.status)).toEqual([
+      "pending",
+      "pending",
+    ])
+  })
+
+  it("answers at once when every id is unknown, and never shows another token's request", async () => {
+    const { ctx, a } = await two()
+    const { token } = await createApiToken(ctx, {
+      name: "Other",
+      allowAllServers: true,
+      serverIds: [],
+    })
+    const other = { ...(await resolveApiToken(token))!, publicUrl: PUBLIC_URL }
+
+    const started = Date.now()
+    const result = await checkPermissions(other, [a], { waitMs: 10_000 })
+
+    expect(Date.now() - started).toBeLessThan(2_000)
+    expect(result.entries).toEqual([{ id: a, status: "unknown" }])
+    expect(result.text).not.toContain("/permissions/")
+  })
+})
+
 describe("what is waiting for the owner", () => {
   it("counts open requests, oldest first, and leaves out answered ones and dead tokens", async () => {
     const { ctx, scope, server } = await setup()
@@ -1230,6 +1361,16 @@ describe("adding a server", () => {
       reason: "connect",
       connect: { serverId: linear.id, slug: linear.slug },
     })
+
+    const several = await checkPermissions(scope, [id, "nope"], { waitMs: 50 })
+    expect(several.told).toEqual([])
+    expect(several.entries[0]).toMatchObject({ id, status: "executed" })
+    const lines = several.text.split("\n")
+    expect(lines.at(-1)).toMatch(/^\[Connect Linear in PCP\]\(.+\)$/)
+    expect(several.text).toContain(`check_server with server "${linear.slug}"`)
+    // The link appears once, at the end, never inside an entry.
+    expect(several.text.split("Connect Linear in PCP").length).toBe(2)
+
     expect(textOf(waiting)).toContain("Linear needs connecting")
 
     await db().mcpServer.update({

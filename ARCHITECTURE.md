@@ -4363,7 +4363,7 @@ message each (`app/mcp/route.ts`). The tools:
   is refused, naming the entry that runs it, before anything else.
 - `search_tools` and `describe_tool`, the old names, are gone after their
   release (docs/breaking-changes.md).
-- `check_permission(id?)`, `withdraw_request(id)`, `check_server(server)`,
+- `check_permission(id? | ids?, mode?)` (several ids wait together, `any` or `all`, `checkPermissions`), `withdraw_request(id)`, `check_server(server)`,
   `register_server(...)` and `propose_tool_access(changes)` belong to the
   permission flow below.
 - `check_run(id)`, beside `run_code_<tier>` for a token that runs code, says how
