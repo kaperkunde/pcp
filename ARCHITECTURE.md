@@ -2899,7 +2899,13 @@ which `runCall` turns into a `browse` request offering Allow once (the site
 for that tab while it is open), Allow this site for (an allowance, as for
 web fetch), Always allow this site and Block this site (the token's site
 line, as for web fetch) and Not now. A popup becomes a tab
-of the tab that opened it, which that tab's next answer names by its id. The gate is the browser's, not a tab's (`Fetch`
+of the tab that opened it, which that tab's next answer names by its
+address and tab id. Each window a page opens is a note on its tab
+(`PopupNote`, from Chromium's own targets, so one that closed before
+Playwright reported it is still there), said once in that tab's next
+answer: open as tab N, closed itself, closed by PCP and why (no room, a
+script running), or refused by the gate at a site the token may not open,
+which also puts the site on the token's page. The gate is the browser's, not a tab's (`Fetch`
 on the browser's own DevTools session, on before the first page exists), so
 it holds a popup from its very first request, before Playwright has
 reported the popup: until then the popup opens only what the tab that
@@ -3308,7 +3314,18 @@ DevTools session of PCP's own (Playwright's download objects can read nothing
 in a context made with downloads off), clicks the ref or opens the address,
 and takes the first download its tab, a frame in it, or a popup of it starts,
 from an address the tab may open (`mayOpen`; a page's own blob or data file
-is the page's). Every other download is cancelled as it begins, and the one
+is the page's). A popup is known to be the tab's by the page that opened it,
+as Chromium named it when it made the window (`Target.targetCreated` on that
+session, kept for the newest `MAX_REMEMBERED_WINDOWS` and followed back
+`MAX_WINDOW_DEPTH` openers): Chromium closes a blank window whose address
+turned out to be a download as the download begins, before anyone could ask
+it whose it was. A file a page shows rather than offers, a PDF or a picture
+(no `attachment`) its tab or such a popup is answered with, is taken the
+same way: while the call waits, the gate continues that document's request
+with its answer held (`interceptResponse`), and `takeDocument` reads the
+body in chunks, stopped past the largest file PCP keeps, then hands it on
+to the page as it was, so the window still shows it. Every other download
+is cancelled as it begins, and the one
 taken is cancelled once Chromium says it is larger than PCP keeps of one file
 or slower than `DOWNLOAD_TIMEOUT_MS`. Its bytes are read and the file removed
 before the call answers; it is kept, encrypted, as the token's result, and
@@ -3319,7 +3336,10 @@ from there for `upload_file` (`receive_file`; see File links). A download a page
 starts while no call waits is refused by Chromium and only said in the tab's
 next answer, by the name the page gave, so the assistant can take it with
 `download`. An address given to `download` must be at a site the tab may
-open already; `navigate` is what asks the owner.
+open already; `navigate` is what asks the owner. The answer names the window
+the file came from (`window`: its tab, its address, `closed` when it closed
+itself) and the other windows the page opened meanwhile (`popups`); an
+answer without a file names them in its lines, as any answer does.
 
 **Whose tab** (`call.ts`). A tab belongs to the token that opened it (its
 `tokenId`; a popup is its opener's) or that the owner last handed it to,

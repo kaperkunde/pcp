@@ -224,6 +224,23 @@ export const MAX_UPLOAD_BYTES = 50 * 1024 * 1024
 export const DOWNLOAD_START_MS = 10_000
 export const DOWNLOAD_TIMEOUT_MS = 120_000
 /**
+ * Windows a page opened (popups), as Chromium named them: which page opened
+ * each, kept for this many of the newest so a download from a window that
+ * has closed is still known to be its tab's (downloads.ts), and followed
+ * back through at most this many openers (a window a window opened).
+ */
+export const MAX_REMEMBERED_WINDOWS = 512
+export const MAX_WINDOW_DEPTH = 4
+/** Windows a tab keeps to name in its next answer: the newest this many. */
+export const MAX_WINDOW_NOTES = 20
+/**
+ * How long download's answer waits for the window its file came from to
+ * become a tab (or close), so it can name the tab.
+ */
+export const WINDOW_SETTLE_MS = 2_000
+/** A PDF or picture a window shows, read in chunks of this many bytes. */
+export const DOCUMENT_READ_BYTES = 1024 * 1024
+/**
  * How long one tool call may hold its tab (calls on one tab run one at a
  * time, each tab apart from the others). Past it the tab is taken to have
  * stopped responding: its page is closed and opened again at its address,

@@ -97,6 +97,7 @@ import {
   MAX_UPLOAD_BYTES,
   MAX_FULL_PAGE_HEIGHT,
   MAX_URL_LENGTH,
+  WINDOW_SETTLE_MS,
   PACED_TAB_DEADLINE_MS,
   PACED_TURN_WAIT_MS,
   PDF_READ_BYTES,
@@ -118,6 +119,7 @@ import {
   browserHeld,
   closeTab,
   ensureBrowser,
+  findPopup,
   mayOpen,
   openTab,
   recomputePrivate,
@@ -130,6 +132,7 @@ import {
   tabView,
   touch,
   withVault,
+  type PopupNote,
   type Reopened,
   type Tab,
   type VaultBrowser,
@@ -571,21 +574,109 @@ function offeredLead(tab: Tab): string[] {
     : []
 }
 
-/**
- * Tabs the page opened (popups) since its last answer: each a tab of the
- * token's, named by its id, never the one the next call falls on.
- */
-function popupLead(scope: BrowserScope, tab: Tab): string[] {
-  const vault = runningBrowser(scope.ctx.vaultId)
+/** Whether a window is still open as a tab of the vault's. */
+function windowOpen(
+  vault: VaultBrowser | null,
+  note: PopupNote,
+): note is PopupNote & { tabId: string } {
+  return (
+    note.ended === null &&
+    note.tabId !== null &&
+    vault?.tabs.has(note.tabId) === true
+  )
+}
 
-  return tab.popups.splice(0).flatMap((id) => {
-    const popup = vault?.tabs.get(id)
-    return popup
-      ? [
-          `The page opened a new tab, ${id} (${popup.page.url()}). This tab stays as it was; name ${id} as tab to read or act on the new one.`,
-        ]
-      : []
-  })
+/** Whether a window closed, by itself or PCP's hand, rather than the gate. */
+function windowClosed(vault: VaultBrowser | null, note: PopupNote): boolean {
+  return (
+    note.ended?.by === "itself" ||
+    note.ended?.by === "pcp" ||
+    (note.ended === null && note.tabId !== null && !windowOpen(vault, note))
+  )
+}
+
+/** A window a page opened, in a line of an answer. */
+function windowWords(vault: VaultBrowser | null, note: PopupNote): string {
+  const at = note.url ? ` at ${note.url.slice(0, MAX_URL_LENGTH)}` : ""
+  const named = note.tabId ? ` (tab ${note.tabId})` : ""
+
+  if (note.ended?.by === "gate") {
+    return `The page opened a new window at ${note.ended.host}, which this token may not open yet, so it was closed. To go there, call navigate with that address: the owner is asked first.`
+  }
+
+  if (windowOpen(vault, note)) {
+    return `A new window opened${at} (tab ${note.tabId}). This tab stays as it was; name ${note.tabId} as tab to read or act on the new one.`
+  }
+
+  if (note.ended?.by === "pcp") {
+    return `A new window opened${at}${named} and was closed: ${note.ended.why}.`
+  }
+
+  if (windowClosed(vault, note)) {
+    return `A new window opened${at}${named} and closed itself.`
+  }
+
+  return `A new window opened${at}; it is not a tab yet: list tabs to find it.`
+}
+
+/**
+ * Notes a site a window was refused at, as blockedNote does: on the
+ * token's page as a site it tried.
+ */
+async function noteRefusedWindows(
+  scope: BrowserScope,
+  notes: PopupNote[],
+): Promise<void> {
+  for (const note of notes) {
+    if (note.ended?.by === "gate") {
+      await decideSite(scope, note.ended.host, "GET").catch(() => null)
+    }
+  }
+}
+
+/**
+ * Windows the page opened (popups) since its last answer: each named by its
+ * address and the tab it became, never the one the next call falls on, or
+ * how it ended (closed itself, refused at a site the token may not open).
+ */
+async function popupLead(scope: BrowserScope, tab: Tab): Promise<string[]> {
+  const vault = runningBrowser(scope.ctx.vaultId)
+  // A window still opening (no tab yet, not closed) waits for the next
+  // answer, for a moment, so the answer can say what became of it.
+  const opening = (note: PopupNote) =>
+    note.tabId === null &&
+    note.ended === null &&
+    Date.now() - note.openedAt < WINDOW_SETTLE_MS
+  const notes = tab.popups.filter((note) => !opening(note))
+  tab.popups = tab.popups.filter(opening)
+  await noteRefusedWindows(scope, notes)
+  return notes.map((note) => windowWords(vault, note))
+}
+
+/**
+ * Waits a moment for a window that is opening to become a tab or close,
+ * so the answer can name its tab: Chromium makes it before PCP hears of
+ * its page.
+ */
+async function windowSettled(note: PopupNote): Promise<void> {
+  const until = Date.now() + WINDOW_SETTLE_MS
+
+  while (note.tabId === null && note.ended === null && Date.now() < until) {
+    await new Promise((resolve) => setTimeout(resolve, 50))
+  }
+}
+
+/** A window in a JSON answer (download's). */
+function windowJson(vault: VaultBrowser | null, note: PopupNote) {
+  return {
+    ...(note.tabId ? { tab: note.tabId } : {}),
+    url:
+      note.ended?.by === "gate"
+        ? note.ended.host
+        : note.url.slice(0, MAX_URL_LENGTH),
+    ...(windowClosed(vault, note) ? { closed: true as const } : {}),
+    ...(note.ended?.by === "gate" ? { refused: true as const } : {}),
+  }
 }
 
 /** What a page's open dialog is called. */
@@ -697,7 +788,7 @@ async function report(
     ...offeredLead(tab),
     ...lead,
     ...(hint?.loud ? [hint.line] : []),
-    ...popupLead(scope, tab),
+    ...(await popupLead(scope, tab)),
     `Tab ${tab.id}: ${title || "(no title)"}`,
     `Address: ${tab.page.url()}`,
     `The owner can watch it or take over: ${markdownLink(`Watch tab ${title || tab.id}`, tabLink(scope.publicUrl, tab.id))}`,
@@ -2242,6 +2333,7 @@ async function downloadFile(
   const { fileBytes } = await loadResourceLimits()
   const caught = await catchDownload(vault.downloads, {
     tabSession: tab.cdp,
+    mainFrameId: tab.mainFrameId,
     judge: async (frameId, address) =>
       !(await tabOwnsFrame(vault.downloads, tab, frameId))
         ? "other"
@@ -2317,6 +2409,31 @@ async function downloadFile(
   const from = /^https?:/i.test(caught.url)
     ? caught.url.slice(0, MAX_URL_LENGTH)
     : null
+  // The window it came from, if a popup's, and the others the page opened.
+  const source =
+    caught.frameId !== tab.mainFrameId
+      ? findPopup(vault, caught.frameId)
+      : undefined
+
+  if (source) {
+    // Still listed while it settles, so the tab it becomes finds it.
+    await windowSettled(source.note)
+    const index = source.parent.popups.indexOf(source.note)
+    if (index >= 0) source.parent.popups.splice(index, 1)
+  }
+
+  const others = tab.popups.splice(0)
+  await noteRefusedWindows(scope, others)
+  const fromWindow = source ? windowJson(vault, source.note) : null
+  const cameFrom = !source
+    ? ""
+    : ` It came from a new window the page opened${
+        windowOpen(vault, source.note)
+          ? `, tab ${source.note.tabId}, which shows it still`
+          : windowClosed(vault, source.note)
+            ? ", which closed itself"
+            : ""
+      }.`
 
   return text(
     JSON.stringify(
@@ -2324,7 +2441,11 @@ async function downloadFile(
         tab: tab.id,
         file: handleOf(kept),
         ...(from ? { from } : {}),
-        note: `PCP keeps this file for you: pass {"$result": "${kept.id}"} where a tool wants a file (upload_file's files, send_email's or create_draft's attachments, a field that takes base64), read it with read_result, or get it onto your own computer with share_result's link where this token has it.`,
+        ...(fromWindow ? { window: fromWindow } : {}),
+        ...(others.length > 0
+          ? { popups: others.map((note) => windowJson(vault, note)) }
+          : {}),
+        note: `PCP keeps this file for you: pass {"$result": "${kept.id}"} where a tool wants a file (upload_file's files, send_email's or create_draft's attachments, a field that takes base64), read it with read_result, or get it onto your own computer with share_result's link where this token has it.${cameFrom}`,
       },
       null,
       2,

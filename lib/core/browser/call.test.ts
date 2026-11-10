@@ -523,14 +523,16 @@ describe.skipIf(!executable)("the browser's tools", { timeout: 90_000 }, () => {
     ).toEqual([])
     expect(api.requests.map((request) => request.url)).toContain("/redirect")
 
-    // The tab whose page tried says so, and the site is on the token's page.
+    // The tab whose page opened them names each window it refused, and the
+    // site is on the token's page.
     const snapshot = await call("snapshot", { tab: parentId })
-    expect(`${textOf(opened)}\n${textOf(snapshot)}`).toContain(
-      `The page tried to open ${other}`,
+    const both = `${textOf(opened)}\n${textOf(snapshot)}`
+    expect(both).toContain(
+      `The page opened a new window at ${other}, which this token may not open yet, so it was closed.`,
     )
     // The popup is named as a new tab; it is not the one the answer is about.
-    expect(`${textOf(opened)}\n${textOf(snapshot)}`).toContain(
-      `The page opened a new tab, ${popupId} (${api.origin}/page).`,
+    expect(both).toContain(
+      `A new window opened at ${api.origin}/page (tab ${popupId}).`,
     )
     expect(tabOf(snapshot)).toBe(parentId)
     expect(

@@ -24,7 +24,14 @@ import {
   type VirtualDisplay,
 } from "./display"
 import { watchLogs } from "./devtools"
-import { openDownloads, watchDownloads, type Downloads } from "./downloads"
+import {
+  openDownloads,
+  openerOf,
+  takeDocument,
+  wantsDocument,
+  watchDownloads,
+  type Downloads,
+} from "./downloads"
 import { chromiumExecutable } from "./executable"
 import { watchFavicon } from "./favicon"
 import { handoverWaiting, waitIdle } from "./idle"
@@ -46,6 +53,7 @@ import {
   DIALOG_DISMISS_MS,
   MAX_SOLVES,
   MAX_TABS,
+  MAX_WINDOW_NOTES,
   NAVIGATION_TIMEOUT_MS,
   PROFILE_SAVE_INTERVAL_MS,
   TITLE_TIMEOUT_MS,
@@ -109,6 +117,29 @@ import type { TabControl, TabView } from "./types"
  * opens is closed as it comes, and the proxies hold every new connection
  * to another site until the script is done (admitConnection).
  */
+
+/**
+ * A window a tab's page opened (a popup), said in the tab's next answer:
+ * its address, the tab it became, and how it ended if it has (closed
+ * itself, refused by the gate, or closed by PCP). Known from the moment
+ * Chromium made it (downloads.ts WindowHooks), so a window that closed
+ * before it became a tab is still named.
+ */
+export type PopupNote = {
+  /** Its target (and main frame) as DevTools names it. */
+  targetId: string
+  /** The last address it was opening or showed; "" while it is blank. */
+  url: string
+  /** The tab it became, once it did. */
+  tabId: string | null
+  /** When PCP first heard of it. */
+  openedAt: number
+  ended:
+    | null
+    | { by: "itself" }
+    | { by: "gate"; host: string }
+    | { by: "pcp"; why: string }
+}
 
 /**
  * An assistant's script running in a tab (evaluate.ts): the site it may
@@ -211,8 +242,8 @@ export type Tab = {
   unresponsive: boolean
   /** The page being reopened (reopenTab), which calls wait for. */
   reopening: Promise<Reopened> | null
-  /** Tabs its page opened (popups), said in its next answer. */
-  popups: string[]
+  /** Windows its page opened (popups), said in its next answer. */
+  popups: PopupNote[]
   /** The assistant's script running in it now, if one is (evaluate.ts). */
   script: ScriptRun | null
   createdAt: number
@@ -613,8 +644,25 @@ async function start(
       browser,
       path.join(scratchDir, "downloads"),
       (frameId, name) => {
-        const tab = vault ? tabOfFrame(vault, frameId) : undefined
+        // The tab's, or the tab whose window offered it.
+        const tab = vault
+          ? (tabOfFrame(vault, frameId) ?? findPopup(vault, frameId)?.parent)
+          : undefined
         if (tab) tab.offeredFile = name
+      },
+      {
+        opened: (targetId, openerId, url) => {
+          const note = vault && notePopup(vault, targetId, openerId)
+          if (note && isShownUrl(url)) note.url = url
+        },
+        moved: (targetId, url) => {
+          const note = vault && findPopup(vault, targetId)?.note
+          if (note && isShownUrl(url)) note.url = url
+        },
+        gone: (targetId) => {
+          const note = vault && findPopup(vault, targetId)?.note
+          if (note) note.ended ??= { by: "itself" }
+        },
       },
     )
   } catch (error) {
@@ -662,7 +710,7 @@ async function start(
     // its pages by that tab (judge), so it has loaded nothing else.
     if ([...self.tabs.values()].some((tab) => tab.page === page)) return
     void withVault(self, () => adoptPopup(self, page)).catch(() =>
-      page.close().catch(() => {}),
+      closePopupPage(self, page, "it could not be made a tab"),
     )
   })
   browser.on("disconnected", () => {
@@ -850,7 +898,7 @@ async function exitContextFor(
     made.on("page", (page) => {
       if ([...vault.tabs.values()].some((tab) => tab.page === page)) return
       void withVault(vault, () => adoptPopup(vault, page)).catch(() =>
-        page.close().catch(() => {}),
+        closePopupPage(vault, page, "it could not be made a tab"),
       )
     })
     return made
@@ -1014,6 +1062,95 @@ function tabOfFrame(vault: VaultBrowser, frameId: string): Tab | undefined {
   return [...vault.tabs.values()].find((tab) => tab.mainFrameId === frameId)
 }
 
+/** An address worth naming for a window: not blank. */
+function isShownUrl(url: string): boolean {
+  return url !== "" && url !== "about:blank"
+}
+
+/** A window's note, and the tab whose page opened it. */
+export function findPopup(
+  vault: VaultBrowser,
+  targetId: string,
+): { note: PopupNote; parent: Tab } | undefined {
+  for (const parent of vault.tabs.values()) {
+    const note = parent.popups.find((popup) => popup.targetId === targetId)
+    if (note) return { note, parent }
+  }
+
+  return undefined
+}
+
+/**
+ * The note for a window `openerId` opened, made the first time it is
+ * heard of: on the tab whose page that is, or, for a window a window
+ * opened that is no tab (yet), on that window's tab. None for a page no
+ * tab of the vault's opened (one PCP opened itself has no opener).
+ */
+function notePopup(
+  vault: VaultBrowser,
+  targetId: string,
+  openerId: string,
+): PopupNote | undefined {
+  const known = findPopup(vault, targetId)?.note
+
+  if (known) {
+    return known
+  }
+
+  const parent =
+    tabOfFrame(vault, openerId) ?? findPopup(vault, openerId)?.parent
+
+  if (!parent || targetId === parent.mainFrameId) {
+    return undefined
+  }
+
+  // A page that opens window after window keeps only the newest notes.
+  if (parent.popups.length >= MAX_WINDOW_NOTES) parent.popups.shift()
+
+  const note: PopupNote = {
+    targetId,
+    url: "",
+    tabId: null,
+    openedAt: Date.now(),
+    ended: null,
+  }
+  parent.popups.push(note)
+  return note
+}
+
+/** A page's target id, as DevTools names it; null once it is gone. */
+async function targetIdOf(page: Page): Promise<string | null> {
+  const session = await page
+    .context()
+    .newCDPSession(page)
+    .catch(() => null)
+
+  if (!session) {
+    return null
+  }
+
+  try {
+    const { targetInfo } = await session.send("Target.getTargetInfo")
+    return targetInfo.targetId
+  } catch {
+    return null
+  } finally {
+    await session.detach().catch(() => {})
+  }
+}
+
+/** Closes a window PCP will not keep, saying why in its opener's answer. */
+async function closePopupPage(
+  vault: VaultBrowser,
+  page: Page,
+  why: string,
+): Promise<void> {
+  const targetId = await targetIdOf(page)
+  const note = targetId ? findPopup(vault, targetId)?.note : undefined
+  if (note) note.ended ??= { by: "pcp", why }
+  await page.close().catch(() => {})
+}
+
 function noteBlocked(tab: Tab, url: string): void {
   try {
     tab.lastBlocked = siteKey(new URL(url))
@@ -1069,15 +1206,35 @@ async function judge(
     return { allow: true }
   }
 
+  const note = info.openerId
+    ? notePopup(vault, info.targetId, info.openerId)
+    : undefined
   const parent = info.openerId ? tabOfFrame(vault, info.openerId) : undefined
   const allowed = parent !== undefined && mayOpen(vault, parent, url)
+
+  if (note) note.url = url
 
   if (allowed && vault.tabs.size < MAX_TABS) {
     return { allow: true }
   }
 
-  if (parent && !allowed) {
-    // Said in the next answer about the tab whose page tried.
+  if (note && parent && !allowed) {
+    // Named in the next answer about the tab whose page opened it.
+    let host = "another site"
+
+    try {
+      host = siteKey(new URL(url))
+    } catch {
+      // Only an address with a host reaches the gate.
+    }
+
+    note.ended ??= { by: "gate", host }
+  } else if (note && allowed) {
+    note.ended ??= {
+      by: "pcp",
+      why: `the browser has ${MAX_TABS} tabs open, as many as it keeps`,
+    }
+  } else if (parent && !allowed) {
     noteBlocked(parent, url)
   }
 
@@ -1105,6 +1262,30 @@ async function startGate(
   const gate = await browser.newBrowserCDPSession()
 
   gate.on("Fetch.requestPaused", (event) => {
+    // The answer to a document the gate held for a download call
+    // (downloads.ts wantsDocument): a file it shows, or let go on.
+    if (
+      event.responseStatusCode !== undefined ||
+      event.responseErrorReason !== undefined
+    ) {
+      const vault = current()
+      void (
+        vault
+          ? takeDocument(vault.downloads, gate, event)
+          : Promise.resolve(false)
+      )
+        .catch(() => false)
+        .then((answered) =>
+          answered
+            ? undefined
+            : gate.send("Fetch.continueRequest", {
+                requestId: event.requestId,
+              }),
+        )
+        .catch(() => {})
+      return
+    }
+
     if (event.resourceType !== "Document") {
       void (
         isServiceWorkerScript(event.request.headers)
@@ -1119,14 +1300,33 @@ async function startGate(
 
     const vault = current()
 
+    if (vault && event.frameId) {
+      const note = findPopup(vault, event.frameId)?.note
+      if (note) note.url = event.request.url
+    }
+
     void (vault ? judge(vault, gate, event) : Promise.resolve({ allow: false }))
       .catch((): Verdict => ({ allow: false }))
       .then(async (verdict: Verdict) => {
+        // While a download call waits, the answer to its tab's (or a
+        // popup's) page is held, in case it is a file shown.
+        const hold =
+          verdict.allow &&
+          vault !== null &&
+          event.frameId !== undefined &&
+          (await wantsDocument(
+            vault.downloads,
+            event.frameId,
+            event.request.url,
+          ).catch(() => false))
         // A navigation answered 204 does not navigate: the tab stays on the
         // page it was on, rather than showing an error page.
         await (
           verdict.allow
-            ? gate.send("Fetch.continueRequest", { requestId: event.requestId })
+            ? gate.send("Fetch.continueRequest", {
+                requestId: event.requestId,
+                ...(hold ? { interceptResponse: true } : {}),
+              })
             : gate.send("Fetch.fulfillRequest", {
                 requestId: event.requestId,
                 responseCode: 204,
@@ -1273,20 +1473,40 @@ async function attach(
  * Runs under withVault, so the room for it is counted with every other tab.
  */
 async function adoptPopup(vault: VaultBrowser, page: Page): Promise<void> {
+  // A page PCP opened itself, attached by now (openTab holds the lock).
+  if ([...vault.tabs.values()].some((tab) => tab.page === page)) return
+
   const opener = await page.opener()
+  let parent: Tab | undefined
 
-  // A page PCP opened itself (openTab, reopenTab) has no opener, and is
-  // attached there.
-  if (!opener) {
-    return
+  if (opener) {
+    parent = [...vault.tabs.values()].find((tab) => tab.page === opener)
+  } else {
+    // A page PCP opened itself (openTab, reopenTab) has no opener, and is
+    // attached there. A window opened with "noopener" has none for
+    // Playwright, but Chromium still says which page opened it.
+    const targetId = await targetIdOf(page)
+    const openerId = targetId ? await openerOf(vault.downloads, targetId) : null
+
+    if (!openerId) {
+      return
+    }
+
+    parent = tabOfFrame(vault, openerId)
   }
-
-  const parent = [...vault.tabs.values()].find((tab) => tab.page === opener)
 
   // A popup a running script opened is closed as it comes: the script
   // reaches nothing but its own tab's site.
   if (!parent || parent.script || vault.tabs.size >= MAX_TABS) {
-    await page.close()
+    await closePopupPage(
+      vault,
+      page,
+      !parent
+        ? "the page that opened it is no tab of the assistant's"
+        : parent.script
+          ? "a script was running in the tab"
+          : `the browser has ${MAX_TABS} tabs open, as many as it keeps`,
+    )
     return
   }
 
@@ -1300,7 +1520,12 @@ async function adoptPopup(vault: VaultBrowser, page: Page): Promise<void> {
     run: parent.run,
   })
   tab.control = parent.control
-  parent.popups.push(tab.id)
+  const note = notePopup(vault, tab.mainFrameId, parent.mainFrameId)
+
+  if (note) {
+    note.tabId = tab.id
+    if (!note.url && isShownUrl(page.url())) note.url = page.url()
+  }
 }
 
 /**
@@ -1509,6 +1734,8 @@ export function getTab(vaultId: string, id: string): Tab | null {
  * under withVault.
  */
 export async function closeTab(vault: VaultBrowser, tab: Tab): Promise<void> {
+  const note = findPopup(vault, tab.mainFrameId)?.note
+  if (note) note.ended ??= { by: "pcp", why: "its tab was closed" }
   vault.tabs.delete(tab.id)
   recomputePrivate(vault)
   await closeHandovers(vault.vaultId, [tab])
