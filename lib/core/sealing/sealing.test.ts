@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs"
 
-import { afterEach, beforeEach, describe, expect, it } from "vitest"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import { stopCleanup, cleanupIdle } from "../cleanup/runtime"
 import type { VaultContext } from "../context"
@@ -9,7 +9,8 @@ import { keyedHash } from "../crypto"
 import { db } from "../db"
 import { allowSiteFor, loadSiteAllowances } from "../allowances"
 import { createApiToken, listApiTokens, resolveApiToken } from "../api-tokens"
-import { exportVault, readExport } from "../backup"
+import { exportVault, readExport, restoreExport } from "../backup"
+import { previewOf } from "../backup-format"
 import { bindOrigin, isBoundOrigin, sitesOf } from "../browser-secrets"
 import {
   createSecret,
@@ -28,6 +29,8 @@ import { downloadByLink, shareResult } from "../file-links"
 import { keepResult } from "../tool-results"
 import { createUploadLink, uploadPageView } from "../upload-links"
 import { setupVault } from "../vault"
+import { deleteVault } from "../vault-reset"
+import { sealedTokenName } from "../token-names"
 import {
   addFetchSite,
   decideSite,
@@ -35,7 +38,13 @@ import {
   loadFetchRules,
   setFetchRuleShared,
 } from "../web-fetch"
-import { ensureSealed, forgetSealedVaults } from "./convert"
+import {
+  type Converter,
+  ensureSealed,
+  forgetSealedVaults,
+  SEAL_CONVERTERS,
+} from "./convert"
+import { knownSealed } from "./state"
 
 // The owner's descriptive values are sealed at rest (#96): what each table
 // stores, that every reader takes the old plain form too, and that a vault
@@ -383,5 +392,129 @@ describe("names", () => {
         vaultPassword: "not the password",
       }),
     ).rejects.toThrow(/not the password of the vault/)
+  })
+})
+
+describe("the conversion", () => {
+  function only(table: string): Converter {
+    return SEAL_CONVERTERS.find((converter) => converter.table === table)!
+  }
+
+  async function plainSecret(name: string): Promise<string> {
+    const { id } = await createSecret(ctx, { name: "x", value: "v" })
+    await db().$executeRawUnsafe(
+      `UPDATE "secret" SET "name" = ?, "meta" = NULL, "name_key" = NULL WHERE "id" = ?`,
+      name,
+      id,
+    )
+    return id
+  }
+
+  it("leaves what the owner changed between its read and its write", async () => {
+    const id = await plainSecret("Before")
+    const { id: tokenId } = await createApiToken(ctx, {
+      name: "x",
+      allowAllServers: true,
+    })
+    await db().$executeRawUnsafe(
+      `UPDATE "api_token" SET "name" = 'Old token', "sealed_name" = NULL WHERE "id" = ?`,
+      tokenId,
+    )
+    await db().setting.create({
+      data: { vaultId: ctx.vaultId, key: "toolTiers", value: '{"a":1}' },
+    })
+
+    const secrets = await only("secret").read(ctx, 10)
+    const tokens = await only("api_token").read(ctx, 10)
+    const settings = await only("setting").read(ctx, 10)
+
+    // The owner, in another request, between the read and the write.
+    await updateSecret(ctx, id, { name: "Renamed", description: "New" })
+    await db().apiToken.update({
+      where: { id: tokenId },
+      data: sealedTokenName(ctx, tokenId, "Renamed token"),
+    })
+    await setSetting(ctx, "toolTiers", '{"b":2}')
+
+    for (const write of [...secrets, ...tokens, ...settings]) {
+      expect(await write()).toBe(false)
+    }
+
+    expect(await listSecrets(ctx)).toMatchObject([
+      { id, name: "Renamed", description: "New" },
+    ])
+    expect((await listApiTokens(ctx))[0]?.name).toBe("Renamed token")
+    expect(await getSetting(ctx, "toolTiers")).toBe('{"b":2}')
+  })
+
+  it("runs once per vault at a time", async () => {
+    await plainSecret("Old")
+
+    const first = ensureSealed(ctx)
+    const second = ensureSealed(ctx)
+
+    expect(second).toBe(first)
+    expect(await first).toBe(true)
+  })
+
+  it("goes on past a table it cannot seal, and names only the table", async () => {
+    await plainSecret("SECRET-STUCK-MARKER")
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {})
+    const stuck: Converter = {
+      table: "stuck_table",
+      read: async () => {
+        throw new Error("a value that must not be logged")
+      },
+    }
+
+    try {
+      expect(
+        await ensureSealed(ctx, { converters: [stuck, ...SEAL_CONVERTERS] }),
+      ).toBe(false)
+      expect(JSON.stringify(logged.mock.calls)).toContain("stuck_table")
+      expect(JSON.stringify(logged.mock.calls)).not.toContain(
+        "must not be logged",
+      )
+    } finally {
+      logged.mockRestore()
+    }
+
+    // The other tables were sealed, and the file rebuilt.
+    expect(await onDisk("SECRET-STUCK-MARKER")).toBe(false)
+    expect(knownSealed(ctx.vaultId)).toBe(false)
+    expect(await ensureSealed(ctx)).toBe(true)
+  })
+
+  it("forgets a vault that a restore replaced or that was deleted", async () => {
+    expect(await ensureSealed(ctx)).toBe(true)
+    expect(knownSealed(ctx.vaultId)).toBe(true)
+
+    const { payload } = await readExport(
+      await exportVault(ctx, "export password 1234"),
+      "export password 1234",
+    )
+    await restoreExport(
+      payload,
+      { into: "vault", ctx },
+      { restoreHostSettings: false },
+    )
+    expect(knownSealed(ctx.vaultId)).toBe(false)
+
+    expect(await ensureSealed(ctx)).toBe(true)
+    await deleteVault(ctx)
+    expect(knownSealed(ctx.vaultId)).toBe(false)
+  })
+
+  it("shows a name it cannot open in an export as hidden", async () => {
+    await createApiToken(ctx, { name: "Claude", allowAllServers: true })
+    const { payload } = await readExport(
+      await exportVault(ctx, "export password 1234"),
+      "export password 1234",
+    )
+    payload.tables.apiTokens[0]!.sealedName = new Uint8Array(40)
+
+    expect(previewOf(payload, new Map(), ctx.dek).tokens).toMatchObject([
+      { name: null },
+    ])
   })
 })

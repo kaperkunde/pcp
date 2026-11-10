@@ -8,6 +8,7 @@ import { sealedSecretMeta } from "../secret-meta"
 import { isSealedText } from "../sealed"
 import { sealedTokenName } from "../token-names"
 import { PLAIN_SETTINGS, storedSetting } from "../settings"
+import { sealingState } from "./state"
 
 /**
  * Seals what a vault kept in plain text before its descriptive values were
@@ -27,43 +28,62 @@ import { PLAIN_SETTINGS, storedSetting } from "../settings"
 /** Rows each table converts per request. */
 export const SEAL_BATCH = 200
 
-type Converter = {
+/**
+ * One table's conversion: `read` finds up to `limit` rows from before and
+ * answers a write for each, which seals that row and says whether it did.
+ */
+export type Converter = {
   table: string
-  /** Seals up to `limit` rows; answers how many it sealed. */
-  run: (ctx: VaultContext, limit: number) => Promise<number>
+  read: (
+    ctx: VaultContext,
+    limit: number,
+  ) => Promise<Array<() => Promise<boolean>>>
 }
 
-const CONVERTERS: Converter[] = [
-  {
+function converter<Row>({
+  table,
+  read,
+  write,
+}: {
+  table: string
+  read: (ctx: VaultContext, limit: number) => Promise<Row[]>
+  write: (ctx: VaultContext, row: Row) => Promise<boolean>
+}): Converter {
+  return {
+    table,
+    read: async (ctx, limit) =>
+      (await read(ctx, limit)).map((row) => () => write(ctx, row)),
+  }
+}
+
+export const SEAL_CONVERTERS: Converter[] = [
+  converter({
     table: "setting",
-    run: async (ctx, limit) => {
-      const rows = await db().setting.findMany({
+    read: (ctx, limit) =>
+      db().setting.findMany({
         where: {
           vaultId: ctx.vaultId,
           key: { notIn: [...PLAIN_SETTINGS] },
           NOT: { value: { startsWith: "pcp-sealed:" } },
         },
         take: limit,
-      })
-
-      for (const row of rows) {
-        if (isSealedText(row.value)) {
-          continue
-        }
-
-        await db().setting.update({
-          where: { vaultId_key: { vaultId: row.vaultId, key: row.key } },
-          data: { value: storedSetting(ctx, row.key, row.value) },
-        })
+      }),
+    write: async (ctx, row) => {
+      if (isSealedText(row.value)) {
+        return false
       }
 
-      return rows.length
+      await db().setting.update({
+        where: { vaultId_key: { vaultId: row.vaultId, key: row.key } },
+        data: { value: storedSetting(ctx, row.key, row.value) },
+      })
+      return true
     },
-  },
-  {
+  }),
+  converter({
     table: "secret",
-    run: async (ctx, limit) => {
-      const rows = await db().secret.findMany({
+    read: (ctx, limit) =>
+      db().secret.findMany({
         where: { vaultId: ctx.vaultId, meta: null },
         select: {
           id: true,
@@ -72,108 +92,91 @@ const CONVERTERS: Converter[] = [
           updatedAt: true,
         },
         take: limit,
+      }),
+    write: async (ctx, row) => {
+      await db().secret.update({
+        where: { id: row.id },
+        data: {
+          ...sealedSecretMeta(ctx, row.id, {
+            name: row.plainName,
+            description: row.plainDescription,
+          }),
+          // Sealing is no change of the owner's.
+          updatedAt: row.updatedAt,
+        },
       })
-
-      for (const row of rows) {
-        await db().secret.update({
-          where: { id: row.id },
-          data: {
-            ...sealedSecretMeta(ctx, row.id, {
-              name: row.plainName,
-              description: row.plainDescription,
-            }),
-            // Sealing is no change of the owner's.
-            updatedAt: row.updatedAt,
-          },
-        })
-      }
-
-      return rows.length
+      return true
     },
-  },
-  {
+  }),
+  converter({
     table: "api_token",
-    run: async (ctx, limit) => {
-      const rows = await db().apiToken.findMany({
+    read: (ctx, limit) =>
+      db().apiToken.findMany({
         where: { vaultId: ctx.vaultId, sealedName: null },
         select: { id: true, plainName: true },
         take: limit,
+      }),
+    write: async (ctx, row) => {
+      await db().apiToken.update({
+        where: { id: row.id },
+        data: sealedTokenName(ctx, row.id, row.plainName),
       })
-
-      for (const row of rows) {
-        await db().apiToken.update({
-          where: { id: row.id },
-          data: sealedTokenName(ctx, row.id, row.plainName),
-        })
-      }
-
-      return rows.length
+      return true
     },
-  },
-  {
+  }),
+  converter({
     table: "secret_browser_origin",
-    run: async (ctx, limit) => {
-      const rows = await db().secretBrowserOrigin.findMany({
+    read: (ctx, limit) =>
+      db().secretBrowserOrigin.findMany({
         where: { secret: { vaultId: ctx.vaultId }, sealed: null },
         take: limit,
-      })
-
-      for (const row of rows) {
-        const sealed = sealedOrigin(ctx, row.secretId, row.origin)
-        // The origin is part of the row's key: the sealed row replaces it.
-        await db().$transaction([
-          db().secretBrowserOrigin.delete({
-            where: {
-              secretId_origin: { secretId: row.secretId, origin: row.origin },
-            },
-          }),
-          db().secretBrowserOrigin.upsert({
-            where: {
-              secretId_origin: {
-                secretId: row.secretId,
-                origin: sealed.origin,
-              },
-            },
-            create: { ...row, ...sealed },
-            update: {},
-          }),
-        ])
-      }
-
-      return rows.length
+      }),
+    write: async (ctx, row) => {
+      const sealed = sealedOrigin(ctx, row.secretId, row.origin)
+      // The origin is part of the row's key: the sealed row replaces it.
+      await db().$transaction([
+        db().secretBrowserOrigin.delete({
+          where: {
+            secretId_origin: { secretId: row.secretId, origin: row.origin },
+          },
+        }),
+        db().secretBrowserOrigin.upsert({
+          where: {
+            secretId_origin: { secretId: row.secretId, origin: sealed.origin },
+          },
+          create: { ...row, ...sealed },
+          update: {},
+        }),
+      ])
+      return true
     },
-  },
-  {
+  }),
+  converter({
     table: "api_token_site_allowance",
-    run: async (ctx, limit) => {
-      const rows = await db().apiTokenSiteAllowance.findMany({
+    read: (ctx, limit) =>
+      db().apiTokenSiteAllowance.findMany({
         where: { token: { vaultId: ctx.vaultId }, sealed: null },
         take: limit,
-      })
-
-      for (const row of rows) {
-        const sealed = sealedSiteAllowance(ctx, row.tokenId, row.host)
-        await db().$transaction([
-          db().apiTokenSiteAllowance.delete({
-            where: { tokenId_host: { tokenId: row.tokenId, host: row.host } },
-          }),
-          db().apiTokenSiteAllowance.upsert({
-            where: {
-              tokenId_host: { tokenId: row.tokenId, host: sealed.host },
-            },
-            create: { ...row, ...sealed },
-            update: {},
-          }),
-        ])
-      }
-
-      return rows.length
+      }),
+    write: async (ctx, row) => {
+      const sealed = sealedSiteAllowance(ctx, row.tokenId, row.host)
+      await db().$transaction([
+        db().apiTokenSiteAllowance.delete({
+          where: { tokenId_host: { tokenId: row.tokenId, host: row.host } },
+        }),
+        db().apiTokenSiteAllowance.upsert({
+          where: { tokenId_host: { tokenId: row.tokenId, host: sealed.host } },
+          create: { ...row, ...sealed },
+          update: {},
+        }),
+      ])
+      return true
     },
-  },
-  {
+  }),
+  converter({
     table: "web_fetch_rule",
-    run: async (ctx, limit) => {
-      const rows = await db().webFetchRule.findMany({
+    read: (ctx, limit) =>
+      db().webFetchRule.findMany({
         where: {
           vaultId: ctx.vaultId,
           kind: { in: ["site", "script"] },
@@ -181,47 +184,25 @@ const CONVERTERS: Converter[] = [
         },
         select: { id: true, kind: true, key: true, updatedAt: true },
         take: limit,
-      })
-
-      for (const row of rows) {
-        if (!isSealedKind(row.kind)) {
-          continue
-        }
-
-        await db().webFetchRule.update({
-          where: { id: row.id },
-          data: {
-            ...sealedRuleKey(ctx, row.id, row.kind, row.key),
-            updatedAt: row.updatedAt,
-          },
-        })
+      }),
+    write: async (ctx, row) => {
+      if (!isSealedKind(row.kind)) {
+        return false
       }
 
-      return rows.length
+      await db().webFetchRule.update({
+        where: { id: row.id },
+        data: {
+          ...sealedRuleKey(ctx, row.id, row.kind, row.key),
+          updatedAt: row.updatedAt,
+        },
+      })
+      return true
     },
-  },
+  }),
 ]
 
-const STATE = Symbol.for("pcp.sealed-vaults")
-
-type State = {
-  /** Vaults this process found with nothing left to seal. */
-  sealed: Set<string>
-  /** Vaults this process sealed rows of, whose file is not rebuilt yet. */
-  dirty: Set<string>
-}
-
-function state(): State {
-  const holder = globalThis as unknown as { [STATE]?: State }
-  holder[STATE] ??= { sealed: new Set(), dirty: new Set() }
-  return holder[STATE]
-}
-
-/** Tests: forget which vaults were found sealed. */
-export function forgetSealedVaults(): void {
-  state().sealed.clear()
-  state().dirty.clear()
-}
+export { forgetSealedVaults } from "./state"
 
 /**
  * One batch of the vault's conversion. Answers true once nothing is left
@@ -229,9 +210,12 @@ export function forgetSealedVaults(): void {
  */
 export async function ensureSealed(
   ctx: VaultContext,
-  { limit = SEAL_BATCH }: { limit?: number } = {},
+  {
+    limit = SEAL_BATCH,
+    converters = SEAL_CONVERTERS,
+  }: { limit?: number; converters?: Converter[] } = {},
 ): Promise<boolean> {
-  const { sealed, dirty } = state()
+  const { sealed, dirty } = sealingState()
 
   if (sealed.has(ctx.vaultId)) {
     return true
@@ -239,15 +223,22 @@ export async function ensureSealed(
 
   let left = false
 
-  for (const converter of CONVERTERS) {
-    const count = await converter.run(ctx, limit)
+  for (const converter of converters) {
+    const writes = await converter.read(ctx, limit)
+    let count = 0
+
+    for (const write of writes) {
+      if (await write()) {
+        count++
+      }
+    }
 
     if (count > 0) {
       dirty.add(ctx.vaultId)
     }
 
     // A full batch may have more behind it.
-    left ||= count >= limit
+    left ||= writes.length >= limit
   }
 
   if (left) {
