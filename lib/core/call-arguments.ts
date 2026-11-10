@@ -17,6 +17,7 @@ import { runCommandTool, RUN_COMMAND } from "./ssh/tools"
 import { storageTool } from "./storage/tools"
 import { applyAliases } from "./tools/define"
 import type { InnerTool, Rename } from "./tools/family"
+import { answerHint } from "./tools/answer-hint"
 import { validate } from "./tools/validate"
 
 /**
@@ -123,7 +124,9 @@ export async function checkCallArguments(
         ? await tabHint(tabs.ctx, tabs.tokenId, tabs.publicUrl)
         : undefined
 
-    return { ...checked, ...(hint ? { hint } : {}) }
+    const full = [hint, answerHint(sent)].filter(Boolean).join("\n")
+
+    return { ...checked, ...(full ? { hint: full } : {}) }
   }
 
   let schema: unknown
@@ -139,7 +142,13 @@ export async function checkCallArguments(
 
   return problems.length === 0
     ? { fits: true, args, notes: [], renames: [] }
-    : { fits: false, problems, notes: [], renames: [] }
+    : {
+        fits: false,
+        problems,
+        notes: [],
+        renames: [],
+        ...(answerHint(args) ? { hint: answerHint(args) } : {}),
+      }
 }
 
 /**

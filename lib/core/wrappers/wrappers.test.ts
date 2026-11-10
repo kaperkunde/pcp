@@ -34,6 +34,7 @@ import { catalogueHandle, withCallHandle } from "../test-handles"
 import { writeToolAccess } from "../tool-access"
 import { setToolTier, toolTier, toolTierInfo } from "../tool-tiers"
 import { tierNotices } from "../owner-notices"
+import { keepBytes } from "../tool-results"
 import { setupVault } from "../vault"
 import { setPacingServer } from "../pacing/config"
 import { resetPacing, setPacingClock } from "../pacing/pace"
@@ -2086,12 +2087,20 @@ describe("a wrapper whose calls no longer fit", () => {
       },
     ])
     await writeToolAccess(scope.tokenId, wrapper.id, "lookup", "allowed")
+    const kept = await keepBytes(ctx, {
+      tokenId: scope.tokenId,
+      serverId: null,
+      toolName: "get_attachment",
+      bytes: Buffer.from("%PDF-1.7"),
+      mediaType: "application/pdf",
+      name: "plan.pdf",
+    })
 
     const result = await call("call_tool_destructive", {
       server: wrapper.slug,
       tool: "lookup",
       arguments: {
-        file: { name: "plan.pdf", size: 9, result: { $result: "abc123" } },
+        file: { name: "plan.pdf", size: 9, result: { $result: kept.id } },
       },
     })
 
