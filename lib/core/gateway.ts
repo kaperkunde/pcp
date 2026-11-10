@@ -134,6 +134,7 @@ import type { Executor } from "./code/types"
 import {
   askCodeCall,
   checkPermission,
+  checkPermissions,
   defaultExecutor,
   answeredNote,
   getPermissionView,
@@ -3094,17 +3095,34 @@ export function buildGatewayServer(
     name: "check_permission",
     title: "Check a permission request",
     description:
-      "Check a permission request's outcome: whether the owner answered it, and how. Call it on the owner's next message after the link, whatever it says, before you send the link again or assume the request is still open; never in the same reply as the link (that would hide the link in some apps). If it is still open, it waits up to 45 seconds for them. Takes the id from the result that asked. Without an id, it lists your requests still waiting for the owner, and those they answered in the last hour.",
-    input: z.object({
-      id: z
-        .string()
-        .min(1)
-        .max(64)
-        .optional()
-        .describe(
-          "The request's id. Leave it out to list your open requests and those answered in the last hour.",
-        ),
-    }),
+      "Check permission requests' outcomes: whether the owner answered each, and how. Call it on the owner's next message after the link, whatever it says, before you send the link again or assume the request is still open; never in the same reply as the link (that would hide the link in some apps). If it is still open, it waits up to 45 seconds for them. Takes the id from the result that asked, or several in ids (mode any returns as soon as one is answered, with the rest's status; all waits for every one). If you have nothing else to do once you have handed the owner the links, you may call it with all their ids to answer each the moment they do; that is optional. Without an id, it lists your requests still waiting for the owner, and those they answered in the last hour.",
+    input: z
+      .object({
+        id: z
+          .string()
+          .min(1)
+          .max(64)
+          .optional()
+          .describe(
+            "One request's id. Leave it and ids out to list your open requests and those answered in the last hour.",
+          ),
+        ids: z
+          .array(z.string().min(1).max(64))
+          .min(1)
+          .max(20)
+          .optional()
+          .describe(
+            "Several requests' ids, to wait on them together instead of one at a time. Not with id. An id that is not yours is listed as unknown.",
+          ),
+        mode: z
+          .enum(["any", "all"])
+          .optional()
+          .describe(
+            'With ids: "any" (the default) answers as soon as one is answered, with its outcome and the status of the rest; "all" waits until none is still waiting. Either way it gives up after 45 seconds and lists every request\'s status, so call again with the open ones.',
+          ),
+      })
+      // One id, or several.
+      .meta({ allOf: [{ not: { required: ["id", "ids"] } }] }),
     output: z.discriminatedUnion("kind", [
       NEEDS_OWNER,
       z.object({
@@ -3120,6 +3138,19 @@ export function buildGatewayServer(
         result: z.string(),
         /** A server it added, as it is now. */
         server: SERVER_STATE.optional(),
+      }),
+      z.object({
+        kind: z.literal("statuses"),
+        /** Each id asked about, in order, as it stands now. */
+        statuses: z.array(
+          z.object({
+            id: z.string(),
+            /** Pending, running, how it ended, or unknown. */
+            status: z.string(),
+            /** What it came to, as for one id; only once answered. */
+            outcome: z.string().optional(),
+          }),
+        ),
       }),
       z.object({
         kind: z.literal("requests"),
@@ -3146,7 +3177,31 @@ export function buildGatewayServer(
       }),
     ]),
     annotations: READS,
-    async run(args: { id?: string }, ctx) {
+    async run(
+      args: { id?: string; ids?: string[]; mode?: "any" | "all" },
+      ctx,
+    ) {
+      if (args.ids !== undefined) {
+        const {
+          entries,
+          text: said,
+          told,
+        } = await checkPermissions(scope, args.ids, {
+          mode: args.mode,
+          signal: ctx.signal,
+        })
+
+        // Only those whose outcome was given: the session's note tells the rest.
+        if (scope.client && told.length > 0) {
+          noteAnswersTold(
+            scope.client.sessionKey,
+            told.map((id) => ({ id, at: Date.now() })),
+          )
+        }
+
+        return ok({ kind: "statuses", statuses: entries }, { text: said })
+      }
+
       if (args.id === undefined) {
         const { open, answered, text: said } = await ownRequests(scope)
 
