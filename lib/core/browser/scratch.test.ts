@@ -4,6 +4,7 @@ import {
   rmSync,
   existsSync,
   symlinkSync,
+  utimesSync,
 } from "node:fs"
 import os from "node:os"
 import path from "node:path"
@@ -86,13 +87,20 @@ describe("the browser's temporary folders", () => {
     await removeScratchDir(held)
   })
 
-  it("removes the folders from before the id was in the name", async () => {
-    const legacy = folder("pcp-chromium-Ab12Cd")
-    const legacyDisplay = folder("pcp-display-Ab12Cd")
+  // Without the id, nothing says whose it is: an older PCP still running
+  // may hold one, and it is left until it has not changed for a day.
+  it("removes the folders from before the id was in the name once a day old", async () => {
+    const old = folder("pcp-chromium-Ab12Cd")
+    const oldDisplay = folder("pcp-display-Ab12Cd")
+    const recent = folder("pcp-chromium-Ef34Gh")
+    const twoDaysAgo = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000)
+    utimesSync(old, twoDaysAgo, twoDaysAgo)
+    utimesSync(oldDisplay, twoDaysAgo, twoDaysAgo)
 
     expect(await pruneScratchDirs({ base, alive: () => true })).toBe(2)
-    expect(existsSync(legacy)).toBe(false)
-    expect(existsSync(legacyDisplay)).toBe(false)
+    expect(existsSync(old)).toBe(false)
+    expect(existsSync(oldDisplay)).toBe(false)
+    expect(existsSync(recent)).toBe(true)
   })
 
   it("leaves everything else alone: Playwright's, other names, files and links", async () => {

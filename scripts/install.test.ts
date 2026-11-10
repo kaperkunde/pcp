@@ -33,8 +33,8 @@ const COSIGN =
 /** Who may have signed it: PCP's image workflow, on main or develop. */
 const SIGNER =
   "^https://github\\.com/kaperkunde/pcp/\\.github/workflows/build-images\\.yml@refs/heads/(main|develop)$"
-const VERIFY = (image: string) =>
-  `run --rm ${COSIGN} verify --certificate-identity-regexp ${SIGNER} --certificate-oidc-issuer https://token.actions.githubusercontent.com ${image}`
+const VERIFY = (image: string, env = "") =>
+  `run --rm ${env}${COSIGN} verify --certificate-identity-regexp ${SIGNER} --certificate-oidc-issuer https://token.actions.githubusercontent.com ${image}`
 /** /tmp in memory, for what PCP's browser keeps there (#100). */
 const TMPFS = "/tmp:rw,nosuid,nodev,noexec,mode=1777,size=1g"
 const RUN = `run -d --name pcp --restart unless-stopped --tmpfs ${TMPFS} -p 3000:3000 -e PCP_HOST_UPDATER=2 -v pcp-data:/data ${PINNED}`
@@ -92,6 +92,11 @@ type Host = {
   system?: string
   /** What `inspect` says about the container after it was started. */
   state?: "running" | "exited"
+  /**
+   * The image id the running container was started from
+   * (`inspect -f {{.Image}} pcp`); the pulled image's when absent.
+   */
+  runningImage?: string
   /** Whether the health check answers. */
   healthy?: boolean
   /** net.ipv4.ip_unprivileged_port_start: the first port a user without root may open. */
@@ -160,6 +165,7 @@ function host({
   uid = 1000,
   system = "Linux",
   state = "running",
+  runningImage,
   healthy = true,
   portStart = 1024,
   compose = false,
@@ -251,7 +257,7 @@ function host({
       `case "$1" in
   --version) echo "${version}" ;;
   info) ${dockerRootless ? 'echo "[name=seccomp,profile=builtin name=rootless name=cgroupns]"; ' : ""}${info} ;;
-  inspect) echo "${state}" ;;
+  inspect) case "$*" in *.Image*) echo "${runningImage ?? image ?? ""}" ;; *) echo "${state}" ;; esac ;;
   ${image_}
   exec) ${request} ;;
   ps) ${ps} ;;
@@ -265,7 +271,7 @@ esac`,
       `case "$1" in
   --version) echo "podman version ${podman}" ;;
   info) echo "${ociRuntime}" ;;
-  inspect) echo "${state}" ;;
+  inspect) case "$*" in *.Image*) echo "${runningImage ?? image ?? ""}" ;; *) echo "${state}" ;; esac ;;
   ${image_}
   exec) ${request} ;;
   ps) ${ps} ;;
@@ -819,6 +825,33 @@ describe("install.sh update", () => {
     expect(result.stdout).toContain("PCP is up to date")
   })
 
+  // A pull moves the tag before the signature is checked, so a check that
+  // failed (Sigstore out of reach) left the tag on the new image: the next
+  // day's tag before and after were the same, and PCP stayed on the old one
+  // for good. What counts is the image the container runs.
+  it("starts the image the tag names when the container runs another, even if the tag did not move", () => {
+    const machine = host({
+      docker: "works",
+      image: "sha256:new",
+      runningImage: "sha256:old",
+    })
+    expect(machine.run().status).toBe(0)
+
+    const result = machine.run(["update"])
+    expect(result.status).toBe(0)
+    expect(result.stdout).not.toContain("PCP is up to date")
+    expect(result.calls).toContain(`docker ${RUN}`)
+  })
+
+  it("compares the container's image with the checked digest's", () => {
+    const machine = host({ docker: "works", image: "sha256:abc" })
+    expect(machine.run().status).toBe(0)
+
+    const result = machine.run(["update"])
+    expect(result.calls).toContain("docker inspect -f {{.Image}} pcp")
+    expect(result.calls).toContain(`docker image inspect -f {{.Id}} ${PINNED}`)
+  })
+
   it("starts PCP again from a new image, with the remembered settings", () => {
     const machine = host({ docker: "works" })
     expect(machine.run([], { PCP_PORT: "8080" }).status).toBe(0)
@@ -932,6 +965,43 @@ describe("install.sh checking the image's signature", () => {
     expect(result.calls).toContain(
       `docker run -d --name pcp --restart unless-stopped --tmpfs ${TMPFS} -p 3000:3000 -e PCP_HOST_UPDATER=2 -v pcp-data:/data ${IMAGE}`,
     )
+  })
+
+  // Behind a proxy, cosign reaches ghcr.io and Sigstore only through it.
+  it("hands cosign the proxy settings it was given, by name", () => {
+    const result = host({ docker: "works" }).run([], {
+      HTTPS_PROXY: "http://proxy.lan:3128",
+      no_proxy: "localhost",
+    })
+    expect(result.status).toBe(0)
+    expect(result.calls).toContain(
+      `docker ${VERIFY(PINNED, "-e HTTPS_PROXY -e no_proxy ")}`,
+    )
+    // Never the value on a command line: a proxy's address may hold a login.
+    expect(result.calls.join("\n")).not.toContain("proxy.lan")
+  })
+
+  it("checks a digest by hand with verify-image, as the image workflow does", () => {
+    const sandbox = `ghcr.io/kaperkunde/pcp-sandbox@${DIGEST}`
+    const machine = host({ docker: "works" })
+    const result = machine.run(["verify-image", sandbox])
+    expect(result.status).toBe(0)
+    expect(result.calls).toEqual([`docker ${VERIFY(sandbox)}`])
+    expect(existsSync(machine.conf)).toBe(false)
+
+    const bad = host({ docker: "works", signature: "bad" }).run([
+      "verify-image",
+      PINNED,
+    ])
+    expect(bad.status).toBe(1)
+
+    for (const ref of [
+      IMAGE,
+      "ghcr.io/x@sha256:abc",
+      "-x@sha256:" + "a".repeat(64),
+    ]) {
+      expect(machine.run(["verify-image", ref]).status, ref).toBe(2)
+    }
   })
 
   it("refuses an override it does not understand", () => {

@@ -270,6 +270,32 @@ describe("the images' signatures", () => {
     )
   })
 
+  it("are checked right after signing, the way install.sh checks them", () => {
+    const sign = steps.findIndex((s) => s.run?.includes("cosign sign"))
+    const check = steps.findIndex((s) =>
+      s.run?.includes("install.sh verify-image"),
+    )
+    expect(check).toBeGreaterThan(sign)
+    const attest = steps.findIndex((s) =>
+      s.uses?.startsWith("actions/attest-build-provenance@"),
+    )
+    // After the attestations too: a referrer beside the image must not
+    // confuse the signature's check.
+    expect(check).toBeGreaterThan(attest)
+    const run = steps[check]!.run!
+    expect(run).toContain('sh install.sh verify-image "$IMAGE@$DIGEST"')
+    expect(run).toContain(
+      'sh install.sh verify-image "$IMAGE-sandbox@$SANDBOX_DIGEST"',
+    )
+  })
+
+  it("are made only by a release run from main", () => {
+    const release = workflow("release.yml") as Workflow & {
+      jobs: Record<string, { if?: string }>
+    }
+    expect(release.jobs.release!.if).toBe("github.ref == 'refs/heads/main'")
+  })
+
   it("are what install.sh checks: that workflow, on main or develop", () => {
     const installer = readFileSync(path.join(root, "install.sh"), "utf8")
     const signer = installer.match(/^IMAGE_SIGNER='(.*)'$/m)?.[1]
