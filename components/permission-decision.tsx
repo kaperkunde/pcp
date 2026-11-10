@@ -164,6 +164,7 @@ export function PermissionDecision({
   )
 
   const credentialForm = `permission-${id}-credentials`
+  const allowButton = `permission-${id}-allow`
 
   function decide(value: Decision) {
     const agrees = AGREES.includes(value)
@@ -326,9 +327,29 @@ export function PermissionDecision({
           id={credentialForm}
           className="flex flex-col gap-5"
           autoComplete="on"
+          // Enter in the login name, Length or Leave out is not Allow: the
+          // sites below have not been looked at. Only the Allow button, or
+          // Enter in the password field, answers.
+          onKeyDown={(event) => {
+            if (
+              event.key === "Enter" &&
+              event.target instanceof HTMLInputElement &&
+              event.target.id !== `permission-${id}-secret`
+            ) {
+              event.preventDefault()
+            }
+          }}
           onSubmit={(event) => {
             event.preventDefault()
-            if (primary) decide(primary.value)
+            const submitter = (event.nativeEvent as SubmitEvent).submitter
+
+            if (
+              primary &&
+              (submitter?.id === allowButton ||
+                document.activeElement?.id === `permission-${id}-secret`)
+            ) {
+              decide(primary.value)
+            }
           }}
         >
           <Field
@@ -611,6 +632,7 @@ export function PermissionDecision({
             <Button
               // With a login name and password it submits their form, so
               // Enter in a field and a password manager's save both mean Allow.
+              id={allowButton}
               type={credential ? "submit" : "button"}
               form={credential ? credentialForm : undefined}
               size="lg"
