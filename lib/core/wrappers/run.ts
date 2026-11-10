@@ -473,8 +473,12 @@ async function innerCall(
 
   notes.push(...fixes)
   lookedUp?.(await markedReadOnly(target.id, name))
+  const sent =
+    target.kind === "browser" && name === "tabs"
+      ? clampTabPace(checked.args, definition.pace)
+      : checked.args
 
-  return runCodeCall(env.ctx, target, name, checked.args, {
+  return runCodeCall(env.ctx, target, name, sent, {
     publicUrl: env.publicUrl,
     tokenId: env.tokenId,
     max: resourceLimits().answerChars,
@@ -545,4 +549,35 @@ export function callPace(
     : {
         refused: `The pace for ${label} goes outside the one its wrapper declares for it (${describeRange(own)}): pick one within it, or change the wrapper's pace with update_wrapper.`,
       }
+}
+
+/**
+ * A tab's pace a wrapper's program sets (browser tabs, action pace), held
+ * within the wrapper's own pace for each kind it declares: a flow never
+ * makes a tab go faster or slower than the owner approved for it. A kind
+ * it declares no pace for is left to the owner's bounds (the browser asks
+ * past them).
+ */
+export function clampTabPace(
+  args: Record<string, unknown>,
+  declared: WrapperPace | undefined,
+): Record<string, unknown> {
+  const pace = args.pace as
+    Record<string, { min_ms: number; max_ms: number } | undefined> | undefined
+
+  if (args.action !== "pace" || !pace || !declared) {
+    return args
+  }
+
+  const held: Record<string, { min_ms: number; max_ms: number }> = {}
+
+  for (const [key, range] of Object.entries(pace)) {
+    if (!range) continue
+    const own = declared[key as "actions" | "navigations"]
+    const within = (ms: number) =>
+      own ? Math.min(Math.max(ms, own.minMs), own.maxMs) : ms
+    held[key] = { min_ms: within(range.min_ms), max_ms: within(range.max_ms) }
+  }
+
+  return { ...args, pace: held }
 }
