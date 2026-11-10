@@ -2,9 +2,11 @@
 
 import { revalidatePath } from "next/cache"
 import { redirect } from "next/navigation"
+import { after } from "next/server"
 
 import { stopBrowser } from "@/lib/core/browser/owner"
 import { canRereadTools } from "@/lib/core/catalogue"
+import { scrubFreedPages } from "@/lib/core/cleanup/runtime"
 import { disconnectOAuth } from "@/lib/core/oauth"
 import {
   createServer,
@@ -321,6 +323,9 @@ export async function deleteServerAction(id: string): Promise<void> {
   const ctx = await requireContext()
   const removed = await getServer(ctx, id).catch(() => null)
   await deleteServer(ctx, id)
+  // Its rows are zeroed in the file as they go; the log's older copy of
+  // their pages goes once the answer is sent.
+  after(() => scrubFreedPages({ rebuild: false }))
 
   // Removing the browser closes it; its sign-ins stay until forgotten.
   if (removed?.kind === "browser") {

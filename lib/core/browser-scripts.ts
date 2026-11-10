@@ -5,6 +5,13 @@ import type { VaultContext } from "./context"
 import { db } from "./db"
 import { invalid } from "./errors"
 import { siteKey } from "./fetch/rules"
+import {
+  openRuleKey,
+  ruleKey,
+  ruleKeys,
+  sealedRuleKey,
+  sealRuleRows,
+} from "./fetch-rule-keys"
 import { newId } from "./ids"
 import { PERMISSION_TTL_MS } from "./permission-rules"
 
@@ -36,12 +43,17 @@ function asLevel(value: string | null | undefined): ScriptLevel | null {
 
 /** The token's level for scripts at a site: its own, else all tokens'; null asks. */
 export async function decideScript(
-  vaultId: string,
+  ctx: VaultContext,
   tokenId: string,
   site: string,
 ): Promise<ScriptLevel | null> {
   const rows = await db().webFetchRule.findMany({
-    where: { vaultId, kind: KIND, key: site, scope: { in: [tokenId, ALL] } },
+    where: {
+      vaultId: ctx.vaultId,
+      kind: KIND,
+      key: { in: ruleKeys(ctx, KIND, site) },
+      scope: { in: [tokenId, ALL] },
+    },
   })
 
   return (
@@ -55,24 +67,32 @@ export async function decideScript(
  * tokens). The owner's alone: their answer to a request, or the token's page.
  */
 export async function writeScriptAccess(
-  vaultId: string,
+  ctx: VaultContext,
   tokenId: string | null,
   site: string,
   access: ScriptLevel,
 ): Promise<void> {
   const scope = tokenId ?? ALL
+  const vaultId = ctx.vaultId
+  const id = newId()
 
+  await sealRuleRows(ctx, KIND, site)
   await db().webFetchRule.upsert({
     where: {
-      vaultId_scope_kind_key: { vaultId, scope, kind: KIND, key: site },
+      vaultId_scope_kind_key: {
+        vaultId,
+        scope,
+        kind: KIND,
+        key: ruleKey(ctx, KIND, site),
+      },
     },
     create: {
-      id: newId(),
+      id,
       vaultId,
       tokenId,
       scope,
       kind: KIND,
-      key: site,
+      ...sealedRuleKey(ctx, id, KIND, site),
       access,
       addedBy: "owner",
     },
@@ -89,13 +109,14 @@ export async function listScriptSites(
 ): Promise<ScriptSiteView[]> {
   const rows = await db().webFetchRule.findMany({
     where: { vaultId: ctx.vaultId, kind: KIND, scope: tokenId },
-    orderBy: { key: "asc" },
   })
 
-  return rows.flatMap((row) => {
-    const access = asLevel(row.access)
-    return access ? [{ site: row.key, access }] : []
-  })
+  return rows
+    .flatMap((row) => {
+      const access = asLevel(row.access)
+      return access ? [{ site: openRuleKey(ctx, row), access }] : []
+    })
+    .sort((a, b) => (a.site < b.site ? -1 : a.site > b.site ? 1 : 0))
 }
 
 /** Takes away a token's own line for scripts at a site: evaluate asks again. */
@@ -111,7 +132,12 @@ export async function removeScriptSite(
   }
 
   await db().webFetchRule.deleteMany({
-    where: { vaultId: ctx.vaultId, kind: KIND, scope: tokenId, key: site },
+    where: {
+      vaultId: ctx.vaultId,
+      kind: KIND,
+      scope: tokenId,
+      key: { in: ruleKeys(ctx, KIND, site) },
+    },
   })
 }
 

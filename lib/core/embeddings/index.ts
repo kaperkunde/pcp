@@ -375,7 +375,7 @@ export async function searchSimilarities(
   open: ProviderOpener,
   options: SemanticOptions = {},
 ): Promise<Map<string, number> | null> {
-  const config = await readEmbeddingsConfig(ctx.vaultId)
+  const config = await readEmbeddingsConfig(ctx)
 
   if (!config) {
     return null

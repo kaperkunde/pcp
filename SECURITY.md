@@ -24,7 +24,13 @@ under keys derived from your password (scrypt, 64 MiB), the recovery key, a
 session cookie, an API token or what an app that signed in holds (its access
 and refresh tokens) — none of which are on the disk. The browser's
 sign-ins, kept results and your notes on servers and skills are in the vault
-too, encrypted the same way. See
+too, encrypted the same way, and so are the names and descriptions of your
+secrets, your API tokens' names, the sites your secrets are typed at and the
+sites web fetch keeps levels for, and your settings (but the public address).
+Some descriptive details are still in plain text: the vault's own name,
+which the sign-in page shows before you unlock, and, until a later release
+seals them too, your servers' names, addresses and descriptions and their
+tools. See
 [ARCHITECTURE.md](ARCHITECTURE.md#encryption). In the Mac app, the window's
 session cookie and the Touch ID key do sit in the app's folder, but encrypted
 under a key in your login keychain, which a copy of the disk does not open.
@@ -486,6 +492,11 @@ Not defended against:
   the updater takes only an app signed with the same Developer ID; the
   Windows app is not signed yet, so there the download is checked against
   the checksum published beside it, and no more.
+- What you delete does not linger in the database file: every connection
+  has SQLite write zeros over deleted rows (`secure_delete`), removing a
+  server or a secret truncates the write-ahead log, and deleting the vault
+  or restoring over it rebuilds the file. A copy of the data volume taken
+  before the delete, a backup or a snapshot of the disk, keeps what it had.
 - While PCP's browser runs, it keeps a few things in clear in the system's
   temporary folder: a file a `download` call waits for (read and removed
   before the call answers), Chromium's crash reporter and cache folders, and

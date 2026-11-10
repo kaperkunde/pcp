@@ -29,6 +29,7 @@ import {
   type WrapperDocument,
 } from "./documents"
 import { checkDistinct, itemSlug, type ItemKind } from "./layout"
+import { SECRET_META_SELECT, secretName } from "../secret-meta"
 
 /**
  * The vault's shareable items as documents (documents.ts): its skills, its
@@ -72,10 +73,10 @@ async function secretNames(
 
   const rows = await db().secret.findMany({
     where: { vaultId: ctx.vaultId, id: { in: wanted } },
-    select: { id: true, name: true },
+    select: SECRET_META_SELECT,
   })
 
-  return new Map(rows.map((row) => [row.id, row.name]))
+  return new Map(rows.map((row) => [row.id, secretName(ctx, row)]))
 }
 
 function skillDocument(entry: SkillEntry): SkillDocument {

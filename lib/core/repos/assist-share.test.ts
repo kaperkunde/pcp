@@ -32,6 +32,7 @@ import { startFakeGitHub, type FakeGitHub } from "./fake-github"
 import { findLocalItem, localItem, localItems } from "./local"
 import { REVIEW_CHANGED, shareReview } from "./share-review"
 import { createRepo, setExcluded } from "./store"
+import { secretNameWhere } from "../secret-meta"
 
 // An assistant proposing that an item go to a linked repository, through
 // the memory tool's /repos/share/: one item, a request that writes and
@@ -75,7 +76,9 @@ async function writeRepo(
     private: hidden,
     files: { "README.md": "Shared things." },
   })
-  const secret = await db().secret.findFirst({ where: { name: "GitHub" } })
+  const secret = await db().secret.findFirst({
+    where: secretNameWhere(ctx, "GitHub"),
+  })
   const secretId =
     secret?.id ?? (await createSecret(ctx, { name: "GitHub", value: PAT })).id
 

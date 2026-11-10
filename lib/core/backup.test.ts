@@ -91,6 +91,7 @@ import {
   setupVault,
   unlockOwnerVault,
 } from "./vault"
+import { tokenName } from "./token-names"
 
 // Export and restore against a scratch database: the file carries the
 // vault's rows as they are, a restore puts them back whole, and every way a
@@ -1183,10 +1184,10 @@ describe("restoring", { timeout: 60_000 }, () => {
     })
     const file = await exportVault(ctx, EXPORT_PASSWORD)
     const raw = await openRaw(file, EXPORT_PASSWORD)
-    expect(raw.tables.secretBrowserOrigins).toMatchObject([
-      { secretId, origin: "https://shop.example", includeSubdomains: false },
-      { secretId, origin: "https://waternet.nl", includeSubdomains: true },
-    ])
+    // Each site as its keyed hash, the site itself sealed beside it.
+    expect(raw.tables.secretBrowserOrigins).toHaveLength(2)
+    expect(JSON.stringify(raw)).not.toContain("shop.example")
+    expect(JSON.stringify(raw)).not.toContain("waternet.nl")
     expect(JSON.stringify(raw)).not.toContain("api_token_secret_allowance")
 
     const { payload } = await readExport(file, EXPORT_PASSWORD)
@@ -1493,7 +1494,13 @@ describe("restoring", { timeout: 60_000 }, () => {
     })
 
     const target = { into: "vault", ctx } as const
-    const { payload, preview } = await readExport(file, EXPORT_PASSWORD, target)
+    const { payload, preview } = await readExport(
+      file,
+      EXPORT_PASSWORD,
+      target,
+      // The names are sealed in the file: shown with its vault's password.
+      { vaultPassword: PASSWORD },
+    )
     expect(
       Object.fromEntries(preview.tokens.map((t) => [t.name, t.status])),
     ).toEqual({
@@ -1516,10 +1523,11 @@ describe("restoring", { timeout: 60_000 }, () => {
     expect(await resolveApiToken(before.token)).toBeNull()
     // Made after the export: not in the file, so gone.
     expect(await resolveApiToken(later.token)).toBeNull()
-    expect(await db().apiToken.count({ where: { name: "Made since" } })).toBe(0)
-
     const rows = await db().apiToken.findMany({ include: { grant: true } })
-    const byName = Object.fromEntries(rows.map((row) => [row.name, row]))
+    expect(rows.map((row) => tokenName(ctx, row))).not.toContain("Made since")
+    const byName = Object.fromEntries(
+      rows.map((row) => [tokenName(ctx, row), row]),
+    )
     // Revoked here: when the vault revoked it. Deleted here: revoked now.
     expect(byName["Revoked since"]?.revokedAt).toEqual(revokedAt)
     expect(byName["Deleted since"]?.revokedAt).not.toBeNull()

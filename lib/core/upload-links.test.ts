@@ -295,9 +295,9 @@ describe("an upload link", () => {
     expect(
       await db().fileLink.findMany({
         where: { uploadLinkId: link.id },
-        select: { name: true },
+        select: { id: true },
       }),
-    ).toEqual([{ name: "only.pdf" }])
+    ).toHaveLength(1)
     expect(await uploadStatus(ctx, tokenId, link.id)).toMatchObject({
       open: false,
       files: [{ name: "only.pdf" }],

@@ -62,6 +62,7 @@ import {
   writeServiceDefinition,
   type ServiceLaunchInput,
 } from "./services"
+import { secretNameWhere } from "../secret-meta"
 
 // Services end to end in the core: launched by the owner on an SSH server
 // (the test server on 127.0.0.1) whose login runs commands in a real sh,
@@ -275,7 +276,9 @@ async function launchInput(
   hostId: string,
   change: Partial<ServiceLaunchInput> = {},
 ): Promise<ServiceLaunchInput> {
-  const secret = await db().secret.findFirst({ where: { name: "docs-key" } })
+  const secret = await db().secret.findFirst({
+    where: secretNameWhere(ctx, "docs-key"),
+  })
   const secretId =
     secret?.id ??
     (await createSecret(ctx, { name: "docs-key", value: API_KEY })).id
@@ -497,7 +500,7 @@ describe("launching a service", { timeout: 30_000 }, () => {
       FAST,
     )
     const secret = await db().secret.findFirstOrThrow({
-      where: { name: "docs-key" },
+      where: secretNameWhere(ctx, "docs-key"),
     })
     const server = await getServer(ctx, launched.registeredId!)
 
@@ -1030,7 +1033,7 @@ describe("a running service", { timeout: 30_000 }, () => {
   it("makes the container again when a secret it takes changes", async () => {
     const { service } = await launched()
     const secret = await db().secret.findFirstOrThrow({
-      where: { name: "docs-key" },
+      where: secretNameWhere(ctx, "docs-key"),
     })
     await updateSecret(ctx, secret.id, { value: "sk-rotated-value-5678" })
 
@@ -1060,7 +1063,7 @@ describe("a running service", { timeout: 30_000 }, () => {
       FAST,
     )
     const secret = await db().secret.findFirstOrThrow({
-      where: { name: "docs-key" },
+      where: secretNameWhere(ctx, "docs-key"),
     })
     expect((await getServer(ctx, launched.registeredId!)).authType).toBe("none")
 
@@ -1112,7 +1115,7 @@ describe("a running service", { timeout: 30_000 }, () => {
       FAST,
     )
     const secret = await db().secret.findFirstOrThrow({
-      where: { name: "docs-key" },
+      where: secretNameWhere(ctx, "docs-key"),
     })
     // The owner's own header, on the server's page.
     await db().mcpServer.update({
@@ -1161,7 +1164,7 @@ describe("a running service", { timeout: 30_000 }, () => {
       FAST,
     )
     const secret = await db().secret.findFirstOrThrow({
-      where: { name: "docs-key" },
+      where: secretNameWhere(ctx, "docs-key"),
     })
     // The owner's own header, with a further one named as the definition's
     // header will be.
@@ -1257,7 +1260,7 @@ describe("a running service", { timeout: 30_000 }, () => {
     it("are read again when a secret it takes changes", async () => {
       const launched = await launchedMcp()
       const secret = await db().secret.findFirstOrThrow({
-        where: { name: "docs-key" },
+        where: secretNameWhere(ctx, "docs-key"),
       })
       mcpTools = [{ name: "split", description: "Splits a document" }]
       await updateSecret(ctx, secret.id, { value: "sk-rotated-value-5678" })
@@ -1354,7 +1357,7 @@ describe("a running service", { timeout: 30_000 }, () => {
   it("names the service among what uses its secret, which cannot be deleted under it", async () => {
     const { service } = await launched()
     const secret = await db().secret.findFirstOrThrow({
-      where: { name: "docs-key" },
+      where: secretNameWhere(ctx, "docs-key"),
     })
     const uses = (await secretUses(ctx)).get(secret.id) ?? []
     expect(uses.map((use) => use.kind).sort()).toEqual([

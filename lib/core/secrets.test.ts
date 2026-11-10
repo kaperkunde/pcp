@@ -11,6 +11,7 @@ import {
 } from "./secrets"
 import { scratchDatabase } from "./test-db"
 import { setupVault } from "./vault"
+import { secretNameWhere } from "./secret-meta"
 
 // The sign-in one of the owner's secrets belongs to: its login name and
 // note, encrypted like the value, and the one-time codes that go with it.
@@ -111,7 +112,9 @@ describe("a secret's sign-in", () => {
     await expect(
       createSecret(ctx, { name: "Other", value: "y", note: "one\ntwo" }),
     ).rejects.toThrow(/one line/)
-    expect(await db().secret.count({ where: { name: "Other" } })).toBe(0)
+    expect(
+      await db().secret.count({ where: secretNameWhere(ctx, "Other") }),
+    ).toBe(0)
   })
 
   it("names only a one-time code secret, from a text secret", async () => {

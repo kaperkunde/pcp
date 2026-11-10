@@ -8,6 +8,7 @@ import { findBrowserServer } from "@/lib/core/browser/server"
 import { listOwnerNotices } from "@/lib/core/owner-notices"
 import { listPendingRequests } from "@/lib/core/permissions"
 import { runDueSyncs } from "@/lib/core/repos/sync"
+import { ensureSealed } from "@/lib/core/sealing/convert"
 import { deliverUploads, reconcileServices } from "@/lib/core/upstream"
 import { availableUpdate } from "@/lib/core/updates/state"
 import { getVault } from "@/lib/core/vault"
@@ -40,6 +41,12 @@ export default async function DashboardLayout({
   // Linked repositories due a sync are synced once this page is sent, with
   // the key the owner's session brought: nothing holds one in between.
   after(() => runDueSyncs(ctx))
+  // What an older PCP kept in plain text is sealed, a batch at a time.
+  after(() =>
+    ensureSealed(ctx).catch((error) =>
+      console.error("[sealing] could not seal the vault's rows", error),
+    ),
+  )
   // Services you left running whose container stopped (the SSH server
   // restarted) are started again the same way, throttled.
   after(() => reconcileServices(ctx, { publicUrl }))
