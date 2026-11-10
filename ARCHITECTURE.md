@@ -2844,7 +2844,7 @@ Hosts are never logged.
 **What an assistant gets.** The tools are `tabs`, `navigate`, `back`,
 `snapshot`, `read_page`, `find`, `click`, `drag`, `type`, `press_key`,
 `select_option`, `upload_file`, `scroll`, `wait_for`, `screenshot`,
-`download`, `handle_dialog`, `hand_over`, `request_secret`,
+`print_pdf`, `download`, `handle_dialog`, `hand_over`, `request_secret`,
 `update_secret_sites`, `evaluate`, `console_log` and `network_log`. Every one
 but `tabs`' open and list, `request_secret` and `update_secret_sites` names
 its tab (below). An assistant reads a snapshot (Playwright's
@@ -2917,7 +2917,15 @@ their refs back when they show again (a dialog over them closed); it goes
 with the tab. A screenshot steps its quality, then its size, down
 until it fits what an answer passes on inline (`MAX_ANSWER_IMAGE_CHARS`,
 an image's own budget, apart from the text's); one that never fits is kept
-and handed back as its handle. While the page shows a dialog (an alert),
+and handed back as its handle. With `full_page` it is the whole page from
+its top (`Page.getLayoutMetrics`' content size, `captureBeyondViewport`),
+cut at `MAX_FULL_PAGE_HEIGHT` CSS pixels down and `MAX_FULL_PAGE_WIDTH`
+across, through the same ladder; its answer says its pixels are the
+page's, not the viewport's. `print_pdf` prints the page with Chromium's
+`Page.printToPDF` on the tab's DevTools session (paper, landscape,
+backgrounds, page ranges), keeps the PDF as the token's result through
+`keepBytes` (refused past the largest file) and answers its handle, as
+`download` does; it reads the page only, so it is Read and unpaced. While the page shows a dialog (an alert),
 every tool that needs the page answers at once with it and how to answer
 it with `handle_dialog`, rather than waiting on a page that cannot answer.
 No tool reads or sets cookies or storage directly; JavaScript runs only
@@ -3042,8 +3050,8 @@ value, by page, in memory): while any field of the page has that value, as
 it is or reformatted (a bank writes an IBAN in groups of four), every answer
 to the token shows it as `[secret: name]` (the snapshot's field line, its
 `- text:` child where the field has a placeholder, and the value wherever
-else it appears, a title included), and `screenshot` is refused (a tool
-error). It lets go when no field has the value any more: the field changed,
+else it appears, a title included), and `screenshot` and `print_pdf` are
+refused (a tool error): both are pictures of the page. It lets go when no field has the value any more: the field changed,
 or a new document does not have it. For as long as the tab lives, whatever
 document it shows, every answer to the token (`callBrowserTool`'s
 `maskHeld`, so the snapshot, `find`, `read_page`, the logs and `evaluate`

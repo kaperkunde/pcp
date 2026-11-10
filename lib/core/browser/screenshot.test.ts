@@ -1,9 +1,14 @@
 import { describe, expect, it } from "vitest"
 
 import { MAX_ANSWER_IMAGE_CHARS } from "../answers"
-import { MAX_SCREENSHOT_BYTES } from "./limits"
+import {
+  MAX_FULL_PAGE_HEIGHT,
+  MAX_FULL_PAGE_WIDTH,
+  MAX_SCREENSHOT_BYTES,
+} from "./limits"
 import {
   fitPicture,
+  fullPageArea,
   INLINE_IMAGE_BYTES,
   shotLadder,
   type Shot,
@@ -88,5 +93,34 @@ describe("a screenshot's size", () => {
     await expect(
       fitPicture(huge.capture, shotLadder({ scale: 1 })),
     ).rejects.toThrow(/too large/)
+  })
+})
+
+describe("a screenshot of the whole page", () => {
+  it("takes the page from its top left, as large as its content", () => {
+    expect(fullPageArea({ width: 1280, height: 3200.4 })).toEqual({
+      area: { x: 0, y: 0, width: 1280, height: 3201 },
+      cut: false,
+    })
+  })
+
+  it("is cut at the most it takes, and says so", () => {
+    expect(
+      fullPageArea({ width: 1280, height: MAX_FULL_PAGE_HEIGHT * 3 }),
+    ).toEqual({
+      area: { x: 0, y: 0, width: 1280, height: MAX_FULL_PAGE_HEIGHT },
+      cut: true,
+    })
+    expect(
+      fullPageArea({ width: MAX_FULL_PAGE_WIDTH + 1, height: 10 }).cut,
+    ).toBe(true)
+  })
+
+  it("steps down through the same sizes as any other, so a long page still passes on", async () => {
+    const { capture, taken } = camera(INLINE_IMAGE_BYTES * 20)
+    const picture = await fitPicture(capture, shotLadder({ scale: 1 }))
+
+    expect(picture.scale).toBeLessThan(1)
+    expect(taken.length).toBeGreaterThan(4)
   })
 })

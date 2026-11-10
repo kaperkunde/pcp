@@ -40,6 +40,7 @@ import { setupVault } from "../vault"
 import { setFetchPrivate, setFetchSite } from "../web-fetch"
 import { callBrowserTool } from "./call"
 import { chromiumExecutable } from "./executable"
+import { holdSecret } from "./held"
 import { closeAllBrowsers, runningBrowser } from "./runtime"
 import { createBrowserServer } from "./server"
 import { browserTools } from "./tools"
@@ -88,6 +89,13 @@ const FORM = `<!doctype html><title>Upload</title>
 <button>Send</button>
 </form>`
 
+/** A page three viewports tall, with a field a secret can be typed into. */
+const LONG = `<!doctype html><title>Statement: March</title>
+<h1>Statement</h1>
+<label>Code <input id="code"></label>
+<div style="height: 2400px; background: linear-gradient(#fff, #9cf)"></div>
+<p>The end</p>`
+
 beforeEach(async () => {
   ;({ cleanup } = await scratchDatabase())
   forgetResourceLimits()
@@ -132,6 +140,10 @@ beforeEach(async () => {
 
     if (request.url.startsWith("/form")) {
       return res.end(FORM)
+    }
+
+    if (request.url.startsWith("/long")) {
+      return res.end(LONG)
     }
 
     if (request.url.startsWith("/sent")) {
@@ -218,6 +230,94 @@ describe.skipIf(!executable)(
   "files in the browser",
   { timeout: 90_000 },
   () => {
+    it("prints a page to a PDF kept as the token's result, and refuses while a field holds a typed secret", async () => {
+      const tab = tabOf(
+        await call("tabs", { action: "open", url: `${api.origin}/long` }),
+      )
+
+      const printed = downloaded(
+        await call("print_pdf", {
+          tab,
+          paper: "a4",
+          landscape: true,
+          print_background: true,
+        }),
+      )
+      expect(printed.file).toMatchObject({
+        type: "application/pdf",
+        name: "Statement March.pdf",
+      })
+      expect(printed.from).toBe(`${api.origin}/long`)
+      const kept = await openResult(ctx, {
+        tokenId,
+        id: printed.file.$result,
+      })
+      const bytes = kept!.bytes()
+      expect(bytes.subarray(0, 5).toString()).toBe("%PDF-")
+      // Landscape A4 is 842 by 595 points.
+      expect(bytes.toString("latin1")).toMatch(
+        /\/MediaBox \[0 0 841\.\d+ 595\.\d+\]/,
+      )
+
+      // One page of it, and a page it does not have.
+      const first = downloaded(
+        await call("print_pdf", { tab, page_ranges: "1" }),
+      )
+      const one = await openResult(ctx, { tokenId, id: first.file.$result })
+      expect(one!.bytes().length).toBeGreaterThan(0)
+      const missing = await call("print_pdf", { tab, page_ranges: "40-41" })
+      expect(missing.isError).toBe(true)
+      expect(textOf(missing)).toContain("The page has no 40-41")
+
+      // A PDF is a picture of the page: none while a field holds a secret.
+      const page = runningBrowser(ctx.vaultId)!.tabs.get(tab)!.page
+      await page.locator("#code").fill("hunter2-hunter2")
+      holdSecret(page, "Bank code", "hunter2-hunter2")
+      const before = await db().toolResult.count()
+
+      for (const refused of [
+        await call("print_pdf", { tab }),
+        await call("screenshot", { tab, full_page: true }),
+      ]) {
+        expect(refused.isError).toBe(true)
+        expect(textOf(refused)).toContain('holds the secret "Bank code"')
+        expect(refused.content.some((part) => part.type === "image")).toBe(
+          false,
+        )
+      }
+
+      expect(await db().toolResult.count()).toBe(before)
+    })
+
+    it("takes a screenshot of the whole page with full_page", async () => {
+      const tab = tabOf(
+        await call("tabs", { action: "open", url: `${api.origin}/long` }),
+      )
+      const size = (result: CallToolResult) => {
+        const [, width, height] = textOf(result).match(/(\d+) by (\d+)/)!
+        return { width: Number(width), height: Number(height) }
+      }
+
+      const viewport = await call("screenshot", { tab })
+      expect(size(viewport)).toEqual({ width: 1280, height: 800 })
+
+      const whole = await call("screenshot", { tab, full_page: true })
+      expect(whole.isError, textOf(whole)).toBeUndefined()
+      expect(textOf(whole)).toContain("the whole page")
+      expect(textOf(whole)).toContain("The whole page from its top")
+      expect(whole.content.some((part) => part.type === "image")).toBe(true)
+      const { width, height } = size(whole)
+      // Taller than the viewport, in the page's proportions, whatever size
+      // it was made to pass on.
+      expect(height / width).toBeGreaterThan(2400 / 1280)
+
+      // The tab stays where it was.
+      const scrolled = await runningBrowser(ctx.vaultId)!
+        .tabs.get(tab)!
+        .page.evaluate(() => window.scrollY)
+      expect(scrolled).toBe(0)
+    })
+
     it("keeps a download as the token's result and leaves nothing on disk", async () => {
       const page = await call("tabs", {
         action: "open",

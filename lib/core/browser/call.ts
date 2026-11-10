@@ -60,6 +60,7 @@ import {
   MAX_QUEUE_WAIT_MS,
   MAX_TABS,
   MAX_UPLOAD_BYTES,
+  MAX_FULL_PAGE_HEIGHT,
   MAX_URL_LENGTH,
   MAX_WAIT_MS,
   MIN_READ_PAGE_TEXT_CHARS,
@@ -1450,6 +1451,7 @@ const NEEDS_THE_PAGE = new Set<BrowserToolName>([
   "scroll",
   "wait_for",
   "download",
+  "print_pdf",
   "evaluate",
 ])
 
@@ -2100,6 +2102,153 @@ function pictureScale(picture: {
   ].join("")
 
   return `Scale ${Math.round(scale * 1000) / 1000}${left || top ? `, its top left at x ${left}, y ${top} of the viewport` : ""}: a point at x, y in this picture is x ${across}, y ${down} in the viewport's CSS pixels, which click, scroll and drag take.`
+}
+
+/** How a picture of the whole page maps to the page, in words. */
+function fullPageScale(picture: {
+  scale: number
+  height: number
+  origin: { x: number; y: number }
+  cut: boolean
+}): string {
+  const factor = Math.round((1 / picture.scale) * 1000) / 1000
+  const top = Math.round(-picture.origin.y)
+
+  return [
+    `The whole page from its top${picture.cut ? `, cut at ${MAX_FULL_PAGE_HEIGHT.toLocaleString("en")} CSS pixels down (the page goes on past that)` : ""}.`,
+    picture.scale === 1
+      ? "Its pixels are the page's CSS pixels,"
+      : `A pixel here is ${factor} of the page's CSS pixels,`,
+    `not the viewport's: the viewport shows the part from y ${top} down, so scroll to a part before you click, scroll or drag at a point of it.`,
+  ].join(" ")
+}
+
+/**
+ * A capture of the page (screenshot, print_pdf) refused while a field holds
+ * a secret PCP typed: the picture would show it.
+ */
+async function capturesRefused(
+  tab: Tab,
+  what: string,
+): Promise<CallToolResult | null> {
+  const held = await heldSecret(tab.page)
+
+  return held
+    ? text(
+        `A field in tab ${tab.id} holds the secret "${held}", which PCP typed, so the tab takes no ${what} until the field changes or the page moves on. Take a snapshot to see the page: it shows the field as ${secretMask(held)}.`,
+        true,
+      )
+    : null
+}
+
+/** print_pdf's paper sizes, in inches across and down. */
+const PAPER: Record<string, { width: number; height: number }> = {
+  letter: { width: 8.5, height: 11 },
+  legal: { width: 8.5, height: 14 },
+  tabloid: { width: 11, height: 17 },
+  a3: { width: 11.69, height: 16.54 },
+  a4: { width: 8.27, height: 11.69 },
+  a5: { width: 5.83, height: 8.27 },
+}
+
+/**
+ * print_pdf: the tab's page printed to a PDF by Chromium (Page.printToPDF on
+ * the tab's own DevTools session), kept for the token as a file and
+ * answered with its handle. Refused while a field holds a typed secret.
+ */
+async function printPdf(
+  scope: BrowserScope,
+  tab: Tab,
+  args: Record<string, unknown>,
+  keepBytes: BytesKeeper | undefined,
+): Promise<CallToolResult> {
+  if (!keepBytes) {
+    return text(
+      "A PDF is kept as a result for the token, which this call cannot make.",
+      true,
+    )
+  }
+
+  const held = await capturesRefused(tab, "PDFs")
+
+  if (held) {
+    return held
+  }
+
+  const paper = PAPER[(args.paper as string | undefined) ?? "letter"]!
+  let data: string
+
+  try {
+    ;({ data } = await bounded(
+      tab.cdp.send("Page.printToPDF", {
+        landscape: args.landscape === true,
+        printBackground: args.print_background === true,
+        paperWidth: paper.width,
+        paperHeight: paper.height,
+        ...(typeof args.page_ranges === "string"
+          ? { pageRanges: args.page_ranges.replace(/\s+/g, "") }
+          : {}),
+      }),
+      ACTION_TIMEOUT_MS,
+      "page.pdf",
+    ))
+  } catch (error) {
+    return text(
+      /range/i.test(firstLine(error))
+        ? `The page has no ${String(args.page_ranges)}: ask for pages it has, or leave out page_ranges for all of them.`
+        : `The page could not be printed: ${failureReason(error)}`,
+      true,
+    )
+  }
+
+  const bytes = Buffer.from(data, "base64")
+  let title = ""
+
+  try {
+    title = await tab.page.title()
+  } catch {
+    // A page that went away keeps the default name.
+  }
+
+  let kept: Awaited<ReturnType<BytesKeeper>>
+
+  try {
+    kept = await keepBytes({
+      bytes,
+      mediaType: "application/pdf",
+      name: `${pdfName(title)}.pdf`,
+      serverId: scope.serverId,
+      toolName: "print_pdf",
+    })
+  } catch (error) {
+    if (error instanceof PcpError) return text(error.message, true)
+    throw error
+  }
+
+  return text(
+    JSON.stringify(
+      {
+        tab: tab.id,
+        file: handleOf(kept),
+        from: tab.page.url().slice(0, MAX_URL_LENGTH),
+        note: `PCP keeps this PDF for you: pass {"$result": "${kept.id}"} where a tool wants a file (send_email's or create_draft's attachments, save_file, convert_document), read it with read_result, or get it onto your own computer with share_result's link where this token has it.`,
+      },
+      null,
+      2,
+    ),
+  )
+}
+
+/** A file name from a page's title: its words, or "page". */
+function pdfName(title: string): string {
+  const name = title
+    .replace(/[\u0000-\u001f\u007f/\\:*?"<>|]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 80)
+    .trim()
+
+  return name || "page"
 }
 
 /** Characters of a text that are not white space. */
@@ -2847,13 +2996,10 @@ async function runTool(
           return report(scope, current, { snapshot: false })
         }
 
-        const held = await heldSecret(current.page)
+        const held = await capturesRefused(current, "screenshots")
 
         if (held) {
-          return text(
-            `A field in tab ${current.id} holds the secret "${held}", which PCP typed, so the tab takes no screenshots until the field changes or the page moves on. Take a snapshot to see the page: it shows the field as ${secretMask(held)}.`,
-            true,
-          )
+          return held
         }
 
         let label: string | null = null
@@ -2868,6 +3014,7 @@ async function runTool(
 
         const picture = await takePicture(current, {
           element: locator,
+          fullPage: args.full_page === true,
           maxWidth: args.max_width as number | undefined,
           quality: args.quality as number | undefined,
         })
@@ -2884,8 +3031,10 @@ async function runTool(
             {
               type: "text",
               text: [
-                `Tab ${current.id}: ${current.page.url()} (${label ? `${label}, ` : ""}${picture.width} by ${picture.height}${picture.scale < 1 ? ", made smaller to pass on" : ""}, JPEG quality ${picture.quality}; the owner can watch the tab: ${markdownLink(`Watch tab ${current.id}`, tabLink(publicUrl, current.id))})`,
-                pictureScale(picture),
+                `Tab ${current.id}: ${current.page.url()} (${label ? `${label}, ` : picture.fullPage ? "the whole page, " : ""}${picture.width} by ${picture.height}${picture.scale < 1 ? ", made smaller to pass on" : ""}, JPEG quality ${picture.quality}; the owner can watch the tab: ${markdownLink(`Watch tab ${current.id}`, tabLink(publicUrl, current.id))})`,
+                picture.fullPage
+                  ? fullPageScale(picture)
+                  : pictureScale(picture),
                 `To read the text in this picture, ${await ocrWords(scope)}; read_result does not show an image.`,
               ].join("\n"),
             },
@@ -2897,6 +3046,10 @@ async function runTool(
           ],
         }
       })
+    case "print_pdf":
+      return onTab(scope, tab, spec, (current) =>
+        printPdf(scope, current, args, keepBytes),
+      )
     case "handle_dialog":
       return onTab(scope, tab, spec, async (current) => {
         const dialog = current.dialog

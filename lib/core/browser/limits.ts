@@ -67,6 +67,15 @@ export const MAX_SCREENSHOT_QUALITY = 90
  */
 export const SCREENSHOT_SCALED_QUALITY = 40
 export const SCREENSHOT_SCALES = [0.75, 0.5, 0.35, 0.25] as const
+/**
+ * screenshot's full_page: the most of a page it takes, down and across, in
+ * CSS pixels (Chromium draws no larger picture in one piece). A longer page
+ * is taken from its top, and the answer says it was cut.
+ */
+export const MAX_FULL_PAGE_HEIGHT = 16_000
+export const MAX_FULL_PAGE_WIDTH = 4 * BROWSER_VIEWPORT.width
+/** print_pdf's page_ranges, in characters. */
+export const MAX_PDF_PAGE_RANGES_CHARS = 100
 /** The narrowest picture screenshot's max_width may ask for, in pixels. */
 export const MIN_SCREENSHOT_WIDTH = 200
 /** The size every tab renders at, in CSS pixels. */
