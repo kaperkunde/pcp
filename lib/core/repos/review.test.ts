@@ -196,6 +196,27 @@ describe("reviewing an item", () => {
     ).toEqual(["call_levels"])
   })
 
+  it("flags a pace of its own, outside the owner's bounds in so many words, and never applies it by itself", () => {
+    const paced = {
+      ...WRAPPER,
+      pace: {
+        actions: { min_ms: 20, max_ms: 60 },
+        tools: [{ tool: "click", min_ms: 100, max_ms: 200 }],
+      },
+    } as WrapperDocument
+    // Against PCP's own bounds unless the owner's are given.
+    const review = reviewItem(WRAPPER, paced)
+
+    expect(kinds(review.flags)).toEqual(["pace"])
+    expect(review.flags[0]!.message).toBe(
+      "Its browser calls would go at a pace of their own: before actions in a page 0.02 to 0.06 s; before click 0.1 to 0.2 s. Outside what you let assistants set without asking: before actions in a page 0.02 to 0.06 s (assistants may set 0.05 to 5 s).",
+    )
+    expect(review.textOnly).toBe(false)
+    expect(review.same).toBe(false)
+    // The same pace again is no change.
+    expect(reviewItem(paced, paced).flags).toEqual([])
+  })
+
   it("flags a new or changed secret binding", () => {
     expect(
       kinds(

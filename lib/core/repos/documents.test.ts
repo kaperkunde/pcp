@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
 
 import { createBrowserServer } from "../browser/server"
+import { getWrapper, saveWrapperByOwner } from "../wrappers/admin"
 import type { VaultContext } from "../context"
 import { scratchDatabase } from "../test-db"
 import { setupVault } from "../vault"
@@ -625,7 +626,11 @@ describe("a hostile repository", () => {
       await problemOf(
         wrapperFiles({ ...WRAPPER, pcp_format: PCP_FORMAT + 1, more: "new" }),
       ),
-    ).toMatch(/format 5, written by a newer PCP; this one reads format 4/)
+    ).toMatch(
+      new RegExp(
+        `format ${PCP_FORMAT + 1}, written by a newer PCP; this one reads format ${PCP_FORMAT}`,
+      ),
+    )
     expect(
       await problemOf({
         "skills/pdf-tools/SKILL.md": ANTHROPIC_SKILL.replace(
@@ -699,6 +704,98 @@ describe("a hostile repository", () => {
         files: { "SKILL.md": "x", "ref/b.md": "x" },
       },
     ])
+  })
+})
+
+describe("format 5: a wrapper's pace", () => {
+  const PACE = {
+    actions: { min_ms: 100, max_ms: 300 },
+    tools: [{ tool: "navigate", min_ms: 500, max_ms: 900 }],
+  }
+
+  it("writes a flow with a pace of its own in format 5, and only that one, and reads it back the same", async () => {
+    const ctx = await freshVault()
+    await createBrowserServer(ctx)
+    const { ids } = await populate(ctx)
+    const flow = await getWrapper(ctx, { id: ids.flow })
+    await saveWrapperByOwner(ctx, ids.flow, {
+      name: flow.name,
+      description: flow.description,
+      callLevels: flow.callLevels,
+      tools: flow.tools,
+      secrets: flow.secrets,
+      pace: PACE,
+    })
+
+    const { document } = await localItem(ctx, "flow", ids.flow)
+    const files = serializeItem(document)
+    const text = files["flows/open-the-shop/wrapper.yaml"]!
+    expect(text).toContain("pcp_format: 5\n")
+    expect(text).toMatch(
+      /pace:\n {2}actions:\n {4}min_ms: 100\n {4}max_ms: 300\n/,
+    )
+    expect((document as { pace?: unknown }).pace).toEqual(PACE)
+
+    const read = await readRepo(files)
+    expect(read.problems).toEqual([])
+    expect(read.items).toEqual([document])
+    expect(serializeItem(read.items[0]!)).toEqual(files)
+
+    // A wrapper without one stays in the format that first held it.
+    const { document: plain } = await localItem(ctx, "wrapper", ids.wrapper)
+    expect(
+      Object.values(serializeItem(plain)).find((file) =>
+        file.startsWith("pcp_format"),
+      ),
+    ).toMatch(/^pcp_format: 2\n/)
+  })
+
+  it("refuses a pace in an older format's document, and one that does not check out", async () => {
+    expect(
+      await problemOf(wrapperFiles({ ...WRAPPER, pcp_format: 2, pace: PACE })),
+    ).toMatch(/format 2, which has no pace: write it as format 5/)
+    expect(
+      await problemOf(
+        wrapperFiles({
+          ...WRAPPER,
+          pcp_format: 5,
+          pace: { actions: { min_ms: 900, max_ms: 100 } },
+        }),
+      ),
+    ).toMatch(/the shortest wait comes first/)
+    expect(
+      await problemOf(
+        wrapperFiles({
+          ...WRAPPER,
+          pcp_format: 5,
+          pace: { tools: [{ tool: "zoom", min_ms: 1, max_ms: 2 }] },
+        }),
+      ),
+    ).toMatch(/zoom is not a browser tool/)
+    const fine = await readRepo(
+      wrapperFiles({ ...WRAPPER, pcp_format: 5, pace: PACE }),
+    )
+    expect(fine.problems).toEqual([])
+    expect((fine.items[0] as { pace?: unknown }).pace).toEqual(PACE)
+  })
+
+  it("applies a document's pace onto the wrapper, and takes it away when the document has none", async () => {
+    const ctx = await freshVault()
+    await createBrowserServer(ctx)
+    const { ids } = await populate(ctx)
+    const { document } = await localItem(ctx, "flow", ids.flow)
+
+    await applyItem(
+      ctx,
+      { ...document, pace: PACE } as unknown as ItemDocument,
+      {
+        id: ids.flow,
+      },
+    )
+    expect((await getWrapper(ctx, { id: ids.flow })).pace).toEqual(PACE)
+
+    await applyItem(ctx, document, { id: ids.flow })
+    expect((await getWrapper(ctx, { id: ids.flow })).pace).toBeUndefined()
   })
 })
 
