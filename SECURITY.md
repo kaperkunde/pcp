@@ -457,6 +457,11 @@ Not defended against:
   the updater takes only an app signed with the same Developer ID; the
   Windows app is not signed yet, so there the download is checked against
   the checksum published beside it, and no more.
+- What you delete does not linger in the database file: every connection
+  has SQLite write zeros over deleted rows (`secure_delete`), removing a
+  server or a secret truncates the write-ahead log, and deleting the vault
+  or restoring over it rebuilds the file. A copy of the data volume taken
+  before the delete, a backup or a snapshot of the disk, keeps what it had.
 - Back up the data volume, or export from Settings. Losing both loses the
   vault.
 - An export file (Settings → Export) holds the vault's rows as they are: the

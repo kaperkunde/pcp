@@ -3548,6 +3548,17 @@ Linux):
   by `lib/core/migrate.ts`, which keeps Prisma's own `_prisma_migrations`
   bookkeeping (same table, same checksums), so a developer's
   `prisma migrate dev` and a container's boot agree on the history.
+  Every connection (`lib/core/db.ts`, and the one migrations run on) sets
+  `secure_delete = ON` (not `FAST`), so SQLite writes zeros over a row as it
+  deletes or rewrites it instead of leaving it in the page or on the free
+  list. The write-ahead log keeps the pages as they were until a
+  checkpoint, so removing a server or a secret checkpoints and truncates it
+  once the answer is sent, and deleting the vault or restoring over it
+  rebuilds the file (`VACUUM`; `scrubFreedPages` in
+  `lib/core/cleanup/runtime.ts`, one at a time with the cleanup). The first
+  cleanup after an upgrade rebuilds the file whatever is free, for pages an
+  older PCP freed without zeroing, and notes that in the `db.scrubbed` host
+  setting (a time, nothing of the vault).
 - `logs/mcp-YYYY-MM-DD.jsonl` — one line per gateway call: which token,
   which tool, which upstream, how long, whether it worked, and whether it
   stopped to ask the owner (with the permission request's id). Never

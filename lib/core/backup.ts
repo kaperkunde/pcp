@@ -35,6 +35,7 @@ import {
   newScryptParams,
 } from "./crypto"
 import { withBrowserClosed } from "./browser/runtime"
+import { scrubFreedPages } from "./cleanup/runtime"
 import { db } from "./db"
 import { backfillDefinitions } from "./definition-rows"
 import { invalid, isPcpError, PcpError } from "./errors"
@@ -408,8 +409,13 @@ export async function restoreExport(
   // The vault's browser holds sign-ins from before and would save them over
   // the profile written here: closed first (its profile saved, so a restore
   // that fails loses nothing) and kept from starting until the rows are in.
-  return withBrowserClosed(target.ctx, () =>
+  await withBrowserClosed(target.ctx, () =>
     writeExport(payload, target, options),
+  )
+  // The replaced vault's rows were zeroed as they went; the log's older
+  // pages and anything freed before secure_delete go with a rebuild.
+  await scrubFreedPages({ rebuild: true }).catch((error) =>
+    console.error("[restore] could not rebuild the database file", error),
   )
 }
 

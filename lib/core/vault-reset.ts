@@ -1,5 +1,6 @@
 import { wipeVault } from "./backup"
 import { withBrowserClosed } from "./browser/runtime"
+import { scrubFreedPages } from "./cleanup/runtime"
 import type { VaultContext } from "./context"
 import { db } from "./db"
 import { PcpError } from "./errors"
@@ -42,4 +43,9 @@ export async function deleteVault(ctx: VaultContext): Promise<void> {
 
   forgetSetupState()
   await deleteRequestLog()
+  // secure_delete zeroed the rows as they went; the log's older pages and
+  // whatever an older PCP freed without zeroing go with the file's rebuild.
+  await scrubFreedPages({ rebuild: true }).catch((error) =>
+    console.error("[vault] could not rebuild the database file", error),
+  )
 }
