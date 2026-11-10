@@ -1184,6 +1184,57 @@ describe("levels and tiers proposed with a wrapper (tool_access)", () => {
   })
 })
 
+describe("the same call again through a wrapper (#115)", () => {
+  const COUNT_TOOL = {
+    name: "tally",
+    description: "Counts the things.",
+    input_schema: { type: "object", properties: {} },
+    program: 'return await pcp.call("things", "count", {})',
+    calls: ["things/count"],
+  }
+
+  it("holds back a wrapper's call the token made a moment ago, and makes it under a rerun", async () => {
+    // things/count changes things here, so its calls are guarded.
+    await setToolTier(ctx, endpointId, "count", "write")
+    const wrapper = await approvedWrapper(
+      COUNT_TOOL as unknown as typeof ECHO_TOOL,
+      { secrets: [] },
+    )
+    await writeToolAccess(scope.tokenId, wrapper.id, "tally", "allowed")
+    const counted = () => api.requests.filter((r) => r.url === "/count")
+
+    const direct = await call("call_tool_write", {
+      server: "things",
+      tool: "count",
+      arguments: {},
+    })
+    expect(direct.isError, direct.text).toBe(false)
+    expect(counted()).toHaveLength(1)
+
+    // The wrapper's own call of it is the same call: held back.
+    const through = await call("call_tool_write", {
+      server: "lookup",
+      tool: "tally",
+      arguments: {},
+    })
+    expect(through.isError).toBe(true)
+    expect(through.text).toContain("Not run again: things/count")
+    expect(through.text).toContain('code "duplicate_call"')
+    expect(counted()).toHaveLength(1)
+
+    // The wrapper's tool repeated on purpose repeats what it calls.
+    const again = await call("call_tool_write", {
+      server: "lookup",
+      tool: "tally",
+      arguments: {},
+      rerun: true,
+      reason: "Count again after the import.",
+    })
+    expect(again.isError, again.text).toBe(false)
+    expect(counted()).toHaveLength(2)
+  })
+})
+
 describe("a wrapper's tool's tier", () => {
   it("is the highest tier of the tools it calls, whatever its own hints propose", async () => {
     const wrapper = await approvedWrapper({

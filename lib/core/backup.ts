@@ -614,6 +614,8 @@ export async function wipeVault(
   // Answers kept for read_result are not exported: a day's cache, bound to
   // the tokens this restore replaces.
   await tx.toolResult.deleteMany(byVault)
+  // Nor are the calls the duplicate guard remembers, half an hour's worth.
+  await tx.callRecord.deleteMany(byVault)
   // Nor are the links that move them to and from an assistant's computer,
   // or the pages the owner uploads them from.
   await tx.fileLink.deleteMany(byVault)

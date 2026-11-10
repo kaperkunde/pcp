@@ -13,6 +13,7 @@ import path from "node:path"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import { createApiToken } from "../api-tokens"
+import { CALL_RECORD_KEEP_MS } from "../calls/limits"
 import type { VaultContext } from "../context"
 import { databaseFile, logDir } from "../data-dir"
 import { db } from "../db"
@@ -406,6 +407,36 @@ describe("a run", () => {
       rmSync(left, { recursive: true, force: true })
       rmSync(theirs, { recursive: true, force: true })
     }
+  })
+
+  it("removes the calls the duplicate guard remembers once past its longest window (#115)", async () => {
+    const now = new Date("2026-11-03T12:00:00Z")
+
+    for (const [id, ago] of [
+      ["old", CALL_RECORD_KEEP_MS + 60_000],
+      ["recent", 60_000],
+    ] as const) {
+      await db().callRecord.create({
+        data: {
+          id,
+          vaultId: ctx.vaultId,
+          tokenId,
+          serverId: "s",
+          toolName: "send",
+          argsHash: id,
+          tier: "write",
+          status: "succeeded",
+          startedAt: new Date(now.getTime() - ago),
+        },
+      })
+    }
+
+    const status = await runCleanup("owner", now)
+
+    expect(status.removed?.requests).toBe(1)
+    expect((await db().callRecord.findMany()).map((row) => row.id)).toEqual([
+      "recent",
+    ])
   })
 
   it("runs every part when one fails, and names the one that did", async () => {

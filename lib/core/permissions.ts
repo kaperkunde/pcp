@@ -1876,7 +1876,7 @@ export async function withPermission(
   ask: PermissionAsk,
 ): Promise<CallToolResult> {
   const { target, args } = describeAsk(ask)
-  const argsHash = requestHash(ask.kind, target, args)
+  const argsHash = requestHash(scope.ctx.dek, ask.kind, target, args)
   const now = new Date()
 
   // The same call the owner just allowed once, made again (a program run
@@ -2043,7 +2043,7 @@ export async function askCodeCall(
   const now = new Date()
   const reused = await reuseExecuted(
     scope,
-    requestHash(ask.kind, target, args),
+    requestHash(scope.ctx.dek, ask.kind, target, args),
     now,
   )
 

@@ -37,6 +37,7 @@ import {
   RUN_PROGRESS_MS,
   RUN_TIMEOUT_MS,
 } from "./limits"
+import { DUPLICATE_WINDOW_WORDS, MAX_RERUN_REASON_CHARS } from "../calls/limits"
 import {
   compressImage,
   framesProgram,
@@ -151,6 +152,12 @@ export type CodeCaller = (
     run: CallRun
     /** Says, once the tool is found, whether it is in the Read tier. */
     lookedUp?: (readOnly: boolean) => void
+    /**
+     * The program repeats on purpose a call it (or the token) made a little
+     * while ago, with a reason (pcp.call's options): the duplicate guard
+     * lets it through (lib/core/calls/guard.ts).
+     */
+    rerun?: boolean
   } & AnswerShape,
 ) => Promise<CodeCallOutcome>
 
@@ -516,6 +523,11 @@ async function answerFor(
         isConnectResult(stop.result)
           ? "On the owner's next message, whatever it says, call check_server as below; once it is connected, run the program again."
           : `If the owner allows it once, that one call runs right then: don't run the program again for it — on the owner's next message, whatever it says, call check_permission with the id below for its answer (an identical call within ${REUSE_EXECUTED_MS / 60_000} minutes also gets that answer instead of a new ask). For the program to make the call itself, they choose Always allow or Allow for; once they have, run the program again.`,
+        ...(sideEffects(trace).length > 0
+          ? [
+              `Run again, a call before it that changed things and is made again with the same arguments within ${DUPLICATE_WINDOW_WORDS} throws an Error with code "duplicate_call" instead of happening twice: leave those calls out of the program, or catch that error.`,
+            ]
+          : []),
       ].join("\n\n"),
       stop.result,
     )
@@ -856,6 +868,21 @@ export async function runProgram(
       throw error
     }
 
+    // A repeat on purpose (calls/guard.ts) says why; the reason is the
+    // program's own words and is not kept.
+    const rerun = payload.rerun === true
+
+    if (
+      rerun &&
+      (typeof payload.reason !== "string" ||
+        payload.reason.trim() === "" ||
+        payload.reason.length > MAX_RERUN_REASON_CHARS)
+    ) {
+      return refuse(
+        `pcp.call's rerun needs a reason: { rerun: true, reason: "why it must happen again" }, ${MAX_RERUN_REASON_CHARS} characters at most.`,
+      )
+    }
+
     // The step it is made in (pcp.step), for the trace only; the program's
     // own text, so it is cut and kept to one line.
     const step =
@@ -914,6 +941,7 @@ export async function runProgram(
             lookedUp: (readOnly) => {
               entry.readOnly = readOnly
             },
+            ...(rerun ? { rerun } : {}),
             ...shape,
           }),
           note,
@@ -955,6 +983,7 @@ export async function runProgram(
         ...(note.request ? { request: note.request } : {}),
         ...(note.secret ? { secret: note.secret, origin: note.origin } : {}),
         ...(note.exit ? { exit: note.exit } : {}),
+        ...(note.rerun ? { rerun: true } : {}),
       })
 
       if ("owner" in outcome) {

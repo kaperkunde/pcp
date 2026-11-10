@@ -1,5 +1,6 @@
 import { pruneAllowances } from "../allowances"
 import { pruneScratchDirs } from "../browser/scratch"
+import { pruneCallRecords } from "../calls/guard"
 import { pruneEmbeddingVectors } from "../embeddings/index"
 import { pruneFileLinks } from "../file-links"
 import { pruneOAuthStates } from "../oauth"
@@ -56,9 +57,12 @@ const PARTS: Part[] = [
   {
     key: "requests",
     label: "old permission requests",
-    // With the answers kept a little while for a call made again.
+    // With the answers kept a little while for a call made again, and the
+    // calls the duplicate guard remembers (calls/guard.ts).
     run: async (_, now) =>
-      (await prunePermissionRequests(now)) + (await pruneReusableAnswers(now)),
+      (await prunePermissionRequests(now)) +
+      (await pruneReusableAnswers(now)) +
+      (await pruneCallRecords(now)),
   },
   {
     key: "results",
