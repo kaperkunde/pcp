@@ -1173,7 +1173,10 @@ export async function saveWrapperByOwner(
   ctx: VaultContext,
   id: string | null,
   input: WrapperInput,
-): Promise<{ id: string }> {
+): Promise<{
+  id: string
+  found: Array<{ secret: string; parts: SecretPart[] }>
+}> {
   const existing = id ? await loadWrapper(ctx, { id }) : null
 
   if (!existing) {
@@ -1193,7 +1196,7 @@ export async function saveWrapperByOwner(
       resolved.description,
       resolved.definition,
     )
-    return { id: existing.server.id }
+    return { id: existing.server.id, found: [] }
   }
 
   return {
@@ -1203,6 +1206,7 @@ export async function saveWrapperByOwner(
       resolved.description,
       resolved.definition,
     ),
+    found: [],
   }
 }
 

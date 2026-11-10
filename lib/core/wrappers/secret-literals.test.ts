@@ -78,4 +78,29 @@ describe("the secrets a program names as written", () => {
       ),
     ).toEqual([{ name: "Inside", parts: ["password"] }])
   })
+
+  it("does not count an object with a computed key", () => {
+    expect(
+      secretLiterals(
+        'const k = "part"; pcp.call("browser", "type", { text: { $secret: "Shop", [k]: "password" } })',
+      ),
+    ).toEqual([])
+  })
+
+  it("finds nothing nested past its depth, and never runs out of stack", () => {
+    const deepObject = `${"{ a: ".repeat(100)}{ $secret: "Deep" }${" }".repeat(100)}`
+    expect(secretLiterals(`const x = ${deepObject}`)).toEqual([])
+
+    const deepTemplate = `${"`${".repeat(100)}({ $secret: "Inside" })${"}`".repeat(100)}`
+    expect(secretLiterals(`const x = ${deepTemplate}`)).toEqual([])
+
+    const huge = `${"`${".repeat(20_000)}1${"}`".repeat(20_000)}`
+    expect(() => secretLiterals(`const x = ${huge}`)).not.toThrow()
+
+    // Within the depth, found.
+    const shallow = `${"{ a: ".repeat(10)}{ $secret: "Near" }${" }".repeat(10)}`
+    expect(secretLiterals(`const x = ${shallow}`)).toEqual([
+      { name: "Near", parts: ["password"] },
+    ])
+  })
 })

@@ -19,7 +19,7 @@ import { decidePermission, getPermissionView } from "../permissions"
 import { readRepo, serializeItem } from "../repos/documents"
 import { wrapperInput } from "../repos/apply"
 import { localItem } from "../repos/local"
-import { reviewItem } from "../repos/review"
+import { reviewInVault } from "../repos/found-review"
 import { createSecret, updateSecret } from "../secrets"
 import { scratchDatabase } from "../test-db"
 import { withCallHandle } from "../test-handles"
@@ -275,6 +275,7 @@ describe("a secret a flow types into pages by name", () => {
         template: "{{secret}}",
         url: expect.any(String),
         found: true,
+        parts: ["username", "password"],
       },
     ])
 
@@ -282,7 +283,9 @@ describe("a secret a flow types into pages by name", () => {
     const read = await call("get_wrapper", { wrapper: "digid" })
     expect(JSON.parse(read.text)).toMatchObject({
       secrets: [],
-      found_secrets: ["DigiD password"],
+      found_secrets: [
+        { secret: "DigiD password", parts: ["username", "password"] },
+      ],
     })
   })
 
@@ -463,18 +466,97 @@ describe("a secret a flow types into pages by name", () => {
       expect.objectContaining({ secret: "DigiD password", found: true }),
     ])
 
-    // The owner's review of an incoming document says what it would type.
-    const review = reviewItem(null, read!)
+    // The owner's review of an incoming document as a new item says what
+    // it would type; onto the wrapper that has the place already, nothing.
+    const review = await reviewInVault(ctx, null, read!, null)
     expect(review.flags).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
           kind: "secret_binding",
           message: expect.stringContaining(
-            'sign_in would type your secret "DigiD password" into pages',
+            'would type your secret "DigiD password" (its login name and password) into pages',
           ),
         }),
       ]),
     )
-    expect(reviewItem(read!, read!).flags).toEqual([])
+    expect(review.textOnly).toBe(false)
+    const changedText = { ...read!, description: "Signs in, quicker." }
+    expect(
+      (await reviewInVault(ctx, read!, changedText, wrapper.id)).flags,
+    ).toEqual([])
+  })
+
+  it("flags on a repository's review a place the wrapper does not have yet, even when only text changes", async () => {
+    // Approved before PCP held the secret: no place.
+    const { wrapper } = await proposeAndApprove()
+    const { document } = await localItem(ctx, "flow", wrapper.id)
+    await digidSecret()
+
+    const textOnly = { ...document, description: "Signs in, quicker." }
+    const review = await reviewInVault(ctx, document, textOnly, wrapper.id)
+    expect(review.flags).toEqual([
+      expect.objectContaining({
+        kind: "secret_binding",
+        message: expect.stringContaining('"DigiD password"'),
+      }),
+    ])
+    expect(review.textOnly).toBe(false)
+    // Nothing changes at all: nothing to apply, so nothing flagged.
+    expect(
+      (await reviewInVault(ctx, document, document, wrapper.id)).same,
+    ).toBe(true)
+  })
+
+  it("names on the owner's own save the places it found that the wrapper did not have", async () => {
+    const { wrapper } = await proposeAndApprove()
+    await digidSecret()
+    const { document } = await localItem(ctx, "flow", wrapper.id)
+    const input = wrapperInput(document as Parameters<typeof wrapperInput>[0])
+
+    const saved = await saveWrapperByOwner(ctx, wrapper.id, input)
+    expect(saved.found).toEqual([
+      { secret: "DigiD password", parts: ["username", "password"] },
+    ])
+    expect((await saveWrapperByOwner(ctx, wrapper.id, input)).found).toEqual([])
+  })
+
+  it("keeps a found place to what the program names: a part typed another way is refused", async () => {
+    const secretId = await digidSecret()
+    await grantSecretUse(ctx, {
+      tokenId: scope.tokenId,
+      secretId,
+      origin: SITE,
+      level: "always",
+    })
+    const { wrapper } = await proposeAndApprove([
+      {
+        ...SIGN_IN,
+        program: `
+          await pcp.call("browser", "type", { tab: "t1", ref: "e1", text: { $secret: "DigiD password", part: "username" } })
+          const key = "pa" + "rt"
+          await pcp.call("browser", "type", { tab: "t1", ref: "e2", text: { $secret: "DigiD password", [key]: "password" } })
+          return "signed in"
+        `,
+      },
+    ])
+    expect((await definitionOf(wrapper.id)).secrets).toEqual([
+      expect.objectContaining({
+        secret: "DigiD password",
+        found: true,
+        parts: ["username"],
+      }),
+    ])
+
+    const refused = await call("call_tool_destructive", {
+      server: "digid",
+      tool: "sign_in",
+      arguments: {},
+    })
+    expect(refused.isError).toBe(true)
+    expect(refused.text).toContain(
+      'only its login name of the secret "DigiD password"',
+    )
+    expect(browser.typed).toEqual(["ada@example.com"])
+    expect(refused.text).not.toContain(PASSWORD)
   })
 })
