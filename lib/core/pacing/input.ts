@@ -195,16 +195,25 @@ export type WrapperPaceInput = BrowserPaceInput & {
   tools?: Array<{ tool: string; min_ms: number; max_ms: number }>
 }
 
-/** A wrapper's pace as a tool or the owner's form gave it, checked. */
-export function fromWrapperPaceInput(input: WrapperPaceInput): WrapperPace {
+/**
+ * A wrapper's pace as a tool or the owner's form gave it, checked: each
+ * tool one the browser has (`isBrowserTool`, browser/tools.ts) and paces.
+ */
+export function fromWrapperPaceInput(
+  input: WrapperPaceInput,
+  isBrowserTool: (name: string) => boolean,
+): WrapperPace {
   const pace: WrapperPace = fromPaceInput(input)
   const tools: Record<string, PaceRange> = {}
 
   for (const entry of input.tools ?? []) {
-    if (
-      !/^[a-z_]{1,40}$/.test(entry.tool) ||
-      browserPacingClass(entry.tool, { action: "open" }) === null
-    ) {
+    if (!isBrowserTool(entry.tool)) {
+      throw invalid(
+        `${entry.tool} is not a browser tool: name one such as click, type or navigate.`,
+      )
+    }
+
+    if (browserPacingClass(entry.tool, { action: "open" }) === null) {
       throw invalid(
         `${entry.tool} is not a browser tool that is paced: name one such as click, type or navigate (snapshot and the other reading tools never wait).`,
       )
@@ -273,12 +282,19 @@ export function wrapperPaceOutside(
   }
 
   for (const [tool, range] of Object.entries(pace.tools ?? {})) {
-    const pacingClass =
-      browserPacingClass(tool, { action: "open" }) ?? "browser_act"
+    // A download is an action when a click starts it and opens a page when
+    // it is by its address: its pace stays within the bounds of both.
+    const classes: BrowserPacingClass[] =
+      tool === "download"
+        ? ["browser_act", "browser_navigate"]
+        : [browserPacingClass(tool, { action: "open" }) ?? "browser_act"]
+    const over = classes.find(
+      (pacingClass) => !paceWithin(range, bounds[pacingClass]),
+    )
 
-    if (!paceWithin(range, bounds[pacingClass])) {
+    if (over) {
       out.push(
-        `before ${tool} ${describeRange(range)} (assistants may set ${describeRange(bounds[pacingClass])} for ${BROWSER_CLASS_WORDS[pacingClass]})`,
+        `before ${tool} ${describeRange(range)} (assistants may set ${describeRange(bounds[over])} for ${BROWSER_CLASS_WORDS[over]})`,
       )
     }
   }

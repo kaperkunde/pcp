@@ -16,6 +16,7 @@ import {
   type WrapperPaceInput,
 } from "../pacing/input"
 import type { WrapperPace } from "../pacing/limits"
+import { browserToolSpec } from "../browser/tools"
 import { canonicalJson } from "../permission-rules"
 import {
   findOwnerSecretByName,
@@ -409,7 +410,9 @@ export async function resolveDefinition(
     )
   }
 
-  const pace = input.pace ? fromWrapperPaceInput(input.pace) : null
+  const pace = input.pace
+    ? fromWrapperPaceInput(input.pace, (tool) => !!browserToolSpec(tool))
+    : null
 
   if (!Array.isArray(input.tools) || input.tools.length === 0) {
     throw invalid("A wrapper has at least one tool.")
