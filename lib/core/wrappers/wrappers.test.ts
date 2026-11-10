@@ -2179,6 +2179,26 @@ describe("a browser flow's own pace", () => {
     ).toEqual({ minMs: 100, maxMs: 300 })
   })
 
+  it("refuses a pace for a tool the browser does not have", async () => {
+    const unknown = await call("create_wrapper", {
+      name: "Chat",
+      tools: [FLOW_TOOL],
+      pace: { tools: [{ tool: "zoom", min_ms: 100, max_ms: 200 }] },
+    })
+    expect(unknown.isError).toBe(true)
+    expect(unknown.text).toContain("zoom is not a browser tool")
+  })
+
+  it("holds a download's own pace to the bounds of opening a page too, as one by address opens one", async () => {
+    const { view } = await approved([FLOW_TOOL], {
+      pace: { tools: [{ tool: "download", min_ms: 60, max_ms: 100 }] },
+    })
+
+    expect(view.wrapper!.paceOutside).toEqual([
+      "before download 0.06 to 0.1 s (assistants may set 0.15 to 10 s for opening a page)",
+    ])
+  })
+
   it("refuses a pace for a tool that is never paced, and one whose shortest wait is past its longest", async () => {
     const reading = await call("create_wrapper", {
       name: "Chat",
