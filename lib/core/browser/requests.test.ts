@@ -103,7 +103,7 @@ describe("the browser in the registry and the instructions", () => {
       slug: "browser",
     })
     expect(await db().mcpTool.count({ where: { serverId: server.id } })).toBe(
-      23,
+      24,
     )
 
     const scope = { ...(await resolveApiTokenFor()), publicUrl: PUBLIC_URL }
