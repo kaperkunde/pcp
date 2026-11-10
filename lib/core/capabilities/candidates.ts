@@ -21,7 +21,7 @@ import {
 
 /** Words that make a tool worth reading the schema of. */
 const WORTH_READING =
-  /ocr|optical|tesseract|convert|export|markdown|text|form|flatten|merge|combine|sign|pdf|document|image|scan|read|extract|file/i
+  /ocr|optical|tesseract|convert|export|markdown|text|form|flatten|merge|combine|sign|pdf|document|image|scan|read|extract|file|render|page/i
 
 export async function candidateTools(
   servers: GatewayServer[],

@@ -14,8 +14,9 @@ import {
   type Outcome,
 } from "../tools/outcome"
 import { capabilityPage, type Capability, type CommonItem } from "./list"
-import { MAX_READ_PROVIDERS, MAX_TRIED_PROVIDERS } from "./limits"
+import { MAX_READ_PROVIDERS, MAX_TRIED_PROVIDERS, PAGE_DPI } from "./limits"
 import {
+  countsFromZero,
   OPERATIONS,
   optionPath,
   providerName,
@@ -168,7 +169,11 @@ export function setupOutcome(
       label: cap.label,
       capability: cap.id,
     },
-    `Not done yet: ${why} PCP's page at the link below offers ${itemNames(cap.items)} for the owner to launch on one of their SSH servers, in a few clicks. Once it runs, call ${cap.tool} again with the same arguments: it uses what they launched, at the levels they give this token. ${nextMessageCheck(`${cap.tool} again`, "nothing is set up yet")}\n\n${linkLastText(url, cap.label)}`,
+    `Not done yet: ${why} ${
+      cap.items.length > 0
+        ? `PCP's page at the link below offers ${itemNames(cap.items)} for the owner to launch on one of their SSH servers, in a few clicks. Once it runs, call ${cap.tool} again with the same arguments: it uses what they launched, at the levels they give this token.`
+        : `PCP's page at the link below says what the owner can add for it. Once they have, call ${cap.tool} again with the same arguments: it uses what they added, at the levels they give this token.`
+    } ${nextMessageCheck(`${cap.tool} again`, "nothing is set up yet")}\n\n${linkLastText(url, cap.label)}`,
   )
 }
 
@@ -387,7 +392,7 @@ export async function runProvider(
   // a provider on paths), in the folder as its tools see it.
   const output =
     provider.output && seenFolder
-      ? `${seenFolder}/${provider.operation}.${op.output === "file" ? "pdf" : "md"}`
+      ? `${seenFolder}/${provider.operation}.${op.extension ?? (op.output === "file" ? "pdf" : "md")}`
       : null
 
   if (provider.output && output) {
@@ -399,7 +404,13 @@ export async function runProvider(
     const path = value === undefined ? null : optionPath(provider, option)
 
     if (path) {
-      setAt(args, path, value)
+      setAt(
+        args,
+        path,
+        typeof value === "number" && countsFromZero(provider, option, path)
+          ? value - 1
+          : value,
+      )
     }
   }
 
@@ -669,6 +680,53 @@ export function convertDocument(
         text: read.text,
         files,
         failed,
+      })
+    },
+  )
+}
+
+/** A page of a PDF made into a picture: the provider, and the picture. */
+export const PAGE_IMAGE = z.object({
+  kind: z.literal("page_image"),
+  provider: z.string(),
+  file: RESULT_HANDLE,
+})
+
+/**
+ * view_image on a PDF: the best provider that turns its page into a
+ * picture, which comes back as a handle (from the path it wrote, or an
+ * image in its answer) for view_image to show.
+ */
+export function pdfPageImage(
+  cap: Capability,
+  providers: Provider[],
+  file: InputFile,
+  page: number,
+  bridge: Bridge,
+  publicUrl: string,
+): Promise<Outcome> {
+  return firstThatWorks(
+    cap,
+    providers,
+    { main: [file] },
+    { page, dpi: PAGE_DPI, format: "png" },
+    bridge,
+    publicUrl,
+    (provider, value, files, failed) => {
+      const made = files[0] ?? firstHandle(value)
+
+      if (!made) {
+        failed.push({
+          provider: providerName(provider),
+          error: "It answered with no picture.",
+        })
+        return null
+      }
+
+      return ok({
+        kind: "page_image",
+        provider: providerName(provider),
+        file: made,
       })
     },
   )

@@ -295,6 +295,27 @@ function codec(): Promise<typeof SharpType> {
   return loaded
 }
 
+/**
+ * An image's size as it shows (turned as its EXIF says), read from its
+ * header alone; null when the codec cannot read it.
+ */
+export async function imageSize(
+  bytes: Buffer,
+): Promise<{ width: number; height: number } | null> {
+  try {
+    const sharp = await codec()
+    const metadata = await sharp(bytes, {
+      limitInputPixels: false,
+      autoOrient: true,
+      pages: 1,
+    }).metadata()
+
+    return metadata.autoOrient
+  } catch {
+    return null
+  }
+}
+
 /** Images take turns: one is decoded at a time in the process. */
 let lane: Promise<unknown> = Promise.resolve()
 

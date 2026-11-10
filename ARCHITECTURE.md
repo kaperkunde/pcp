@@ -4616,11 +4616,12 @@ A file meant to last goes into a store with `save_file`.
 
 Some work an assistant asks for by what it is, not by a tool's name: read
 the text in a picture or a scan, fill in or merge a PDF, turn a document
-into Markdown. Each is a capability (`lib/core/capabilities/list.ts`, a
-typed list: `read_image`, `pdf_edit`, `convert_document`) and one of PCP's
-own tools that every token has (`read_image`, `edit_pdf`,
-`convert_document`). The tool does no work itself: a provider does, one of
-the token's own tools.
+into Markdown, see a PDF's page as a picture. Each is a capability
+(`lib/core/capabilities/list.ts`, a typed list: `read_image`, `pdf_edit`,
+`convert_document`, `pdf_pages`) and one of PCP's own tools that every
+token has (`read_image`, `edit_pdf`, `convert_document`, `view_image`). The
+tool does no work itself: a provider does, one of the token's own tools
+(`view_image` shows a picture itself, and needs one for a PDF only).
 
 **Providers** (`providers.ts`, pure) are found among the tools the token
 can call or ask for (blocked ones are not there; the browser's never
@@ -4676,6 +4677,28 @@ digits and meter readings against the picture. `convert_document` and
 picture of a signature; a digital signature needs a certificate and is the
 provider's own tool) try providers best first until one does it, and answer
 the text, or the PDF it made, as a handle.
+
+`view_image` (`lib/core/view-image.ts`, Read) shows the assistant one of its
+kept files as MCP image content, so the model's own vision reads it rather
+than an OCR reading of its text: a PNG, JPEG, WebP or GIF by its first
+bytes (never an SVG, which is text), cropped (in the original's pixels),
+grey and as wide as asked, its longest side at most `VIEW_IMAGE_SIDE`, then
+encoded as a JPEG that fits an answer inline the way a screenshot is
+(`browser/screenshot.ts fitPicture` and `shotLadder`: quality, then size,
+down to `INLINE_IMAGE_BYTES`), decoded by `code/media.ts`. A PDF's page is
+made a picture by a `page_image` provider (`pdf_pages`: a tool that renders a
+page to an image, by its words; the page counted from 1, one less to an
+argument that counts from 0; its answer an image, kept as a handle, or a PNG
+it wrote through the file step), at `view_image`'s own tier, Read unless the
+owner chose another: a Write provider, or a file step's Write `put_file`, is
+refused naming the entry that runs it. No common item provides it yet, so
+its page says to add a server or endpoint that does. A video's frame is
+taken by ffmpeg in the sandbox, through a program of PCP's own that calls
+`pcp.video.frames` (`runProgram`, no tool callable), only while the sandbox
+runner is connected; without it the answer says video needs the sandbox. A
+page or frame made on the way is kept as a result of the token's and named,
+so a closer look (crop) does not make it again. `read_image` with
+`include_image` adds the same picture beside its readings.
 
 **No provider**: the answer is `needs_owner` with reason `setup` and the
 capability, a markdown link labelled with the capability's own words, last,

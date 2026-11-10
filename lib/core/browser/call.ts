@@ -2886,7 +2886,7 @@ async function runTool(
               text: [
                 `Tab ${current.id}: ${current.page.url()} (${label ? `${label}, ` : ""}${picture.width} by ${picture.height}${picture.scale < 1 ? ", made smaller to pass on" : ""}, JPEG quality ${picture.quality}; the owner can watch the tab: ${markdownLink(`Watch tab ${current.id}`, tabLink(publicUrl, current.id))})`,
                 pictureScale(picture),
-                `To read the text in this picture, ${await ocrWords(scope)}; read_result does not show an image.`,
+                `To read the text in this picture, ${await ocrWords(scope)}; read_result does not show an image, and view_image with crop shows you part of it closer.`,
               ].join("\n"),
             },
             {

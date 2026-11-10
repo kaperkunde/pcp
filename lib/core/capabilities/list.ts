@@ -2,9 +2,10 @@ import { stem, tokenize } from "../search"
 
 /**
  * Capabilities: things an assistant asks for by what they are (read the
- * text in a picture, fill in a PDF's form, turn a document into Markdown)
- * rather than by a tool's name. Each is one of PCP's own tools, always
- * there for every token (read_image, edit_pdf, convert_document); what does
+ * text in a picture, fill in a PDF's form, turn a document into Markdown,
+ * see a PDF's page) rather than by a tool's name. Each is one of PCP's own
+ * tools, always there for every token (read_image, edit_pdf,
+ * convert_document, view_image for a PDF); what does
  * the work is a provider: a tool among the token's own that the words in
  * providers.ts find, called at the token's own levels and tiers as
  * call_tool_* would (gateway.ts forwardCall). With no provider, the tool
@@ -18,6 +19,7 @@ export const CAPABILITY_IDS = [
   "read_image",
   "pdf_edit",
   "convert_document",
+  "pdf_pages",
 ] as const
 
 export type CapabilityId = (typeof CAPABILITY_IDS)[number]
@@ -54,6 +56,11 @@ export type Capability = {
   queryWords: string[]
   /** The common items that provide it, best first. */
   items: CommonItem[]
+  /**
+   * When its tool needs a provider, where it does other work without one
+   * (view_image shows a picture itself, and needs one for a PDF only).
+   */
+  when?: string
 }
 
 const DOCLING: CommonItem = {
@@ -148,6 +155,27 @@ export const CAPABILITIES: readonly Capability[] = [
       "extract text",
     ],
     items: [DOCLING, PDF_MCP],
+  },
+  {
+    id: "pdf_pages",
+    tool: "view_image",
+    title: "See PDF pages",
+    summary:
+      "Turns a page of a PDF into a picture, so view_image can show it to an assistant.",
+    explain:
+      "view_image shows an assistant a picture as it is, so it can see what is in it rather than only read its text. A PDF is not a picture: with a tool installed that turns a page into one, view_image hands it the PDF and shows the page it made.",
+    label: "Set up PDF pages in PCP",
+    queryWords: [
+      "pdf page image",
+      "pdf to image",
+      "pdf to png",
+      "render pdf",
+      "pdf page picture",
+      "see pdf page",
+      "view pdf page",
+    ],
+    items: [],
+    when: "for a PDF",
   },
 ]
 

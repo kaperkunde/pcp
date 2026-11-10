@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto"
 import { Client, InMemoryTransport } from "@modelcontextprotocol/client"
 import type { CallToolResult } from "@modelcontextprotocol/server"
+import sharp from "sharp"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import { createApiToken, resolveApiToken } from "../api-tokens"
@@ -505,5 +506,182 @@ describe("forwarding through the token's levels and tiers", () => {
 
     expect(answer.structured).toMatchObject({ reason: "setup" })
     expect(ran).toEqual([])
+  })
+})
+
+/** A PDF page renderer that takes the file by handle, as an API's upload. */
+function renderer(annotations: unknown, page: Record<string, unknown>) {
+  return [
+    {
+      name: "render_page",
+      description: "Render a page of a PDF to a PNG image.",
+      schema: {
+        type: "object",
+        properties: { file: FILE, ...page, dpi: { type: "integer" } },
+        required: ["file"],
+        additionalProperties: false,
+      },
+      annotations,
+    },
+  ] satisfies FakeTool[]
+}
+
+async function png(width: number, height: number): Promise<Buffer> {
+  return sharp({
+    create: { width, height, channels: 3, background: "#c00" },
+  })
+    .png()
+    .toBuffer()
+}
+
+describe("view_image on a PDF", () => {
+  it("answers with the owner's link to set up PDF pages when no tool makes one", async () => {
+    const id = await keptFile("letter.pdf", "application/pdf")
+
+    const answer = await call("view_image", { file: { $result: id } })
+
+    expect(answer.structured).toMatchObject({
+      kind: "needs_owner",
+      reason: "setup",
+      url: `${PUBLIC_URL}/plugins/pdf_pages`,
+      capability: "pdf_pages",
+    })
+    expect(answer.text).toContain("call view_image again")
+    expect(answer.text.trimEnd().split("\n").at(-1)).toBe(
+      `[Set up PDF pages in PCP](${PUBLIC_URL}/plugins/pdf_pages)`,
+    )
+    expect(ran).toEqual([])
+  })
+
+  it("has a provider make the page a picture, and shows it", async () => {
+    await server(
+      "pages",
+      renderer(
+        { readOnlyHint: true },
+        {
+          page_index: {
+            type: "integer",
+            description: "The page, 0-based.",
+          },
+        },
+      ),
+    )
+    const id = await keptFile("letter.pdf", "application/pdf")
+    const picture = await png(300, 400)
+    answers["pages/render_page"] = () => ({
+      content: [
+        {
+          type: "image",
+          data: picture.toString("base64"),
+          mimeType: "image/png",
+        },
+      ],
+    })
+
+    const client = await connect()
+    const result = (await client.callTool({
+      name: "view_image",
+      arguments: { file: { $result: id }, page: 3 },
+    })) as CallToolResult
+    await client.close()
+    const text = result.content
+      .map((part) => (part.type === "text" ? part.text : ""))
+      .join("\n")
+
+    expect(result.isError, text).toBeFalsy()
+    // Page 3, to a tool that counts from 0.
+    expect(ran).toEqual([
+      {
+        server: "pages",
+        tool: "render_page",
+        args: { file: { $result: id }, page_index: 2, dpi: 150 },
+      },
+    ])
+    expect(text).toContain("Page 3 of letter.pdf")
+    expect(text).toContain("made a picture by pages/render_page")
+    const image = result.content.find((part) => part.type === "image")!
+    expect(image.mimeType).toBe("image/jpeg")
+    expect(
+      await sharp(Buffer.from(image.data, "base64")).metadata(),
+    ).toMatchObject({ width: 300, height: 400 })
+    expect(vi.mocked(appendRequestLog)).toHaveBeenCalledWith(
+      expect.objectContaining({
+        tool: "view_image",
+        server: "pages",
+        upstreamTool: "render_page",
+      }),
+    )
+  })
+
+  it("refuses a provider above view_image's own tier (Read), naming the entry that runs it", async () => {
+    await server("pages", renderer(WRITES, { page: { type: "integer" } }))
+    const id = await keptFile("letter.pdf", "application/pdf")
+
+    const answer = await call("view_image", { file: { $result: id } })
+
+    expect(answer.isError).toBe(true)
+    expect(answer.text).toContain(
+      "pages/render_page is a Write tool, above view_image (Read)",
+    )
+    expect(answer.text).toContain("call_tool_write")
+    expect(ran).toEqual([])
+  })
+
+  it("passes a 1-based page as it is", async () => {
+    await server(
+      "pages",
+      renderer({ readOnlyHint: true }, { page_number: { type: "integer" } }),
+    )
+    const id = await keptFile("letter.pdf", "application/pdf")
+    const picture = await png(20, 20)
+    answers["pages/render_page"] = () => ({
+      content: [
+        {
+          type: "image",
+          data: picture.toString("base64"),
+          mimeType: "image/png",
+        },
+      ],
+    })
+
+    const answer = await call("view_image", { file: { $result: id } })
+
+    expect(answer.isError, answer.text).toBe(false)
+    expect(ran[0]!.args).toMatchObject({ page_number: 1 })
+  })
+})
+
+describe("read_image with include_image", () => {
+  it("shows the picture beside the readings, which stay its structured answer", async () => {
+    await server("conv", CONVERTER)
+    const kept = await keepBytes(ctx, {
+      tokenId: scope.tokenId,
+      serverId: null,
+      toolName: "test",
+      bytes: await png(64, 32),
+      mediaType: "image/png",
+      name: "sign.png",
+    })
+    answers["conv/convert_file"] = json({
+      document: { md_content: "STOP" },
+    })
+
+    const client = await connect()
+    const result = (await client.callTool({
+      name: "read_image",
+      arguments: { file: { $result: kept.id }, include_image: true },
+    })) as CallToolResult
+    await client.close()
+
+    expect(result.isError).toBeFalsy()
+    expect(result.structuredContent).toMatchObject({
+      kind: "readings",
+      readings: [{ provider: "conv/convert_file", text: "STOP" }],
+    })
+    expect(result.content.map((part) => part.type)).toEqual([
+      "text",
+      "text",
+      "image",
+    ])
   })
 })

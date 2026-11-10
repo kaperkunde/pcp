@@ -106,13 +106,16 @@ import {
 } from "./owner-link"
 import { waitForOwner } from "@kaperkunde/mcp/owner"
 import {
+  DEFAULT_IMAGE_QUALITY,
   MAX_CALLS_PER_RUN,
   MAX_CODE_CHARS,
+  MAX_IMAGE_SIDE,
   MAX_PARALLEL_CALLS,
   MAX_SLEEP_MS,
   RUN_ANSWER_MS,
   RUN_CPU_MS,
   RUN_TIMEOUT_MS,
+  VIEW_IMAGE_SIDE,
 } from "./code/limits"
 import {
   bareHandles,
@@ -219,6 +222,7 @@ import {
 } from "./servers"
 import { collectHandleIds, missingResultMessage } from "./result-handles"
 import { capabilityProviders } from "./capabilities/candidates"
+import { viewImage, type ViewImageArgs } from "./view-image"
 import {
   capabilitiesNamed,
   capability,
@@ -234,6 +238,7 @@ import {
   convertDocument,
   EDIT_OUTPUT,
   editPdf,
+  pdfPageImage,
   READ_IMAGE_OUTPUT,
   readImage,
   RESULT_HANDLE,
@@ -947,6 +952,10 @@ function tooManyCalls(value: string): Outcome {
 
 const HEADER_NAME = /^[A-Za-z0-9-]{1,100}$/
 
+/** Where a description points to view_image, for a model that sees pictures. */
+const VIEW_POINTER =
+  "If you can analyse images yourself, call view_image with the handle to see the picture; read_image only extracts its text."
+
 /**
  * The capability tools' annotations (capabilities/): they hand a file to a
  * provider, which may keep a copy in its own folder, and change nothing
@@ -1345,7 +1354,7 @@ export function buildGatewayServer(
           ? { providers: found }
           : {
               providers: [],
-              setup: `No tool of this token provides it yet: calling ${cap.tool} answers with the owner's link, "${cap.label}", to set one up.`,
+              setup: `No tool of this token provides it yet: calling ${cap.tool}${cap.when ? ` ${cap.when}` : ""} answers with the owner's link, "${cap.label}", to set one up.`,
             }
     }
 
@@ -1498,7 +1507,7 @@ export function buildGatewayServer(
 
       if (!Object.values(found).some((list) => (list?.length ?? 0) > 0)) {
         lines.push(
-          `not installed: ${cap.title} (pcp ${cap.tool}) — ${cap.summary} No tool of this token provides it yet: calling ${cap.tool} answers with the owner's link, "${cap.label}", to set one up.`,
+          `not installed: ${cap.title} (pcp ${cap.tool}) — ${cap.summary} No tool of this token provides it yet: calling ${cap.tool}${cap.when ? ` ${cap.when}` : ""} answers with the owner's link, "${cap.label}", to set one up.`,
         )
       }
     }
@@ -2630,9 +2639,13 @@ export function buildGatewayServer(
   const providersFor = (id: CapabilityId) =>
     capabilityProviders(scope.ctx, currentServers(), id)
 
-  /** The tier a capability tool calls its providers within. */
+  /** The tier a capability tool calls its providers within: its own. */
   const capabilityTier = (name: string): ToolTier =>
-    ownTiers[name] ?? tierFromAnnotations(CAPABILITY_HINTS)
+    ownTiers[name] ??
+    tierFromAnnotations(
+      ownTools.find((tool) => tool.name === name)?.annotations ??
+        CAPABILITY_HINTS,
+    )
 
   /**
    * The bridge a capability tool's calls go through: forwardCall, each call
@@ -2709,36 +2722,203 @@ export function buildGatewayServer(
   register({
     name: "read_image",
     title: "Read an image or scan",
-    description: `Read text in an image or scan (OCR): a photo, a screenshot, a scanned page or a PDF of one, by its file handle. Runs every OCR provider this token may use on it (a service the owner launched, an OCR server they added) and answers each reading with how sure it was, flagging where the readings disagree or one is unsure; check digits and meter readings against the picture. Each provider's call follows this token's levels and runs at most at this tool's tier: one the owner has not allowed yet answers with their link. With no provider installed it answers with a link for the owner to set one up; once they have, call it again. ${OWNER_LINK_RULE}`,
-    input: z.object({ file: fileArg("The picture or scan") }),
+    description: `Read text in an image or scan (OCR): a photo, a screenshot, a scanned page or a PDF of one, by its file handle. Runs every OCR provider this token may use on it (a service the owner launched, an OCR server they added) and answers each reading with how sure it was, flagging where the readings disagree or one is unsure; check digits and meter readings against the picture. include_image adds the picture itself to the answer. ${VIEW_POINTER} Each provider's call follows this token's levels and runs at most at this tool's tier: one the owner has not allowed yet answers with their link. With no provider installed it answers with a link for the owner to set one up; once they have, call it again. ${OWNER_LINK_RULE}`,
+    input: z.object({
+      file: fileArg("The picture or scan"),
+      include_image: z
+        .boolean()
+        .optional()
+        .describe(
+          "Also show you the picture, made to fit in the answer as view_image shows it (a PNG, JPEG, WebP or GIF; for a PDF's page, call view_image).",
+        ),
+    }),
     output: READ_IMAGE_OUTPUT,
     annotations: CAPABILITY_HINTS,
-    async run(args: { file: { $result: string } }, ctx) {
-      const cap = capability("read_image")
-      const files = await inputFiles([args.file])
+    async run(
+      args: { file: { $result: string }; include_image?: boolean },
+      ctx,
+    ) {
+      const read = await readImageRun(args, ctx.signal)
 
-      if (!Array.isArray(files)) {
-        return files
-      }
-
-      const providers = (await providersFor(cap.id)).read ?? []
-
-      if (providers.length === 0) {
-        return setupOutcome(
-          cap,
-          scope.publicUrl,
-          "no tool this token can use reads the text in a picture.",
-        )
-      }
-
-      return readImage(
-        cap,
-        providers,
-        files[0]!,
-        bridgeFor("read_image", ctx.signal),
-        scope.publicUrl,
-      )
+      return args.include_image ? withPicture(read, args.file) : read
     },
+  })
+
+  /** read_image's readings, as the providers made them. */
+  const readImageRun = async (
+    args: { file: { $result: string } },
+    signal: AbortSignal | undefined,
+  ): Promise<Outcome> => {
+    const cap = capability("read_image")
+    const files = await inputFiles([args.file])
+
+    if (!Array.isArray(files)) {
+      return files
+    }
+
+    const providers = (await providersFor(cap.id)).read ?? []
+
+    if (providers.length === 0) {
+      return setupOutcome(
+        cap,
+        scope.publicUrl,
+        "no tool this token can use reads the text in a picture.",
+      )
+    }
+
+    return readImage(
+      cap,
+      providers,
+      files[0]!,
+      bridgeFor("read_image", signal),
+      scope.publicUrl,
+    )
+  }
+
+  /**
+   * read_image's readings with the picture beside them (include_image), as
+   * view_image shows it; the readings stay its structured answer.
+   */
+  const withPicture = async (
+    read: Outcome,
+    file: { $result: string },
+  ): Promise<Outcome> => {
+    if (read.type !== "ok") {
+      return read
+    }
+
+    const shown = await viewImage(
+      scope,
+      { file },
+      {
+        pdfPage: async () =>
+          failure("view_image shows a PDF's page, not read_image."),
+      },
+    )
+    const value = read.value as Record<string, unknown>
+    const json = { type: "text" as const, text: JSON.stringify(value) }
+
+    if (shown.type !== "result") {
+      const why = shown.type === "error" ? shown.message : "it is not a picture"
+
+      return passOn({
+        content: [
+          json,
+          { type: "text", text: `The picture is not shown: ${why}` },
+        ],
+        structuredContent: value,
+      })
+    }
+
+    return passOn({
+      content: [json, ...shown.result.content],
+      structuredContent: value,
+    })
+  }
+
+  register({
+    name: "view_image",
+    title: "View an image",
+    description: `View an image yourself, as a picture: a photo, screenshot, scan, a PDF's page or a video's frame, by its file handle (a browser download or screenshot, a mail attachment, an upload, a stored file). PCP shows it to you as image content, made to fit in the answer (its quality, then its size, stepped down); max_width, crop, grayscale and quality shape it, and crop (in pixels of the original) looks closer at a detail. A PDF's page is made a picture by a provider this token may use, at this tool's tier and this token's levels: with none it answers with a link for the owner to set one up. A video's frame needs PCP's sandbox. An SVG is text, not shown: read it with read_result. read_image reads a picture's text (OCR) instead. ${OWNER_LINK_RULE}`,
+    input: z.object({
+      file: fileArg("The picture, PDF or video"),
+      max_width: z
+        .number()
+        .int()
+        .min(16)
+        .max(VIEW_IMAGE_SIDE)
+        .optional()
+        .describe(
+          `The widest the picture may be, in pixels (its longest side is at most ${VIEW_IMAGE_SIDE} when left out); it is made smaller still if it does not fit in the answer.`,
+        ),
+      crop: z
+        .object({
+          x: z
+            .number()
+            .int()
+            .min(0)
+            .max(MAX_IMAGE_SIDE * 4)
+            .describe("Pixels from the left edge."),
+          y: z
+            .number()
+            .int()
+            .min(0)
+            .max(MAX_IMAGE_SIDE * 4)
+            .describe("Pixels from the top edge."),
+          width: z
+            .number()
+            .int()
+            .min(1)
+            .max(MAX_IMAGE_SIDE)
+            .describe("Width in pixels."),
+          height: z
+            .number()
+            .int()
+            .min(1)
+            .max(MAX_IMAGE_SIDE)
+            .describe("Height in pixels."),
+        })
+        .optional()
+        .describe(
+          "Only this part, in pixels of the original (of the page or frame as made): the answer says the original's size.",
+        ),
+      grayscale: z
+        .boolean()
+        .optional()
+        .describe("In grey: smaller, for text and line drawings."),
+      quality: z
+        .number()
+        .int()
+        .min(10)
+        .max(95)
+        .optional()
+        .describe(
+          `JPEG quality to start from (${DEFAULT_IMAGE_QUALITY} when left out).`,
+        ),
+      page: z
+        .number()
+        .int()
+        .min(1)
+        .max(100_000)
+        .optional()
+        .describe(
+          "For a PDF: the page to show, from 1 (the first when left out).",
+        ),
+      time_s: z
+        .number()
+        .min(0)
+        .max(1_000_000)
+        .optional()
+        .describe(
+          "For a video: the moment to show, in seconds from the start (the middle when left out).",
+        ),
+    }),
+    annotations: READS,
+    run: (args: ViewImageArgs, ctx) =>
+      viewImage(scope, args, {
+        pdfPage: async (file, page) => {
+          const cap = capability("pdf_pages")
+          const providers = (await providersFor(cap.id)).page_image ?? []
+
+          if (providers.length === 0) {
+            return setupOutcome(
+              cap,
+              scope.publicUrl,
+              "no tool this token can use turns a PDF's page into a picture.",
+            )
+          }
+
+          return pdfPageImage(
+            cap,
+            providers,
+            file,
+            page,
+            bridgeFor("view_image", ctx.signal),
+            scope.publicUrl,
+          )
+        },
+        ...(ctx.signal ? { signal: ctx.signal } : {}),
+      }),
   })
 
   register({
@@ -3016,7 +3196,7 @@ export function buildGatewayServer(
     find_files:
       "Find files by name: in a folder of a store and every folder under it, with * and ? in the name.",
     get_file:
-      "Get a file as a handle: one file of a store as a kept result's handle, {\"$result\": \"<id>\"}, to pass on whole to another tool (send_email's attachments, save_file, an API's file field) without reading it yourself; a text file's start comes back as text too.",
+      "Get a file as a handle: one file of a store as a kept result's handle, {\"$result\": \"<id>\"}, to pass on whole to another tool (send_email's attachments, save_file, an API's file field) without reading it yourself; a text file's start comes back as text too. To see a picture, PDF page or video frame yourself, pass the handle to view_image.",
     share_file:
       "Share a stored file by public link: a download link to one file of a store, for someone else or another device, which anyone holding it can use until it expires (an hour and a few downloads by default, at most a week); its bytes never pass through you. Give the link only to whom it is for.",
     save_file:
@@ -3377,7 +3557,7 @@ export function buildGatewayServer(
   register({
     name: "read_result",
     title: "Read the rest of a long answer",
-    description: `Read a kept result by id (a long answer, a $result handle), a slice at a time: a long answer ends with a notice naming its result id, and a handle {"$result": "<id>"} names one. A file that is not text is described, not shown; pass its handle to the tool that should get it. Results are kept for a day, for this token only.`,
+    description: `Read a kept result by id (a long answer, a $result handle), a slice at a time: a long answer ends with a notice naming its result id, and a handle {"$result": "<id>"} names one. A file that is not text is described, not shown; pass its handle to the tool that should get it (view_image shows you a picture). Results are kept for a day, for this token only.`,
     input: z.object({
       id: z
         .string()
@@ -3727,7 +3907,7 @@ export function buildGatewayServer(
       name: "check_upload",
       title: "Check an upload link",
       description:
-        'Check an upload link for the files the owner uploaded to it (from create_upload_link), each as a handle {"$result": id} to pass where a tool wants a file, and whether the link takes more. Call it on the owner\'s next message after the link, whatever it says, before you send the link again or assume nothing has arrived; never in the same reply as the link. While the link is open, it waits up to 45 seconds for them to finish (Done, or the last file).',
+        'Check an upload link for the files the owner uploaded to it (from create_upload_link), each as a handle {"$result": id} to pass where a tool wants a file, and whether the link takes more. Call it on the owner\'s next message after the link, whatever it says, before you send the link again or assume nothing has arrived; never in the same reply as the link. While the link is open, it waits up to 45 seconds for them to finish (Done, or the last file). To see an uploaded picture, PDF page or video frame yourself, pass its handle to view_image.',
       input: z.object({
         id: z
           .string()

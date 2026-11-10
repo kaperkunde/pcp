@@ -39,6 +39,7 @@ export type OperationId =
   | "flatten"
   | "merge"
   | "sign"
+  | "page_image"
 
 /** One of the token's tools, as detection reads it. */
 export type CandidateTool = {
@@ -117,6 +118,11 @@ export type OperationOption = {
    * option is left out where the enum does not.
    */
   item?: string
+  /**
+   * The value counts from 1 (a page): an argument that counts from 0, by
+   * its name or description, gets one less (countsFromZero).
+   */
+  oneBased?: boolean
 }
 
 type Operation = {
@@ -129,8 +135,13 @@ type Operation = {
   /** Names that do this, ranked higher. */
   nameBonus?: RegExp
   inputs: "one" | "many" | "pdf+image"
-  /** What it answers with: a value, or a file it writes. */
-  output: "value" | "file"
+  /**
+   * What it answers with: a value, a file it writes, or a picture, which it
+   * writes (to an output path) or answers with (an image, kept as a handle).
+   */
+  output: "value" | "file" | "image"
+  /** The extension of the file it writes, where PCP names it. */
+  extension?: string
   /** Arguments it sets where the tool has them. */
   options: Record<string, OperationOption>
 }
@@ -243,6 +254,40 @@ export const OPERATIONS: Record<OperationId, Operation> = {
     options: {
       page: { names: ["page"], type: "integer" },
       rect: { names: ["rect", "box"], type: "array" },
+    },
+  },
+  page_image: {
+    id: "page_image",
+    capability: "pdf_pages",
+    match: [
+      {
+        name: /render|rasteri[sz]e|thumbnail|to_?(image|png|jpe?g|picture)|(page|pdf)s?_?(image|picture|png|jpe?g)/i,
+        text: [/pdf|page/i],
+      },
+      {
+        text: [
+          /\b(render|rasteri[sz]e|convert|turn|export)\w*\b[^.]{0,40}\b(pages?|pdfs?)\b[^.]{0,40}\b(images?|png|jpe?g|pictures?|bitmaps?)\b/i,
+        ],
+      },
+    ],
+    nameNot:
+      /extract_?images?|images?_?(info|to|from)|from_?image|signature|insert|add|watermark|ocr|text|stamp|replace|remove|delete|compare/i,
+    nameBonus: /render|page|png|picture/i,
+    inputs: "one",
+    output: "image",
+    extension: "png",
+    options: {
+      page: {
+        names: ["page", "page_number", "page_num", "page_no", "page_index"],
+        type: "integer",
+        oneBased: true,
+      },
+      dpi: { names: ["dpi", "resolution"], type: "integer" },
+      format: {
+        names: ["format", "image_format", "output_format"],
+        type: "string",
+        item: "png",
+      },
     },
   },
 }
@@ -678,6 +723,7 @@ export function findProviders(
 
       const output = files.input.kind === "path" ? slots.output : null
 
+      // A picture may come back in the answer instead.
       if (op.output === "file" && !output) {
         // An edit whose result PCP cannot fetch is no use here.
         continue
@@ -822,6 +868,42 @@ export function optionPath(
   }
 
   return null
+}
+
+/**
+ * Whether the argument an option goes to counts from 0 (an index), by its
+ * name or what its description says, where the option counts from 1.
+ */
+export function countsFromZero(
+  provider: Provider,
+  option: OperationOption,
+  path: string[],
+): boolean {
+  if (!option.oneBased) {
+    return false
+  }
+
+  const prop = Object.values(provider.props).find(
+    (entry) => entry.path.join(".") === path.join("."),
+  )
+  const name = path.at(-1) ?? ""
+  const description =
+    typeof prop?.schema.description === "string" ? prop.schema.description : ""
+
+  if (
+    /\b(1|one)[- ]?(based|indexed)\b|\bfrom 1\b|\bfirst page is 1\b/i.test(
+      description,
+    )
+  ) {
+    return false
+  }
+
+  return (
+    /index/i.test(name) ||
+    /\b(0|zero)[- ]?(based|indexed)\b|\b(start(s|ing)?|count(s|ing)?) (at|from) (0|zero)\b|\bfirst page is 0\b/i.test(
+      description,
+    )
+  )
 }
 
 /** The name assistants know a provider by: server/tool. */
