@@ -1109,7 +1109,7 @@ async function paceAction(
     return null
   }
 
-  const paced = await paceSite(scope.ctx.vaultId, site, "browser_act", {
+  const paced = await paceSite(scope.ctx, site, "browser_act", {
     serverId: scope.serverId,
     signal: scope.signal,
     deadline: scope.deadline,

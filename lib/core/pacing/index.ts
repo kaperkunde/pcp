@@ -1,3 +1,4 @@
+import type { VaultContext } from "../context"
 import { markedReadOnly } from "../read-only"
 import { readPacingConfig, resolvePolicy } from "./config"
 import {
@@ -62,7 +63,7 @@ function siteKey(vaultId: string, host: string): string {
  * (tool-tiers.ts, through read-only.ts), or one that changes things.
  */
 export async function paceServerCall(
-  vaultId: string,
+  ctx: VaultContext,
   server: { id: string; name: string },
   toolName: string,
   { signal, deadline }: PaceOptions = {},
@@ -74,7 +75,7 @@ export async function paceServerCall(
   const pacingClass: PacingClass = (await markedReadOnly(server.id, toolName))
     ? "server_read"
     : "server_change"
-  const policy = resolvePolicy(await readPacingConfig(vaultId), pacingClass, {
+  const policy = resolvePolicy(await readPacingConfig(ctx), pacingClass, {
     serverId: server.id,
   })
 
@@ -82,7 +83,7 @@ export async function paceServerCall(
     return null
   }
 
-  return waitForSlot(serverKey(vaultId, server.id), server.name, policy, {
+  return waitForSlot(serverKey(ctx.vaultId, server.id), server.name, policy, {
     signal,
     deadline,
   })
@@ -96,7 +97,7 @@ export async function paceServerCall(
  * its override) or else by the vault's provider.
  */
 export async function paceEmbeddings(
-  vaultId: string,
+  ctx: VaultContext,
   provider: { serverId?: string; name: string },
   { signal, deadline }: PaceOptions = {},
 ): Promise<PacedRefusal | null> {
@@ -104,7 +105,7 @@ export async function paceEmbeddings(
     return null
   }
 
-  const policy = resolvePolicy(await readPacingConfig(vaultId), "server_read", {
+  const policy = resolvePolicy(await readPacingConfig(ctx), "server_read", {
     serverId: provider.serverId,
   })
 
@@ -114,8 +115,8 @@ export async function paceEmbeddings(
 
   return waitForSlot(
     provider.serverId
-      ? serverKey(vaultId, provider.serverId)
-      : `${vaultId}\nembeddings`,
+      ? serverKey(ctx.vaultId, provider.serverId)
+      : `${ctx.vaultId}\nembeddings`,
     provider.name,
     policy,
     { signal, deadline },
@@ -127,7 +128,7 @@ export async function paceEmbeddings(
  * tab's site (the browser's own server id given, for its override).
  */
 export async function paceSite(
-  vaultId: string,
+  ctx: VaultContext,
   host: string,
   pacingClass: Extract<PacingClass, "browser_act" | "web_fetch">,
   { serverId, signal, deadline }: PaceOptions & { serverId?: string } = {},
@@ -136,7 +137,7 @@ export async function paceSite(
     return null
   }
 
-  const policy = resolvePolicy(await readPacingConfig(vaultId), pacingClass, {
+  const policy = resolvePolicy(await readPacingConfig(ctx), pacingClass, {
     site: host,
     serverId,
   })
@@ -145,7 +146,7 @@ export async function paceSite(
     return null
   }
 
-  return waitForSlot(siteKey(vaultId, host), host, policy, {
+  return waitForSlot(siteKey(ctx.vaultId, host), host, policy, {
     signal,
     deadline,
   })

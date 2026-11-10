@@ -8,7 +8,7 @@ import {
 import type { VaultContext } from "../context"
 import { db } from "../db"
 import { invalid } from "../errors"
-import { getVaultSetting, setSetting } from "../settings"
+import { getSetting, setSetting } from "../settings"
 import { EMBED_MAX_MODEL_CHARS, EMBED_MAX_URL_CHARS } from "./limits"
 
 /**
@@ -85,9 +85,9 @@ const ConfigSchema = z.discriminatedUnion("provider", [
  * one (a hand-edited export) counts as none: search keeps to keywords.
  */
 export async function readEmbeddingsConfig(
-  vaultId: string,
+  ctx: VaultContext,
 ): Promise<EmbeddingsConfig | null> {
-  const raw = await getVaultSetting(vaultId, SETTING_EMBEDDINGS)
+  const raw = await getSetting(ctx, SETTING_EMBEDDINGS)
 
   if (!raw) {
     return null
@@ -239,7 +239,7 @@ export async function embeddingsOverview(
   ctx: VaultContext,
 ): Promise<EmbeddingsOverview> {
   const [config, secrets, endpoints, registered, vectors] = await Promise.all([
-    readEmbeddingsConfig(ctx.vaultId),
+    readEmbeddingsConfig(ctx),
     db().secret.findMany({
       where: { vaultId: ctx.vaultId, kind: "text" },
       select: { id: true, name: true },

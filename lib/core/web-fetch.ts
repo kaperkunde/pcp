@@ -377,7 +377,7 @@ export async function runFetch(
 ): Promise<CallToolResult> {
   const host = fetchHostOf(args)
   const pace = async (site: string) => {
-    const paced = await paceSite(ctx.vaultId, site, "web_fetch", { deadline })
+    const paced = await paceSite(ctx, site, "web_fetch", { deadline })
     return paced ? pacedResult(paced) : null
   }
   const options = {

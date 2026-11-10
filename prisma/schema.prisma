@@ -93,7 +93,6 @@ model Session {
   expiresAt DateTime @map("expires_at")
   createdAt DateTime @default(now()) @map("created_at")
   lastSeenAt DateTime @default(now()) @map("last_seen_at")
-  userAgent String?  @map("user_agent")
 
   @@index([vaultId])
   @@map("session")
