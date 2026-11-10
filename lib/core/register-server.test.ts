@@ -32,6 +32,7 @@ import { createSshServer } from "./ssh/hosts"
 import { scratchDatabase } from "./test-db"
 import { setupVault } from "./vault"
 import { secretNameWhere } from "./secret-meta"
+import { TOKEN_NAME_SELECT, tokenName } from "./token-names"
 
 // register_server as an assistant meets it: through the gateway's MCP
 // interface, with its arguments checked and the request the owner is shown.
@@ -1843,8 +1844,8 @@ describe("levels and tiers proposed with it (tool_access)", () => {
   })
 
   async function tokenId() {
-    return (await db().apiToken.findFirstOrThrow({ where: { name: "Claude" } }))
-      .id
+    const rows = await db().apiToken.findMany({ select: TOKEN_NAME_SELECT })
+    return rows.find((row) => tokenName(ctx, row) === "Claude")!.id
   }
 
   async function decide(access?: unknown) {

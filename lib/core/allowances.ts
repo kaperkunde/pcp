@@ -2,8 +2,10 @@ import { requireToken } from "./api-tokens"
 import { endSecretAllowance, listSecretAllowances } from "./browser-secrets"
 import { ALLOW_FOR_MINUTES, type AllowForMinutes } from "./constants"
 import type { VaultContext } from "./context"
+import { keyedHash } from "./crypto"
 import { db } from "./db"
 import { invalid } from "./errors"
+import { openText, sealText, type Sealed } from "./sealed"
 import { accessKey } from "./tool-access"
 
 /**
@@ -81,20 +83,69 @@ export async function allowToolFor(
   return until
 }
 
+/**
+ * A site allowance's host is kept as a keyed hash under the vault's key
+ * (the row's key) with the host itself sealed beside it as
+ * "api_token_site_allowance:<token id>:<hash>" (#96). A row from before
+ * holds the host in plain text and nothing sealed.
+ */
+function siteAllowanceKey(ctx: VaultContext, host: string): string {
+  return keyedHash(ctx.dek, "pcp site allowance", host)
+}
+
+function siteAllowanceAad(tokenId: string, key: string): string {
+  return `api_token_site_allowance:${tokenId}:${key}`
+}
+
+export function sealedSiteAllowance(
+  ctx: VaultContext,
+  tokenId: string,
+  host: string,
+): { host: string; sealed: Sealed } {
+  const key = siteAllowanceKey(ctx, host)
+  return {
+    host: key,
+    sealed: sealText(ctx.dek, siteAllowanceAad(tokenId, key), host),
+  }
+}
+
+function openSiteAllowance(
+  ctx: VaultContext,
+  row: { tokenId: string; host: string; sealed: Uint8Array | null },
+): string {
+  return openText(
+    ctx.dek,
+    siteAllowanceAad(row.tokenId, row.host),
+    row.sealed,
+    row.host,
+  )
+}
+
+/** The rows a host may be kept as: its hash, or itself from before. */
+function siteAllowanceHosts(ctx: VaultContext, host: string): string[] {
+  return [siteAllowanceKey(ctx, host), host]
+}
+
 /** Lets one token reach one site without asking, for `minutes` from `now`. */
 export async function allowSiteFor(
+  ctx: VaultContext,
   tokenId: string,
   host: string,
   minutes: AllowForMinutes,
   now = new Date(),
 ): Promise<Date> {
   const until = untilFrom(minutes, now)
+  const row = sealedSiteAllowance(ctx, tokenId, host)
 
-  await db().apiTokenSiteAllowance.upsert({
-    where: { tokenId_host: { tokenId, host } },
-    create: { tokenId, host, until },
-    update: { until },
-  })
+  await db().$transaction([
+    // One from before, in plain text, gives way to the sealed one.
+    db().apiTokenSiteAllowance.deleteMany({ where: { tokenId, host } }),
+    db().apiTokenSiteAllowance.upsert({
+      where: { tokenId_host: { tokenId, host: row.host } },
+      create: { tokenId, ...row, until },
+      update: { until },
+    }),
+  ])
 
   return until
 }
@@ -119,15 +170,18 @@ export async function loadToolAllowances(
 
 /** The token's sites allowed for now, by host, to when. */
 export async function loadSiteAllowances(
+  ctx: VaultContext,
   tokenId: string,
   now = new Date(),
 ): Promise<Map<string, number>> {
   const rows = await db().apiTokenSiteAllowance.findMany({
     where: { tokenId, until: { gt: now } },
-    select: { host: true, until: true },
+    select: { tokenId: true, host: true, sealed: true, until: true },
   })
 
-  return new Map(rows.map((row) => [row.host, row.until.getTime()]))
+  return new Map(
+    rows.map((row) => [openSiteAllowance(ctx, row), row.until.getTime()]),
+  )
 }
 
 /** Whether an allowance that lasts to `until` (ms) still holds at `now`. */
@@ -167,7 +221,7 @@ export async function listTokenAllowances(
     })),
     ...sites.map((row): TokenAllowance => ({
       kind: "site",
-      host: row.host,
+      host: openSiteAllowance(ctx, row),
       until: row.until,
     })),
     ...secrets.map((row): TokenAllowance => ({
@@ -208,7 +262,7 @@ export async function endAllowance(
     })
   } else {
     await db().apiTokenSiteAllowance.deleteMany({
-      where: { tokenId, host: target.host },
+      where: { tokenId, host: { in: siteAllowanceHosts(ctx, target.host) } },
     })
   }
 }

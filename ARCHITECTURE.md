@@ -68,6 +68,34 @@ associated data (a ciphertext cannot be moved to another row):
 - the login name and note of one of the owner's secrets
   (`secret.login_name` with `secret:<id>:login`, `secret.note` with
   `secret:<id>:note`): not secret, but theirs,
+- what describes the owner's things (#96), sealed so that a copy of the
+  database does not show whom a vault belongs to or what it reaches
+  (`lib/core/sealed.ts`): a secret's name and description
+  (`secret.meta`, `secret:<id>:meta`), an API token's name
+  (`api_token.sealed_name`, `api_token:<id>:name`), the vault's settings
+  but the public address, which a request with no key reads
+  (`setting.value` as `pcp-sealed:v1:…`, `setting:<vault id>:<key>`), and
+  the sites a secret is typed at, a token's sites allowed for a while and
+  web fetch's site and script lines (each kept as a keyed hash of the site,
+  the site sealed beside it: `secret_browser_origin:<secret id>:<hash>`,
+  `api_token_site_allowance:<token id>:<hash>`, `web_fetch_rule:<id>:key`).
+  What is found by its value is found by a keyed hash (`keyedHash` in
+  `crypto.ts`: HMAC-SHA256 under a key HKDF derives from the DEK per
+  label), a secret's name in `secret.name_key`, unique in the vault. A
+  linked file's name is sealed under its link's key (`file_link_name:<id>`,
+  `link-names.ts`) and the asking token's name on an upload page under the
+  page's (`upload_link_assistant:<id>`), since those pages hold no other
+  key. Rows from before keep the old plain columns (renamed `plainName`
+  and the like in the client, so nothing reads them by accident) until
+  `ensureSealed` (`lib/core/sealing/convert.ts`) seals them, a batch per
+  table per request through `after()` from `/mcp` and the owner's pages,
+  then rebuilds the database file once (see "Data on disk"); every reader
+  takes either form meanwhile, and an older export restores in the plain
+  form and is sealed the same way. The vault's own name (`vault.name`) stays
+  plain on purpose: the sign-in page shows it before anything is unlocked.
+  Still plain, for later: a server's name, address, description and
+  sign-in details, its tools and schemas, slugs and tool names, a kept
+  result's name,
 - a store's key (`storage_root.store_key`, `storage_store:<server id>`),
   which in turn wraps each file's key in an encrypted store, and the
   store's index of names, sizes and times (`storage_entry.meta`,
@@ -3734,8 +3762,12 @@ the vault's id), every token the file has live that the vault being replaced
 has revoked, or no longer has, is written revoked (the vault's `revoked_at`,
 or now for a deleted one) with its grant blanked as revoking blanks it
 (`carriedRevocations`, read inside the transaction before the wipe). The
-preview lists the file's tokens by name and prefix and marks those that
-come back revoked. At setup, or for another PCP's export, the vault knows
+preview lists the file's tokens by prefix and marks those that come back
+revoked; their names are sealed in the file under the vault's own key, so
+the preview shows them only when the owner also types the password of the
+vault in the file, which opens the file's password grant for the preview
+alone (`readExport`'s `vaultPassword`; its parameters held to an export's
+own, a wrong one refused, the key kept nowhere). At setup, or for another PCP's export, the vault knows
 nothing of them and the file is written as it is. A newer export of a vault
 restored here from an older one has tokens this vault never had; they come
 back revoked too, and the owner makes them again.

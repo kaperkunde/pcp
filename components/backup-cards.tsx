@@ -213,6 +213,7 @@ export function RestoreCard({
   )
   const [file, setFile] = useState<File | null>(null)
   const [exportPassword, setExportPassword] = useState("")
+  const [vaultPassword, setVaultPassword] = useState("")
   const [preview, setPreview] = useState<ExportPreview | null>(null)
   const [localError, setLocalError] = useState<string | null>(null)
   // A result the owner has gone back from: its message is not shown again.
@@ -249,6 +250,7 @@ export function RestoreCard({
     const data = new FormData()
     data.set("file", file)
     data.set("exportPassword", exportPassword)
+    data.set("vaultPassword", vaultPassword)
     // Not from a <form action>, so React is told it is an action's work.
     startTransition(() => dispatch(data))
   }
@@ -263,6 +265,7 @@ export function RestoreCard({
     const data = new FormData(event.currentTarget)
     data.set("file", file)
     data.set("exportPassword", exportPassword)
+    data.set("vaultPassword", vaultPassword)
     data.set("confirm", "on")
     // Not from a <form action>, so React is told it is an action's work.
     startTransition(() => dispatch(data))
@@ -273,6 +276,7 @@ export function RestoreCard({
     setPreview(null)
     setFile(null)
     setExportPassword("")
+    setVaultPassword("")
     setLocalError(null)
   }
 
@@ -315,6 +319,20 @@ export function RestoreCard({
               value={exportPassword}
               onChange={(event) => setExportPassword(event.currentTarget.value)}
               required
+            />
+          </Field>
+          <Field
+            label="Password of the vault in the file"
+            htmlFor="restore-vault-password"
+            hint="The password you signed in with when the export was made. Names in the file are sealed under it, so the check shows them only with it."
+          >
+            <Input
+              id="restore-vault-password"
+              name="vaultPassword"
+              type="password"
+              autoComplete="off"
+              value={vaultPassword}
+              onChange={(event) => setVaultPassword(event.currentTarget.value)}
             />
           </Field>
           {preview === null ? (
@@ -462,7 +480,9 @@ function PreviewList({ preview }: { preview: ExportPreview }) {
             <ul className="flex flex-col gap-1" data-testid="restore-tokens">
               {preview.tokens.map((token, index) => (
                 <li key={index}>
-                  {token.name}
+                  {token.name ?? (
+                    <span className="text-muted-foreground">Name sealed</span>
+                  )}
                   {token.prefix ? (
                     <span className="text-muted-foreground">
                       {" "}

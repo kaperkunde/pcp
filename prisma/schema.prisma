@@ -108,7 +108,12 @@ model ApiToken {
   vault           Vault     @relation(fields: [vaultId], references: [id], onDelete: Cascade)
   grantId         String    @unique @map("grant_id")
   grant           KeyGrant  @relation(fields: [grantId], references: [id], onDelete: Cascade)
-  name            String
+  /// The name from before it was sealed (#96): read only while sealedName
+  /// is null, "" once the row is sealed.
+  plainName       String    @map("name")
+  /// The name the owner gave it: AES-256-GCM under the vault's data key
+  /// with "api_token:<id>:name" as associated data (lib/core/token-names.ts).
+  sealedName      Bytes?    @map("sealed_name")
   /// The first characters of the token, so the owner can tell them apart.
   prefix          String
   allowAllServers Boolean   @default(true) @map("allow_all_servers")
@@ -260,8 +265,13 @@ model ApiTokenToolAllowance {
 model ApiTokenSiteAllowance {
   tokenId   String   @map("token_id")
   token     ApiToken @relation(fields: [tokenId], references: [id], onDelete: Cascade)
-  /// The site's host, as WebFetchRule keys it.
+  /// The site's host as a keyed hash under the vault's key, the host itself
+  /// in sealed (#96); a row from before holds the host in plain text here
+  /// and no sealed one.
   host      String
+  /// The host, AES-256-GCM under the vault's data key with
+  /// "api_token_site_allowance:<token id>:<host hash>" as associated data.
+  sealed    Bytes?
   until     DateTime
   createdAt DateTime @default(now()) @map("created_at")
 
@@ -356,9 +366,15 @@ model WebFetchRule {
   scope         String
   /// method | site
   kind          String
-  /// A method: GET | POST | PUT | PATCH | DELETE | OTHER. A site: its host,
-  /// lower-case, with the port when it is not the scheme's own.
+  /// A method: GET | POST | PUT | PATCH | DELETE | OTHER. A site (and a
+  /// script's site): its host, lower-case, with the port when it is not the
+  /// scheme's own, kept as a keyed hash of it under the vault's key with the
+  /// host in sealed (lib/core/fetch-rule-keys.ts, #96); a row from before
+  /// holds the host itself. An exit: its id. private: "private".
   key           String
+  /// A site's host, AES-256-GCM under the vault's data key with
+  /// "web_fetch_rule:<id>:key" as associated data. Null for other kinds.
+  sealed        Bytes?
   /// allowed | ask | blocked. Null on a site: it follows the method rules.
   access        String?
   /// assistant (first seen in a fetch) | owner (added in PCP)
@@ -582,8 +598,13 @@ model Secret {
 model SecretBrowserOrigin {
   secretId  String   @map("secret_id")
   secret    Secret   @relation(fields: [secretId], references: [id], onDelete: Cascade)
-  /// https://host[:port], as URL.origin writes it.
+  /// https://host[:port], as URL.origin writes it: kept as a keyed hash of
+  /// it under the vault's key, the origin itself in sealed (#96). A row
+  /// from before holds the origin in plain text here and no sealed one.
   origin    String
+  /// The origin, AES-256-GCM under the vault's data key with
+  /// "secret_browser_origin:<secret id>:<origin hash>" as associated data.
+  sealed    Bytes?
   /// The site and its subdomains: an origin at the same scheme and port
   /// whose host ends in this one's, within the same registrable domain
   /// (the public suffix list, browser-secrets.ts). Never another domain.
@@ -1218,7 +1239,12 @@ model FileLink {
   secretHash String    @unique @map("secret_hash")
   /// The kept result a download serves, or the id an upload is kept under.
   resultId   String    @map("result_id")
-  name       String?
+  /// The file's name from before it was sealed (#96): null on a new row.
+  plainName  String?   @map("name")
+  /// The file's name, AES-256-GCM under the link's key with
+  /// "file_link_name:<id>", so only the link (or the token, through an
+  /// upload's wrapped key) shows it. Null for a file with no name.
+  sealedName Bytes?    @map("sealed_name")
   mediaType  String    @map("media_type")
   /// The file's bytes; 0 for an upload that has not arrived.
   length     Int       @default(0)
@@ -1305,6 +1331,10 @@ model UploadLink {
   /// it ({store, folder} as JSON): AES-256-GCM under the link's key with
   /// "upload_link_destination:<id>"; null for none.
   destination Bytes?
+  /// The name of the token that asked, as the page shows it: AES-256-GCM
+  /// under the link's key with "upload_link_assistant:<id>", since the page
+  /// has no other key (#96). Null on a page from before.
+  assistant   Bytes?
 
   @@index([tokenId])
   @@index([expiresAt])

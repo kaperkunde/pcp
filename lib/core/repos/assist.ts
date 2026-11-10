@@ -18,6 +18,7 @@ import {
 import { applyMerged, pendingChange, type ChangeShown } from "./sync"
 import { localItem } from "./local"
 import { hiddenCharacter } from "../memories"
+import { TOKEN_NAME_SELECT, tokenName } from "../token-names"
 
 /**
  * Assistants helping with what sync left for the owner: a conflict, or a
@@ -586,11 +587,14 @@ export async function applyRepoChange(
   const document = await documentOf(ask.ref, ask.files)
   const token = await db().apiToken.findFirst({
     where: { id: tokenId, vaultId: ctx.vaultId },
-    select: { name: true },
+    select: TOKEN_NAME_SELECT,
   })
   const notes = await applyMerged(ctx, item, document, {
     remoteSha: ask.pendingSha,
-    proposer: { by: "assistant", tokenName: token?.name ?? "an assistant" },
+    proposer: {
+      by: "assistant",
+      tokenName: token ? tokenName(ctx, token) : "an assistant",
+    },
   })
 
   return [`Applied ${item.data.path} as you were shown it.`, ...notes].join(" ")

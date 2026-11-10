@@ -24,7 +24,13 @@ under keys derived from your password (scrypt, 64 MiB), the recovery key, a
 session cookie, an API token or what an app that signed in holds (its access
 and refresh tokens) — none of which are on the disk. The browser's
 sign-ins, kept results and your notes on servers and skills are in the vault
-too, encrypted the same way. See
+too, encrypted the same way, and so are the names and descriptions of your
+secrets, your API tokens' names, the sites your secrets are typed at and the
+sites web fetch keeps levels for, and your settings (but the public address).
+Some descriptive details are still in plain text: the vault's own name,
+which the sign-in page shows before you unlock, and, until a later release
+seals them too, your servers' names, addresses and descriptions and their
+tools. See
 [ARCHITECTURE.md](ARCHITECTURE.md#encryption). In the Mac app, the window's
 session cookie and the Touch ID key do sit in the app's folder, but encrypted
 under a key in your login keychain, which a copy of the disk does not open.

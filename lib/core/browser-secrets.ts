@@ -19,6 +19,7 @@ import {
 } from "./browser/types"
 import { SECRET_ALLOW_MINUTES } from "./constants"
 import type { VaultContext } from "./context"
+import { keyedHash } from "./crypto"
 import { db } from "./db"
 import { invalid, notFound, PcpError } from "./errors"
 import { checkPasswordRecipe } from "./generate-password"
@@ -30,6 +31,7 @@ import {
   secretName,
   secretNameWhere,
 } from "./secret-meta"
+import { openText, sealText, type Sealed } from "./sealed"
 import {
   checkLoginName,
   createSecret,
@@ -40,6 +42,7 @@ import {
   validateSecretValue,
   type OwnerSecretKind,
 } from "./secrets"
+import { TOKEN_NAME_SELECT, tokenName } from "./token-names"
 
 /**
  * The owner's secrets in the browser: an assistant's type call names one as
@@ -268,15 +271,64 @@ export function coveringOrigins(origin: string): string[] {
   return parents
 }
 
+/**
+ * A secret's site is kept as a keyed hash of its origin under the vault's
+ * key, the origin itself sealed beside it (#96); a row from before holds
+ * the origin in plain text and nothing sealed, so a lookup asks for both.
+ */
+function originKey(ctx: VaultContext, origin: string): string {
+  return keyedHash(ctx.dek, "pcp secret origin", origin)
+}
+
+function originAad(secretId: string, key: string): string {
+  return `secret_browser_origin:${secretId}:${key}`
+}
+
+/** What a row of the secret's site at `origin` stores. */
+export function sealedOrigin(
+  ctx: VaultContext,
+  secretId: string,
+  origin: string,
+): { origin: string; sealed: Sealed } {
+  const key = originKey(ctx, origin)
+  return {
+    origin: key,
+    sealed: sealText(ctx.dek, originAad(secretId, key), origin),
+  }
+}
+
+/** A site row's origin, opened (or as it was, from before). */
+export function openOrigin(
+  ctx: VaultContext,
+  row: { secretId: string; origin: string; sealed: Uint8Array | null },
+): string {
+  return openText(
+    ctx.dek,
+    originAad(row.secretId, row.origin),
+    row.sealed,
+    row.origin,
+  )
+}
+
+/** The rows an origin may be kept as. */
+function originKeys(ctx: VaultContext, origins: string[]): string[] {
+  return [...origins, ...origins.map((origin) => originKey(ctx, origin))]
+}
+
 /** The rows that could cover an origin: its own, and its parents' with subdomains. */
-function coveringWhere(origin: string) {
+function coveringWhere(ctx: VaultContext, origin: string) {
   const parents = coveringOrigins(origin)
 
   return {
     OR: [
-      { origin },
+      { origin: { in: originKeys(ctx, [origin]) } },
       ...(parents.length > 0
-        ? [{ origin: { in: parents }, includeSubdomains: true }]
+        ? [
+            {
+              origin: { in: originKeys(ctx, parents) },
+              includeSubdomains: true,
+            },
+          ]
         : []),
     ],
   }
@@ -316,34 +368,53 @@ export const MAX_SITES_PER_SECRET = 50
  * with subdomains (siteCovers).
  */
 export async function isBoundOrigin(
+  ctx: VaultContext,
   secretId: string,
   origin: string,
 ): Promise<boolean> {
   const rows = await db().secretBrowserOrigin.findMany({
-    where: { secretId, ...coveringWhere(origin) },
-    select: { origin: true, includeSubdomains: true },
+    where: { secretId, ...coveringWhere(ctx, origin) },
+    select: {
+      secretId: true,
+      origin: true,
+      sealed: true,
+      includeSubdomains: true,
+    },
   })
 
   return rows.some((row) =>
     siteCovers(
-      { origin: row.origin, subdomains: row.includeSubdomains },
+      { origin: openOrigin(ctx, row), subdomains: row.includeSubdomains },
       origin,
     ),
   )
 }
 
+function byOrigin(a: SecretSite, b: SecretSite): number {
+  return a.origin < b.origin ? -1 : a.origin > b.origin ? 1 : 0
+}
+
 /** A secret's sites, as they are now. */
-export async function sitesOf(secretId: string): Promise<SecretSite[]> {
+export async function sitesOf(
+  ctx: VaultContext,
+  secretId: string,
+): Promise<SecretSite[]> {
   const rows = await db().secretBrowserOrigin.findMany({
     where: { secretId },
-    orderBy: [{ origin: "asc" }],
-    select: { origin: true, includeSubdomains: true },
+    select: {
+      secretId: true,
+      origin: true,
+      sealed: true,
+      includeSubdomains: true,
+    },
   })
 
-  return rows.map((row) => ({
-    origin: row.origin,
-    subdomains: row.includeSubdomains,
-  }))
+  return rows
+    .map((row) => ({
+      origin: openOrigin(ctx, row),
+      subdomains: row.includeSubdomains,
+    }))
+    .sort(byOrigin)
 }
 
 /**
@@ -403,21 +474,32 @@ export async function bindOrigin(
     )
   }
 
-  const before = await sitesOf(secretId)
+  const before = await sitesOf(ctx, secretId)
   const known = before.find((site) => site.origin === origin)
 
   if (!known && before.length >= MAX_SITES_PER_SECRET) {
     throw invalid(`A secret has at most ${MAX_SITES_PER_SECRET} sites.`)
   }
 
-  await db().secretBrowserOrigin.upsert({
-    where: { secretId_origin: { secretId, origin } },
-    create: { secretId, origin, includeSubdomains: subdomains === true },
-    update: subdomains === undefined ? {} : { includeSubdomains: subdomains },
-  })
+  const sealed = sealedOrigin(ctx, secretId, origin)
+  const includeSubdomains = subdomains ?? known?.subdomains ?? false
+
+  await db().$transaction([
+    // One from before, in plain text, gives way to the sealed one.
+    db().secretBrowserOrigin.deleteMany({ where: { secretId, origin } }),
+    db().secretBrowserOrigin.upsert({
+      where: { secretId_origin: { secretId, origin: sealed.origin } },
+      create: { secretId, ...sealed, includeSubdomains },
+      update: { includeSubdomains },
+    }),
+  ])
 
   if (known?.subdomains && subdomains === false) {
-    await dropUncoveredAllowances(secretId, before, await sitesOf(secretId))
+    await dropUncoveredAllowances(
+      secretId,
+      before,
+      await sitesOf(ctx, secretId),
+    )
   }
 
   return origin
@@ -434,14 +516,16 @@ export async function unbindOrigin(
   origin: string,
 ): Promise<void> {
   await requireTypable(ctx, secretId)
-  const before = await sitesOf(secretId)
+  const before = await sitesOf(ctx, secretId)
   endSignInWindows(null, secretId)
 
   await db().$transaction([
-    db().secretBrowserOrigin.deleteMany({ where: { secretId, origin } }),
+    db().secretBrowserOrigin.deleteMany({
+      where: { secretId, origin: { in: originKeys(ctx, [origin]) } },
+    }),
     db().apiTokenSecretAllowance.deleteMany({ where: { secretId, origin } }),
   ])
-  await dropUncoveredAllowances(secretId, before, await sitesOf(secretId))
+  await dropUncoveredAllowances(secretId, before, await sitesOf(ctx, secretId))
 }
 
 /** Each of the vault's secrets' sites, by secret id. */
@@ -450,16 +534,24 @@ export async function listBrowserOrigins(
 ): Promise<Map<string, SecretSite[]>> {
   const rows = await db().secretBrowserOrigin.findMany({
     where: { secret: { vaultId: ctx.vaultId } },
-    orderBy: [{ origin: "asc" }],
-    select: { secretId: true, origin: true, includeSubdomains: true },
+    select: {
+      secretId: true,
+      origin: true,
+      sealed: true,
+      includeSubdomains: true,
+    },
   })
   const bySecret = new Map<string, SecretSite[]>()
 
   for (const row of rows) {
     bySecret.set(row.secretId, [
       ...(bySecret.get(row.secretId) ?? []),
-      { origin: row.origin, subdomains: row.includeSubdomains },
+      { origin: openOrigin(ctx, row), subdomains: row.includeSubdomains },
     ])
+  }
+
+  for (const sites of bySecret.values()) {
+    sites.sort(byOrigin)
   }
 
   return bySecret
@@ -495,7 +587,7 @@ export async function signInsAt(
     where: {
       vaultId: ctx.vaultId,
       kind: { in: ["text", "totp"] },
-      browserOrigins: { some: coveringWhere(origin) },
+      browserOrigins: { some: coveringWhere(ctx, origin) },
     },
     orderBy: { kind: "asc" },
     select: {
@@ -586,14 +678,16 @@ export async function grantSecretUse(
  * the origin is the secret's.
  */
 export async function takeSecretUse(
+  ctx: VaultContext,
   target: { tokenId: string; secretId: string; origin: string },
   now = new Date(),
 ): Promise<boolean> {
-  return (await takeAllowance(target, now)) !== false
+  return (await takeAllowance(ctx, target, now)) !== false
 }
 
 /** takeSecretUse, saying whether what it used was a once allowance. */
 async function takeAllowance(
+  ctx: VaultContext,
   {
     tokenId,
     secretId,
@@ -610,7 +704,7 @@ async function takeAllowance(
   }
 
   if (row.until === null) {
-    return (await isBoundOrigin(secretId, origin)) ? "lasting" : false
+    return (await isBoundOrigin(ctx, secretId, origin)) ? "lasting" : false
   }
 
   if (row.until.getTime() <= now.getTime()) {
@@ -729,7 +823,7 @@ export async function listSecretAllowances(
       OR: [{ until: null }, { until: { gt: now } }],
     },
     include: {
-      token: { select: { name: true } },
+      token: { select: TOKEN_NAME_SELECT },
       secret: { select: SECRET_META_SELECT },
     },
   })
@@ -737,7 +831,7 @@ export async function listSecretAllowances(
   return rows
     .map((row) => ({
       tokenId: row.tokenId,
-      tokenName: row.token.name,
+      tokenName: tokenName(ctx, row.token),
       secretId: row.secretId,
       secretName: secretName(ctx, row.secret),
       origin: row.origin,
@@ -809,6 +903,7 @@ export async function admitSecretUse(
   }
 
   const taken = await takeAllowance(
+    ctx,
     { tokenId, secretId: secret.id, origin: use.origin },
     now,
   )
@@ -1133,7 +1228,7 @@ export async function checkSecretSitesChange(
     throw invalid(`Keep the reason under ${MAX_SECRET_PURPOSE} characters.`)
   }
 
-  const current = await sitesOf(secret.id)
+  const current = await sitesOf(ctx, secret.id)
   const add: ProposedSecretSite[] = []
 
   for (const entry of args.add ?? []) {
@@ -1232,7 +1327,7 @@ export async function showSecretSitesChange(
   ask: SecretSitesChangeAsk,
 ): Promise<SecretSitesShown> {
   const secret = await findTypableSecret(ctx, ask.secretName)
-  const current = secret ? await sitesOf(secret.id) : []
+  const current = secret ? await sitesOf(ctx, secret.id) : []
   const known = current.map((site) => {
     const host = hostOf(site.origin)
     return { host, domain: registrableDomain(host) }
@@ -1295,7 +1390,7 @@ export async function checkSecretSitesAnswer(
     return `The secret "${ask.secretName}" is no longer in PCP, so there is nothing to change.`
   }
 
-  if (basis !== sitesBasis(await sitesOf(secret.id))) {
+  if (basis !== sitesBasis(await sitesOf(ctx, secret.id))) {
     return `The sites of "${secret.name}" changed since this page was opened, so nothing was changed. Read it again, then answer.`
   }
 
@@ -1360,7 +1455,7 @@ export async function applySecretSitesChange(
     }
   }
 
-  const now = (await sitesOf(secret.id)).map(siteLabel)
+  const now = (await sitesOf(ctx, secret.id)).map(siteLabel)
 
   return [
     `The owner changed where "${secret.name}" is typed.`,

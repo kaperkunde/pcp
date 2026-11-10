@@ -123,6 +123,7 @@ import {
   type SecretTypeCall,
   type SecretTyper,
 } from "./types"
+import { TOKEN_NAME_SELECT, tokenName } from "../token-names"
 
 /**
  * Running a browser tool for an assistant: which tab, whether the site may
@@ -251,12 +252,12 @@ export function pageUrl(raw: string): URL {
   return url
 }
 
-async function tokenName(tokenId: string): Promise<string> {
+async function openerName(ctx: VaultContext, tokenId: string): Promise<string> {
   const token = await db().apiToken.findUnique({
     where: { id: tokenId },
-    select: { name: true },
+    select: TOKEN_NAME_SELECT,
   })
-  return token?.name ?? "an assistant"
+  return token ? tokenName(ctx, token) : "an assistant"
 }
 
 /**
@@ -278,7 +279,7 @@ async function driveAs(
   tab: Tab,
   scope: Pick<BrowserScope, "ctx" | "tokenId">,
 ): Promise<void> {
-  const rules = await loadFetchRules(scope.ctx.vaultId, scope.tokenId)
+  const rules = await loadFetchRules(scope.ctx, scope.tokenId)
   tab.rules = rules
   tab.privateAllowed = resolvePrivateAccess(rules)
   tab.lastUsedAt = Date.now()
@@ -851,7 +852,7 @@ async function newTab(
   return openTab(
     vault,
     {
-      openedBy: await tokenName(scope.tokenId),
+      openedBy: await openerName(scope.ctx, scope.tokenId),
       tokenId: scope.tokenId,
       rules: null,
       privateAllowed: false,
@@ -2964,6 +2965,7 @@ async function runTool(
       return onTab(scope, tab, spec, (current) =>
         evaluateInTab(
           {
+            ctx,
             vaultId: ctx.vaultId,
             tokenId,
             serverId: server.id,

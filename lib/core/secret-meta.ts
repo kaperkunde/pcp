@@ -1,7 +1,7 @@
 import type { Prisma } from "@/lib/generated/prisma/client"
 
 import type { VaultContext } from "./context"
-import { keyedHash } from "./keyed-hash"
+import { keyedHash } from "./crypto"
 import { openJson, sealJson, type Sealed } from "./sealed"
 
 /**
@@ -13,7 +13,7 @@ import { openJson, sealJson, type Sealed } from "./sealed"
  * Never the value: that is secrets.ts's alone.
  */
 
-const NAME_LABEL = "secret name"
+const NAME_LABEL = "pcp secret name"
 
 export type SecretMeta = { name: string; description: string }
 

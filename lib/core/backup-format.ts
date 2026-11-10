@@ -37,6 +37,7 @@ import { asBytes } from "./crypto"
 import { invalid } from "./errors"
 import { DDNS_CONFIG_KEY, ddnsHostname, type DdnsConfig } from "./network/ddns"
 import { TLS_CONFIG_KEY } from "./network/tls"
+import { tokenName } from "./token-names"
 import { UPDATE_CONFIG_KEY } from "./updates/state"
 
 /**
@@ -117,7 +118,7 @@ function renamedFrom<T extends z.ZodType>(
  * from them, so a hostile file could otherwise ask for gigabytes; these
  * bounds allow a quarter of one.
  */
-const ScryptParamsSchema = z
+export const ScryptParamsSchema = z
   .strictObject({
     kdf: z.literal("scrypt"),
     salt: z.base64().min(1),
@@ -164,44 +165,50 @@ const KeyGrantRow = z.strictObject({
   lastUsedAt: dateOrNull,
 })
 
-const ApiTokenRow = z.strictObject({
-  id,
-  vaultId: id,
-  grantId: id,
-  name: str,
-  prefix: str,
-  allowAllServers: z.boolean(),
-  // Skills, added in 0.4: an older file's tokens see every skill (it has none).
-  allSkills: z.boolean().default(true),
-  manageEndpoints: z.boolean(),
-  keepMemories: z.boolean(),
-  // Memory migration, added in 0.5: an older file's tokens make the offer
-  // once, as the tokens of a vault that updated do.
-  memoryMigration: z.boolean().default(true),
-  webFetch: z.boolean(),
-  runCode: z.boolean().default(false),
-  manageWrappers: z.boolean().default(false),
-  shareFiles: z.boolean().default(false),
-  expiresAt: dateOrNull,
-  revokedAt: dateOrNull,
-  createdAt: date,
-  lastUsedAt: dateOrNull,
-  // A token an assistant got by signing in with OAuth. Its credentials
-  // (oauth_credential) are not exported, as a session's are not: after a
-  // restore the assistant signs in again.
-  oauthClientId: str.nullable().default(null),
-  oauthClientName: str.nullable().default(null),
-  // The owner's instructions for the assistant, as ciphertext under the
-  // vault's key, and the suggested instructions' version they came from.
-  // An older file has neither: the token shows them as not set yet.
-  instructions: bytesOrNull.default(null),
-  instructionsBase: z.number().int().positive().nullable().default(null),
-  // Client profiles, added in 0.5: the owner's choice for the token (null
-  // detects it per request) and the client last seen using it. An older
-  // file has neither: the token detects its client again.
-  clientProfile: str.nullable().default(null),
-  clientSeen: str.nullable().default(null),
-})
+const ApiTokenRow = renamedFrom(
+  { name: "plainName" },
+  z.strictObject({
+    id,
+    vaultId: id,
+    grantId: id,
+    // The name in plain text, from before it was sealed: "" once sealed into
+    // sealedName (absent from older files).
+    plainName: str,
+    sealedName: bytesOrNull.default(null),
+    prefix: str,
+    allowAllServers: z.boolean(),
+    // Skills, added in 0.4: an older file's tokens see every skill (it has none).
+    allSkills: z.boolean().default(true),
+    manageEndpoints: z.boolean(),
+    keepMemories: z.boolean(),
+    // Memory migration, added in 0.5: an older file's tokens make the offer
+    // once, as the tokens of a vault that updated do.
+    memoryMigration: z.boolean().default(true),
+    webFetch: z.boolean(),
+    runCode: z.boolean().default(false),
+    manageWrappers: z.boolean().default(false),
+    shareFiles: z.boolean().default(false),
+    expiresAt: dateOrNull,
+    revokedAt: dateOrNull,
+    createdAt: date,
+    lastUsedAt: dateOrNull,
+    // A token an assistant got by signing in with OAuth. Its credentials
+    // (oauth_credential) are not exported, as a session's are not: after a
+    // restore the assistant signs in again.
+    oauthClientId: str.nullable().default(null),
+    oauthClientName: str.nullable().default(null),
+    // The owner's instructions for the assistant, as ciphertext under the
+    // vault's key, and the suggested instructions' version they came from.
+    // An older file has neither: the token shows them as not set yet.
+    instructions: bytesOrNull.default(null),
+    instructionsBase: z.number().int().positive().nullable().default(null),
+    // Client profiles, added in 0.5: the owner's choice for the token (null
+    // detects it per request) and the client last seen using it. An older
+    // file has neither: the token detects its client again.
+    clientProfile: str.nullable().default(null),
+    clientSeen: str.nullable().default(null),
+  }),
+)
 
 const ApiTokenServerRow = z.strictObject({ tokenId: id, serverId: id })
 
@@ -231,6 +238,9 @@ const WebFetchRuleRow = z.strictObject({
   scope: str,
   kind: str,
   key: str,
+  // A site's host, sealed, with its keyed hash in key: absent from older
+  // files, whose sites are in key as they are.
+  sealed: bytesOrNull.default(null),
   access: str.nullable(),
   addedBy: str,
   createdAt: date,
@@ -326,6 +336,9 @@ const SecretRow = renamedFrom(
 const SecretBrowserOriginRow = z.strictObject({
   secretId: id,
   origin: str,
+  // The origin, sealed, with its keyed hash in origin: absent from older
+  // files, whose origins are in origin as they are.
+  sealed: bytesOrNull.default(null),
   // "This domain and its subdomains": absent from older files.
   includeSubdomains: z.boolean().default(false),
   createdAt: date,
@@ -663,7 +676,11 @@ export type ExportPayload = z.output<typeof PayloadSchema>
 
 /** An API token in a file, as the owner is shown it before a restore. */
 export type ExportedToken = {
-  name: string
+  /**
+   * The name the owner gave it; null when it is sealed in the file and the
+   * password of the file's vault was not given (#96).
+   */
+  name: string | null
   /** The first characters of the token; empty for an assistant's OAuth sign-in. */
   prefix: string
   createdAt: string
@@ -976,12 +993,18 @@ export function checkReferences(payload: ExportPayload): void {
 export function previewOf(
   payload: ExportPayload,
   revoked: ReadonlyMap<string, Date> = new Map(),
+  /**
+   * The file's vault key, unwrapped with the password of its vault: what
+   * opens the names sealed in it. Without it, sealed names are not shown.
+   */
+  dek: Buffer | null = null,
 ): ExportPreview {
   const { tables, host } = payload
+  const ctx = dek ? { vaultId: payload.vault.id, dek } : null
   const tokens = [...tables.apiTokens]
     .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime())
     .map((row): ExportedToken => ({
-      name: row.name,
+      name: ctx ? tokenName(ctx, row) : row.sealedName ? null : row.plainName,
       prefix: row.prefix,
       createdAt: row.createdAt.toISOString(),
       status:

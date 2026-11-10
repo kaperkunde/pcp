@@ -20,6 +20,7 @@ import {
   RESTORE_CHUNK_ROWS,
   RESTORE_SPEC_CHUNK_ROWS,
   rowJson,
+  ScryptParamsSchema,
 } from "./backup-format"
 import {
   EXPORT_FILE_SUFFIX,
@@ -33,6 +34,7 @@ import {
   deriveKek,
   encrypt,
   newScryptParams,
+  unwrapDek,
 } from "./crypto"
 import { withBrowserClosed } from "./browser/runtime"
 import { scrubFreedPages } from "./cleanup/runtime"
@@ -302,6 +304,15 @@ export async function readExport(
   file: Buffer,
   exportPassword: string,
   target: RestoreTarget = { into: "fresh" },
+  {
+    vaultPassword,
+  }: {
+    /**
+     * The password of the vault in the file: the names sealed in it (#96)
+     * are shown only with it. A wrong one is refused.
+     */
+    vaultPassword?: string
+  } = {},
 ): Promise<{ payload: ExportPayload; preview: ExportPreview }> {
   if (file.length > MAX_EXPORT_FILE_BYTES) {
     throw invalid(
@@ -382,7 +393,58 @@ export async function readExport(
     await replacedTokens(db(), parsed.data, target),
   )
 
-  return { payload: parsed.data, preview: previewOf(parsed.data, carried) }
+  const dek = vaultPassword
+    ? await fileVaultKey(parsed.data, vaultPassword)
+    : null
+
+  return {
+    payload: parsed.data,
+    preview: previewOf(parsed.data, carried, dek),
+  }
+}
+
+export const WRONG_VAULT_PASSWORD =
+  "That is not the password of the vault in this file."
+
+/**
+ * The file's vault key, unwrapped from its password grant: only to show the
+ * owner what the file holds by name, never kept. The grant's parameters
+ * come from the file, so they are held to what an export's own may be.
+ */
+async function fileVaultKey(
+  payload: ExportPayload,
+  password: string,
+): Promise<Buffer> {
+  const grant = payload.tables.keyGrants
+    .filter((row) => row.kind === "password")
+    .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())[0]
+  let params: unknown
+
+  try {
+    params = grant ? JSON.parse(grant.kdfParams) : null
+  } catch {
+    params = null
+  }
+
+  const kdf = ScryptParamsSchema.safeParse(params)
+
+  if (!grant || !kdf.success) {
+    throw new PcpError("unauthorized", WRONG_VAULT_PASSWORD)
+  }
+
+  try {
+    return unwrapDek(
+      Buffer.from(grant.wrappedDek),
+      await deriveKek(password, kdf.data),
+      grant.id,
+    )
+  } catch (error) {
+    if (error instanceof CryptoError) {
+      throw new PcpError("unauthorized", WRONG_VAULT_PASSWORD)
+    }
+
+    throw error
+  }
 }
 
 function parseJson(buffer: Buffer, orElse: string): unknown {

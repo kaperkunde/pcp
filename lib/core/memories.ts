@@ -13,6 +13,7 @@ import { instructionsBlock } from "./instructions-block"
 import { newId } from "./ids"
 import { openRequestFor, type OpenRequest } from "./permission-fold"
 import { canonicalJson } from "./permission-rules"
+import { TOKEN_NAME_SELECT, tokenName } from "./token-names"
 
 /**
  * Memories: notes an assistant keeps for the owner through the gateway's
@@ -307,7 +308,14 @@ function seal(ctx: VaultContext, id: string, body: MemoryBody) {
   )
 }
 
-type Row = Memory & { token: { name: string; revokedAt: Date | null } | null }
+type Row = Memory & {
+  token: {
+    id: string
+    plainName: string
+    sealedName: Uint8Array | null
+    revokedAt: Date | null
+  } | null
+}
 
 function unseal(ctx: VaultContext, row: Row): Entry {
   const body = JSON.parse(
@@ -319,7 +327,7 @@ function unseal(ctx: VaultContext, row: Row): Entry {
     path: body.path,
     text: body.text,
     tokenId: row.tokenId,
-    tokenName: row.token?.name ?? null,
+    tokenName: row.token ? tokenName(ctx, row.token) : null,
     tokenRevoked: row.token?.revokedAt != null,
     author: row.author === "owner" ? "owner" : "assistant",
     visibility: row.visibility === "shared" ? "shared" : "private",
@@ -340,7 +348,7 @@ async function load(ctx: VaultContext, tokenId?: string): Promise<Entry[]> {
           }
         : {}),
     },
-    include: { token: { select: { name: true, revokedAt: true } } },
+    include: { token: { select: { ...TOKEN_NAME_SELECT, revokedAt: true } } },
   })
 
   return rows
@@ -1598,7 +1606,7 @@ export async function instructionMemories(
         { visibility: "private", tokenId, always: true },
       ],
     },
-    include: { token: { select: { name: true, revokedAt: true } } },
+    include: { token: { select: { ...TOKEN_NAME_SELECT, revokedAt: true } } },
   })
   const entries = rows
     .map((row) => unseal(ctx, row))
@@ -1847,13 +1855,13 @@ export async function setMemoriesAccess(
       (token.expiresAt !== null && token.expiresAt.getTime() < Date.now())
     ) {
       throw invalid(
-        `The token ${token.name} is revoked or expired, so it reads nothing.`,
+        `The token ${tokenName(ctx, token)} is revoked or expired, so it reads nothing.`,
       )
     }
 
     if (!token.keepMemories) {
       throw invalid(
-        `The token ${token.name} cannot keep memories, so it would never read these. Turn that on for the token first.`,
+        `The token ${tokenName(ctx, token)} cannot keep memories, so it would never read these. Turn that on for the token first.`,
       )
     }
   }

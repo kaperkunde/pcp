@@ -508,7 +508,7 @@ describe.skipIf(!executable)("the owner's tabs", { timeout: 90_000 }, () => {
         id: "another-token",
         vaultId: "another",
         grantId: "another-grant",
-        name: "Bob's",
+        plainName: "Bob's",
         prefix: "pcp_",
         allowAllServers: true,
       },

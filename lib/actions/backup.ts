@@ -90,6 +90,7 @@ export async function restoreAction(
       await uploadFrom(formData),
       field(formData, "exportPassword"),
       { into: "vault", ctx: session.ctx },
+      { vaultPassword: field(formData, "vaultPassword") || undefined },
     )
 
     if (!confirm) {
@@ -152,6 +153,8 @@ export async function restoreAtSetupAction(
     const { payload, preview } = await readExport(
       await uploadFrom(formData),
       field(formData, "exportPassword"),
+      { into: "fresh" },
+      { vaultPassword: field(formData, "vaultPassword") || undefined },
     )
 
     if (!confirm) {
