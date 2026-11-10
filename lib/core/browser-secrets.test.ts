@@ -51,6 +51,7 @@ import { writeToolAccess } from "./tool-access"
 import { DEFAULT_PASSWORD_RECIPE } from "./constants"
 import { SECRET_SIGN_IN_WINDOW_MS } from "./browser/limits"
 import { setupVault } from "./vault"
+import { secretName, secretNameWhere } from "./secret-meta"
 
 // Secrets the browser types, against a scratch database: the sites a secret
 // belongs to, a token's allowance per secret and site (once, an hour,
@@ -675,9 +676,9 @@ describe("one-time codes", () => {
       /too short/,
     )
     await updateSecret(ctx, id, { name: "Codes 2" })
-    expect((await db().secret.findUniqueOrThrow({ where: { id } })).name).toBe(
-      "Codes 2",
-    )
+    expect(
+      secretName(ctx, await db().secret.findUniqueOrThrow({ where: { id } })),
+    ).toBe("Codes 2")
   })
 
   it("never go out as a server's secret", async () => {
@@ -813,7 +814,7 @@ describe("request_secret", () => {
     expect(textOf(done)).toContain('{"$secret": "Mail password"}')
     expect(textOf(done)).not.toContain(SEED)
     const secret = await db().secret.findFirstOrThrow({
-      where: { name: "Mail password" },
+      where: secretNameWhere(ctx, "Mail password"),
     })
     expect(secret.kind).toBe("totp")
     expect(await revealSecret(ctx, secret.id)).toBe(SEED)
@@ -960,7 +961,7 @@ describe("request_secret with a login name and a made password", () => {
 
     expect(done.isError, textOf(done)).not.toBe(true)
     const secret = await db().secret.findFirstOrThrow({
-      where: { name: "Energy" },
+      where: secretNameWhere(ctx, "Energy"),
     })
     const value = await revealSecret(ctx, secret.id)
     expect(value).toMatch(/^[A-NP-Za-z1-9]{32}$/)
@@ -1002,7 +1003,7 @@ describe("request_secret with a login name and a made password", () => {
       loginName: "",
     })
     const secret = await db().secret.findFirstOrThrow({
-      where: { name: "Energy" },
+      where: secretNameWhere(ctx, "Energy"),
     })
     expect(await revealSecret(ctx, secret.id)).toBe("typed-by-ada")
     await expect(readTypedLogin(ctx, secret.id)).rejects.toThrow(

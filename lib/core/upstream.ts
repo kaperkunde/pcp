@@ -175,6 +175,7 @@ import {
   scrubResult,
   type SecretGrant,
 } from "./wrappers/placeholders"
+import { SECRET_META_SELECT, secretName } from "./secret-meta"
 
 /**
  * Talking to the servers in the registry: opening a connection with the
@@ -1014,14 +1015,14 @@ export async function githubCredential(
 
   const row = await db().secret.findFirst({
     where: { id: secretId, vaultId: ctx.vaultId },
-    select: { kind: true, name: true },
+    select: { ...SECRET_META_SELECT, kind: true },
   })
 
   if (
     !row ||
     !(
       row.kind === "text" ||
-      (row.kind === "oauth" && row.name === GITHUB_SIGNIN_SECRET)
+      (row.kind === "oauth" && secretName(ctx, row) === GITHUB_SIGNIN_SECRET)
     )
   ) {
     throw new PcpError(

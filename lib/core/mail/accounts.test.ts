@@ -236,7 +236,7 @@ describe("adding an account", () => {
       data: {
         id: "managed",
         vaultId: ctx.vaultId,
-        name: `oauth/${id}`,
+        plainName: `oauth/${id}`,
         kind: "oauth",
         ciphertext: Buffer.from("x"),
       },

@@ -210,7 +210,12 @@ async function readVault(vaultId: string): Promise<ExportPayloadJson> {
           ).map(rowJson),
           memories: (await tx.memory.findMany(byVault)).map(rowJson),
           skills: (await tx.skill.findMany(byVault)).map(rowJson),
-          secrets: (await tx.secret.findMany(byVault)).map(rowJson),
+          secrets: (
+            await tx.secret.findMany({
+              ...byVault,
+              orderBy: { createdAt: "asc" },
+            })
+          ).map(rowJson),
           secretBrowserOrigins: (
             await tx.secretBrowserOrigin.findMany({
               where: { secret: { vaultId } },

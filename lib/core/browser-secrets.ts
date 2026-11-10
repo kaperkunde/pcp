@@ -25,6 +25,12 @@ import { checkPasswordRecipe } from "./generate-password"
 import { lookalikeReason } from "./lookalike-sites"
 import { hiddenCharacter, withoutPresentation } from "./memories"
 import {
+  byName,
+  SECRET_META_SELECT,
+  secretName,
+  secretNameWhere,
+} from "./secret-meta"
+import {
   checkLoginName,
   createSecret,
   findOwnerSecretByName,
@@ -290,14 +296,14 @@ async function requireTypable(
 ): Promise<TypableSecret> {
   const row = await db().secret.findFirst({
     where: { id: secretId, vaultId: ctx.vaultId },
-    select: { id: true, name: true, kind: true },
+    select: { ...SECRET_META_SELECT, kind: true },
   })
 
   if (!row || !isOwnerSecretKind(row.kind)) {
     throw notFound("That secret")
   }
 
-  return { id: row.id, name: row.name, kind: row.kind }
+  return { id: row.id, name: secretName(ctx, row), kind: row.kind }
 }
 
 // ---- The secret's origins ---------------------------------------------------
@@ -491,29 +497,37 @@ export async function signInsAt(
       kind: { in: ["text", "totp"] },
       browserOrigins: { some: coveringWhere(origin) },
     },
-    orderBy: [{ kind: "asc" }, { name: "asc" }],
+    orderBy: { kind: "asc" },
     select: {
-      id: true,
-      name: true,
+      ...SECRET_META_SELECT,
       kind: true,
       loginName: true,
       note: true,
-      totpCompanion: { select: { name: true } },
+      totpCompanion: { select: SECRET_META_SELECT },
     },
-    take: max * 2,
   })
+  const named = rows
+    .map((row) => ({
+      ...row,
+      name: secretName(ctx, row),
+      totp: row.totpCompanion ? secretName(ctx, row.totpCompanion) : null,
+    }))
+    // By kind, then name: sorted here, since the names are sealed.
+    .sort((a, b) =>
+      a.kind === b.kind ? byName(a, b) : a.kind < b.kind ? -1 : 1,
+    )
   const companions = new Set(
-    rows.flatMap((row) => (row.totpCompanion ? [row.totpCompanion.name] : [])),
+    named.flatMap((row) => (row.totp ? [row.totp] : [])),
   )
 
-  return rows
+  return named
     .filter((row) => row.kind === "text" || !companions.has(row.name))
     .slice(0, max)
     .map((row) => ({
       name: row.name,
       kind: row.kind as OwnerSecretKind,
       ...openSecretDetails(ctx, row),
-      totp: row.totpCompanion?.name ?? null,
+      totp: row.totp,
     }))
 }
 
@@ -716,7 +730,7 @@ export async function listSecretAllowances(
     },
     include: {
       token: { select: { name: true } },
-      secret: { select: { name: true } },
+      secret: { select: SECRET_META_SELECT },
     },
   })
 
@@ -725,7 +739,7 @@ export async function listSecretAllowances(
       tokenId: row.tokenId,
       tokenName: row.token.name,
       secretId: row.secretId,
-      secretName: row.secret.name,
+      secretName: secretName(ctx, row.secret),
       origin: row.origin,
       until: row.until,
       once: row.once,
@@ -885,8 +899,8 @@ export async function checkSecretRequest(
   const generate =
     args.generate === undefined ? null : checkPasswordRecipe(args.generate)
 
-  const existing = await db().secret.findUnique({
-    where: { vaultId_name: { vaultId: ctx.vaultId, name } },
+  const existing = await db().secret.findFirst({
+    where: secretNameWhere(ctx, name),
     select: { kind: true },
   })
 
@@ -947,8 +961,8 @@ export async function checkSecretAnswer(
       : null
   }
 
-  const other = await db().secret.findUnique({
-    where: { vaultId_name: { vaultId: ctx.vaultId, name: ask.name } },
+  const other = await db().secret.findFirst({
+    where: secretNameWhere(ctx, ask.name),
     select: { id: true },
   })
 

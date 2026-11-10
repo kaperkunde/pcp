@@ -10,6 +10,7 @@ import { db } from "../db"
 import { invalid } from "../errors"
 import { getSetting, setSetting } from "../settings"
 import { EMBED_MAX_MODEL_CHARS, EMBED_MAX_URL_CHARS } from "./limits"
+import { byName, SECRET_META_SELECT, secretName } from "../secret-meta"
 
 /**
  * The owner's embeddings provider for search (Settings → Search), kept as
@@ -240,11 +241,16 @@ export async function embeddingsOverview(
 ): Promise<EmbeddingsOverview> {
   const [config, secrets, endpoints, registered, vectors] = await Promise.all([
     readEmbeddingsConfig(ctx),
-    db().secret.findMany({
-      where: { vaultId: ctx.vaultId, kind: "text" },
-      select: { id: true, name: true },
-      orderBy: { name: "asc" },
-    }),
+    db()
+      .secret.findMany({
+        where: { vaultId: ctx.vaultId, kind: "text" },
+        select: SECRET_META_SELECT,
+      })
+      .then((rows) =>
+        rows
+          .map((row) => ({ id: row.id, name: secretName(ctx, row) }))
+          .sort(byName),
+      ),
     db().mcpServer.findMany({
       where: { vaultId: ctx.vaultId, kind: "openapi" },
       select: { id: true, name: true },

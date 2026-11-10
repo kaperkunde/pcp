@@ -31,6 +31,7 @@ import {
 import { createSshServer } from "./ssh/hosts"
 import { scratchDatabase } from "./test-db"
 import { setupVault } from "./vault"
+import { secretNameWhere } from "./secret-meta"
 
 // register_server as an assistant meets it: through the gateway's MCP
 // interface, with its arguments checked and the request the owner is shown.
@@ -1460,7 +1461,7 @@ describe("proposing a service", () => {
 
     expect(done.isError).not.toBe(true)
     const secret = await db().secret.findFirstOrThrow({
-      where: { name: "Docling key" },
+      where: secretNameWhere(ctx, "Docling key"),
     })
     expect(launched).toEqual([
       expect.objectContaining({
@@ -1506,9 +1507,9 @@ describe("proposing a service", () => {
       expect(JSON.stringify(done)).toContain(
         'The secret you entered is kept in PCP as \\"Docling key\\"',
       )
-      expect(await db().secret.count({ where: { name: "Docling key" } })).toBe(
-        1,
-      )
+      expect(
+        await db().secret.count({ where: secretNameWhere(ctx, "Docling key") }),
+      ).toBe(1)
     } finally {
       executor.launchService = launch
     }
@@ -1575,7 +1576,7 @@ describe("proposing a service", () => {
 
     await approve("mcp-token-typed-by-the-owner")
     const secret = await db().secret.findFirstOrThrow({
-      where: { name: "Docs MCP token" },
+      where: secretNameWhere(ctx, "Docs MCP token"),
     })
     expect(launched[0]!.env).toEqual({ MCP_TOKEN: secret.id })
     expect(launched[0]!.definition).toMatchObject({ registers: mcp.registers })

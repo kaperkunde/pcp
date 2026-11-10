@@ -4,6 +4,12 @@ import { db } from "./db"
 import { openSecretDetails, type SecretKind } from "./secrets"
 import { readEnvBindings } from "./services/definition"
 import { readDefinition } from "./wrappers/definition"
+import {
+  byName,
+  openSecretMeta,
+  SECRET_META_SELECT,
+  secretName,
+} from "./secret-meta"
 
 /**
  * What uses each secret, by name, and the secrets' names for a token that
@@ -196,26 +202,29 @@ export async function listSecretNames(
     await db().secret.findMany({
       where: { vaultId: ctx.vaultId },
       select: {
-        id: true,
-        name: true,
-        description: true,
+        ...SECRET_META_SELECT,
         kind: true,
         loginName: true,
         note: true,
-        totpCompanion: { select: { name: true } },
+        totpCompanion: { select: SECRET_META_SELECT },
         browserOrigins: {
           select: { origin: true, includeSubdomains: true },
           orderBy: { origin: "asc" },
         },
       },
-      orderBy: [{ kind: "desc" }, { name: "asc" }],
     })
-  ).filter(
-    (row) =>
-      !needle ||
-      row.name.toLowerCase().includes(needle) ||
-      row.description.toLowerCase().includes(needle),
   )
+    .map((row) => ({ ...row, ...openSecretMeta(ctx, row) }))
+    // Kind descending, then name: sorted here, since the names are sealed.
+    .sort((a, b) =>
+      a.kind === b.kind ? byName(a, b) : a.kind < b.kind ? 1 : -1,
+    )
+    .filter(
+      (row) =>
+        !needle ||
+        row.name.toLowerCase().includes(needle) ||
+        row.description.toLowerCase().includes(needle),
+    )
   const shown = rows.slice(0, MAX_LISTED_SECRETS)
   const uses = await secretUses(
     ctx,
@@ -243,7 +252,9 @@ export async function listSecretNames(
         ...(sites.length > 0 ? { sites } : {}),
         ...(loginName ? { login_name: loginName } : {}),
         ...(note ? { note } : {}),
-        ...(row.totpCompanion ? { totp: row.totpCompanion.name } : {}),
+        ...(row.totpCompanion
+          ? { totp: secretName(ctx, row.totpCompanion) }
+          : {}),
       }
     }),
     more: rows.length - shown.length,

@@ -54,6 +54,7 @@ import { copyTokenAccess, writeToolAccess } from "./tool-access"
 import { setToolTier } from "./tool-tiers"
 import { setupVault } from "./vault"
 import { createSshServer } from "./ssh/hosts"
+import { openSecretMeta, secretNameWhere } from "./secret-meta"
 
 // The owner's permission against a scratch database, with the upstream
 // replaced by a stub that counts what actually ran.
@@ -1778,10 +1779,12 @@ describe("a new secret the owner types in", () => {
     expect(textOf(added)).not.toContain("k-123")
 
     const secret = await db().secret.findFirstOrThrow({
-      where: { name: "Pets API key" },
+      where: secretNameWhere(ctx, "Pets API key"),
     })
     expect(await revealSecret(ctx, secret.id)).toBe("k-123")
-    expect(secret.description).toBe("Sent to Pets in the X-API-Key header.")
+    expect(openSecretMeta(ctx, secret).description).toBe(
+      "Sent to Pets in the X-API-Key header.",
+    )
     expect(
       await db().mcpServer.findFirstOrThrow({ where: { name: "Pets" } }),
     ).toMatchObject({
@@ -2770,10 +2773,12 @@ describe("an API with a user name and password", () => {
     expect(textOf(added)).not.toContain("pw-123")
 
     const secret = await db().secret.findFirstOrThrow({
-      where: { name: "Pets password" },
+      where: secretNameWhere(ctx, "Pets password"),
     })
     expect(await revealSecret(ctx, secret.id)).toBe("pw-123")
-    expect(secret.description).toBe("The password for ada at Pets.")
+    expect(openSecretMeta(ctx, secret).description).toBe(
+      "The password for ada at Pets.",
+    )
     expect(
       await db().mcpServer.findFirstOrThrow({ where: { name: "Pets" } }),
     ).toMatchObject({
@@ -2960,10 +2965,12 @@ describe("a mail account an assistant proposes", () => {
     expect(textOf(added)).not.toContain(PASSWORD)
 
     const secret = await db().secret.findFirstOrThrow({
-      where: { name: "Mail password" },
+      where: secretNameWhere(ctx, "Mail password"),
     })
     expect(await revealSecret(ctx, secret.id)).toBe(PASSWORD)
-    expect(secret.description).toBe("The password for ada@example.com at Mail.")
+    expect(openSecretMeta(ctx, secret).description).toBe(
+      "The password for ada@example.com at Mail.",
+    )
     const account = await db().mcpServer.findFirstOrThrow({
       where: { name: "Mail" },
     })

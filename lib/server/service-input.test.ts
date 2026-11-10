@@ -7,6 +7,7 @@ import { scratchDatabase } from "@/lib/core/test-db"
 import { setupVault } from "@/lib/core/vault"
 
 import { NEW_SECRET, withNewSecrets } from "./service-input"
+import { secretNameWhere } from "@/lib/core/secret-meta"
 
 let cleanup: () => Promise<void>
 let ctx: VaultContext
@@ -33,7 +34,7 @@ describe("a launch's new secrets", () => {
   it("binds them to their variables", async () => {
     const bound = await withNewSecrets(ctx, form(), {}, async (env) => env)
     const secret = await db().secret.findFirstOrThrow({
-      where: { name: "Docs key" },
+      where: secretNameWhere(ctx, "Docs key"),
     })
 
     expect(bound).toEqual({ API_KEY: secret.id })
@@ -49,6 +50,8 @@ describe("a launch's new secrets", () => {
     expect((failure as PcpError).message).toBe(
       'Build box did not start pcp-docs.\nThe secret you typed is kept in PCP as "Docs key" (for API_KEY): choose it when you try again, or delete it on the Secrets page.',
     )
-    expect(await db().secret.count({ where: { name: "Docs key" } })).toBe(1)
+    expect(
+      await db().secret.count({ where: secretNameWhere(ctx, "Docs key") }),
+    ).toBe(1)
   })
 })

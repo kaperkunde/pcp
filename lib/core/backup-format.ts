@@ -85,6 +85,34 @@ const bytes = z
 const bytesOrNull = bytes.nullable()
 
 /**
+ * A row whose columns were renamed in PCP when their values were sealed
+ * (#96): an older file names them by their old names, which are read as
+ * the new ones. The column itself is the same.
+ */
+function renamedFrom<T extends z.ZodType>(
+  names: Record<string, string>,
+  schema: T,
+): T {
+  // Typed as the row it reads into: what a file of this PCP holds.
+  return z.preprocess((value) => {
+    if (typeof value !== "object" || value === null || Array.isArray(value)) {
+      return value
+    }
+
+    const row: Record<string, unknown> = { ...value }
+
+    for (const [old, now] of Object.entries(names)) {
+      if (old in row && !(now in row)) {
+        row[now] = row[old]
+        delete row[old]
+      }
+    }
+
+    return row
+  }, schema) as unknown as T
+}
+
+/**
  * The scrypt parameters a file may ask for. `deriveKek` sizes its memory
  * from them, so a hostile file could otherwise ask for gigabytes; these
  * bounds allow a quarter of one.
@@ -267,23 +295,30 @@ const SkillRow = z.strictObject({
   updatedAt: date,
 })
 
-const SecretRow = z.strictObject({
-  id,
-  vaultId: id,
-  name: str,
-  description: str,
-  kind: str,
-  ciphertext: bytes,
-  keyVersion: z.number().int(),
-  createdAt: date,
-  updatedAt: date,
-  lastUsedAt: dateOrNull,
-  // The owner's login name and note (encrypted) and the TOTP secret that goes
-  // with the sign-in, added with sign-in hints: absent from older files.
-  loginName: bytesOrNull.default(null),
-  note: bytesOrNull.default(null),
-  totpCompanionId: id.nullable().default(null),
-})
+const SecretRow = renamedFrom(
+  { name: "plainName", description: "plainDescription" },
+  z.strictObject({
+    id,
+    vaultId: id,
+    // The name and description in plain text, from before they were sealed:
+    // "" once sealed into meta, with the name's keyed hash in nameKey.
+    plainName: str,
+    plainDescription: str,
+    meta: bytesOrNull.default(null),
+    nameKey: str.nullable().default(null),
+    kind: str,
+    ciphertext: bytes,
+    keyVersion: z.number().int(),
+    createdAt: date,
+    updatedAt: date,
+    lastUsedAt: dateOrNull,
+    // The owner's login name and note (encrypted) and the TOTP secret that goes
+    // with the sign-in, added with sign-in hints: absent from older files.
+    loginName: bytesOrNull.default(null),
+    note: bytesOrNull.default(null),
+    totpCompanionId: id.nullable().default(null),
+  }),
+)
 
 // The sites a secret is typed at in the browser, added with typed secrets:
 // absent from older files. A token's allowances to have one typed are not

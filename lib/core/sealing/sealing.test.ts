@@ -8,6 +8,12 @@ import { databaseFile } from "../data-dir"
 import { db } from "../db"
 import { keyedHash } from "../keyed-hash"
 import {
+  createSecret,
+  findOwnerSecretByName,
+  listSecrets,
+  updateSecret,
+} from "../secrets"
+import {
   getSetting,
   getVaultSetting,
   setSetting,
@@ -87,5 +93,83 @@ describe("settings", () => {
     })
     expect(row.value).toMatch(/^pcp-sealed:v1:/)
     expect(await getSetting(ctx, "toolTiers")).toBe('{"a":"read"}')
+  })
+})
+
+describe("secrets", () => {
+  it("seals the name and description, and finds the secret by name", async () => {
+    const { id } = await createSecret(ctx, {
+      name: "SECRET-NAME-MARKER",
+      description: "SECRET-DESCRIPTION-MARKER",
+      value: "v",
+    })
+
+    expect(await onDisk("SECRET-NAME-MARKER")).toBe(false)
+    expect(await onDisk("SECRET-DESCRIPTION-MARKER")).toBe(false)
+    expect(
+      await findOwnerSecretByName(ctx, "SECRET-NAME-MARKER"),
+    ).toMatchObject({ id, name: "SECRET-NAME-MARKER" })
+    expect(await listSecrets(ctx)).toMatchObject([
+      {
+        id,
+        name: "SECRET-NAME-MARKER",
+        description: "SECRET-DESCRIPTION-MARKER",
+      },
+    ])
+
+    const raw = await db().$queryRawUnsafe<
+      Array<{ name: string; description: string; name_key: string }>
+    >(`SELECT "name", "description", "name_key" FROM "secret"`)
+    expect(raw).toEqual([
+      {
+        name: "",
+        description: "",
+        name_key: expect.stringMatching(/^[0-9a-f]{64}$/),
+      },
+    ])
+  })
+
+  it("still refuses a second secret by the same name", async () => {
+    await createSecret(ctx, { name: "Mail", value: "a" })
+    const { id } = await createSecret(ctx, { name: "Shop", value: "b" })
+
+    await expect(
+      createSecret(ctx, { name: "Mail", value: "c" }),
+    ).rejects.toThrow(/already exists/)
+    await expect(updateSecret(ctx, id, { name: "Mail" })).rejects.toThrow(
+      /already exists/,
+    )
+    // The database refuses one too, should a writer skip the check.
+    await expect(
+      db().secret.update({
+        where: { id },
+        data: {
+          nameKey: (
+            await db().secret.findFirstOrThrow({ where: { id: { not: id } } })
+          ).nameKey,
+        },
+      }),
+    ).rejects.toThrow()
+  })
+
+  it("reads a secret from before, finds it by name, and seals it", async () => {
+    const { id } = await createSecret(ctx, { name: "x", value: "v" })
+    await db().$executeRawUnsafe(
+      `UPDATE "secret" SET "name" = 'Old mail', "description" = 'From before', "meta" = NULL, "name_key" = NULL WHERE "id" = ?`,
+      id,
+    )
+
+    expect(await findOwnerSecretByName(ctx, "Old mail")).toMatchObject({ id })
+    await expect(
+      createSecret(ctx, { name: "Old mail", value: "c" }),
+    ).rejects.toThrow(/already exists/)
+
+    expect(await ensureSealed(ctx)).toBe(true)
+
+    expect(await onDisk("From before")).toBe(false)
+    expect(await findOwnerSecretByName(ctx, "Old mail")).toMatchObject({ id })
+    expect(await listSecrets(ctx)).toMatchObject([
+      { id, name: "Old mail", description: "From before" },
+    ])
   })
 })

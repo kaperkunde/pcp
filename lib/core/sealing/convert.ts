@@ -1,6 +1,7 @@
 import { scrubFreedPages } from "../cleanup/runtime"
 import type { VaultContext } from "../context"
 import { db } from "../db"
+import { sealedSecretMeta } from "../secret-meta"
 import { isSealedText } from "../sealed"
 import { PLAIN_SETTINGS, storedSetting } from "../settings"
 
@@ -47,6 +48,37 @@ const CONVERTERS: Converter[] = [
         await db().setting.update({
           where: { vaultId_key: { vaultId: row.vaultId, key: row.key } },
           data: { value: storedSetting(ctx, row.key, row.value) },
+        })
+      }
+
+      return rows.length
+    },
+  },
+  {
+    table: "secret",
+    run: async (ctx, limit) => {
+      const rows = await db().secret.findMany({
+        where: { vaultId: ctx.vaultId, meta: null },
+        select: {
+          id: true,
+          plainName: true,
+          plainDescription: true,
+          updatedAt: true,
+        },
+        take: limit,
+      })
+
+      for (const row of rows) {
+        await db().secret.update({
+          where: { id: row.id },
+          data: {
+            ...sealedSecretMeta(ctx, row.id, {
+              name: row.plainName,
+              description: row.plainDescription,
+            }),
+            // Sealing is no change of the owner's.
+            updatedAt: row.updatedAt,
+          },
         })
       }
 
