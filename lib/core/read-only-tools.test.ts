@@ -257,10 +257,14 @@ describe("a call that failed on its way", () => {
     expect(read.isError).toBe(true)
     expect(read.text).toBe("Postcards could not be reached.")
 
+    // The same call again is held back as a repeat (#115) unless the
+    // assistant says why it repeats it.
     failWith = new PcpError("validation", "That is not a postcard.")
     const refused = await call("call_tool_destructive", {
       server: "postcards",
       tool: "send_postcard",
+      rerun: true,
+      reason: "Postcards was unreachable the first time.",
     })
     expect(refused.text).toBe("That is not a postcard.")
   })
