@@ -9,7 +9,11 @@ const MAX_ANSWER_DEPTH = 8
  * wrong is said by the schema as always, and this names the one handle inside
  * it to pass instead. Nothing when there is not exactly one such answer.
  */
-export function answerHint(args: unknown): string | undefined {
+export function answerHint(
+  args: unknown,
+  /** The problems found: the hint stands only where one names the answer. */
+  problems?: string[],
+): string | undefined {
   const found: string[] = []
   let nodes = 0
 
@@ -57,6 +61,22 @@ export function answerHint(args: unknown): string | undefined {
   }
 
   const at = found[0]!
+
+  // Problems quote a path as "file/result": one at the answer or under it.
+  const quoted = at.slice(1)
+
+  if (
+    problems &&
+    (at === "" ||
+      !problems.some(
+        (problem) =>
+          problem.startsWith(`"${quoted}"`) ||
+          problem.startsWith(`"${quoted}/`),
+      ))
+  ) {
+    return undefined
+  }
+
   const handle = (
     (at === "" ? (args as Record<string, unknown>) : valueAt(args, at)) as {
       result: { $result: string }

@@ -124,7 +124,9 @@ export async function checkCallArguments(
         ? await tabHint(tabs.ctx, tabs.tokenId, tabs.publicUrl)
         : undefined
 
-    const full = [hint, answerHint(sent)].filter(Boolean).join("\n")
+    const full = [hint, answerHint(sent, checked.problems)]
+      .filter(Boolean)
+      .join("\n")
 
     return { ...checked, ...(full ? { hint: full } : {}) }
   }
@@ -140,15 +142,19 @@ export async function checkCallArguments(
 
   const problems = validate(schema, args, secretAt ? { secretAt } : {})
 
-  return problems.length === 0
-    ? { fits: true, args, notes: [], renames: [] }
-    : {
-        fits: false,
-        problems,
-        notes: [],
-        renames: [],
-        ...(answerHint(args) ? { hint: answerHint(args) } : {}),
-      }
+  if (problems.length === 0) {
+    return { fits: true, args, notes: [], renames: [] }
+  }
+
+  const hint = answerHint(args, problems)
+
+  return {
+    fits: false,
+    problems,
+    notes: [],
+    renames: [],
+    ...(hint ? { hint } : {}),
+  }
 }
 
 /**
