@@ -213,7 +213,7 @@ describe("delivery", () => {
     })
     const lines = text.split("\n")
 
-    expect(lines[0]).toContain('CALL THE read_memory TOOL WITH command "every"')
+    expect(lines[0]).toContain("CALL THE search TOOL WITH NO ARGUMENTS")
     expect(lines[1]).toBe(INSTRUCTIONS_LEAD)
     expect(lines[2]).toBe("- Answer in French.")
     expect(lines[3]).toContain("PCP is a gateway")

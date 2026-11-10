@@ -514,7 +514,9 @@ describe("PCP's own tools in search (#41)", () => {
       kind: "pcp",
       inputSchema: { type: "object" },
     })
-    expect(said.call).toContain("not through call_tool")
+    expect(said.call).toContain(
+      'run it with execute_destructive as {"tool": "check_permission"',
+    )
     expect(said.call_handle).toBeUndefined()
     expect(said.outputSchema).toBeUndefined()
   })

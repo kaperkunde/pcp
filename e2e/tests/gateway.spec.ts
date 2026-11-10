@@ -101,33 +101,41 @@ test("issues an API token and describes the servers behind it", async ({
 }) => {
   token = await createToken(page, TOKEN_NAME)
 
-  const { instructions, tools } = await initialize(baseURL!, token)
-  expect(tools).toEqual([
+  const { instructions, listed, tools } = await initialize(baseURL!, token)
+  // A client lists the entries alone (#113); PCP's own tools are behind them.
+  expect(listed).toEqual([
     "search",
-    "list_tools",
-    "describe",
     "execute_read",
     "execute_write",
     "execute_destructive",
-    "read_image",
-    "view_image",
-    "convert_document",
-    "edit_pdf",
-    // PCP's own store, and the others by store (#90).
-    "list_folder",
-    "find_files",
-    "get_file",
-    "save_file",
-    "make_folder",
-    "move",
-    "delete",
-    "check_permission",
-    "withdraw_request",
-    "check_server",
-    "read_result",
-    "register_server",
-    "propose_tool_access",
   ])
+  expect([...tools].sort()).toEqual(
+    [
+      "search",
+      "list_tools",
+      "execute_read",
+      "execute_write",
+      "execute_destructive",
+      "read_image",
+      "view_image",
+      "convert_document",
+      "edit_pdf",
+      // PCP's own store, and the others by store (#90).
+      "list_folder",
+      "find_files",
+      "get_file",
+      "save_file",
+      "make_folder",
+      "move",
+      "delete",
+      "check_permission",
+      "withdraw_request",
+      "check_server",
+      "read_result",
+      "register_server",
+      "propose_tool_access",
+    ].sort(),
+  )
   expect(instructions).toContain(
     `${SLUG}: Sends postcards and adds numbers. (3 tools)`,
   )

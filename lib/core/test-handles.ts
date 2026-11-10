@@ -156,31 +156,40 @@ export async function listEveryTool(
     .split("\n")
     .filter((line) => line.startsWith("pcp "))
     .map((line) => line.split(" ")[1]!)
-  const own = await Promise.all(
-    names.map(async (name) => {
-      const tool = JSON.parse(
-        textOf(
-          await client.callTool({ name: "search", arguments: { ref: name } }),
-        ),
-      ) as {
-        tool: string
-        title?: string
-        description?: string
-        inputSchema: ListedTool["inputSchema"]
-        outputSchema?: Record<string, unknown>
-        annotations?: ListedTool["annotations"]
-      }
+  const own: ListedTool[] = []
 
-      return {
-        name: tool.tool,
-        title: tool.title,
-        description: tool.description,
-        inputSchema: tool.inputSchema,
-        ...(tool.outputSchema ? { outputSchema: tool.outputSchema } : {}),
-        annotations: tool.annotations,
-      }
-    }),
-  )
+  for (const name of names) {
+    own.push(
+      await (async () => {
+        const tool = JSON.parse(
+          textOf(
+            await client.callTool({ name: "search", arguments: { ref: name } }),
+          ),
+        ) as {
+          tool: string
+          title?: string
+          description?: string
+          inputSchema: ListedTool["inputSchema"]
+          outputSchema?: Record<string, unknown>
+          annotations?: ListedTool["annotations"]
+        }
+
+        return {
+          name: tool.tool,
+          title: tool.title,
+          description: tool.description,
+          inputSchema: tool.inputSchema,
+          ...(tool.outputSchema ? { outputSchema: tool.outputSchema } : {}),
+          annotations: tool.annotations,
+        }
+      })(),
+    )
+  }
+
+  // Each search's line in the request log is written as it ends, without
+  // being waited for: let the last land before a test's data folder goes,
+  // or the log stops writing for a while (request-log.ts).
+  await new Promise((resolve) => setTimeout(resolve, 50))
 
   return { tools: [...listed, ...own] }
 }

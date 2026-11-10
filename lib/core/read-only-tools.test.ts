@@ -174,16 +174,18 @@ describe("the read-only tools", () => {
     expect(readOnly("read_memory")).toBe(true)
     expect(readOnly("execute_read")).toBe(true)
     // Finding and reading tools, skills and memories.
-    for (const name of ["search", "describe", "list_tools", "read_result"]) {
+    for (const name of ["search", "list_tools", "read_result"]) {
       expect(readOnly(name), name).toBe(true)
     }
     expect(readOnly("memory")).toBe(false)
     expect(readOnly("execute_write")).toBe(false)
     expect(readOnly("execute_destructive")).toBe(false)
     expect(readOnly("list_secrets")).toBeUndefined()
-    // The old names are gone (docs/breaking-changes.md).
+    // The old names are gone (docs/breaking-changes.md), and describe is
+    // search's ref (#113).
     expect(tools.map((tool) => tool.name)).not.toContain("search_tools")
     expect(tools.map((tool) => tool.name)).not.toContain("describe_tool")
+    expect(tools.map((tool) => tool.name)).not.toContain("describe")
   })
 
   it("include list_secrets and get_endpoint for a token that manages endpoints", async () => {
@@ -271,7 +273,7 @@ describe("a call that failed on its way", () => {
   })
 })
 
-describe("the call_tool entries", () => {
+describe("the execute entries", () => {
   it("say their tier in their annotations, and the old names are gone", async () => {
     const { tools } = await listEveryTool(client)
     const hints = (name: string) =>
@@ -413,34 +415,54 @@ describe("the call_tool entries", () => {
     expect(await markedReadOnly(serverId, "peek_cards")).toBe(true)
   })
 
-  it("advertise the owner's tier for PCP's own tools", async () => {
+  it("advertise the owner's tier for PCP's own tools, and run them by it; the entries keep theirs", async () => {
     await reconnect({
-      ownTiers: { execute_destructive: "write", search: "destructive" },
+      ownTiers: {
+        execute_destructive: "write",
+        search: "destructive",
+        memory: "write",
+        check_permission: "destructive",
+      },
     })
     const { tools } = await listEveryTool(client)
     const hints = (name: string) =>
       tools.find((tool) => tool.name === name)?.annotations
 
+    // An entry's tier is its name (#113).
     expect(hints("execute_destructive")).toMatchObject({
-      readOnlyHint: false,
-      destructiveHint: false,
-    })
-    expect(hints("search")).toMatchObject({
       readOnlyHint: false,
       destructiveHint: true,
     })
-    // The entry still runs only what its own tier lets it.
+    expect(hints("search")).toMatchObject({ readOnlyHint: true })
+    expect(hints("memory")).toMatchObject({
+      readOnlyHint: false,
+      destructiveHint: false,
+    })
+    expect(hints("check_permission")).toMatchObject({
+      readOnlyHint: false,
+      destructiveHint: true,
+    })
     expect(
-      (
-        await call("execute_destructive", {
-          server: "postcards",
-          tool: "burn_cards",
-        })
-      ).isError,
-    ).toBe(false)
-    expect(
-      JSON.parse((await call("describe", { ref: "search" })).text),
-    ).toMatchObject({ tier: "destructive" })
+      JSON.parse((await call("search", { ref: "memory" })).text),
+    ).toMatchObject({ tier: "write", run_with: "execute_write" })
+
+    // Run through the execute entry of the owner's tier for them.
+    const viaWrite = await client.callTool({
+      name: "execute_write",
+      arguments: {
+        tool: "memory",
+        arguments: { command: "view", path: "/memories" },
+      },
+    })
+    expect(viaWrite.isError).toBeFalsy()
+    const refused = await client.callTool({
+      name: "execute_read",
+      arguments: { tool: "check_permission" },
+    })
+    expect(refused.isError).toBe(true)
+    expect((refused.content as Array<{ text: string }>)[0]!.text).toContain(
+      "run it with execute_destructive",
+    )
   })
 })
 

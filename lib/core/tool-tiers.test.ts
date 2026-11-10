@@ -230,34 +230,26 @@ describe("the owner's tiers", () => {
     const own = await listOwnToolTiers(ctx)
     const names = own.map((tool) => tool.name)
     expect(names).toEqual(
-      expect.arrayContaining([
-        "execute_read",
-        "execute_write",
-        "execute_destructive",
-        "run_read",
-        "run_write",
-        "run_destructive",
-        "search",
-      ]),
+      expect.arrayContaining(["memory", "web_fetch", "check_permission"]),
     )
-    expect(own.find((tool) => tool.name === "execute_destructive")).toEqual(
+    // The entries' tiers are their names (#113): not the owner's to choose.
+    for (const entry of ["search", "execute_destructive", "run_read"]) {
+      expect(names).not.toContain(entry)
+    }
+    expect(own.find((tool) => tool.name === "memory")).toEqual(
       expect.objectContaining({ derived: "destructive", override: null }),
     )
 
-    await chooseOwnToolTier(ctx, "execute_destructive", "write")
-    expect(await readOwnToolTiers(ctx)).toEqual({
-      execute_destructive: "write",
-    })
+    await chooseOwnToolTier(ctx, "memory", "write")
+    expect(await readOwnToolTiers(ctx)).toEqual({ memory: "write" })
     expect(
-      (await listOwnToolTiers(ctx)).find(
-        (tool) => tool.name === "execute_destructive",
-      ),
+      (await listOwnToolTiers(ctx)).find((tool) => tool.name === "memory"),
     ).toMatchObject({ derived: "destructive", override: "write" })
 
-    await expect(chooseOwnToolTier(ctx, "call_tool", "read")).rejects.toThrow(
-      /no tool called call_tool/,
-    )
-    await chooseOwnToolTier(ctx, "execute_destructive", null)
+    await expect(
+      chooseOwnToolTier(ctx, "execute_destructive", "read"),
+    ).rejects.toThrow(/no tool called execute_destructive/)
+    await chooseOwnToolTier(ctx, "memory", null)
     expect(await readOwnToolTiers(ctx)).toEqual({})
   })
 })

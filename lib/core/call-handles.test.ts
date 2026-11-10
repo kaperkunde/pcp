@@ -250,16 +250,28 @@ describe("call_tool with a call handle", () => {
     )
   })
 
-  it("takes no server or tool name", async () => {
+  it("takes no server name, and a tool name only for PCP's own tools", async () => {
     const client = await connect()
     const { tools } = await listEveryTool(client)
 
     for (const name of ["execute_destructive", "execute_read"]) {
       const schema = tools.find((tool) => tool.name === name)!.inputSchema
       expect(Object.keys(schema.properties ?? {})).not.toContain("server")
-      expect(Object.keys(schema.properties ?? {})).not.toContain("tool")
-      expect(schema.required).toContain("call_handle")
+      // A call_handle, or one of PCP's own tools by name: one of them.
+      expect(JSON.stringify(schema.allOf)).toContain(
+        '{"anyOf":[{"required":["call_handle"]},{"required":["tool"]}]}',
+      )
     }
+
+    const own = await call(client, "execute_destructive", {
+      tool: "send_postcard",
+      arguments: { to: "Ada" },
+    })
+    expect(own.isError).toBe(true)
+    expect(own.text).toContain(
+      "PCP has no tool of its own called send_postcard",
+    )
+    expect(ran).toEqual([])
   })
 
   it("answers a stale handle with the schema as it is now and a fresh handle", async () => {
@@ -322,7 +334,7 @@ describe("call_tool with a call handle", () => {
       })
 
       expect(result.isError).toBe(true)
-      expect(result.text).toContain("not one describe gave this token")
+      expect(result.text).toContain("not one search gave this token")
       expect(result.text).not.toContain('"inputSchema"')
     }
 
@@ -343,7 +355,7 @@ describe("call_tool with a call handle", () => {
     })
 
     expect(result.isError).toBe(true)
-    expect(result.text).toContain("not one describe gave this token")
+    expect(result.text).toContain("not one search gave this token")
     expect(ran).toEqual([])
   })
 
@@ -362,7 +374,7 @@ describe("call_tool with a call handle", () => {
       })
 
       expect(result.isError).toBe(true)
-      expect(result.text).toContain("not a tool's name")
+      expect(result.text).toContain("not its name")
       expect(result.text).toContain('"inputSchema"')
       expect(ran).toEqual([])
 
@@ -378,7 +390,7 @@ describe("call_tool with a call handle", () => {
       call_handle: "postcards/burn_cards",
     })
     expect(unknown.isError).toBe(true)
-    expect(unknown.text).toContain("describe")
+    expect(unknown.text).toContain("search again with its ref")
     expect(unknown.text).not.toContain('call_handle":')
   })
 

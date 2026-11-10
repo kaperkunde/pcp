@@ -1081,7 +1081,7 @@ describe("search and describe", () => {
     expect(lines.slice(2)).toContain(
       "memory /memories/shared/friends.md — Grace likes postcards from the sea.",
     )
-    expect(lines.at(-1)).toBe("describe takes a ref as it is here.")
+    expect(lines.at(-1)).toBe("search takes a ref as it is here, as ref.")
 
     // Words no tool has find the skill and the memory alone.
     const friend = await call(client, "search", {
@@ -1193,12 +1193,12 @@ describe("search and describe", () => {
     await client.close()
   })
 
-  it("no longer has search_tools and describe_tool, whose release has passed", async () => {
+  it("no longer has search_tools and describe_tool, whose release has passed, nor lists describe (#113)", async () => {
     const client = await connect()
     const names = (await listEveryTool(client)).tools.map((tool) => tool.name)
 
     expect(names).toContain("search")
-    expect(names).toContain("describe")
+    expect(names).not.toContain("describe")
     expect(names).not.toContain("search_tools")
     expect(names).not.toContain("describe_tool")
     await client.close()

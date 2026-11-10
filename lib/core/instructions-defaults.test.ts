@@ -27,7 +27,7 @@ describe("PCP's suggested instructions", () => {
 
     const text = currentTemplate().text
     for (const word of [
-      "describe",
+      "search's ref",
       "search",
       "skill",
       "call_handle",
@@ -70,7 +70,7 @@ describe("PCP's suggested instructions", () => {
 
     expect(v3).toContain("call_tool, run_code")
     expect(v4).not.toContain("call_tool, run_code")
-    expect(v4).toContain("execute_destructive")
+    expect(v4).toContain("call_tool_destructive")
     expect(mergeLines(v3, v3, v4)).toEqual({ text: v4, conflicts: 0 })
   })
 
@@ -115,5 +115,18 @@ describe("PCP's suggested instructions", () => {
       text: `${v6}\n- Answer in Dutch.`,
       conflicts: 0,
     })
+  })
+
+  it("name search, execute and run from version 7, offered as a merge (#113)", () => {
+    const v6 = templateText(6)!
+    const v7 = templateText(7)!
+
+    expect(v6).toContain("call_tool_destructive")
+    for (const old of ["call_tool", "run_code", "describe"]) {
+      expect(v7).not.toContain(old)
+    }
+    expect(v7).toContain("execute_destructive")
+    expect(v7).toContain("run_destructive")
+    expect(mergeLines(v6, v6, v7)).toEqual({ text: v7, conflicts: 0 })
   })
 })
