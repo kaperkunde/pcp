@@ -14,8 +14,9 @@ export const MAX_READ_PROVIDERS = 4
 export const MAX_TRIED_PROVIDERS = 3
 
 /**
- * The resolution view_image asks a PDF's page in, in dots per inch: an A4
- * page comes out about 1240 by 1754 pixels, small print still legible.
+ * The resolution convert_document asks a PDF's page in (to "png"), in dots
+ * per inch: an A4 page comes out about 1240 by 1754 pixels, small print
+ * still legible.
  */
 export const PAGE_DPI = 150
 

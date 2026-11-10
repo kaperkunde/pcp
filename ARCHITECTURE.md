@@ -4682,17 +4682,21 @@ into a picture: a `page_image` provider, a tool that renders a page to an
 image, found by its words (the page one less to an argument that counts
 from 0, by its name or description), its answer an image (kept as a handle)
 or a PNG it wrote through the file step; the answer is that handle, for
-`view_image`. No common item does it yet, so its setup answer names none.
+`view_image`, once its first bytes are a PNG, JPEG or WebP (anything else is
+that provider failing: "the renderer answered with no picture"). The input
+goes by its first bytes too: a picture is pointed to `view_image`, and
+anything but a PDF is refused, whatever type it was kept as. No common item does it yet, so its setup answer names none.
 
 `view_image` (`lib/core/view-image.ts`) is PCP's own Read tool, not a
 capability: it calls no provider. It shows the assistant one of its kept
 files as MCP image content, so the model's own vision reads it rather than
 an OCR reading of its text: a PNG, JPEG, WebP or GIF by its first bytes
 (never an SVG, which is text), cropped (in the original's pixels), grey and
-as wide as asked, its longest side at most `VIEW_IMAGE_SIDE`, then encoded
-as a JPEG that fits an answer inline the way a screenshot is
+as wide as asked, its longest side at most `VIEW_IMAGE_SIDE`, decoded once
+into raw pixels (`code/media.ts decodeImage`), then encoded from those
+(`encodeJpeg`) as a JPEG that fits an answer inline the way a screenshot is
 (`browser/screenshot.ts fitPicture` and `shotLadder`: quality, then size,
-down to `INLINE_IMAGE_BYTES`), decoded by `code/media.ts`. A PDF is refused
+down to `INLINE_IMAGE_BYTES`), the request's signal checked between steps. A PDF is refused
 with the `convert_document` call that makes its page a picture. A video's
 frame is taken by ffmpeg in the sandbox, through a program of PCP's own that
 calls `pcp.video.frames` (`runProgram`, no tool callable), only while the

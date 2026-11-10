@@ -222,6 +222,7 @@ import {
 } from "./servers"
 import { collectHandleIds, missingResultMessage } from "./result-handles"
 import { capabilityProviders } from "./capabilities/candidates"
+import { sniffMediaType } from "./media-types"
 import { viewImage, type ViewImageArgs } from "./view-image"
 import {
   capabilitiesNamed,
@@ -951,6 +952,14 @@ function tooManyCalls(value: string): Outcome {
 }
 
 const HEADER_NAME = /^[A-Za-z0-9-]{1,100}$/
+
+/** Pictures by their first bytes: what view_image shows as it is. */
+const PICTURE_TYPES = new Set([
+  "image/png",
+  "image/jpeg",
+  "image/webp",
+  "image/gif",
+])
 
 /** Where a description points to view_image, for a model that sees pictures. */
 const VIEW_POINTER =
@@ -2710,6 +2719,13 @@ export function buildGatewayServer(
     return files
   }
 
+  /** A kept result of the token's, by its first bytes: its type, or null. */
+  const sniffResult = async (id: string): Promise<string | null> => {
+    const opened = await openResult(scope.ctx, { tokenId: scope.tokenId, id })
+
+    return opened ? sniffMediaType(opened.bytes().subarray(0, 64)) : null
+  }
+
   const fileArg = (what: string) =>
     RESULT_HANDLE.describe(
       `${what}: a handle {"$result": …} as an answer gave it (a browser download or screenshot, a mail attachment, an upload, another tool's file). Pass it as it is.`,
@@ -2725,7 +2741,7 @@ export function buildGatewayServer(
         .boolean()
         .optional()
         .describe(
-          "Also show you the picture, made to fit in the answer as view_image shows it (a PNG, JPEG, WebP or GIF; for a PDF's page, call view_image).",
+          'Also show you the picture, made to fit in the answer as view_image shows it (a PNG, JPEG, WebP or GIF; for a PDF\'s page, convert_document with to "png" first, then view_image). view_image is the dependable way to see a picture: some apps show only the readings (the structured answer), so this picture may not reach you.',
         ),
     }),
     output: READ_IMAGE_OUTPUT,
@@ -2923,9 +2939,18 @@ export function buildGatewayServer(
       }
 
       if (args.to === "png") {
-        if (files[0]!.mediaType.toLowerCase().startsWith("image/")) {
+        // What the file is by its first bytes, not the type it was kept as.
+        const sniffed = await sniffResult(files[0]!.id)
+
+        if (sniffed && PICTURE_TYPES.has(sniffed)) {
           return failure(
-            `to "png" makes a picture of a PDF's page; this file is ${files[0]!.mediaType}, a picture already: pass its handle to view_image.`,
+            `This file is already a picture (${sniffed}): pass its handle to view_image to see it.`,
+          )
+        }
+
+        if (sniffed !== "application/pdf") {
+          return failure(
+            `to "png" makes a picture of only a PDF's page, and this file is not a PDF by its first bytes (${sniffed ?? files[0]!.mediaType}). Convert it to Markdown instead (leave out to).`,
           )
         }
 
@@ -2943,10 +2968,12 @@ export function buildGatewayServer(
         return pdfPageImage(
           cap,
           pagers,
-          files[0]!,
+          // A PDF by its bytes, whatever type it was kept as.
+          { ...files[0]!, mediaType: "application/pdf" },
           args.page ?? 1,
           bridgeFor("convert_document", ctx.signal),
           scope.publicUrl,
+          (handle) => sniffResult(handle.$result),
         )
       }
 

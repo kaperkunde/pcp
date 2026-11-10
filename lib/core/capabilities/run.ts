@@ -613,7 +613,7 @@ async function firstThatWorks(
     value: unknown,
     files: Handle[],
     failed: Array<{ provider: string; error: string }>,
-  ) => Outcome | null,
+  ) => Outcome | null | Promise<Outcome | null>,
 ): Promise<Outcome> {
   const failed: Array<{ provider: string; error: string }> = []
   const skipped: string[] = []
@@ -635,7 +635,7 @@ async function firstThatWorks(
       continue
     }
 
-    const answer = done(provider, run.value, run.files, failed)
+    const answer = await done(provider, run.value, run.files, failed)
 
     if (answer) {
       return answer
@@ -699,10 +699,15 @@ export function convertDocument(
   )
 }
 
+/** The pictures a page may come back as, by their first bytes. */
+const PAGE_PICTURES = new Set(["image/png", "image/jpeg", "image/webp"])
+
 /**
  * convert_document's to "png": the best provider that turns a PDF's page
  * into a picture, which comes back as a handle (from the path it wrote, or
- * an image in its answer) for view_image to show.
+ * an image in its answer) for view_image to show. What it made counts only
+ * when its first bytes are a PNG, JPEG or WebP (`pictureType` sniffs the
+ * token's kept result); anything else is that provider failing.
  */
 export function pdfPageImage(
   cap: Capability,
@@ -711,6 +716,7 @@ export function pdfPageImage(
   page: number,
   bridge: Bridge,
   publicUrl: string,
+  pictureType: (handle: Handle) => Promise<string | null>,
 ): Promise<Outcome> {
   return firstThatWorks(
     cap,
@@ -719,13 +725,14 @@ export function pdfPageImage(
     { page, dpi: PAGE_DPI, format: "png" },
     bridge,
     publicUrl,
-    (provider, value, files, failed) => {
+    async (provider, value, files, failed) => {
       const made = files[0] ?? firstHandle(value)
+      const type = made ? await pictureType(made) : null
 
-      if (!made) {
+      if (!made || !type || !PAGE_PICTURES.has(type)) {
         failed.push({
           provider: providerName(provider),
-          error: "It answered with no picture.",
+          error: `the renderer answered with no picture${made ? ` (${type ?? "a file PCP does not know"})` : ""}.`,
         })
         return null
       }
