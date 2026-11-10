@@ -78,14 +78,27 @@ export async function updateWrapperAction(
   const id = field(formData, "id")
 
   const result = await guarded(async () => {
-    await saveWrapperByOwner(ctx, id, inputFrom(formData))
+    const saved = await saveWrapperByOwner(ctx, id, inputFrom(formData))
 
     const slug = field(formData, "slug")
     if (slug) {
       await renameServerSlug(ctx, id, slug)
     }
 
-    return { message: "Saved." }
+    // A place found in the programs that it did not have: said, not silent.
+    return {
+      message:
+        saved.found.length > 0
+          ? `Saved. Typed into pages, found in the program: ${saved.found
+              .map(
+                (entry) =>
+                  `${entry.secret} (${entry.parts.map((part) => (part === "username" ? "login name" : "password")).join(" and ")})`,
+              )
+              .join(
+                ", ",
+              )}. PCP types them only at the sites you bound them to, or after asking you.`
+          : "Saved.",
+    }
   })
 
   revalidatePath("/servers")

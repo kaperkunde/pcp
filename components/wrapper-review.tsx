@@ -148,6 +148,15 @@ function SiteList({
   )
 }
 
+/** What a program types of a secret it was found to, in the owner's words. */
+function typedLabel(parts: Array<"username" | "password">): string {
+  return parts.length === 2
+    ? "Its login name and password"
+    : parts[0] === "username"
+      ? "Its login name"
+      : "Its password"
+}
+
 function SecretPlaces({ shown }: { shown: WrapperShown }) {
   return (
     <section
@@ -181,12 +190,21 @@ function SecretPlaces({ shown }: { shown: WrapperShown }) {
                       New: type its value in below
                     </span>
                   ) : null}
+                  {binding.found ? (
+                    <span className="block text-xs text-muted-foreground">
+                      Found in the program
+                    </span>
+                  ) : null}
                 </td>
                 <td className="py-2 pr-4 break-all">
                   <code>{binding.tool}</code> <code>{binding.argument}</code>
                 </td>
                 <td className="py-2 pr-4 break-all">
-                  <code>{binding.template}</code>
+                  {binding.found ? (
+                    typedLabel(binding.found.parts)
+                  ) : (
+                    <code>{binding.template}</code>
+                  )}
                 </td>
                 <td className="py-2 break-all">
                   <code>{binding.url}</code>
@@ -202,6 +220,9 @@ function SecretPlaces({ shown }: { shown: WrapperShown }) {
       <p className="text-xs leading-relaxed text-muted-foreground">
         PCP writes each value in at these places only, for the server at that
         address. Neither the program nor the assistant ever sees it.
+        {shown.secrets.some((binding) => binding.found)
+          ? " A secret found in a program is typed into a page only at the sites you bound it to, or after asking you."
+          : null}
       </p>
     </section>
   )

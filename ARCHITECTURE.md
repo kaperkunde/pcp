@@ -2542,6 +2542,45 @@ checkSyntax`), nothing has a character that does not show on screen
   `type` text (Browser, Secrets in pages). Scrubbing cannot catch a
   value a tool transforms or stores and answers with later: the owner's
   review of the place a secret goes is what decides, and the page says so.
+  Several secrets may share a place (a login name and a password, both
+  `browser/type` at `/text`): a binding is unique by place and secret.
+  A call whose placeholder has no binding is refused in `run.ts innerCall`
+  before anything is sent or asked, with the `secrets` entry to propose
+  through `update_wrapper` (`unboundSecretFix`); `upstream.ts` refuses it
+  again.
+- **Secrets a flow types, found in its program** (#120,
+  `secret-literals.ts`, `definition.ts foundBindings`). Each time a
+  definition is checked (an assistant's request, the owner's save, a
+  repository's document applied), PCP reads each tool's program for
+  placeholders written with a fixed name, `{"$secret": "<name>"}` in any
+  quoting QuickJS takes, with `"part"` or not (comments, strings and
+  regular expressions skipped; a name worked out as it runs, an object with
+  a computed key or a spread, and anything nested past 64 templates or
+  brackets deep is not found).
+  For a tool that calls a browser's `type`, each such name of a secret PCP
+  holds gets a binding at `browser/type` `/text` marked `found`, with the
+  `parts` the programs name of it (login name, password, or both), stored
+  in the definition (so its hash, the request's `basis` and the owner's
+  approval cover it) and shown on the review as found in the program, with
+  what it types. A found binding lets through only its parts: a call that
+  types another part is refused (`run.ts`, `placeholders.ts matchGrant`); a
+  binding given by name has no `parts`, which is both, as before. Only the browser: typing still
+  passes the browser's own gate at the moment of typing (the secret's
+  sites, the token's allowance, or a `secret_use` request), which no
+  binding changes, whereas a secret sent to any other tool goes without a
+  per-use ask, so it needs a binding the owner was asked for by name. A
+  found binding is never one an assistant or a document gives: `toInput`
+  keeps it out of `get_wrapper`'s `secrets` (it is `found_secrets` there),
+  the owner's form and the repository document, and a change finds it
+  again from the programs as they will be. Since what is found depends on
+  the secrets the vault holds, not on the text alone, every way a
+  definition is written says when it gains one: the request's review; a
+  repository's review, which compares the places the document would get
+  with the ones the wrapper has in the vault (`repos/found-review.ts
+reviewInVault`, `secret_binding`, so even a change of text only waits
+  for the owner) and is checked again when they take it (the number of
+  flags they were shown); and the owner's own save, whose message names
+  each new one. The wrapper's page lists them read only beside the form.
 - **Replacing.** A tool listed in `replaces` (it has to be among the
   tool's `calls`) is left out of `search`, `list_tools`, `pcp.tools`
   and the instructions' counts (`listedTools`) for a token while the
@@ -3053,7 +3092,8 @@ the body could carry the secret encoded.
 A secret goes into a page only as `type`'s text, `{"$secret": name}`: in an
 assistant's call (`resolveCall` lets it through there and nowhere else),
 from run_code's `pcp.call`, or from a wrapper or flow whose binding names
-`browser/type` at `/text` with no template (`definition.ts`). Any other
+`browser/type` at `/text` with no template (`definition.ts`; given by name,
+or found in the program, Wrappers above). Any other
 browser tool or argument is refused, in `resolveCall` and in `upstream.ts`.
 `upstream.ts callBrowser` is the one path: it hands `callBrowserTool` a
 `SecretTyper`, never a value. The browser resolves the field (ref or

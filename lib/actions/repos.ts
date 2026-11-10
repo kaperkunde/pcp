@@ -570,7 +570,7 @@ export async function importServiceAction(
 export async function answerChangeAction(
   itemId: string,
   answer: "approve" | "decline" | "keep",
-  shown: { sha: string; hash: string },
+  shown: { sha: string; hash: string; flags?: number },
 ): Promise<RepoActionResult> {
   const ctx = await requireContext()
   const result = await guarded(async () => {
@@ -581,6 +581,7 @@ export async function answerChangeAction(
           const notes = await approveChange(ctx, itemId, {
             sha,
             hash: String(shown.hash),
+            ...(typeof shown.flags === "number" ? { flags: shown.flags } : {}),
           })
           return { message: "Applied as you were shown it.", lines: notes }
         }
