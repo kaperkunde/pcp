@@ -68,6 +68,34 @@ associated data (a ciphertext cannot be moved to another row):
 - the login name and note of one of the owner's secrets
   (`secret.login_name` with `secret:<id>:login`, `secret.note` with
   `secret:<id>:note`): not secret, but theirs,
+- what describes the owner's things (#96), sealed so that a copy of the
+  database does not show whom a vault belongs to or what it reaches
+  (`lib/core/sealed.ts`): a secret's name and description
+  (`secret.meta`, `secret:<id>:meta`), an API token's name
+  (`api_token.sealed_name`, `api_token:<id>:name`), the vault's settings
+  but the public address, which a request with no key reads
+  (`setting.value` as `pcp-sealed:v1:…`, `setting:<vault id>:<key>`), and
+  the sites a secret is typed at, a token's sites allowed for a while and
+  web fetch's site and script lines (each kept as a keyed hash of the site,
+  the site sealed beside it: `secret_browser_origin:<secret id>:<hash>`,
+  `api_token_site_allowance:<token id>:<hash>`, `web_fetch_rule:<id>:key`).
+  What is found by its value is found by a keyed hash (`keyedHash` in
+  `crypto.ts`: HMAC-SHA256 under a key HKDF derives from the DEK per
+  label), a secret's name in `secret.name_key`, unique in the vault. A
+  linked file's name is sealed under its link's key (`file_link_name:<id>`,
+  `link-names.ts`) and the asking token's name on an upload page under the
+  page's (`upload_link_assistant:<id>`), since those pages hold no other
+  key. Rows from before keep the old plain columns (renamed `plainName`
+  and the like in the client, so nothing reads them by accident) until
+  `ensureSealed` (`lib/core/sealing/convert.ts`) seals them, a batch per
+  table per request through `after()` from `/mcp` and the owner's pages,
+  then rebuilds the database file once (see "Data on disk"); every reader
+  takes either form meanwhile, and an older export restores in the plain
+  form and is sealed the same way. The vault's own name (`vault.name`) stays
+  plain on purpose: the sign-in page shows it before anything is unlocked.
+  Still plain, for later: a server's name, address, description and
+  sign-in details, its tools and schemas, slugs and tool names, a kept
+  result's name,
 - a store's key (`storage_root.store_key`, `storage_store:<server id>`),
   which in turn wraps each file's key in an encrypted store, and the
   store's index of names, sizes and times (`storage_entry.meta`,
@@ -3601,6 +3629,17 @@ Linux):
   by `lib/core/migrate.ts`, which keeps Prisma's own `_prisma_migrations`
   bookkeeping (same table, same checksums), so a developer's
   `prisma migrate dev` and a container's boot agree on the history.
+  Every connection (`lib/core/db.ts`, and the one migrations run on) sets
+  `secure_delete = ON` (not `FAST`), so SQLite writes zeros over a row as it
+  deletes or rewrites it instead of leaving it in the page or on the free
+  list. The write-ahead log keeps the pages as they were until a
+  checkpoint, so removing a server or a secret checkpoints and truncates it
+  once the answer is sent, and deleting the vault or restoring over it
+  rebuilds the file (`VACUUM`; `scrubFreedPages` in
+  `lib/core/cleanup/runtime.ts`, one at a time with the cleanup). The first
+  cleanup after an upgrade rebuilds the file whatever is free, for pages an
+  older PCP freed without zeroing, and notes that in the `db.scrubbed` host
+  setting (a time, nothing of the vault).
 - `logs/mcp-YYYY-MM-DD.jsonl` — one line per gateway call: which token,
   which tool, which upstream, how long, whether it worked, and whether it
   stopped to ask the owner (with the permission request's id). Never
@@ -3776,8 +3815,12 @@ the vault's id), every token the file has live that the vault being replaced
 has revoked, or no longer has, is written revoked (the vault's `revoked_at`,
 or now for a deleted one) with its grant blanked as revoking blanks it
 (`carriedRevocations`, read inside the transaction before the wipe). The
-preview lists the file's tokens by name and prefix and marks those that
-come back revoked. At setup, or for another PCP's export, the vault knows
+preview lists the file's tokens by prefix and marks those that come back
+revoked; their names are sealed in the file under the vault's own key, so
+the preview shows them only when the owner also types the password of the
+vault in the file, which opens the file's password grant for the preview
+alone (`readExport`'s `vaultPassword`; its parameters held to an export's
+own, a wrong one refused, the key kept nowhere). At setup, or for another PCP's export, the vault knows
 nothing of them and the file is written as it is. A newer export of a vault
 restored here from an older one has tokens this vault never had; they come
 back revoked too, and the owner makes them again.
@@ -4766,11 +4809,11 @@ A file meant to last goes into a store with `save_file`.
 
 Some work an assistant asks for by what it is, not by a tool's name: read
 the text in a picture or a scan, fill in or merge a PDF, turn a document
-into Markdown. Each is a capability (`lib/core/capabilities/list.ts`, a
-typed list: `read_image`, `pdf_edit`, `convert_document`) and one of PCP's
-own tools that every token has (`read_image`, `edit_pdf`,
-`convert_document`). The tool does no work itself: a provider does, one of
-the token's own tools.
+into Markdown or a PDF's page into a picture. Each is a capability
+(`lib/core/capabilities/list.ts`, a typed list: `read_image`, `pdf_edit`,
+`convert_document`) and one of PCP's own tools that every token has
+(`read_image`, `edit_pdf`, `convert_document`). The tool does no work
+itself: a provider does, one of the token's own tools.
 
 **Providers** (`providers.ts`, pure) are found among the tools the token
 can call or ask for (blocked ones are not there; the browser's never
@@ -4826,6 +4869,34 @@ digits and meter readings against the picture. `convert_document` and
 picture of a signature; a digital signature needs a certificate and is the
 provider's own tool) try providers best first until one does it, and answer
 the text, or the PDF it made, as a handle.
+
+`convert_document` with `to: "png"` turns a PDF's page (`page`, from 1)
+into a picture: a `page_image` provider, a tool that renders a page to an
+image, found by its words (the page one less to an argument that counts
+from 0, by its name or description), its answer an image (kept as a handle)
+or a PNG it wrote through the file step; the answer is that handle, for
+`view_image`, once its first bytes are a PNG, JPEG or WebP (anything else is
+that provider failing: "the renderer answered with no picture"). The input
+goes by its first bytes too: a picture is pointed to `view_image`, and
+anything but a PDF is refused, whatever type it was kept as. No common item does it yet, so its setup answer names none.
+
+`view_image` (`lib/core/view-image.ts`) is PCP's own Read tool, not a
+capability: it calls no provider. It shows the assistant one of its kept
+files as MCP image content, so the model's own vision reads it rather than
+an OCR reading of its text: a PNG, JPEG, WebP or GIF by its first bytes
+(never an SVG, which is text), cropped (in the original's pixels), grey and
+as wide as asked, its longest side at most `VIEW_IMAGE_SIDE`, decoded once
+into raw pixels (`code/media.ts decodeImage`), then encoded from those
+(`encodeJpeg`) as a JPEG that fits an answer inline the way a screenshot is
+(`browser/screenshot.ts fitPicture` and `shotLadder`: quality, then size,
+down to `INLINE_IMAGE_BYTES`), the request's signal checked between steps. A PDF is refused
+with the `convert_document` call that makes its page a picture. A video's
+frame is taken by ffmpeg in the sandbox, through a program of PCP's own that
+calls `pcp.video.frames` (`runProgram`, no tool callable), only while the
+sandbox runner is connected; without it the answer says video needs the
+sandbox. The frame is kept as a result of the token's and named, so a closer
+look (crop) does not take it again. `read_image` with `include_image` adds
+the same picture beside its readings.
 
 **No provider**: the answer is `needs_owner` with reason `setup` and the
 capability, a markdown link labelled with the capability's own words, last,

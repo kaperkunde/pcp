@@ -5,6 +5,7 @@ import { asBytes, decrypt, decryptString, encryptString } from "./crypto"
 import { db } from "./db"
 import { isPcpError } from "./errors"
 import { fileAad, keyAad, storePathAad } from "./file-links"
+import { openLinkName } from "./link-names"
 import type { StorageFolder } from "./storage/files"
 import { joinRelative, splitPath } from "./storage/paths"
 
@@ -208,7 +209,8 @@ async function deliver(
             const path = await saveOne(
               folder,
               openStorePath(ctx, link) ?? "",
-              link.name || `upload-${now.toISOString().slice(0, 10)}`,
+              openLinkName(key, link) ||
+                `upload-${now.toISOString().slice(0, 10)}`,
               bytes,
             )
 

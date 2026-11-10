@@ -554,7 +554,7 @@ describe("the setting", () => {
     }
 
     await writeEmbeddingsConfig(ctx, config)
-    expect(await readEmbeddingsConfig(ctx.vaultId)).toEqual(config)
+    expect(await readEmbeddingsConfig(ctx)).toEqual(config)
     expect(
       await db().setting.findFirst({ where: { key: "embeddings" } }),
     ).toBeTruthy()
@@ -563,10 +563,10 @@ describe("the setting", () => {
       where: { vaultId_key: { vaultId: ctx.vaultId, key: "embeddings" } },
       data: { value: "{" },
     })
-    expect(await readEmbeddingsConfig(ctx.vaultId)).toBeNull()
+    expect(await readEmbeddingsConfig(ctx)).toBeNull()
 
     await writeEmbeddingsConfig(ctx, null)
-    expect(await readEmbeddingsConfig(ctx.vaultId)).toBeNull()
+    expect(await readEmbeddingsConfig(ctx)).toBeNull()
   })
 
   it("finds the /embeddings address from a base address", () => {

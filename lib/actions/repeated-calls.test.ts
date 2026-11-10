@@ -76,7 +76,7 @@ describe("repeated calls on Settings", () => {
     expect(
       await saveRepeatedCallsDefaultAction(IDLE, form({ minutes: "90" })),
     ).toMatchObject({ status: "ok" })
-    expect((await readDuplicateCalls(ctx.vaultId)).defaultMinutes).toBe(90)
+    expect((await readDuplicateCalls(ctx)).defaultMinutes).toBe(90)
     expect(await duplicateCallsOverview(ctx)).toMatchObject({
       defaultMinutes: 90,
       ownDefault: true,
@@ -93,7 +93,7 @@ describe("repeated calls on Settings", () => {
     ).toMatchObject({ status: "error" })
 
     await saveRepeatedCallsDefaultAction(IDLE, form({ minutes: "" }))
-    expect(await readDuplicateCalls(ctx.vaultId)).toEqual({ tools: {} })
+    expect(await readDuplicateCalls(ctx)).toEqual({ tools: {} })
   })
 
   it("gives a tool its own time or none, and takes it away", async () => {
@@ -110,7 +110,7 @@ describe("repeated calls on Settings", () => {
         form({ tool, mode: "minutes", minutes: "5" }),
       ),
     ).toMatchObject({ status: "ok" })
-    expect((await readDuplicateCalls(ctx.vaultId)).tools).toEqual({
+    expect((await readDuplicateCalls(ctx)).tools).toEqual({
       [tool]: 5,
     })
 
@@ -133,6 +133,6 @@ describe("repeated calls on Settings", () => {
     ).toMatchObject({ status: "error", error: "Choose a tool." })
 
     await removeRepeatedCallsToolAction(IDLE, form({ tool }))
-    expect(await readDuplicateCalls(ctx.vaultId)).toEqual({ tools: {} })
+    expect(await readDuplicateCalls(ctx)).toEqual({ tools: {} })
   })
 })

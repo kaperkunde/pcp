@@ -3,7 +3,7 @@ import { z } from "zod"
 import type { VaultContext } from "../context"
 import { db } from "../db"
 import { invalid, notFound } from "../errors"
-import { getVaultSetting, setSetting } from "../settings"
+import { getSetting, setSetting } from "../settings"
 import { accessKey } from "../tool-access"
 import { loadToolTiers } from "../tool-tiers"
 import {
@@ -57,14 +57,14 @@ function outOfBounds(): Error {
 }
 
 /**
- * The vault's setting, read without the vault key (settings are not
- * encrypted); one that does not read as one (a hand-edited export) counts
- * as none, which is PCP's default for every tool.
+ * The vault's setting, sealed under its key (lib/core/settings.ts); one
+ * that does not read as one (a hand-edited export) counts as none, which
+ * is PCP's default for every tool.
  */
 export async function readDuplicateCalls(
-  vaultId: string,
+  ctx: VaultContext,
 ): Promise<DuplicateCallsConfig> {
-  const raw = await getVaultSetting(vaultId, SETTING_DUPLICATE_CALLS)
+  const raw = await getSetting(ctx, SETTING_DUPLICATE_CALLS)
 
   if (!raw) {
     return EMPTY_DUPLICATE_CALLS
@@ -124,9 +124,7 @@ export async function setDuplicateCallDefault(
     throw outOfBounds()
   }
 
-  const { defaultMinutes: _old, ...config } = await readDuplicateCalls(
-    ctx.vaultId,
-  )
+  const { defaultMinutes: _old, ...config } = await readDuplicateCalls(ctx)
 
   await writeConfig(
     ctx,
@@ -164,7 +162,7 @@ export async function setDuplicateCallWindow(
     throw outOfBounds()
   }
 
-  const config = await readDuplicateCalls(ctx.vaultId)
+  const config = await readDuplicateCalls(ctx)
   const key = accessKey(serverId, tool)
   const tools: Record<string, GuardOverride> = {}
 
@@ -219,7 +217,7 @@ export type DuplicateCallsOverview = {
 export async function duplicateCallsOverview(
   ctx: VaultContext,
 ): Promise<DuplicateCallsOverview> {
-  const config = await readDuplicateCalls(ctx.vaultId)
+  const config = await readDuplicateCalls(ctx)
   const servers = (
     await db().mcpServer.findMany({
       where: { vaultId: ctx.vaultId },

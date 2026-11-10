@@ -4,6 +4,7 @@ import type {
   McpServer,
   McpTool,
   PermissionRequest,
+  Prisma,
 } from "@/lib/generated/prisma/client"
 
 import {
@@ -245,6 +246,7 @@ import {
   runFetch,
   writeSiteAccess,
 } from "./web-fetch"
+import { TOKEN_NAME_SELECT, tokenName } from "./token-names"
 
 /**
  * The owner's say before an assistant's call runs. A call to a tool the
@@ -511,7 +513,7 @@ const ROW_INCLUDE = {
   server: true,
   token: {
     select: {
-      name: true,
+      ...TOKEN_NAME_SELECT,
       revokedAt: true,
       expiresAt: true,
       manageEndpoints: true,
@@ -975,12 +977,37 @@ function tokenIsLive(token: Row["token"], now = new Date()): boolean {
   )
 }
 
-async function loadRow(where: {
-  id: string
-  vaultId: string
-  tokenId?: string
-}): Promise<Row | null> {
-  return db().permissionRequest.findFirst({ where, include: ROW_INCLUDE })
+type LoadedRow = Prisma.PermissionRequestGetPayload<{
+  include: typeof ROW_INCLUDE
+}>
+
+/** A row as loaded, its token's name opened (token-names.ts). */
+function named(ctx: VaultContext, row: LoadedRow): Row {
+  const { token, ...rest } = row
+  return {
+    ...rest,
+    token: {
+      name: tokenName(ctx, token),
+      revokedAt: token.revokedAt,
+      expiresAt: token.expiresAt,
+      manageEndpoints: token.manageEndpoints,
+    },
+  }
+}
+
+async function loadRow(
+  ctx: VaultContext,
+  where: {
+    id: string
+    vaultId: string
+    tokenId?: string
+  },
+): Promise<Row | null> {
+  const row = await db().permissionRequest.findFirst({
+    where,
+    include: ROW_INCLUDE,
+  })
+  return row ? named(ctx, row) : null
 }
 
 function toolLabel(row: Pick<Row, "server" | "toolName">): string {
@@ -1157,7 +1184,7 @@ async function summarizeRow(
 
   if (row.kind === "browse") {
     const asked = describeBrowseAsk(args as BrowseAsk, {
-      privateAllowed: await privateAllowedFor(ctx.vaultId, row.tokenId),
+      privateAllowed: await privateAllowedFor(ctx, row.tokenId),
     })
 
     return { ...asked, lines: [...asked.lines, asker] }
@@ -1173,7 +1200,7 @@ async function summarizeRow(
     const ask = args as SecretUseAsk
     const secret = await findTypableSecret(ctx, ask.secretName)
     const asked = describeSecretUseAsk(ask, {
-      bound: secret ? await isBoundOrigin(secret.id, ask.origin) : false,
+      bound: secret ? await isBoundOrigin(ctx, secret.id, ask.origin) : false,
     })
 
     return { ...asked, lines: [...asked.lines, asker] }
@@ -1207,7 +1234,7 @@ async function summarizeRow(
       ? await findExitLabel(ctx, fetchArgs.exit)
       : undefined
     const asked = describeFetchAsk(fetchArgs, {
-      privateAllowed: await privateAllowedFor(ctx.vaultId, row.tokenId),
+      privateAllowed: await privateAllowedFor(ctx, row.tokenId),
       ...(exit ? { exitLabel: exit } : {}),
     })
 
@@ -1216,7 +1243,7 @@ async function summarizeRow(
 
   if (row.kind === "exit_use") {
     const asked = describeExitUseAsk(args as ExitUseAsk, {
-      privateAllowed: await privateAllowedFor(ctx.vaultId, row.tokenId),
+      privateAllowed: await privateAllowedFor(ctx, row.tokenId),
     })
 
     return { ...asked, lines: [...asked.lines, asker] }
@@ -1680,12 +1707,12 @@ async function conflictsOf(
       id: { not: row.id },
     },
     orderBy: { createdAt: "asc" },
-    select: { id: true, token: { select: { name: true } } },
+    select: { id: true, token: { select: TOKEN_NAME_SELECT } },
   })
 
   return others.map((other) => ({
     id: other.id,
-    tokenName: other.token.name,
+    tokenName: tokenName(ctx, other.token),
     url: permissionUrl(publicUrl, other.id),
   }))
 }
@@ -1836,7 +1863,7 @@ async function outcomeFromRow(
   id: string,
   publicUrl: string,
 ): Promise<CallToolResult> {
-  const row = await loadRow({ id, vaultId: ctx.vaultId })
+  const row = await loadRow(ctx, { id, vaultId: ctx.vaultId })
 
   return row
     ? outcomeOf(await toView(ctx, row, publicUrl))
@@ -1993,7 +2020,7 @@ export async function withPermission(
     noteHandoverRequest(scope.ctx.vaultId, ask.input.tabId, id)
   }
 
-  const row = await loadRow({ id, vaultId: scope.ctx.vaultId })
+  const row = await loadRow(scope.ctx, { id, vaultId: scope.ctx.vaultId })
   // The assistant hears which tools it named, to check its own patterns;
   // the page shows the owner the same levels in full.
   const detail =
@@ -2305,7 +2332,7 @@ export async function decidePermission(
   },
   executor: PermissionExecutor = defaultExecutor,
 ): Promise<CallToolResult> {
-  const row = await loadRow({
+  const row = await loadRow(ctx, {
     id,
     vaultId: ctx.vaultId,
     ...(tokenId ? { tokenId } : {}),
@@ -2414,7 +2441,7 @@ export async function decidePermission(
   // A script's answer is about scripts at its site: never the tool.
   if (kind === "script_use" && choice === "block") {
     const { site } = readArgs(ctx, row) as ScriptUseAsk
-    await writeScriptAccess(ctx.vaultId, row.tokenId, site, "blocked")
+    await writeScriptAccess(ctx, row.tokenId, site, "blocked")
 
     return finishUnrun(
       ctx,
@@ -2426,7 +2453,7 @@ export async function decidePermission(
 
   if (choice === "block" || choice === "decline") {
     if (choice === "block" && host) {
-      await writeSiteAccess(ctx.vaultId, row.tokenId, host, "blocked")
+      await writeSiteAccess(ctx, row.tokenId, host, "blocked")
     } else if (choice === "block" && row.serverId) {
       await writeToolAccess(row.tokenId, row.serverId, row.toolName, "blocked")
     }
@@ -2550,11 +2577,11 @@ export async function decidePermission(
     // Written by executeSecretUse, executeScriptUse and applySecretRequest
     // below.
   } else if (choice === "always" && host) {
-    await writeSiteAccess(ctx.vaultId, row.tokenId, host, "allowed")
+    await writeSiteAccess(ctx, row.tokenId, host, "allowed")
   } else if (choice === "always" && row.serverId) {
     await writeToolAccess(row.tokenId, row.serverId, row.toolName, "allowed")
   } else if (allowFor && host) {
-    await allowSiteFor(row.tokenId, host, allowFor)
+    await allowSiteFor(ctx, row.tokenId, host, allowFor)
   } else if (allowFor && row.serverId) {
     await allowToolFor(row.tokenId, row.serverId, row.toolName, allowFor)
   }
@@ -2987,7 +3014,7 @@ async function executeScriptUse(
   }
 
   if (choice === "always") {
-    await writeScriptAccess(ctx.vaultId, row.tokenId, asked.site, "allowed")
+    await writeScriptAccess(ctx, row.tokenId, asked.site, "allowed")
   } else {
     allowScriptOnce(once)
   }
@@ -3612,7 +3639,7 @@ export async function getPermissionView(
   id: string,
   { publicUrl, tokenId }: { publicUrl: string; tokenId?: string },
 ): Promise<PermissionView | null> {
-  const row = await loadRow({
+  const row = await loadRow(ctx, {
     id,
     vaultId: ctx.vaultId,
     ...(tokenId ? { tokenId } : {}),
@@ -3669,15 +3696,17 @@ export async function waitingHandovers(
     return []
   }
 
-  const rows = await db().permissionRequest.findMany({
-    where: {
-      ...waitingRequestsWhere(ctx),
-      kind: "browser_handover",
-      id: { in: ids },
-    },
-    include: ROW_INCLUDE,
-    orderBy: WAITING_ORDER,
-  })
+  const rows = await db()
+    .permissionRequest.findMany({
+      where: {
+        ...waitingRequestsWhere(ctx),
+        kind: "browser_handover",
+        id: { in: ids },
+      },
+      include: ROW_INCLUDE,
+      orderBy: WAITING_ORDER,
+    })
+    .then((rows) => rows.map((row) => named(ctx, row)))
 
   return rows.map((row) => {
     const ask = readArgs(ctx, row) as HandoverAsk
@@ -3702,11 +3731,13 @@ export async function listOpenPermissions(
   tokenId: string,
   publicUrl: string,
 ): Promise<PermissionView[]> {
-  const rows = await db().permissionRequest.findMany({
-    where: waitingRequestsWhere(ctx, { tokenId }),
-    include: ROW_INCLUDE,
-    orderBy: WAITING_ORDER,
-  })
+  const rows = await db()
+    .permissionRequest.findMany({
+      where: waitingRequestsWhere(ctx, { tokenId }),
+      include: ROW_INCLUDE,
+      orderBy: WAITING_ORDER,
+    })
+    .then((rows) => rows.map((row) => named(ctx, row)))
 
   return Promise.all(rows.map((row) => toView(ctx, row, publicUrl)))
 }
@@ -3735,12 +3766,14 @@ export async function listPendingRequests(
   const where = waitingRequestsWhere(ctx)
   const [total, rows] = await Promise.all([
     db().permissionRequest.count({ where }),
-    db().permissionRequest.findMany({
-      where,
-      include: ROW_INCLUDE,
-      orderBy: WAITING_ORDER,
-      take: limit,
-    }),
+    db()
+      .permissionRequest.findMany({
+        where,
+        include: ROW_INCLUDE,
+        orderBy: WAITING_ORDER,
+        take: limit,
+      })
+      .then((rows) => rows.map((row) => named(ctx, row))),
   ])
   const requests = await Promise.all(
     rows.map(async (row) => {
@@ -4065,14 +4098,16 @@ export async function listAnsweredRequests(
     return { seen, answered: [], more: fresh.length }
   }
 
-  const rows = await db().permissionRequest.findMany({
-    where: {
-      id: { in: picked.map((row) => row.id) },
-      vaultId: scope.ctx.vaultId,
-      tokenId: scope.tokenId,
-    },
-    include: ROW_INCLUDE,
-  })
+  const rows = await db()
+    .permissionRequest.findMany({
+      where: {
+        id: { in: picked.map((row) => row.id) },
+        vaultId: scope.ctx.vaultId,
+        tokenId: scope.tokenId,
+      },
+      include: ROW_INCLUDE,
+    })
+    .then((rows) => rows.map((row) => named(scope.ctx, row)))
   const byId = new Map(rows.map((row) => [row.id, row]))
   const answered: AnsweredRequest[] = []
 
@@ -4216,7 +4251,7 @@ export async function withdrawPermission(
   id: string,
 ): Promise<CallToolResult> {
   const where = { id, vaultId: scope.ctx.vaultId, tokenId: scope.tokenId }
-  const row = await loadRow(where)
+  const row = await loadRow(scope.ctx, where)
 
   if (!row) {
     return text("There is no permission request with that id.", true)
@@ -4240,7 +4275,7 @@ export async function withdrawPermission(
   }
 
   // Not open, or answered while this looked: say how it stands.
-  const status = ((await loadRow(where)) ?? row).status
+  const status = ((await loadRow(scope.ctx, where)) ?? row).status
   const reason =
     status === "withdrawn"
       ? "You already withdrew this request."
@@ -4282,7 +4317,7 @@ export async function getAccessProposal(
 ): Promise<
   (Awaited<ReturnType<typeof accessReview>> & { tokenId: string }) | null
 > {
-  const row = await loadRow({ id, vaultId: ctx.vaultId })
+  const row = await loadRow(ctx, { id, vaultId: ctx.vaultId })
 
   if (!row || row.kind !== "access" || !isOpen(row)) {
     return null
@@ -4310,7 +4345,7 @@ export async function openShareRequest(
   ctx: VaultContext,
   id: string,
 ): Promise<OpenShareRequest | null> {
-  const row = await loadRow({ id, vaultId: ctx.vaultId })
+  const row = await loadRow(ctx, { id, vaultId: ctx.vaultId })
 
   if (!row || row.kind !== "repo_share" || !isOpen(row)) {
     return null
@@ -4353,7 +4388,7 @@ export async function confirmProposedShare(
     publicUrl: string
   },
 ): Promise<ShareResult> {
-  const row = await loadRow({ id, vaultId: ctx.vaultId })
+  const row = await loadRow(ctx, { id, vaultId: ctx.vaultId })
 
   if (!row || row.kind !== "repo_share") {
     throw notFound("That request")
@@ -4433,7 +4468,7 @@ export async function applyAccessRequest(
     ownNames?: OwnToolNames
   },
 ): Promise<CallToolResult> {
-  const row = await loadRow({ id, vaultId: ctx.vaultId })
+  const row = await loadRow(ctx, { id, vaultId: ctx.vaultId })
 
   if (!row || row.kind !== "access") {
     throw notFound("That proposal")

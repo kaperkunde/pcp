@@ -245,7 +245,7 @@ describe("guardCall", () => {
 
   it("follows the window the owner set for a tool, or none", async () => {
     await setDuplicateCallWindow(ctx, serverId, "send", 5)
-    const config = await readDuplicateCalls(ctx.vaultId)
+    const config = await readDuplicateCalls(ctx)
     expect(guardWindowMs(config, serverId, "send")).toBe(5 * 60_000)
     expect(guardWindowMs(config, serverId, "other")).toBe(DUPLICATE_CALL_MS)
 
@@ -258,7 +258,7 @@ describe("guardCall", () => {
 
     await setDuplicateCallWindow(ctx, serverId, "send", "exempt")
     expect(
-      guardWindowMs(await readDuplicateCalls(ctx.vaultId), serverId, "send"),
+      guardWindowMs(await readDuplicateCalls(ctx), serverId, "send"),
     ).toBeNull()
 
     await expect(
@@ -270,7 +270,7 @@ describe("guardCall", () => {
 
     // Back to PCP's default: nothing kept.
     await setDuplicateCallWindow(ctx, serverId, "send", null)
-    expect(await readDuplicateCalls(ctx.vaultId)).toEqual({ tools: {} })
+    expect(await readDuplicateCalls(ctx)).toEqual({ tools: {} })
   })
 })
 

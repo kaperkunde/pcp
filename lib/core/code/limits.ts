@@ -89,6 +89,13 @@ export const MAX_VIDEO_FRAMES = 30
 export const DEFAULT_VIDEO_FRAMES = 5
 /** A frame's width when the program names none, in pixels. */
 export const DEFAULT_FRAME_WIDTH = 1280
+/**
+ * The longest side of a picture view_image shows (view-image.ts), in
+ * pixels, unless max_width asks for less: what vision models take in
+ * without scaling it down themselves. It is made smaller still when it does
+ * not fit in an answer (browser/screenshot.ts INLINE_IMAGE_BYTES).
+ */
+export const VIEW_IMAGE_SIDE = 1568
 /** Random bytes one crypto.getRandomValues fills, as the web allows. */
 export const MAX_RANDOM_BYTES = 65_536
 /** What the program prints, in characters; the rest is dropped and counted. */

@@ -7,6 +7,7 @@ import {
   type LogOutcome,
   type LogQuery,
 } from "./request-log"
+import { TOKEN_NAME_SELECT, tokenName } from "./token-names"
 
 /**
  * The Log page: the vault's lines of the request log, with what the log
@@ -95,7 +96,7 @@ export async function activityLog(
     readRequestLog(ctx.vaultId, query),
     db().apiToken.findMany({
       where: { vaultId: ctx.vaultId },
-      select: { id: true, name: true, revokedAt: true },
+      select: { ...TOKEN_NAME_SELECT, revokedAt: true },
       orderBy: { createdAt: "desc" },
     }),
   ])
@@ -111,7 +112,9 @@ export async function activityLog(
           select: { id: true, status: true, expiresAt: true },
         })
       : []
-  const names = new Map(tokens.map((token) => [token.id, token.name]))
+  const names = new Map(
+    tokens.map((token) => [token.id, tokenName(ctx, token)]),
+  )
   const states = new Map(
     requests.map((request) => [request.id, stateOf(request, now)]),
   )
@@ -125,7 +128,7 @@ export async function activityLog(
     next: page.next,
     tokens: tokens.map((token) => ({
       id: token.id,
-      name: token.name,
+      name: names.get(token.id) ?? "",
       revoked: token.revokedAt !== null,
     })),
   }

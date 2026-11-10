@@ -1,6 +1,7 @@
 import type { CallToolResult } from "@modelcontextprotocol/server"
 
 import { decideScript, scriptSiteOf, takeScriptOnce } from "../browser-scripts"
+import type { VaultContext } from "../context"
 import { siteKey } from "../fetch/rules"
 import { handleOf, type ResultKeeper } from "../tool-results"
 import { familyError, textAnswer } from "../tools/family"
@@ -236,6 +237,7 @@ async function closePopupsSince(
 }
 
 export type EvaluateScope = {
+  ctx: VaultContext
   vaultId: string
   tokenId: string
   serverId: string
@@ -296,7 +298,7 @@ export async function evaluateInTab(
     )
   }
 
-  const level = await decideScript(scope.vaultId, scope.tokenId, site)
+  const level = await decideScript(scope.ctx, scope.tokenId, site)
 
   if (level === "blocked") {
     return refused(

@@ -32,6 +32,7 @@ import {
 import type { SecretPart } from "./placeholders"
 import { hasReference } from "./schema-check"
 import { secretLiterals } from "./secret-literals"
+import { secretNameWhere } from "../secret-meta"
 
 /**
  * What a wrapper is: its tools, each a program over the vault's other tools
@@ -787,8 +788,8 @@ export async function resolveDefinition(
     // codes) or PCP's own: never sent, and never typed in anew over it.
     if (
       !existing &&
-      (await db().secret.findUnique({
-        where: { vaultId_name: { vaultId: ctx.vaultId, name: secretName } },
+      (await db().secret.findFirst({
+        where: secretNameWhere(ctx, secretName),
         select: { id: true },
       }))
     ) {

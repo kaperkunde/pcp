@@ -27,6 +27,7 @@ import {
   setExcluded,
 } from "./store"
 import { addService, PETS_SPEC } from "./test-vault"
+import { secretNameWhere } from "../secret-meta"
 
 // The review before a push: every file in full, what stays in the vault,
 // what looks personal and what fixes it, Confirm pushing exactly what was
@@ -65,7 +66,9 @@ async function writeRepo(
     private: hidden,
     files: { "README.md": "Shared things." },
   })
-  const secret = await db().secret.findFirst({ where: { name: "GitHub" } })
+  const secret = await db().secret.findFirst({
+    where: secretNameWhere(ctx, "GitHub"),
+  })
   const secretId =
     secret?.id ?? (await createSecret(ctx, { name: "GitHub", value: PAT })).id
 

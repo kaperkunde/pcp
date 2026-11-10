@@ -24,7 +24,13 @@ under keys derived from your password (scrypt, 64 MiB), the recovery key, a
 session cookie, an API token or what an app that signed in holds (its access
 and refresh tokens) — none of which are on the disk. The browser's
 sign-ins, kept results and your notes on servers and skills are in the vault
-too, encrypted the same way. See
+too, encrypted the same way, and so are the names and descriptions of your
+secrets, your API tokens' names, the sites your secrets are typed at and the
+sites web fetch keeps levels for, and your settings (but the public address).
+Some descriptive details are still in plain text: the vault's own name,
+which the sign-in page shows before you unlock, and, until a later release
+seals them too, your servers' names, addresses and descriptions and their
+tools. See
 [ARCHITECTURE.md](ARCHITECTURE.md#encryption). In the Mac app, the window's
 session cookie and the Touch ID key do sit in the app's folder, but encrypted
 under a key in your login keychain, which a copy of the disk does not open.
@@ -234,14 +240,18 @@ password gives its try back, since it is no guess and only someone who knows
 it can type it, so you never lock yourself out by signing in. Recovery keys
 and export passwords are counted the same way, each on its own, and Touch ID
 has a budget of its own rather than spending the password's. scrypt makes
-each guess expensive. The address is the one the proxy in front of PCP
-reports (`X-Forwarded-For`), which a client reaching port 3000 directly can
-set to anything; the 60 for the whole instance holds either way. PCP takes
-the right-most address in that header: the one the proxy in front of PCP
-appended, or the only one behind a proxy that replaces the header. Behind
-more than one proxy, set `PCP_TRUSTED_PROXIES` to your proxies' addresses,
-and PCP reads the header from the right, past them and loopback, to the
-client they saw (see
+each guess expensive. The address is the one that connected to PCP,
+unless that is a proxy: PCP's server stamps the connecting address on every
+request itself (a client's own stamp is removed), and reads `X-Forwarded-For`
+only from loopback or from an address in `PCP_TRUSTED_PROXIES`. A client that
+reaches port 3000 directly cannot choose its own address that way. A proxy PCP
+was not told about is counted as one address for all its clients (the 60 for
+the whole instance holds either way), and PCP says so once in its log. Behind
+a reverse proxy, set `PCP_TRUSTED_PROXIES` to its own address, or the
+subnet of the Docker network you share with it, and keep port 3000 reachable
+from your proxies alone: PCP then
+reads the header from the right, past your proxies and loopback, to the client
+they saw (see
 [docs/self-hosting.md](docs/self-hosting.md#i-already-have-a-proxy)). The counts
 are kept in memory, so a restart starts them again.
 
@@ -486,6 +496,11 @@ Not defended against:
   the updater takes only an app signed with the same Developer ID; the
   Windows app is not signed yet, so there the download is checked against
   the checksum published beside it, and no more.
+- What you delete does not linger in the database file: every connection
+  has SQLite write zeros over deleted rows (`secure_delete`), removing a
+  server or a secret truncates the write-ahead log, and deleting the vault
+  or restoring over it rebuilds the file. A copy of the data volume taken
+  before the delete, a backup or a snapshot of the disk, keeps what it had.
 - While PCP's browser runs, it keeps a few things in clear in the system's
   temporary folder: a file a `download` call waits for (read and removed
   before the call answers), Chromium's crash reporter and cache folders, and

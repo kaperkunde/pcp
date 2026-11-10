@@ -286,7 +286,7 @@ export async function guardCall(
     return { ticket: null, warning: null }
   }
 
-  const config = await readDuplicateCalls(scope.ctx.vaultId)
+  const config = await readDuplicateCalls(scope.ctx)
   const windowMs = guardWindowMs(config, target.server.id, target.tool)
 
   if (windowMs === null) {

@@ -266,7 +266,7 @@ describe("with a vault", () => {
       data: {
         id: "managed",
         vaultId: ctx.vaultId,
-        name: `oauth/${id}`,
+        plainName: `oauth/${id}`,
         kind: "oauth",
         ciphertext: Buffer.from("x"),
       },

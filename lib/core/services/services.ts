@@ -117,6 +117,7 @@ import {
   type ServiceCall,
 } from "./tools"
 import { checkUpdateImage, prepareServiceUpdate } from "./updates"
+import { SECRET_META_SELECT, secretName } from "../secret-meta"
 
 /**
  * Services: containers PCP runs with the owner's own Docker or Podman, on
@@ -413,7 +414,7 @@ export async function prepareLaunch(
   const ids = [...new Set(Object.values(env))]
   const secrets = await db().secret.findMany({
     where: { vaultId: ctx.vaultId, id: { in: ids } },
-    select: { id: true, kind: true, name: true },
+    select: { ...SECRET_META_SELECT, kind: true },
   })
 
   for (const id of ids) {
@@ -425,7 +426,7 @@ export async function prepareLaunch(
 
     if (secret.kind !== "text") {
       throw invalid(
-        `${secret.name} is not a text secret: a service's variable takes one you typed in.`,
+        `${secretName(ctx, secret)} is not a text secret: a service's variable takes one you typed in.`,
       )
     }
   }
@@ -2494,7 +2495,7 @@ export async function serviceView(
   const ids = Object.values(loaded.env)
   const secrets = await db().secret.findMany({
     where: { vaultId: ctx.vaultId, id: { in: ids } },
-    select: { id: true, name: true },
+    select: SECRET_META_SELECT,
   })
   const registered = loaded.spec.registeredId
     ? await getServer(ctx, loaded.spec.registeredId).catch(() => null)
@@ -2530,8 +2531,9 @@ export async function serviceView(
         plain: entry.plain,
         value: loaded.values[entry.name] ?? null,
         secretId,
-        secretName:
-          secrets.find((secret) => secret.id === secretId)?.name ?? null,
+        secretName: ((secret) => (secret ? secretName(ctx, secret) : null))(
+          secrets.find((secret) => secret.id === secretId),
+        ),
       }
     }),
     registered: registered

@@ -106,13 +106,16 @@ import {
 } from "./owner-link"
 import { waitForOwner } from "@kaperkunde/mcp/owner"
 import {
+  DEFAULT_IMAGE_QUALITY,
   MAX_CALLS_PER_RUN,
   MAX_CODE_CHARS,
+  MAX_IMAGE_SIDE,
   MAX_PARALLEL_CALLS,
   MAX_SLEEP_MS,
   RUN_ANSWER_MS,
   RUN_CPU_MS,
   RUN_TIMEOUT_MS,
+  VIEW_IMAGE_SIDE,
 } from "./code/limits"
 import {
   bareHandles,
@@ -237,6 +240,8 @@ import {
 } from "./servers"
 import { collectHandleIds, missingResultMessage } from "./result-handles"
 import { capabilityProviders } from "./capabilities/candidates"
+import { sniffMediaType } from "./media-types"
+import { viewImage, type ViewImageArgs } from "./view-image"
 import {
   capabilitiesNamed,
   capability,
@@ -252,6 +257,7 @@ import {
   convertDocument,
   EDIT_OUTPUT,
   editPdf,
+  pdfPageImage,
   READ_IMAGE_OUTPUT,
   readImage,
   RESULT_HANDLE,
@@ -965,6 +971,18 @@ function tooManyCalls(value: string): Outcome {
 }
 
 const HEADER_NAME = /^[A-Za-z0-9-]{1,100}$/
+
+/** Pictures by their first bytes: what view_image shows as it is. */
+const PICTURE_TYPES = new Set([
+  "image/png",
+  "image/jpeg",
+  "image/webp",
+  "image/gif",
+])
+
+/** Where a description points to view_image, for a model that sees pictures. */
+const VIEW_POINTER =
+  "If you can analyse images yourself, call view_image with the handle to see the picture; read_image only extracts its text."
 
 /**
  * The capability tools' annotations (capabilities/): they hand a file to a
@@ -2803,7 +2821,7 @@ export function buildGatewayServer(
   const providersFor = (id: CapabilityId) =>
     capabilityProviders(scope.ctx, currentServers(), id)
 
-  /** The tier a capability tool calls its providers within. */
+  /** The tier a capability tool calls its providers within: its own. */
   const capabilityTier = (name: string): ToolTier =>
     ownTiers[name] ?? tierFromAnnotations(CAPABILITY_HINTS)
 
@@ -2874,6 +2892,13 @@ export function buildGatewayServer(
     return files
   }
 
+  /** A kept result of the token's, by its first bytes: its type, or null. */
+  const sniffResult = async (id: string): Promise<string | null> => {
+    const opened = await openResult(scope.ctx, { tokenId: scope.tokenId, id })
+
+    return opened ? sniffMediaType(opened.bytes().subarray(0, 64)) : null
+  }
+
   const fileArg = (what: string) =>
     RESULT_HANDLE.describe(
       `${what}: a handle {"$result": …} as an answer gave it (a browser download or screenshot, a mail attachment, an upload, another tool's file). Pass it as it is.`,
@@ -2882,51 +2907,247 @@ export function buildGatewayServer(
   register({
     name: "read_image",
     title: "Read an image or scan",
-    description: `Read text in an image or scan (OCR): a photo, a screenshot, a scanned page or a PDF of one, by its file handle. Runs every OCR provider this token may use on it (a service the owner launched, an OCR server they added) and answers each reading with how sure it was, flagging where the readings disagree or one is unsure; check digits and meter readings against the picture. Each provider's call follows this token's levels and runs at most at this tool's tier: one the owner has not allowed yet answers with their link. With no provider installed it answers with a link for the owner to set one up; once they have, call it again. ${OWNER_LINK_RULE}`,
-    input: z.object({ file: fileArg("The picture or scan") }),
+    description: `Read text in an image or scan (OCR): a photo, a screenshot, a scanned page or a PDF of one, by its file handle. Runs every OCR provider this token may use on it (a service the owner launched, an OCR server they added) and answers each reading with how sure it was, flagging where the readings disagree or one is unsure; check digits and meter readings against the picture. include_image adds the picture itself to the answer. ${VIEW_POINTER} Each provider's call follows this token's levels and runs at most at this tool's tier: one the owner has not allowed yet answers with their link. With no provider installed it answers with a link for the owner to set one up; once they have, call it again. ${OWNER_LINK_RULE}`,
+    input: z.object({
+      file: fileArg("The picture or scan"),
+      include_image: z
+        .boolean()
+        .optional()
+        .describe(
+          'Also show you the picture, made to fit in the answer as view_image shows it (a PNG, JPEG, WebP or GIF; for a PDF\'s page, convert_document with to "png" first, then view_image). view_image is the dependable way to see a picture: some apps show only the readings (the structured answer), so this picture may not reach you.',
+        ),
+    }),
     output: READ_IMAGE_OUTPUT,
     annotations: CAPABILITY_HINTS,
-    async run(args: { file: { $result: string } }, ctx) {
-      const cap = capability("read_image")
-      const files = await inputFiles([args.file])
+    async run(
+      args: { file: { $result: string }; include_image?: boolean },
+      ctx,
+    ) {
+      const read = await readImageRun(args, ctx.signal)
 
-      if (!Array.isArray(files)) {
-        return files
-      }
-
-      const providers = (await providersFor(cap.id)).read ?? []
-
-      if (providers.length === 0) {
-        return setupOutcome(
-          cap,
-          scope.publicUrl,
-          "no tool this token can use reads the text in a picture.",
-        )
-      }
-
-      return readImage(
-        cap,
-        providers,
-        files[0]!,
-        bridgeFor("read_image", ctx.signal),
-        scope.publicUrl,
-      )
+      return args.include_image ? withPicture(read, args.file) : read
     },
+  })
+
+  /** read_image's readings, as the providers made them. */
+  const readImageRun = async (
+    args: { file: { $result: string } },
+    signal: AbortSignal | undefined,
+  ): Promise<Outcome> => {
+    const cap = capability("read_image")
+    const files = await inputFiles([args.file])
+
+    if (!Array.isArray(files)) {
+      return files
+    }
+
+    const providers = (await providersFor(cap.id)).read ?? []
+
+    if (providers.length === 0) {
+      return setupOutcome(
+        cap,
+        scope.publicUrl,
+        "no tool this token can use reads the text in a picture.",
+      )
+    }
+
+    return readImage(
+      cap,
+      providers,
+      files[0]!,
+      bridgeFor("read_image", signal),
+      scope.publicUrl,
+    )
+  }
+
+  /**
+   * read_image's readings with the picture beside them (include_image), as
+   * view_image shows it; the readings stay its structured answer.
+   */
+  const withPicture = async (
+    read: Outcome,
+    file: { $result: string },
+  ): Promise<Outcome> => {
+    if (read.type !== "ok") {
+      return read
+    }
+
+    const shown = await viewImage(scope, { file }, {})
+    const value = read.value as Record<string, unknown>
+    const json = { type: "text" as const, text: JSON.stringify(value) }
+
+    if (shown.type !== "result") {
+      const why = shown.type === "error" ? shown.message : "it is not a picture"
+
+      return passOn({
+        content: [
+          json,
+          { type: "text", text: `The picture is not shown: ${why}` },
+        ],
+        structuredContent: value,
+      })
+    }
+
+    return passOn({
+      content: [json, ...shown.result.content],
+      structuredContent: value,
+    })
+  }
+
+  register({
+    name: "view_image",
+    title: "View an image",
+    description: `View an image yourself, as a picture: a photo, screenshot, scan or a video's frame, by its file handle (a browser download or screenshot, a mail attachment, an upload, a stored file). PCP shows it to you as image content, made to fit in the answer (its quality, then its size, stepped down); max_width, crop, grayscale and quality shape it, and crop (in pixels of the original) looks closer at a detail. A PDF's page: convert it to a picture first with convert_document (to "png", page), then pass the handle it answers here. A video's frame needs PCP's sandbox. An SVG is text, not shown: read it with read_result. read_image reads a picture's text (OCR) instead.`,
+    input: z.object({
+      file: fileArg("The picture or video"),
+      max_width: z
+        .number()
+        .int()
+        .min(16)
+        .max(VIEW_IMAGE_SIDE)
+        .optional()
+        .describe(
+          `The widest the picture may be, in pixels (its longest side is at most ${VIEW_IMAGE_SIDE} when left out); it is made smaller still if it does not fit in the answer.`,
+        ),
+      crop: z
+        .object({
+          x: z
+            .number()
+            .int()
+            .min(0)
+            .max(MAX_IMAGE_SIDE * 4)
+            .describe("Pixels from the left edge."),
+          y: z
+            .number()
+            .int()
+            .min(0)
+            .max(MAX_IMAGE_SIDE * 4)
+            .describe("Pixels from the top edge."),
+          width: z
+            .number()
+            .int()
+            .min(1)
+            .max(MAX_IMAGE_SIDE)
+            .describe("Width in pixels."),
+          height: z
+            .number()
+            .int()
+            .min(1)
+            .max(MAX_IMAGE_SIDE)
+            .describe("Height in pixels."),
+        })
+        .optional()
+        .describe(
+          "Only this part, in pixels of the original (of a video's frame as taken): the answer says the original's size.",
+        ),
+      grayscale: z
+        .boolean()
+        .optional()
+        .describe("In grey: smaller, for text and line drawings."),
+      quality: z
+        .number()
+        .int()
+        .min(10)
+        .max(95)
+        .optional()
+        .describe(
+          `JPEG quality to start from (${DEFAULT_IMAGE_QUALITY} when left out).`,
+        ),
+      time_s: z
+        .number()
+        .min(0)
+        .max(1_000_000)
+        .optional()
+        .describe(
+          "For a video: the moment to show, in seconds from the start (the middle when left out).",
+        ),
+    }),
+    annotations: READS,
+    run: (args: ViewImageArgs, ctx) =>
+      viewImage(scope, args, ctx.signal ? { signal: ctx.signal } : {}),
   })
 
   register({
     name: "convert_document",
     title: "Convert a document to text",
-    description: `Convert a document to Markdown or text: a PDF, Word, PowerPoint, Excel or HTML file, by its file handle, so you can read, quote or summarise it. Uses the best provider this token may use (a document converter the owner launched or added), trying the next when one fails; a long text comes back as a handle for read_result. Each call follows this token's levels and runs at most at this tool's tier: one the owner has not allowed yet answers with their link. With no provider installed it answers with a link for the owner to set one up; once they have, call it again. ${OWNER_LINK_RULE}`,
-    input: z.object({ file: fileArg("The document") }),
+    description: `Convert a document to Markdown or text: a PDF, Word, PowerPoint, Excel or HTML file, by its file handle, so you can read, quote or summarise it; or, with to "png" and page, a PDF's page to a picture, answered as a handle to pass to view_image. Uses the best provider this token may use (a document converter the owner launched or added; for a page, a tool that renders one), trying the next when one fails; a long text comes back as a handle for read_result. Each call follows this token's levels and runs at most at this tool's tier: one the owner has not allowed yet answers with their link. With no provider installed it answers with a link for the owner to set one up; once they have, call it again. ${OWNER_LINK_RULE}`,
+    input: z.object({
+      file: fileArg("The document"),
+      to: z
+        .enum(["markdown", "png"])
+        .optional()
+        .describe(
+          'What to make: "markdown" (the default), the document as text; "png", one page of a PDF as a picture (PNG where the provider lets PCP choose), to pass to view_image.',
+        ),
+      page: z
+        .number()
+        .int()
+        .min(1)
+        .max(100_000)
+        .optional()
+        .describe('With to "png": the page, from 1 (the first when left out).'),
+    }),
     output: CONVERT_OUTPUT,
     annotations: CAPABILITY_HINTS,
-    async run(args: { file: { $result: string } }, ctx) {
+    async run(
+      args: {
+        file: { $result: string }
+        to?: "markdown" | "png"
+        page?: number
+      },
+      ctx,
+    ) {
       const cap = capability("convert_document")
+
+      if (args.page !== undefined && args.to !== "png") {
+        return failure(
+          'page goes with to "png": the page to make a picture of.',
+        )
+      }
+
       const files = await inputFiles([args.file])
 
       if (!Array.isArray(files)) {
         return files
+      }
+
+      if (args.to === "png") {
+        // What the file is by its first bytes, not the type it was kept as.
+        const sniffed = await sniffResult(files[0]!.id)
+
+        if (sniffed && PICTURE_TYPES.has(sniffed)) {
+          return failure(
+            `This file is already a picture (${sniffed}): pass its handle to view_image to see it.`,
+          )
+        }
+
+        if (sniffed !== "application/pdf") {
+          return failure(
+            `to "png" makes a picture of only a PDF's page, and this file is not a PDF by its first bytes (${sniffed ?? files[0]!.mediaType}). Convert it to Markdown instead (leave out to).`,
+          )
+        }
+
+        const pagers = (await providersFor(cap.id)).page_image ?? []
+
+        if (pagers.length === 0) {
+          return setupOutcome(
+            cap,
+            scope.publicUrl,
+            "no tool this token can use turns a PDF's page into a picture. That takes a server or API endpoint that renders a page to an image, which the owner adds; PCP's common items do not offer one yet.",
+            { items: [] },
+          )
+        }
+
+        return pdfPageImage(
+          cap,
+          pagers,
+          // A PDF by its bytes, whatever type it was kept as.
+          { ...files[0]!, mediaType: "application/pdf" },
+          args.page ?? 1,
+          bridgeFor("convert_document", ctx.signal),
+          scope.publicUrl,
+          (handle) => sniffResult(handle.$result),
+        )
       }
 
       const providers = (await providersFor(cap.id)).convert ?? []
@@ -3189,7 +3410,7 @@ export function buildGatewayServer(
     find_files:
       "Find files by name: in a folder of a store and every folder under it, with * and ? in the name.",
     get_file:
-      "Get a file as a handle: one file of a store as a kept result's handle, {\"$result\": \"<id>\"}, to pass on whole to another tool (send_email's attachments, save_file, an API's file field) without reading it yourself; a text file's start comes back as text too.",
+      'Get a file as a handle: one file of a store as a kept result\'s handle, {"$result": "<id>"}, to pass on whole to another tool (send_email\'s attachments, save_file, an API\'s file field) without reading it yourself; a text file\'s start comes back as text too. To see a picture yourself, pass the handle to view_image (a PDF\'s page: convert_document to "png" first).',
     share_file:
       "Share a stored file by public link: a download link to one file of a store, for someone else or another device, which anyone holding it can use until it expires (an hour and a few downloads by default, at most a week); its bytes never pass through you. Give the link only to whom it is for.",
     save_file:
@@ -3612,7 +3833,7 @@ export function buildGatewayServer(
   register({
     name: "read_result",
     title: "Read the rest of a long answer",
-    description: `Read a kept result by id (a long answer, a $result handle), a slice at a time: a long answer ends with a notice naming its result id, and a handle {"$result": "<id>"} names one. A file that is not text is described, not shown; pass its handle to the tool that should get it. Results are kept for a day, for this token only.`,
+    description: `Read a kept result by id (a long answer, a $result handle), a slice at a time: a long answer ends with a notice naming its result id, and a handle {"$result": "<id>"} names one. A file that is not text is described, not shown; pass its handle to the tool that should get it (view_image shows you a picture). Results are kept for a day, for this token only.`,
     input: z.object({
       id: z
         .string()
@@ -3962,7 +4183,7 @@ export function buildGatewayServer(
       name: "check_upload",
       title: "Check an upload link",
       description:
-        'Check an upload link for the files the owner uploaded to it (from create_upload_link), each as a handle {"$result": id} to pass where a tool wants a file, and whether the link takes more. Call it on the owner\'s next message after the link, whatever it says, before you send the link again or assume nothing has arrived; never in the same reply as the link. While the link is open, it waits up to 45 seconds for them to finish (Done, or the last file).',
+        'Check an upload link for the files the owner uploaded to it (from create_upload_link), each as a handle {"$result": id} to pass where a tool wants a file, and whether the link takes more. Call it on the owner\'s next message after the link, whatever it says, before you send the link again or assume nothing has arrived; never in the same reply as the link. While the link is open, it waits up to 45 seconds for them to finish (Done, or the last file). To see an uploaded picture yourself, pass its handle to view_image (a PDF\'s page: convert_document to "png" first).',
       input: z.object({
         id: z
           .string()

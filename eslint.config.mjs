@@ -68,7 +68,11 @@ export default nextConfig({
     {
       // The image's entry point runs Next.js's standalone server.js, which
       // is CommonJS, after the listen address is picked.
-      files: ["docker/start.cjs"],
+      files: [
+        "docker/start.cjs",
+        "docker/peer-stamp.cjs",
+        "desktop/server-entry.cjs",
+      ],
       rules: {
         "@typescript-eslint/no-require-imports": "off",
       },
