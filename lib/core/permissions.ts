@@ -2008,7 +2008,7 @@ export async function withPermission(
   noteOwnerAsked(id)
 
   // Closed with the tab it is about, if that closes before the owner answers.
-  if (ask.kind === "browser_handover") {
+  if (ask.kind === "browser_handover" || ask.kind === "tab_pace") {
     noteHandoverRequest(scope.ctx.vaultId, ask.input.tabId, id)
   }
 

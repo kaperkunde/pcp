@@ -166,8 +166,9 @@ export type Tab = {
   /** The owner holds the tab for an assistant's hand-over, since then. */
   handoverSince: number | null
   /**
-   * The hand-over requests asked about this tab (noteHandoverRequest):
-   * closed when the tab closes, so none waits for a tab that is gone.
+   * The hand-over and pace requests asked about this tab
+   * (noteHandoverRequest): closed when the tab closes, so none waits for a
+   * tab that is gone.
    */
   handoverRequests: Set<string>
   /** The last site the gate kept the main frame from opening. */
@@ -1558,7 +1559,11 @@ async function closeHandovers(vaultId: string, tabs: Tab[]): Promise<void> {
   }
 
   await closePendingRequests(
-    { vaultId, kind: "browser_handover", id: { in: ids } },
+    {
+      vaultId,
+      kind: { in: ["browser_handover", "tab_pace"] },
+      id: { in: ids },
+    },
     "closed",
   ).catch((error) =>
     console.error("[browser] closing a tab's hand-over failed", error),
