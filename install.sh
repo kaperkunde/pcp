@@ -22,7 +22,15 @@
 # that fails it is not started, and PCP goes on running as it was.
 # PCP_INSECURE_SKIP_VERIFY=1 skips the check for one run, with a warning:
 # for an image from before images were signed, or one you built yourself.
-# It is never remembered, so the daily update checks again.
+# It is never remembered, so the daily update checks again. Behind a proxy,
+# cosign's container gets HTTPS_PROXY, HTTP_PROXY and NO_PROXY (either case)
+# as this run has them; the daily timer runs with systemd's environment, so
+# set them there too (systemctl [--user] set-environment, or a drop-in).
+#
+#   install.sh verify-image <repository>@sha256:<digest>
+#
+# runs that check alone, on an image by its digest, and changes nothing: the
+# image workflow checks what it has just signed with it, and you can too.
 #
 # "Install and restart" on PCP's Settings page works through the same copy:
 # a timer runs it with `watch` every 30 seconds, which looks for the request
@@ -127,7 +135,8 @@ die() {
 }
 
 usage() {
-  warn "Usage: install.sh [uninstall|update|watch]" "" \
+  warn "Usage: install.sh [uninstall|update|watch]" \
+    "       install.sh verify-image <repository>@sha256:<digest>" "" \
     "Settings go in the environment: PCP_PORT, PCP_HTTPS, PCP_RUNTIME," \
     "PCP_DATA_VOLUME, PCP_AUTO_UPDATE, PCP_UPDATE_BUTTON, PCP_CHANNEL, PCP_VERSION," \
     "PCP_IMAGE, PCP_INSECURE_SKIP_VERIFY. The top of the script explains them."
@@ -725,6 +734,51 @@ image_digest_ref() {
     done
 }
 
+# cosign's check of one image by its digest ($1, repository@sha256:…), in
+# cosign's own pinned image: quiet when it passes, cosign's words on
+# standard output when it does not. The proxy settings this run was given go
+# into its container by name (a proxy's address can hold a login, so never
+# its value on a command line), since cosign reaches ghcr.io and Sigstore
+# itself. The image workflow runs the same check (`verify-image`) on what it
+# has just signed, so the two cannot drift apart.
+cosign_verify() {
+  set -- "$1"
+  for name in HTTPS_PROXY HTTP_PROXY NO_PROXY https_proxy http_proxy no_proxy; do
+    eval "value=\${$name:-}"
+    if [ -n "$value" ]; then
+      set -- "$@" -e "$name"
+    fi
+  done
+  ref=$1
+  shift
+  "$RUNTIME" run --rm "$@" "$COSIGN_IMAGE" verify \
+    --certificate-identity-regexp "$IMAGE_SIGNER" \
+    --certificate-oidc-issuer "$IMAGE_ISSUER" "$ref" 2>&1 >/dev/null
+}
+
+# `verify-image <repository>@sha256:<digest>`: that check alone, for the
+# image workflow (build-images.yml) and for anyone checking by hand.
+verify_image_only() {
+  ref=$1
+  case "$ref" in
+    [!a-z0-9]* | *[!a-z0-9./_:@-]* | *@*@*) usage_error "verify-image takes an image by its digest, repository@sha256:<64 hex>, not '$ref'." ;;
+  esac
+  hex=${ref#*@sha256:}
+  case "$ref" in
+    *@sha256:*) ;;
+    *) usage_error "verify-image takes an image by its digest, repository@sha256:<64 hex>, not '$ref'." ;;
+  esac
+  case "$hex" in
+    *[!0-9a-f]*) usage_error "verify-image takes an image by its digest, repository@sha256:<64 hex>, not '$ref'." ;;
+  esac
+  [ "${#hex}" -eq 64 ] || usage_error "verify-image takes an image by its digest, repository@sha256:<64 hex>, not '$ref'."
+  if ! problem=$(cosign_verify "$ref"); then
+    warn "$problem"
+    die "The signature of $ref does not check out."
+  fi
+  say "The signature of $ref checks out."
+}
+
 # Checks the image just pulled (see the top) and sets IMAGE_REF, what PCP
 # runs and the installer is read from: the digest whose signature checked
 # out. With PCP_INSECURE_SKIP_VERIFY=1 the digest, or the tag when there is
@@ -739,9 +793,7 @@ verify_image() {
   [ -n "$ref" ] || die "The image $IMAGE has no digest from its registry, so its signature cannot be checked, and PCP does not run it." \
     "If it is an image you built yourself, run this installer with PCP_INSECURE_SKIP_VERIFY=1 to run it unchecked."
   say "Checking the signature of $ref"
-  if ! problem=$("$RUNTIME" run --rm "$COSIGN_IMAGE" verify \
-    --certificate-identity-regexp "$IMAGE_SIGNER" \
-    --certificate-oidc-issuer "$IMAGE_ISSUER" "$ref" 2>&1 >/dev/null); then
+  if ! problem=$(cosign_verify "$ref"); then
     warn "$problem"
     die "" "The image $IMAGE (${ref#"$PCP_IMAGE"@}) is not one PCP's release workflow signed, or its signature could not be checked (the message above says which), so PCP does not run it and goes on as it was." \
       "If cosign could not reach ghcr.io or Sigstore, run this installer again later. If the image is one of PCP's from before images were signed, or your own, PCP_INSECURE_SKIP_VERIFY=1 runs it unchecked, for that run only. Otherwise do not: report it at https://github.com/kaperkunde/pcp/security."
@@ -1118,8 +1170,16 @@ watch() {
   update
 }
 
+# An image's id (Docker writes sha256: before it, Podman does not).
 image_id() {
-  "$RUNTIME" image inspect -f '{{.Id}}' "$IMAGE" 2>/dev/null || true
+  id=$("$RUNTIME" image inspect -f '{{.Id}}' "$1" 2>/dev/null) || true
+  printf '%s\n' "${id#sha256:}"
+}
+
+# The id of the image PCP's container was started from.
+running_image_id() {
+  id=$("$RUNTIME" inspect -f '{{.Image}}' "$CONTAINER" 2>/dev/null) || true
+  printf '%s\n' "${id#sha256:}"
 }
 
 # Whether a file read out of the image is this installer: not empty and not
@@ -1199,16 +1259,18 @@ adopt_image_installer() {
 # because the installer changed, and its unit may differ.
 update() {
   UPDATING=1
-  before=$(image_id)
   "$RUNTIME" pull -q "$IMAGE" >/dev/null || die "Could not pull $IMAGE. Check that this computer reaches ghcr.io."
   verify_image
-  after=$(image_id)
   if [ "${PCP_UPDATER_REEXEC:-}" = 1 ]; then
     install
     return 0
   fi
   adopt_image_installer "$IMAGE_REF"
-  if [ -n "$after" ] && [ "$before" = "$after" ] && container_running; then
+  # Up to date when the container runs the image just checked. Not the tag
+  # before and after the pull: the pull moves the tag before the check, so
+  # a check that failed once would leave the new image looking current.
+  checked=$(image_id "$IMAGE_REF")
+  if [ -n "$checked" ] && [ "$checked" = "$(running_image_id)" ] && container_running; then
     say "PCP is up to date: $IMAGE has not changed."
     return 0
   fi
@@ -1371,6 +1433,18 @@ uninstall() {
 main() {
   case "${1:-}" in
     '' | uninstall | update | watch) ;;
+    verify-image)
+      [ "$#" -eq 2 ] || usage
+      require_linux
+      PCP_RUNTIME=${PCP_RUNTIME:-}
+      case "$PCP_RUNTIME" in
+        '' | docker | podman) ;;
+        *) usage_error "PCP_RUNTIME must be docker or podman, not '$PCP_RUNTIME'." ;;
+      esac
+      pick_runtime
+      verify_image_only "$2"
+      return 0
+      ;;
     *) usage ;;
   esac
   require_linux

@@ -96,7 +96,22 @@ before it runs an image, accepting only `build-images.yml` run from `main`
 or `develop`; so the workflow's file name and those branches are part of
 what installs trust, and renaming either is a change to `IMAGE_SIGNER` in
 `install.sh` in the same release (`scripts/docker.test.ts` checks they
-agree). The actions are pinned by commit, as everywhere here.
+agree). The actions are pinned by commit, as everywhere here. Right after
+signing, the job checks both digests with `install.sh verify-image`, the
+same function, cosign image, identity and issuer installs use, so a build
+whose signature an install would refuse fails there; that check reads the
+signatures anonymously, as installs do, so the packages stay public.
+`release.yml` runs only from `main` (`if: github.ref == 'refs/heads/main'`),
+so a run started by hand on another branch neither signs nor moves `latest`.
+
+When this reaches a release, its notes have to say what an existing install
+does not get by itself: a Quadlet install that left its daily update to
+Podman's `podman-auto-update.timer` (`PCP_AUTO_UPDATE=1` under Podman 4.4
+or newer) keeps that timer, which pulls and restarts with no signature
+checked, until the owner runs the install line again or uses **Install and
+restart**; then the installer's own timer takes over. Put that in the
+pull request's `## Changelog` section, which is where the release notes
+come from.
 
 Every push to `develop` gets the same, ahead of the releases
 (`.github/workflows/develop.yml`): the checks a pull request runs (`ci.yml`),

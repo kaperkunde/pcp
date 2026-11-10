@@ -986,7 +986,10 @@ describe("install.sh checking the image's signature", () => {
     const machine = host({ docker: "works" })
     const result = machine.run(["verify-image", sandbox])
     expect(result.status).toBe(0)
-    expect(result.calls).toEqual([`docker ${VERIFY(sandbox)}`])
+    // Nothing pulled, run or written but the check.
+    expect(result.calls.filter((call) => / (run|pull|rm) /.test(call))).toEqual(
+      [`docker ${VERIFY(sandbox)}`],
+    )
     expect(existsSync(machine.conf)).toBe(false)
 
     const bad = host({ docker: "works", signature: "bad" }).run([

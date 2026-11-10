@@ -56,6 +56,9 @@ permissions:
 jobs:
   release:
     name: tag and draft
+    # Only from main: a run started by hand on another branch would sign
+    # images as that branch's and move latest.
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     # pull-requests: the changelog reads the pull requests merged since the

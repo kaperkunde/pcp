@@ -452,7 +452,16 @@ Not defended against:
   PCP's unit runs the digest. (A `policy.json` rule could make Podman check
   it, but Podman reads one such file for every image a user runs, so it
   cannot be added for PCP's image without rewriting the host's policy for
-  all the others.)
+  all the others.) A Quadlet install from before this keeps Podman's timer
+  and the label on its unit until the installer runs again (the install
+  line, or Install and restart).
+- What the signature does not say, by design: which channel or version an
+  image is. The installer accepts an image signed from `develop` on the
+  stable channel too (both are PCP's own workflow on a branch only its
+  maintainers push to), and nothing ties a digest to a version, so an older
+  signed image, pushed back under `latest` by someone who can push to the
+  registry, passes the check: a rollback to a release PCP once published,
+  never to an image PCP did not build.
 - **Install and restart** under the Linux installer does the same when you
   choose it: PCP writes the request (an id and a time, nothing else) in its
   data folder, and the installer's watcher on the host reads it through

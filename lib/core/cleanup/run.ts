@@ -101,7 +101,8 @@ const PARTS: Part[] = [
     label: "the browser's leftover temporary folders",
     // What a browser or virtual display that did not close left in the
     // system's temporary folder: a crashed or killed PCP's, by its process
-    // id (browser/scratch.ts). At boot, every one from before.
+    // id (browser/scratch.ts); one from before the id was in the name once
+    // it has not changed for a day.
     run: () => pruneScratchDirs(),
   },
   {

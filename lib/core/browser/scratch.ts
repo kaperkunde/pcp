@@ -30,6 +30,11 @@ export type ScratchKind = "chromium" | "display"
 const NAME = /^pcp-(chromium|display)-([1-9]\d{0,9})-[A-Za-z0-9]{6}$/
 /** A folder from before the id was in the name. */
 const LEGACY = /^pcp-(chromium|display)-[A-Za-z0-9]{6}$/
+/**
+ * How long such a folder is left unchanged before it is removed: nothing
+ * says whose it is, and an older PCP still running may hold it.
+ */
+export const LEGACY_SCRATCH_AGE_MS = 24 * 60 * 60 * 1000
 
 type ScratchState = {
   /** The folders this process's browsers and display hold. */
@@ -84,17 +89,19 @@ export function processAlive(pid: number): boolean {
 /**
  * Removes the browser's folders nothing holds: those of a process that is
  * gone, this process's own that no browser or display holds, and those from
- * before the id was in the name. Only folders this user owns, and never a
- * link. Returns how many it removed.
+ * before the id was in the name once unchanged for a day. Only folders this
+ * user owns, and never a link. Returns how many it removed.
  */
 export async function pruneScratchDirs({
   base = os.tmpdir(),
   pid = process.pid,
   alive = processAlive,
+  now = Date.now(),
 }: {
   base?: string
   pid?: number
   alive?: (pid: number) => boolean
+  now?: number
 } = {}): Promise<number> {
   const current = state()
   let entries: import("node:fs").Dirent[]
@@ -133,6 +140,7 @@ export async function pruneScratchDirs({
 
       if (!stat.isDirectory()) continue
       if (uid !== undefined && stat.uid !== uid) continue
+      if (!match && now - stat.mtimeMs < LEGACY_SCRATCH_AGE_MS) continue
 
       await fs.rm(dir, { recursive: true, force: true })
       removed++

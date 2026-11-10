@@ -171,3 +171,15 @@ jobs:
           subject-digest: ${{ steps.sandbox.outputs.digest }}
           push-to-registry: true
           create-storage-record: false
+      # What install.sh does before it runs an image, on what was just
+      # signed: the same function, cosign image, identity and issuer, so the
+      # first signed build of develop proves the check passes (with the
+      # attestations beside the images) before a release relies on it.
+      - name: Check the signatures as installs do
+        env:
+          IMAGE: ghcr.io/${{ github.repository }}
+          DIGEST: ${{ steps.pcp.outputs.digest }}
+          SANDBOX_DIGEST: ${{ steps.sandbox.outputs.digest }}
+        run: |
+          sh install.sh verify-image "$IMAGE@$DIGEST"
+          sh install.sh verify-image "$IMAGE-sandbox@$SANDBOX_DIGEST"

@@ -2624,7 +2624,9 @@ is in one beside it (`pcp-display-<pid>-…`). Sign-ins never are: the contexts
 are off the record, their cookies and storage in memory. A PCP that crashes
 or is killed leaves these folders behind, so the process's id is in their
 names and the cleanup removes those of a process that is gone, and the
-process's own that no browser or display holds (never Playwright's own
+process's own that no browser or display holds (one from before the id was
+in the name once it has not changed for a day, since an older PCP still
+running may hold it; never Playwright's own
 `playwright_*` folders beside them). Chromium starts with
 `--disk-cache-size=1`, so the disk cache of its own profile, in Playwright's
 folder, holds nothing to speak of; in the container image `/tmp` is a tmpfs
@@ -3968,7 +3970,7 @@ the download instead. `desktop/README.md` has the details.
 **The Linux installer can update it once a day** (`PCP_AUTO_UPDATE=1`,
 remembered like its other settings): a systemd timer runs a copy of the
 installer with `update`, which pulls the image, checks its signature, and
-starts PCP again only when the image changed. Under Quadlet too: Podman's
+starts PCP again only when the container runs another image. Under Quadlet too: Podman's
 own `podman-auto-update.timer`, which an older installer turned on with the
 unit's autoupdate label, checks no signature and cannot follow an image
 pinned by digest, so the unit no longer carries the label.
@@ -3986,7 +3988,13 @@ image, pinned by digest (`COSIGN_IMAGE`), with `verify
 `develop` (`IMAGE_SIGNER`) and GitHub's issuer. Only once that passes does
 it touch the running container, and from then on the run, the Quadlet unit
 (`Image=`) and the installer it reads use `<image>@sha256:…`, never the tag.
-A failure stops the run before anything changes; `PCP_INSECURE_SKIP_VERIFY=1`
+The check is `cosign_verify`, which hands cosign's container the proxy
+settings by name; `install.sh verify-image` runs it alone, and
+`build-images.yml` runs that on each digest right after signing, so the
+workflow and installs check alike. `update` decides by the image the
+container runs (`inspect -f {{.Image}}`) against the checked digest's id,
+not the tag before and after the pull, which a failed check would leave
+moved. A failure stops the run before anything changes; `PCP_INSECURE_SKIP_VERIFY=1`
 skips the check for one run, with a warning, and is not remembered. A
 `policy.json` rule that would have Podman check the signature itself is not
 written: Podman reads one policy file per user (or the system's), so a rule

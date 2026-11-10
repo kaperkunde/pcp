@@ -289,8 +289,10 @@ whatever `HOME` is, so that only root can change what root runs.
 `PCP_AUTO_UPDATE=0` takes it away again: `pcp-update.timer` and the copy.
 Under Podman too: an installer from before images were signed left the
 daily update to Podman's own `podman-auto-update.timer`, which starts
-whatever the tag names with nothing checked; the next run takes PCP's unit
-off it (the timer itself stays on, since other containers may use it).
+whatever the tag names with nothing checked. That goes on until the
+installer runs again: run the install line once more, or use **Install and
+restart**, and it takes PCP's unit off that timer (the timer itself stays
+on, since other containers may use it).
 
 **Install and restart** works through a second timer, `pcp-update-request.timer`,
 which runs a copy of the installer every 30 seconds. It looks into the
@@ -317,8 +319,14 @@ the signature of every image it pulls, before it starts it or reads the
 installer out of it, and then runs that digest rather than the tag, so a
 tag moved in between changes nothing. An image whose signature does not
 check out is not started, and PCP goes on running as it was; the message
-says why. `PCP_INSECURE_SKIP_VERIFY=1` runs one unchecked, for that run
-only (an image from before images were signed, or one you built): do not
+says why, and the next update tries again: it compares the image the
+container runs with the one it just checked, not the tag. Behind a proxy,
+the check gets `HTTPS_PROXY`, `HTTP_PROXY` and `NO_PROXY` as the installer
+has them; for the daily timer, set them in systemd's environment
+(`systemctl --user set-environment HTTPS_PROXY=…`, or without `--user` as
+root). `install.sh verify-image ghcr.io/kaperkunde/pcp@sha256:…` runs the
+check alone and changes nothing. `PCP_INSECURE_SKIP_VERIFY=1` runs one
+unchecked, for that run only (an image from before images were signed, or one you built): do not
 use it to get past a refusal you cannot explain, which is what the check
 is there to stop.
 
