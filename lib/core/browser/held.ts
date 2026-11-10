@@ -525,6 +525,62 @@ export async function heldValues(page: Page): Promise<{
   }
 }
 
+/** What typedShown answers when a frame of the page could not be read. */
+export const UNREAD = Symbol("unread")
+
+/**
+ * The name of a secret PCP typed into any of `pages` that `page` shows,
+ * in a frame's text or a field's value, as maskTyped finds it (as typed
+ * or written the page's own way); null for none, UNREAD when a frame that
+ * is still there could not be read. A picture or a PDF of the page would
+ * carry what masking an answer's text cannot reach.
+ */
+export async function typedShown(
+  page: Page,
+  pages: Iterable<Page>,
+): Promise<string | null | typeof UNREAD> {
+  const masker = typedMasker(pages)
+
+  if (!masker) {
+    return null
+  }
+
+  for (const frame of page.frames().slice(0, MAX_MASKED_FRAMES)) {
+    const texts = await bounded(
+      frame
+        .locator("html")
+        .evaluateAll((roots) =>
+          roots.flatMap((root) => [
+            (root as HTMLElement).innerText ?? root.textContent ?? "",
+            ...Array.from(
+              root.querySelectorAll("input, textarea"),
+              (field) =>
+                (field as HTMLInputElement | HTMLTextAreaElement).value,
+            ),
+          ]),
+        ),
+      ACTION_TIMEOUT_MS,
+      "page text",
+    ).catch(() => null)
+
+    if (texts === null) {
+      if (!frame.isDetached()) return UNREAD
+      continue
+    }
+
+    for (const text of texts) {
+      const masked = masker(text)
+
+      if (masked !== text) {
+        const found = /\[secret: ([^\]]+)\]/.exec(masked)
+        if (found && !text.includes(found[0])) return found[1]!
+      }
+    }
+  }
+
+  return null
+}
+
 /** The name of a secret the page still holds; null for none. */
 export async function heldSecret(page: Page): Promise<string | null> {
   return (await heldValues(page)).names[0] ?? null

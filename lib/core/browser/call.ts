@@ -71,7 +71,14 @@ import { catchDownload, offeredName, tabOwnsFrame } from "./downloads"
 import { evaluateInTab } from "./evaluate"
 import { atStep, callClock, timeoutMessage, type CallClock } from "./clock"
 import { coveringElement, coveringLine, failureReason } from "./failures"
-import { heldSecret, heldValues, holdSecret, maskTypedResult } from "./held"
+import {
+  heldSecret,
+  heldValues,
+  holdSecret,
+  maskTypedResult,
+  typedShown,
+  UNREAD,
+} from "./held"
 import { clickAt, dragBetween, wheelAt, type MouseButton } from "./input"
 import {
   ACTION_TIMEOUT_MS,
@@ -2414,14 +2421,37 @@ function fullPageScale(picture: {
  * a secret PCP typed: the picture would show it.
  */
 async function capturesRefused(
+  scope: Pick<BrowserScope, "ctx" | "tokenId">,
   tab: Tab,
   what: string,
 ): Promise<CallToolResult | null> {
   const held = await heldSecret(tab.page)
 
-  return held
+  if (held) {
+    return text(
+      `A field in tab ${tab.id} holds the secret "${held}", which PCP typed, so the tab takes no ${what} until the field changes or the page moves on. Take a snapshot to see the page: it shows the field as ${secretMask(held)}.`,
+      true,
+    )
+  }
+
+  // A secret typed into any of the token's tabs, as every answer masks it
+  // (maskHeld), that this page shows as its text: a picture or a PDF would
+  // carry it past the masking.
+  const pages = [...(runningBrowser(scope.ctx.vaultId)?.tabs.values() ?? [])]
+    .filter((other) => other.tokenId === scope.tokenId)
+    .map((other) => other.page)
+  const shown = await typedShown(tab.page, pages)
+
+  if (shown === UNREAD) {
+    return text(
+      `Tab ${tab.id}'s page could not be read to check it shows no secret PCP typed, so it takes no ${what} now. Try again in a moment.`,
+      true,
+    )
+  }
+
+  return shown
     ? text(
-        `A field in tab ${tab.id} holds the secret "${held}", which PCP typed, so the tab takes no ${what} until the field changes or the page moves on. Take a snapshot to see the page: it shows the field as ${secretMask(held)}.`,
+        `Tab ${tab.id} shows the secret "${shown}", which PCP typed, in its page, so it takes no ${what} while the page shows it. Take a snapshot to see the page: it shows it as ${secretMask(shown)}.`,
         true,
       )
     : null
@@ -2455,7 +2485,7 @@ async function printPdf(
     )
   }
 
-  const held = await capturesRefused(tab, "PDFs")
+  const held = await capturesRefused(scope, tab, "PDFs")
 
   if (held) {
     return held
@@ -3295,7 +3325,7 @@ async function runTool(
           return report(scope, current, { snapshot: false })
         }
 
-        const held = await capturesRefused(current, "screenshots")
+        const held = await capturesRefused(scope, current, "screenshots")
 
         if (held) {
           return held

@@ -762,7 +762,9 @@ embeddingProvider`, which hands `embeddings/provider.ts` the header;
   it, as typed or as the page reformatted it (`browser/held.ts`, keyed
   hashes of the value and of its normalised form, white space and
   separators out and upper case, never the value), every answer shows it as
-  `[secret: name]` and `screenshot` and `print_pdf` are refused; a password field's value
+  `[secret: name]` and `screenshot` and `print_pdf` are refused (also while
+  any frame's text shows a secret typed into one of the token's tabs, as
+  `maskTyped` finds it: `held.ts typedShown`); a password field's value
   never shows, its snapshot `- text:` child included. For the life of the
   tab, every answer to the token masks each secret typed into any of its
   tabs wherever the text has it once normalised (`maskTyped`: a keyed

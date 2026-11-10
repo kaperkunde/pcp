@@ -3051,7 +3051,12 @@ it is or reformatted (a bank writes an IBAN in groups of four), every answer
 to the token shows it as `[secret: name]` (the snapshot's field line, its
 `- text:` child where the field has a placeholder, and the value wherever
 else it appears, a title included), and `screenshot` and `print_pdf` are
-refused (a tool error): both are pictures of the page. It lets go when no field has the value any more: the field changed,
+refused (a tool error): both are pictures of the page. They are refused
+too while any frame of the page shows, in its text or a field, a secret
+PCP typed into one of the token's tabs (`held.ts typedShown`: each frame's
+`innerText` and field values through `maskTyped`'s matcher, read in PCP's
+own world; a frame that cannot be read refuses as well): an answer's text
+is masked, a picture or a PDF's text layer could not be. It lets go when no field has the value any more: the field changed,
 or a new document does not have it. For as long as the tab lives, whatever
 document it shows, every answer to the token (`callBrowserTool`'s
 `maskHeld`, so the snapshot, `find`, `read_page`, the logs and `evaluate`
