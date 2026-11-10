@@ -191,7 +191,7 @@ so in the summary; the bump itself waits for the request.
   endpoint's tools state both hints (GET Read, POST/PUT/PATCH Write, DELETE
   Destructive). Everything that asks whether a tool reads or destroys asks
   there, never the raw annotations: the entry gates, `markedReadOnly`
-  (pacing, a run's trace), the permission page's warning, the wrapper
+  (pacing, a run's trace), the duplicate guard, the permission page's warning, the wrapper
   review's badges, describe, list_tools, search, pcp.tools, and what PCP's
   own tools advertise. Each `call_tool_<tier>` and `run_code_<tier>` runs
   tools at or below its tier only and refuses one above, naming the entry
@@ -588,17 +588,22 @@ embeddingProvider`, which hands `embeddings/provider.ts` the header;
   credential and reads nothing it deletes; its schedule is refused if it
   leaves more than a day between runs. Anything new that PCP keeps only for
   a while is removed by a part there, with a test.
-- The duplicate guard (`lib/core/calls/`): a Write or Destructive call a
-  token makes again with the same server, tool and arguments within the
-  window (`calls/limits.ts`, the owner's `duplicateCalls` per tool) is not
-  run but answered `duplicate_call` with how the first went, unless the
-  assistant passes `rerun` with a `reason`. It sits after the arguments
-  are checked in `callResolved`, `forwardCall` (a program's `pcp.call`) and
-  a wrapper's `innerCall`, never in `upstream.ts`: what the owner allowed
-  on PCP's page is not guarded. `call_record` keeps only an HMAC of the
-  arguments under the vault key (`crypto.ts keyedHash`), is never
-  exported and is pruned by the cleanup. A new way to call a tool goes
-  through it, with a test.
+- The duplicate guard (`lib/core/calls/`): a Write or Destructive call (the
+  tier read through `effectiveTier`) a token makes again with the same
+  server, tool and arguments within the window (`calls/limits.ts`; the
+  owner's default and per-tool times or "never" are the vault's
+  `duplicateCalls` setting, Settings → Repeated calls) is not run but
+  answered `duplicate_call` with how the first went, unless the assistant
+  passes `rerun` with a `reason`. It sits after the arguments are checked
+  in `callResolved` (call_tool_write/destructive), `forwardCall` (a
+  program's `pcp.call`) and a wrapper's `innerCall`, never in `upstream.ts`.
+  Never guarded: the browser, SSH and storage kinds, a capability's calls
+  to its provider, a wrapper's calls in a run the owner approved, and
+  executions from the owner's page. The lookup and the record are one
+  transaction. `call_record` keeps only an HMAC of the arguments under the
+  vault key (`crypto.ts keyedHash`) and a short answer encrypted, never a
+  kept result; it is never exported and is pruned by the cleanup. A new
+  way to call a tool goes through it, with a test.
 - `lib/core/openapi` never fetches a remote `$ref`, never follows a redirect
   on a call, and never lets an argument set a header or leave the base URL.
   A schema is untrusted input: new limits go in `openapi/limits.ts`.

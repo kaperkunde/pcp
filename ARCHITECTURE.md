@@ -4375,20 +4375,28 @@ below them (`owner-notices.ts tierNotices`), until the owner chooses again.
 An assistant sometimes makes a call that changes things again: it lost the
 answer, a run timed out, it retried out of caution. So a Write or
 Destructive call is remembered for a while (`lib/core/calls/guard.ts`, a
-`call_record` row: token, server id, tool, tier, status, times, the kept
-result of its answer and the permission request it made), and the same
-call (server, tool and arguments as checked and renamed) made again by the
-same token within the window (`DUPLICATE_CALL_MS`, 30 minutes, in
-`calls/limits.ts`) is not run. It is answered as a tool error with code
-`duplicate_call` saying how the first went: still running, succeeded (with
-its answer kept as a result for the token, a handle to read), failed (the
-tool answered an error, so most likely nothing happened), failed on its way
-(`MAY_HAVE_GONE_THROUGH`), or asking the owner (its request and
-`check_permission`). A call still marked running past `STALE_RUNNING_MS`
+`call_record` row: token, server id, tool, tier, status, times, its answer
+and the permission request it made), and the same call (server, tool and
+arguments as checked and renamed) made again by the same token within the
+window (`DUPLICATE_CALL_MS`, 30 minutes, in `calls/limits.ts`) is not run.
+It is answered as a tool error with code `duplicate_call` saying how the
+first went: still running, succeeded (with its answer when it was short,
+`MAX_INLINE_ANSWER_CHARS`, kept encrypted on the row as
+`call_record:<id>:answer`, or the kept result a long answer already was;
+never a new kept result, which would count against the token's own),
+failed (the tool answered an error, so most likely nothing happened),
+failed on its way (`MAY_HAVE_GONE_THROUGH`), or asking the owner (its
+request and `check_permission`). Every such answer also says that if what
+the call acts on changed since (turned off and on again), the assistant
+makes it again with a reason: the guard does not guess at that. A call still marked running past `STALE_RUNNING_MS`
 never reported back and may have happened. A call that came to nothing
 (paced, refused, a server to connect, an ask the owner declined or let
 expire) is forgotten. The same tool with other arguments is only noted in
 the answer.
+
+The lookup and the new record are one transaction, which SQLite runs one
+at a time: of two identical calls, the second to get there finds the
+first, whatever times they took before.
 
 The arguments are never stored: `args_hash` is an HMAC under a key derived
 from the vault key ("pcp call record v1", `keyedHash` in `crypto.ts`), so
@@ -4406,8 +4414,11 @@ guarded either: Read tools (by `effectiveTier`), the browser, SSH's
 `run_command`, stores (PCP's own store tools, which have no rerun, and the
 stores' tools: a repeat fails or does the same), a capability tool's calls
 to its provider, and tools the owner exempted. An ask-level call leaves its
-repeats to the permission flow (the same request, or the answer of the run
-the owner allowed once) and is held back only by a call that ran.
+repeats to the permission flow while that flow answers them (the request
+still waiting or running, or the run the owner allowed once while its
+answer is there to take, `reuseUntil`); once that answer was taken, or the
+allowed run failed, the next identical call is held back rather than
+asking the owner again unaware.
 
 An assistant repeats a call on purpose with `rerun: true` and a `reason`
 (required with it, under `allOf`) on `call_tool_write` and
@@ -4421,8 +4432,11 @@ and does not reach its calls: a program run again after it stopped for the
 owner meets `duplicate_call` on the calls that already ran.
 
 The owner's own windows are the vault's `duplicateCalls` setting
-(`calls/config.ts`): per tool, by server id and name, minutes between 1 and
-24 hours, or `exempt`.
+(`calls/config.ts`), set on Settings → Repeated calls
+(`components/repeated-calls-card.tsx`, `lib/actions/repeated-calls.ts`): a
+default for every tool, and per tool (chosen from the vault's tools that
+change things, by server id and name) minutes between 1 and 24 hours, or
+`exempt` ("Never hold back").
 
 ### Call handles
 

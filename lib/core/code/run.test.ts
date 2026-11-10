@@ -1878,11 +1878,12 @@ describe("the same program again", () => {
     expect(ran).toHaveLength(1)
     expect(await db().permissionRequest.count()).toBe(1)
 
-    // Once: the next run is asked about it again.
-    expect((await run(program, { rerun: true })).text).toContain(
-      "stopped at postcards/send_postcard",
-    )
-    expect(await db().permissionRequest.count()).toBe(2)
+    // Once: the next run is not asked about it again unaware, but held
+    // back by the duplicate guard with how the allowed run went (#115).
+    const third = await run(program, { rerun: true })
+    expect(third.text).toContain("Not run again: postcards/send_postcard")
+    expect(third.text).toContain("The owner allowed it and it ran")
+    expect(await db().permissionRequest.count()).toBe(1)
     expect(ran).toHaveLength(1)
   })
 
@@ -1991,11 +1992,9 @@ describe("the same call again (#115)", () => {
     expect(again.text).toContain("rerun: true and a reason")
     expect(ran).toHaveLength(1)
 
-    // Its answer is kept for the token, by the handle the answer names.
-    const id = /\{"\$result": "([^"]+)"\}/.exec(again.text)![1]!
-    expect(
-      (await openResult(ctx, { tokenId: scope.tokenId, id }))?.text(),
-    ).toBe("ran archive")
+    // A short answer comes back with it, and no result is kept for it.
+    expect(again.text).toContain("It answered:\nran archive")
+    expect(await db().toolResult.count()).toBe(0)
 
     // Only a keyed hash of the arguments is kept.
     const [row] = await db().callRecord.findMany()

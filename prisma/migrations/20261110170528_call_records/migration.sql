@@ -9,6 +9,7 @@ CREATE TABLE "call_record" (
     "tier" TEXT NOT NULL,
     "status" TEXT NOT NULL,
     "result_id" TEXT,
+    "answer" BLOB,
     "request_id" TEXT,
     "started_at" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "finished_at" DATETIME,

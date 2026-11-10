@@ -187,12 +187,14 @@ and these tools:
 | `propose_tool_access`   | Proposes which tools its token may run, many at once and across servers, and hears which tools would change; you review and save it in PCP.                                                                                                                                 |
 
 A Write or Destructive call an assistant makes again with the same
-arguments within half an hour (from `call_tool_*`, a program's `pcp.call` or
-a wrapper) is not run twice: PCP answers with how the first one went (still
-running, done and its answer, failed, or waiting for you), and runs it again
-only when the assistant says it means to, with a reason (`rerun`). The log
-marks such a repeat. Read tools, the browser, SSH commands, stores and calls
-you allowed on PCP's page are not held back.
+arguments within a while (from `call_tool_*`, a program's `pcp.call` or a
+wrapper) is not run twice: PCP answers with how the first one went (still
+running, done and what it answered, failed, or waiting for you), and runs it
+again only when the assistant says it means to, with a reason (`rerun`). The
+log marks such a repeat. The while is 30 minutes unless you set otherwise
+under Settings → Repeated calls, for every tool or for one tool, where you
+can also have a tool never held back. Read tools, the browser, SSH commands,
+stores and calls you allowed on PCP's page are not held back.
 
 Options on a token's page, each off until you tick it, add more tools,
 described further down:

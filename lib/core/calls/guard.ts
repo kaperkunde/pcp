@@ -2,9 +2,10 @@ import { AsyncLocalStorage } from "node:async_hooks"
 
 import type { CallToolResult } from "@modelcontextprotocol/server"
 
+import type { Prisma } from "@/lib/generated/prisma/client"
 import { MAY_HAVE_GONE_THROUGH } from "../code/runs"
 import type { VaultContext } from "../context"
-import { keyedHash } from "../crypto"
+import { asBytes, decryptString, encryptString, keyedHash } from "../crypto"
 import { db } from "../db"
 import { isPcpError } from "../errors"
 import { newId } from "../ids"
@@ -12,12 +13,12 @@ import { pacedRetryAfter } from "../pacing/pace"
 import { canonicalJson } from "../permission-rules"
 import type { CodeCallOutcome } from "../permissions"
 import { currentLogNote, type LogNote } from "../request-log"
-import { keepResult } from "../tool-results"
 import type { ToolTier } from "../tool-tiers"
 import { errorCodeOf } from "../tools/outcome"
 import { guardWindowMs, readDuplicateCalls } from "./config"
 import {
   CALL_RECORD_KEEP_MS,
+  MAX_INLINE_ANSWER_CHARS,
   STALE_RUNNING_MS,
   UNGUARDED_KINDS,
 } from "./limits"
@@ -27,20 +28,22 @@ import {
  * remembered for a while (`call_record`), and the same call made again
  * within that window (the same server, tool and arguments, as checked and
  * renamed) is not run: it is answered with how the first one went,
- * running, succeeded (with its answer kept as a result), failed, or asking
- * the owner. An assistant that means to do it twice says so (`rerun` with a
+ * running, succeeded (with its answer when it was short, or the kept
+ * result a long one already was), failed, or asking the owner. An assistant that means to do it twice says so (`rerun` with a
  * reason). The same tool with other arguments is only noted.
  *
  * It sits where a call is resolved, its arguments checked and before it
  * asks or runs: call_tool_write and call_tool_destructive (gateway.ts
- * callResolved), run_code's pcp.call and the capability tools (forwardCall)
- * and a wrapper's calls (wrappers/run.ts innerCall); never in upstream.ts,
+ * callResolved), run_code's pcp.call (forwardCall) and a wrapper's calls (wrappers/run.ts innerCall); never in upstream.ts,
  * so a call the owner allowed on PCP's page is not guarded. Read tools,
  * the kinds in UNGUARDED_KINDS and tools the owner exempted are not
  * either.
  *
  * Nothing of the arguments is stored but an HMAC under a key derived from
- * the vault key (callHash), so the table confirms no guess without it.
+ * the vault key (callHash), so the table confirms no guess without it; a
+ * short answer is kept encrypted on the row (`call_record:<id>:answer`),
+ * never as a kept result, so remembering calls never pushes out the
+ * token's own results.
  */
 
 const CALL_HASH_LABEL = "pcp call record v1"
@@ -91,7 +94,18 @@ type CallRow = {
   finishedAt: Date | null
   resultId: string | null
   requestId: string | null
+  answer: Uint8Array | null
 }
+
+type Client = Prisma.TransactionClient | ReturnType<typeof db>
+
+function answerAad(id: string): string {
+  return `call_record:${id}:answer`
+}
+
+/** Said with every repeat held back: a state changed in between counts. */
+export const CHANGED_SINCE =
+  "If what it acts on changed since (you turned something off and on again), make it again with a reason."
 
 /**
  * A call the assistant repeats on purpose carries that to the calls made
@@ -126,6 +140,7 @@ function ago(ms: number): string {
  * expired), so it does not stand in the way.
  */
 async function earlierLines(
+  client: Client,
   scope: GuardScope,
   row: CallRow,
   { asking, now }: { asking: boolean; now: Date },
@@ -141,15 +156,32 @@ async function earlierLines(
         : [
             `It started ${when} and is still running: its answer goes to the call that made it.`,
           ]
-    case "succeeded":
+    case "succeeded": {
+      let answer: string | null = null
+
+      try {
+        answer = row.answer
+          ? decryptString(
+              scope.ctx.dek,
+              Buffer.from(row.answer),
+              answerAad(row.id),
+            )
+          : null
+      } catch {
+        answer = null
+      }
+
       return [
         `It succeeded ${when}.`,
-        ...(row.resultId
-          ? [
-              `Its answer is kept as {"$result": "${row.resultId}"}: read_result reads it.`,
-            ]
-          : []),
+        ...(answer !== null
+          ? [`It answered:\n${answer}`]
+          : row.resultId
+            ? [
+                `Its answer is kept as {"$result": "${row.resultId}"}: read_result reads it.`,
+              ]
+            : []),
       ]
+    }
     case "failed":
       return [
         `It failed ${when}: the tool answered with an error, so most likely nothing happened; read that error before trying again.`,
@@ -157,23 +189,42 @@ async function earlierLines(
     case "may_have_happened":
       return [`It failed on its way ${when}. ${MAY_HAVE_GONE_THROUGH}`]
     case "asked": {
-      // The permission flow answers its own repeats (the same request, or
-      // the answer of the run the owner allowed once).
-      if (asking || !row.requestId) {
+      if (!row.requestId) {
         return null
       }
 
-      const request = await db().permissionRequest.findFirst({
+      const request = await client.permissionRequest.findFirst({
         where: {
           id: row.requestId,
           vaultId: scope.ctx.vaultId,
           tokenId: scope.tokenId,
         },
-        select: { status: true, expiresAt: true, decidedAt: true },
+        select: {
+          status: true,
+          expiresAt: true,
+          decidedAt: true,
+          reuseUntil: true,
+        },
       })
       const check = `check_permission with id "${row.requestId}"`
 
       if (!request) {
+        return null
+      }
+
+      // A call that asks again while its request waits or runs finds that
+      // request, and one the owner allowed once is answered with that run
+      // while its answer is there to take (permissions.ts reuseExecuted):
+      // the permission flow's own. Once that answer was taken, the next is
+      // held back here rather than asking the owner again unaware.
+      if (
+        asking &&
+        ((request.status === "pending" && request.expiresAt > now) ||
+          request.status === "running" ||
+          (request.status === "executed" &&
+            request.reuseUntil !== null &&
+            request.reuseUntil > now))
+      ) {
         return null
       }
 
@@ -247,55 +298,51 @@ export async function guardCall(
   rerun ||= confirmedRerun.getStore() === true
   const since = new Date(now.getTime() - windowMs)
   const id = newId()
-
-  // Recorded first, then compared with what came before it: of two
-  // identical calls at once, the later one is the repeat.
-  await db().callRecord.create({
-    data: {
-      id,
-      vaultId: scope.ctx.vaultId,
-      tokenId: scope.tokenId,
-      serverId: target.server.id,
-      toolName: target.tool,
-      argsHash,
-      tier: target.tier,
-      status: "running",
-      startedAt: now,
-    },
-  })
-
-  const before = {
-    OR: [{ startedAt: { lt: now } }, { startedAt: now, id: { lt: id } }],
-  }
   const name = `${target.server.slug}/${target.tool}`
 
-  if (!rerun) {
-    const earlier = await db().callRecord.findMany({
-      where: {
-        tokenId: scope.tokenId,
-        argsHash,
-        startedAt: { gte: since },
-        ...before,
-      },
-      orderBy: [{ startedAt: "desc" }, { id: "desc" }],
-      take: 5,
-    })
+  // Looked up and recorded in one transaction, which SQLite runs one at a
+  // time: of two identical calls, whichever comes second finds the first,
+  // whatever times they took before.
+  const duplicate = await db().$transaction(async (tx) => {
+    if (!rerun) {
+      const earlier = await tx.callRecord.findMany({
+        where: { tokenId: scope.tokenId, argsHash, startedAt: { gte: since } },
+        orderBy: [{ startedAt: "desc" }, { id: "desc" }],
+        take: 5,
+      })
 
-    for (const row of earlier) {
-      const lines = await earlierLines(scope, row, { asking, now })
+      for (const row of earlier) {
+        const lines = await earlierLines(tx, scope, row, { asking, now })
 
-      if (lines) {
-        await db().callRecord.deleteMany({ where: { id } })
-
-        return {
-          duplicate: [
+        if (lines) {
+          return [
             `Not run again: ${name} was called with these same arguments ${ago(now.getTime() - row.startedAt.getTime())} ago (within the ${ago(windowMs)} PCP watches for repeats), so PCP did not run it a second time.`,
             ...lines,
-            again,
-          ].join("\n\n"),
+            `${CHANGED_SINCE} ${again}`,
+          ].join("\n\n")
         }
       }
     }
+
+    await tx.callRecord.create({
+      data: {
+        id,
+        vaultId: scope.ctx.vaultId,
+        tokenId: scope.tokenId,
+        serverId: target.server.id,
+        toolName: target.tool,
+        argsHash,
+        tier: target.tier,
+        status: "running",
+        startedAt: now,
+      },
+    })
+
+    return null
+  })
+
+  if (duplicate !== null) {
+    return { duplicate }
   }
 
   const near = await db().callRecord.findFirst({
@@ -306,7 +353,7 @@ export async function guardCall(
       startedAt: { gte: since },
       argsHash: { not: argsHash },
       status: { not: "asked" },
-      ...before,
+      id: { not: id },
     },
     orderBy: { startedAt: "desc" },
     select: { startedAt: true },
@@ -320,7 +367,7 @@ export async function guardCall(
       tool: target.tool,
     },
     warning: near
-      ? `Note: you called ${name} ${ago(now.getTime() - near.startedAt.getTime())} ago with other arguments; if this is the same action, check that one did not already do it.`
+      ? `Note: you called ${name} ${ago(Math.max(0, now.getTime() - near.startedAt.getTime()))} ago with other arguments; if this is the same action, check that one did not already do it.`
       : null,
   }
 }
@@ -473,6 +520,20 @@ export function endOfThrow(error: unknown): CallEnd {
   return { status: "may_have_happened" }
 }
 
+/**
+ * The kept result a long answer already names: the whole answer PCP kept
+ * (tool-results.ts resultNotice), else the first handle in it.
+ */
+export function keptResultIn(text: string): string | null {
+  return (
+    /PCP kept the whole answer: [\d,]+ characters as result ([\w-]{1,64})/.exec(
+      text,
+    )?.[1] ??
+    /"\$result"\s*:\s*"([\w-]{1,64})"/.exec(text)?.[1] ??
+    null
+  )
+}
+
 /** Ends a guarded call's record. A failure here never fails the call. */
 export async function endCall(
   ticket: CallTicket | null,
@@ -489,19 +550,12 @@ export async function endCall(
       return
     }
 
-    let resultId: string | null = null
-
-    if (end.status === "succeeded" && end.answer && end.answer.text !== "") {
-      resultId = (
-        await keepResult(ticket.scope.ctx, {
-          tokenId: ticket.scope.tokenId,
-          serverId: ticket.serverId,
-          toolName: ticket.tool,
-          text: end.answer.text,
-          mediaType: end.answer.mediaType,
-        })
-      ).id
-    }
+    const text = end.status === "succeeded" ? (end.answer?.text ?? "") : ""
+    // A short answer is kept on the row; a long one only by the result it
+    // already was (its notice, or a handle in it). Never a new kept
+    // result: those count against the token's own.
+    const short = text !== "" && text.length <= MAX_INLINE_ANSWER_CHARS
+    const resultId = short ? null : keptResultIn(text)
 
     await db().callRecord.updateMany({
       where: { id: ticket.id },
@@ -509,6 +563,11 @@ export async function endCall(
         status: end.status,
         finishedAt: now,
         resultId,
+        answer: short
+          ? asBytes(
+              encryptString(ticket.scope.ctx.dek, text, answerAad(ticket.id)),
+            )
+          : null,
         requestId: end.status === "asked" ? end.requestId : null,
       },
     })

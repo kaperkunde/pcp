@@ -37,7 +37,7 @@ import {
   RUN_PROGRESS_MS,
   RUN_TIMEOUT_MS,
 } from "./limits"
-import { DUPLICATE_CALL_MS, MAX_RERUN_REASON_CHARS } from "../calls/limits"
+import { DUPLICATE_WINDOW_WORDS, MAX_RERUN_REASON_CHARS } from "../calls/limits"
 import {
   compressImage,
   framesProgram,
@@ -525,7 +525,7 @@ async function answerFor(
           : `If the owner allows it once, that one call runs right then: don't run the program again for it — on the owner's next message, whatever it says, call check_permission with the id below for its answer (an identical call within ${REUSE_EXECUTED_MS / 60_000} minutes also gets that answer instead of a new ask). For the program to make the call itself, they choose Always allow or Allow for; once they have, run the program again.`,
         ...(sideEffects(trace).length > 0
           ? [
-              `Run again, a call before it that changed things and is made again with the same arguments within ${DUPLICATE_CALL_MS / 60_000} minutes throws an Error with code "duplicate_call" instead of happening twice: leave those calls out of the program, or catch that error.`,
+              `Run again, a call before it that changed things and is made again with the same arguments within ${DUPLICATE_WINDOW_WORDS} throws an Error with code "duplicate_call" instead of happening twice: leave those calls out of the program, or catch that error.`,
             ]
           : []),
       ].join("\n\n"),

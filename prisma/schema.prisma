@@ -1196,8 +1196,11 @@ model CallRecord {
   /// so it may have gone through) | asked (the owner was asked: see
   /// requestId)
   status     String
-  /// The kept result (tool_result) holding the answer, when one was kept.
+  /// The kept result (tool_result) a long answer already was, by its id.
   resultId   String?   @map("result_id")
+  /// A short answer (MAX_INLINE_ANSWER_CHARS), AES-256-GCM under the vault's
+  /// data key with "call_record:<id>:answer" as associated data.
+  answer     Bytes?
   /// The permission request it made, when it asked the owner.
   requestId  String?   @map("request_id")
   startedAt  DateTime  @default(now()) @map("started_at")

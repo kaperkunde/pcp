@@ -10,7 +10,7 @@ unknown key.
 
 No tool or argument was renamed. A Write or Destructive call made again by
 the same token with the same server, tool and arguments within 30 minutes
-(the owner can change that per tool, or turn it off) is no longer run a
+(the owner can change that for every tool or one tool, or turn it off for a tool, under Settings → Repeated calls) is no longer run a
 second time: `call_tool_write` and `call_tool_destructive` answer a tool
 error with code `duplicate_call` saying how the first call went, and a
 program's `pcp.call` (run_code, a wrapper) throws an Error with that code.
