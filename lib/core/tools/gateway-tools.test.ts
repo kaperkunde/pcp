@@ -808,6 +808,66 @@ describe("execute_<tier> by name, and the names kept for one release (#113)", ()
     }
   })
 
+  it("does not make the same Write call of PCP's own twice, unless asked to again with a reason", async () => {
+    const register = {
+      tool: "register_server",
+      arguments: { name: "Linear", url: "https://mcp.linear.example/mcp" },
+    }
+    const first = await said("execute_write", register)
+    expect(first.isError).toBe(false)
+    expect(first.structured).toMatchObject({ kind: "needs_owner" })
+
+    const again = await said("execute_write", register)
+    expect(again.isError).toBe(true)
+    expect(again.code).toBe("duplicate_call")
+    expect(again.texts.join("\n")).toContain(
+      "Not run again: pcp/register_server",
+    )
+    expect(await db().permissionRequest.count()).toBe(1)
+
+    // rerun goes with a reason; with one, the call is made again.
+    expect(
+      (await said("execute_write", { ...register, rerun: true })).code,
+    ).toBe("invalid_arguments")
+    const meant = await said("execute_write", {
+      ...register,
+      rerun: true,
+      reason: "The owner asked for it again.",
+    })
+    expect(meant.isError).toBe(false)
+    expect(await db().permissionRequest.count()).toBe(2)
+
+    // What only reads is never held back, whatever the tool's tier.
+    const view = {
+      tool: "memory",
+      arguments: { command: "view", path: "/memories" },
+    }
+    expect((await said("execute_destructive", view)).isError).toBe(false)
+    expect((await said("execute_destructive", view)).isError).toBe(false)
+  })
+
+  it("lists every one of PCP's own tools for kind pcp with no query", async () => {
+    const all = await said("search", { kind: "pcp" })
+    const lines = all.texts[0]!.split("\n").filter((line) =>
+      line.startsWith("pcp "),
+    )
+    expect(lines).toHaveLength(OWN_TOOLS.length)
+
+    // A limit alone says nothing to search by.
+    const bare = await said("search", { limit: 5 })
+    expect(bare.code).toBe("invalid_arguments")
+    expect(bare.texts.join("")).toContain("limit goes with query")
+  })
+
+  it("answers PCP's own tools through execute without repeating the text as structuredContent", async () => {
+    const listed = await said("execute_read", { tool: "check_permission" })
+    expect(listed.isError).toBe(false)
+    expect(listed.structured).toBeUndefined()
+    expect(JSON.parse(listed.texts.at(-1)!)).toMatchObject({
+      kind: "requests",
+    })
+  })
+
   it("gives the owner's standing rules for search with no arguments", async () => {
     const rules = await said("search", {})
     expect(rules.isError).toBe(false)
