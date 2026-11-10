@@ -44,10 +44,12 @@ import {
 } from "./definition"
 import { FLOW_RUN_TIMEOUT_MS, WRAPPER_RUN_TIMEOUT_MS } from "./limits"
 import {
+  allowsPart,
   findPlaceholders,
   type FoundPlaceholder,
   type SecretGrant,
 } from "./placeholders"
+import { typedPartsLabel } from "./secret-literals"
 import { checkCallArguments } from "../call-arguments"
 import {
   ok,
@@ -341,13 +343,18 @@ function finished(
 
 /**
  * The first placeholder in a call's arguments that no binding the owner
- * approved names, by its place and name. A malformed one is left for
- * upstream.ts to refuse in its own words.
+ * approved names, by its place, name and part, with the binding there for
+ * another part when there is one. A malformed one is left for upstream.ts
+ * to refuse in its own words.
  */
 function unboundSecret(
   args: Record<string, unknown>,
   grant: SecretGrant,
-): FoundPlaceholder | null {
+): {
+  placeholder: FoundPlaceholder
+  /** What the binding at that place lets through, when it lacks this part. */
+  allowed?: SecretGrant[number]["parts"]
+} | null {
   let found: FoundPlaceholder[]
 
   try {
@@ -356,16 +363,26 @@ function unboundSecret(
     return null
   }
 
-  return (
-    found.find(
-      (placeholder) =>
-        !grant.some(
-          (binding) =>
-            binding.pointer === placeholder.pointer &&
-            binding.name === placeholder.name,
-        ),
-    ) ?? null
-  )
+  for (const placeholder of found) {
+    const there = grant.filter(
+      (binding) =>
+        binding.pointer === placeholder.pointer &&
+        binding.name === placeholder.name,
+    )
+
+    if (there.some((binding) => allowsPart(binding, placeholder.part))) {
+      continue
+    }
+
+    return there.length > 0
+      ? {
+          placeholder,
+          allowed: there.flatMap((binding) => binding.parts ?? []),
+        }
+      : { placeholder }
+  }
+
+  return null
 }
 
 /**
@@ -380,18 +397,33 @@ export function unboundSecretFix({
   target,
   browser,
   placeholder,
+  allowed,
 }: {
   wrapper: string
   tool: string
   target: string
   browser: boolean
   placeholder: FoundPlaceholder
+  /** The parts a place found in the program lets through, lacking this one. */
+  allowed?: Array<"username" | "password">
 }): string {
   const entry = JSON.stringify({
     secret: placeholder.name,
     tool: target,
     argument: placeholder.pointer || "/",
   })
+
+  if (allowed) {
+    const literal = JSON.stringify({
+      $secret: placeholder.name,
+      ...(placeholder.part === "username" ? { part: "username" } : {}),
+    }).replace(/":/g, '": ')
+
+    return [
+      `The owner allowed only ${typedPartsLabel(allowed).replace(/^its /, "the ")} of the secret "${placeholder.name}" in ${target} at ${placeholder.pointer || "/"} for the wrapper ${wrapper}, as its programs name it; its tool ${tool} typed ${placeholder.part === "username" ? "its login name" : "its password"} there, so the call was not made.`,
+      `Fix it with update_wrapper: write ${literal} in the program as it is, so PCP finds that part too, or add ${entry} to secrets (the whole list, so keep the places get_wrapper shows). The owner sees it and decides.`,
+    ].join(" ")
+  }
 
   return [
     `The owner has not allowed the secret "${placeholder.name}" in ${target} at ${placeholder.pointer || "/"} for the wrapper ${wrapper}, so its tool ${tool}'s call was not made.`,
@@ -483,6 +515,7 @@ async function innerCall(
             secretId: binding.secretId,
             template: binding.template,
             url: binding.url,
+            ...(binding.parts ? { parts: binding.parts } : {}),
           },
         ]
       : [],
@@ -539,7 +572,7 @@ async function innerCall(
         tool: tool.name,
         target: `${slug}/${name}`,
         browser: target.kind === "browser" && name === "type",
-        placeholder: unbound,
+        ...unbound,
       }),
     }
   }

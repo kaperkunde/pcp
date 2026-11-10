@@ -44,6 +44,7 @@ import {
   definitionHash,
   isFlow,
   isFlowTool,
+  newFoundPlaces,
   readDefinition,
   resolveDefinition,
   type CallLevels,
@@ -56,7 +57,7 @@ import {
 import { flowSites, type FlowSites } from "./flow-sites"
 import { MAX_WRAPPERS } from "./limits"
 import type { SecretPart } from "./placeholders"
-import { secretLiterals } from "./secret-literals"
+import { typedPartsLabel } from "./secret-literals"
 
 /**
  * Making and changing wrappers. An assistant only ever asks: create_wrapper,
@@ -179,12 +180,15 @@ export type WrapperView = {
   secrets: Array<SecretBindingInput & { template: string }>
   /**
    * The secrets the programs type into pages by name as written, whose
-   * places PCP made (definition.ts SecretBinding `found`).
+   * places PCP made (definition.ts SecretBinding `found`), with what of each.
    */
-  foundSecrets: string[]
+  foundSecrets: FoundSecret[]
 }
 
 type InputSecret = SecretBindingInput & { template: string; found?: true }
+
+/** A secret typed into pages by its name in a program, and what of it. */
+export type FoundSecret = { secret: string; parts: SecretPart[] }
 
 function basisOf(
   server: { name: string; description: string },
@@ -290,13 +294,10 @@ export async function getWrapper(
     flow: isFlow(definition, await browserServerIds(ctx)),
     tools,
     secrets: givenSecrets(secrets),
-    foundSecrets: [
-      ...new Set(
-        definition.secrets.flatMap((binding) =>
-          binding.found ? [binding.secret] : [],
-        ),
-      ),
-    ],
+    foundSecrets: newFoundPlaces(null, definition).filter(
+      (entry, index, all) =>
+        all.findIndex((other) => other.secret === entry.secret) === index,
+    ),
   }
 }
 
@@ -404,7 +405,7 @@ async function describe(
       template: binding.template,
       isNew: binding.secretId === null,
       ...(binding.found
-        ? { found: { parts: typedParts(after!, binding.secret) } }
+        ? { found: { parts: binding.parts ?? ["username", "password"] } }
         : {}),
     }),
   )
@@ -496,7 +497,7 @@ async function describe(
       ? `Found in the programs: they type ${typed
           .map(
             (binding) =>
-              `your secret "${binding.secret}" (${partsLabel(binding.found!.parts)})`,
+              `your secret "${binding.secret}" (${typedPartsLabel(binding.found!.parts)})`,
           )
           .join(
             ", ",
@@ -524,30 +525,6 @@ async function describe(
     tools,
     secrets,
   }
-}
-
-/** What the programs that type a secret type of it, for the owner. */
-function typedParts(
-  definition: WrapperDefinition,
-  secret: string,
-): SecretPart[] {
-  const parts = new Set(
-    definition.tools.flatMap((tool) =>
-      secretLiterals(tool.program).flatMap((found) =>
-        found.name === secret ? found.parts : [],
-      ),
-    ),
-  )
-
-  return (["username", "password"] as const).filter((part) => parts.has(part))
-}
-
-function partsLabel(parts: SecretPart[]): string {
-  return parts.length === 2
-    ? "its login name and password"
-    : parts[0] === "username"
-      ? "its login name"
-      : "its password"
 }
 
 /**
@@ -1175,7 +1152,11 @@ export async function saveWrapperByOwner(
   input: WrapperInput,
 ): Promise<{
   id: string
-  found: Array<{ secret: string; parts: SecretPart[] }>
+  /**
+   * The places found in the programs that it did not have (definition.ts
+   * newFoundPlaces), for the owner to be told of.
+   */
+  found: FoundSecret[]
 }> {
   const existing = id ? await loadWrapper(ctx, { id }) : null
 
@@ -1196,7 +1177,10 @@ export async function saveWrapperByOwner(
       resolved.description,
       resolved.definition,
     )
-    return { id: existing.server.id, found: [] }
+    return {
+      id: existing.server.id,
+      found: newFoundPlaces(existing.definition, resolved.definition),
+    }
   }
 
   return {
@@ -1206,7 +1190,7 @@ export async function saveWrapperByOwner(
       resolved.description,
       resolved.definition,
     ),
-    found: [],
+    found: newFoundPlaces(null, resolved.definition),
   }
 }
 

@@ -2,7 +2,6 @@ import { invalid } from "../errors"
 import { diffLines, type DiffLine } from "../line-merge"
 import { hiddenCharacter } from "../memories"
 import { canonicalJson } from "../permission-rules"
-import { secretLiterals } from "../wrappers/secret-literals"
 
 import {
   refOf,
@@ -124,11 +123,6 @@ function listed(values: string[]): string {
   return values.join(", ")
 }
 
-/** A tool that calls a type tool, which may be the browser's. */
-function typesIntoPages(calls: string[]): boolean {
-  return calls.some((call) => call.endsWith("/type"))
-}
-
 function wrapperFlags(
   current: WrapperDocument | null,
   incoming: WrapperDocument,
@@ -163,27 +157,6 @@ function wrapperFlags(
         path: yamlPath,
         message: `${tool.name} would call ${listed(added)}.`,
       })
-    }
-
-    // A secret the program types into pages by name gets its place from the
-    // program itself once applied (wrappers/definition.ts), so it is
-    // flagged as a place given by name is.
-    const typedBefore = new Set(
-      before && typesIntoPages(before.calls)
-        ? secretLiterals(before.program).map((found) => found.name)
-        : [],
-    )
-
-    if (typesIntoPages(tool.calls)) {
-      for (const found of secretLiterals(tool.program)) {
-        if (!typedBefore.has(found.name)) {
-          flags.push({
-            kind: "secret_binding",
-            path,
-            message: `${tool.name} would type your secret "${found.name}" into pages (its name is written in the program): PCP types it only at the sites you bound it to, or after asking you.`,
-          })
-        }
-      }
     }
   }
 

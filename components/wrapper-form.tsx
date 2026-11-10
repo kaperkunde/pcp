@@ -1,6 +1,6 @@
 "use client"
 
-import { useActionState } from "react"
+import { useActionState, type ReactNode } from "react"
 
 import {
   FormFooter,
@@ -68,10 +68,16 @@ export const EMPTY_WRAPPER: WrapperFormValues = {
 export function WrapperForm({
   initial,
   secretNames,
+  found,
 }: {
   initial: WrapperFormValues
   /** The secrets you hold, by name, for the secrets list. */
   secretNames: string[]
+  /**
+   * The secrets its programs type into pages by name, whose places PCP
+   * made: read only, as they come from the programs, not the JSON.
+   */
+  found?: ReactNode
 }) {
   const editing = Boolean(initial.id)
   const [state, action] = useActionState<ServerActionResult, FormData>(
@@ -158,6 +164,7 @@ export function WrapperForm({
             spellCheck={false}
           />
         </Field>
+        {found}
         <DefinitionGuide secretNames={secretNames} />
       </FormSection>
 

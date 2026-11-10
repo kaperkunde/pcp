@@ -554,7 +554,7 @@ describe("a secret a flow types into pages by name", () => {
     })
     expect(refused.isError).toBe(true)
     expect(refused.text).toContain(
-      'only its login name of the secret "DigiD password"',
+      'only the login name of the secret "DigiD password"',
     )
     expect(browser.typed).toEqual(["ada@example.com"])
     expect(refused.text).not.toContain(PASSWORD)

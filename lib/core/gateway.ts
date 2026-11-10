@@ -5287,7 +5287,7 @@ export function buildGatewayServer(
       name: "get_wrapper",
       title: "Read a wrapper",
       description:
-        "Get a wrapper's tools as the owner approved them: each one's description, input and output schema, program, the tools it calls and replaces, whose levels its calls follow (call_levels), and where a secret goes in (by the secret's name, never its value; found_secrets: the ones its programs type into pages, found in them). Read it before update_wrapper: its tools are in the shape update_wrapper takes.",
+        "Get a wrapper's tools as the owner approved them: each one's description, input and output schema, program, the tools it calls and replaces, whose levels its calls follow (call_levels), and where a secret goes in (by the secret's name, never its value; found_secrets: the ones its programs type into pages, found in them, with the parts each may type). Read it before update_wrapper: its tools are in the shape update_wrapper takes.",
       input: z.object({
         wrapper: z
           .string()

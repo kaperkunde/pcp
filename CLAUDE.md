@@ -679,10 +679,14 @@ embeddingProvider`, which hands `embeddings/provider.ts` the header;
   is unique by place and secret, so a login name and a password share
   `/text`. A secret a flow's program types by a fixed name
   (`secret-literals.ts`) gets that binding when the definition is checked,
-  for a secret PCP holds, marked `found`, shown on the review and approved
-  with the wrapper; never for any other tool, never one an assistant or a
+  for a secret PCP holds, marked `found` with the `parts` the program
+  names (only those are typed), shown on the review and approved with the
+  wrapper; never for any other tool, never one an assistant or a
   repository document gives (`toInput` leaves it out), and it changes
-  nothing of the gate. A call whose secret has no binding is refused
+  nothing of the gate. It depends on the vault's secrets, so a repository's
+  review flags each one the wrapper does not have yet against the vault
+  (`repos/found-review.ts reviewInVault`, never text only), and the
+  owner's save and page name them. A call whose secret has no binding is refused
   before anything is sent, with the `secrets` entry to propose.
   An assistant's create, change and delete are a permission request
   (`wrapper_change`) that shows every program, schema, call, replaced tool

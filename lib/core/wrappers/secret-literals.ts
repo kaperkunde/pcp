@@ -34,6 +34,11 @@ type Token =
 const MAX_TOKENS = 200_000
 /** At most this many names are taken from one program. */
 const MAX_FOUND = 50
+/**
+ * How deep templates and brackets are read: past it nothing more is found,
+ * and the reading of templates stops there rather than recurse further.
+ */
+const MAX_DEPTH = 64
 
 /** After these words a `/` starts a regular expression, not a division. */
 const BEFORE_REGEX = new Set([
@@ -128,13 +133,18 @@ function unescape(raw: string): string | null {
   return out
 }
 
-/** The tokens of `text` from `from`, up to an unmatched `}` when `inner`. */
+/**
+ * The tokens of `text` from `from`, up to an unmatched `}` when inside a
+ * template's expression (`level` above 0). Past MAX_DEPTH templates deep it
+ * stops reading: what is left is found in nothing.
+ */
 function tokenize(
   text: string,
   from: number,
-  inner: boolean,
+  level: number,
   tokens: Token[],
 ): number {
+  const inner = level > 0
   let at = from
   let depth = 0
 
@@ -197,8 +207,13 @@ function tokenize(
           end += 2
         } else if (text[end] === "$" && text[end + 1] === "{") {
           fixed = false
+
+          if (level >= MAX_DEPTH) {
+            return text.length
+          }
+
           // What is inside is read too, and its own objects counted.
-          end = tokenize(text, end + 2, true, tokens) + 1
+          end = tokenize(text, end + 2, level + 1, tokens) + 1
         } else {
           end += 1
         }
@@ -321,7 +336,7 @@ function isPunct(token: Token | undefined, ...values: string[]): boolean {
  */
 export function secretLiterals(program: string): SecretLiteral[] {
   const tokens: Token[] = []
-  tokenize(program, 0, false, tokens)
+  tokenize(program, 0, 0, tokens)
 
   const found = new Map<string, Set<SecretPart>>()
   const stack: Frame[] = []
@@ -331,7 +346,23 @@ export function secretLiterals(program: string): SecretLiteral[] {
 
     if (token.kind === "punct") {
       if (token.value === "{" || token.value === "(" || token.value === "[") {
-        stack.push({ bracket: token.value })
+        const around = stack.at(-1)
+
+        // A computed key: what it names is worked out as it runs.
+        if (
+          token.value === "[" &&
+          around?.bracket === "{" &&
+          isPunct(tokens[index - 1], "{", ",")
+        ) {
+          around.other = true
+        }
+
+        // Too deep to be read as anything: never counted.
+        stack.push(
+          stack.length >= MAX_DEPTH
+            ? { bracket: token.value, other: true }
+            : { bracket: token.value },
+        )
         continue
       }
 
@@ -406,4 +437,13 @@ export function secretLiterals(program: string): SecretLiteral[] {
       parts.has(part),
     ),
   }))
+}
+
+/** What a program types of a secret, in words. */
+export function typedPartsLabel(parts: SecretPart[]): string {
+  return parts.length === 2
+    ? "its login name and password"
+    : parts[0] === "username"
+      ? "its login name"
+      : "its password"
 }
