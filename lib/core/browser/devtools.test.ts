@@ -343,13 +343,13 @@ describe.skipIf(!executable)(
       expect(textOf(once)).toContain('"App"')
       await owner(call("evaluate", { tab, script }))
 
-      await writeScriptAccess(ctx.vaultId, tokenId, site, "blocked")
+      await writeScriptAccess(ctx, tokenId, site, "blocked")
       const blocked = await call("evaluate", { tab, script })
       expect(blocked.isError).toBe(true)
       expect(textOf(blocked)).toContain("blocked scripts")
 
-      await writeScriptAccess(ctx.vaultId, tokenId, site, "allowed")
-      expect(await decideScript(ctx.vaultId, tokenId, site)).toBe("allowed")
+      await writeScriptAccess(ctx, tokenId, site, "allowed")
+      expect(await decideScript(ctx, tokenId, site)).toBe("allowed")
 
       const state = await call("evaluate", { tab, script: "window.appState" })
       expect(JSON.parse(textOf(state).split("Result (JSON):\n")[1]!)).toEqual({
@@ -390,12 +390,7 @@ describe.skipIf(!executable)(
 
     it("keeps the tab at its site while a script runs", async () => {
       const tab = await open("/app")
-      await writeScriptAccess(
-        ctx.vaultId,
-        tokenId,
-        new URL(api.origin).host,
-        "allowed",
-      )
+      await writeScriptAccess(ctx, tokenId, new URL(api.origin).host, "allowed")
       const before = elsewhere.requests.length
 
       const ran = await call("evaluate", {
@@ -440,12 +435,7 @@ describe.skipIf(!executable)(
 
     it("refuses a script while a field holds a typed secret", async () => {
       const tab = await open("/app")
-      await writeScriptAccess(
-        ctx.vaultId,
-        tokenId,
-        new URL(api.origin).host,
-        "allowed",
-      )
+      await writeScriptAccess(ctx, tokenId, new URL(api.origin).host, "allowed")
       const page = runningBrowser(ctx.vaultId)!.tabs.get(tab)!.page
       await page.locator("#field").fill("hunter2-hunter2")
       holdSecret(page, "Shop", "hunter2-hunter2")
@@ -520,12 +510,7 @@ describe.skipIf(!executable)(
         expect.objectContaining({ source: "network", level: "error" }),
       )
 
-      await writeScriptAccess(
-        ctx.vaultId,
-        tokenId,
-        new URL(api.origin).host,
-        "allowed",
-      )
+      await writeScriptAccess(ctx, tokenId, new URL(api.origin).host, "allowed")
       await call("evaluate", {
         tab,
         script:

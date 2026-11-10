@@ -222,7 +222,19 @@ describe.skipIf(!executable)("a browser flow", { timeout: 90_000 }, () => {
     })
     expect(messages).toEqual(["hello there"])
 
-    const again = await call("call_tool_destructive", args)
+    // The same call again is not run twice (calls/guard.ts): the answer
+    // says the first one succeeded.
+    const repeated = await call("call_tool_destructive", args)
+    expect(repeated.isError).toBe(true)
+    expect(repeated.text).toContain("Not run again: chat/post_message")
+    expect(messages).toEqual(["hello there"])
+
+    // Made again on purpose, the flow finds its message there already.
+    const again = await call("call_tool_destructive", {
+      ...args,
+      rerun: true,
+      reason: "Check that the message is there.",
+    })
     expect(again.isError, again.text).toBe(false)
     expect(JSON.parse(again.text)).toEqual({
       ok: true,
@@ -255,7 +267,7 @@ describe.skipIf(!executable)("a browser flow", { timeout: 90_000 }, () => {
       code: `
         const url = ${JSON.stringify(`${api.origin}/thread`)}
         const first = await pcp.call("chat", "post_message", { url, text: "from a program" })
-        const second = await pcp.call("chat", "post_message", { url, text: "from a program" })
+        const second = await pcp.call("chat", "post_message", { url, text: "from a program" }, { rerun: true, reason: "check it is there" })
         return [first, second]
       `,
     })

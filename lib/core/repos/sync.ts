@@ -464,7 +464,7 @@ export async function pendingChange(
     local,
     incoming,
     review: reviewItem(local, incoming.document, {
-      paceBounds: assistantBounds(await readPacingConfig(ctx.vaultId)),
+      paceBounds: assistantBounds(await readPacingConfig(ctx)),
     }),
     resolved: await resolveItem(ctx, incoming.document, { onto: true }),
   }

@@ -63,6 +63,7 @@ const ALL_TOOLS = [
   "run_code_destructive",
   "check_run",
   "read_image",
+  "view_image",
   "convert_document",
   "edit_pdf",
   // PCP's own store, and the others by store (#90).
@@ -259,7 +260,7 @@ describe("PCP's own tools", () => {
       const first = tool.description!.slice(0, 25)
 
       expect(first, tool.name).toMatch(
-        /^(START HERE: |(Search|List|Get|Call|Run|Check|Withdraw|Read|Share|Receive|Propose|Change|Fetch|Save|Edit|Convert|Find|Make|Move|Delete) )/,
+        /^(START HERE: |(Search|List|Get|Call|Run|Check|Withdraw|Read|Share|Receive|Propose|Change|Fetch|Save|Edit|Convert|Find|Make|Move|Delete|View) )/,
       )
       // A verb and an object, not a verb alone.
       expect(first.trim().split(/\s+/).length, tool.name).toBeGreaterThan(2)
@@ -298,6 +299,7 @@ describe("PCP's own tools", () => {
       list_tools: /tool/,
       web_fetch: /web/,
       read_image: /image/,
+      view_image: /^View an image/,
       convert_document: /document/,
       edit_pdf: /PDF/,
       list_folder: /^List files in a folder/,
@@ -446,6 +448,36 @@ describe("PCP's own tools", () => {
         .map((part) => part.text)
         .join(""),
     })
+
+    // Several at once: the one withdrawn is answered, an unknown id listed.
+    const several = await client.callTool({
+      name: "check_permission",
+      arguments: { ids: [owner.request, "nowhere"], mode: "all" },
+    })
+    expect(several.structuredContent).toMatchObject({
+      kind: "statuses",
+      statuses: [
+        { id: owner.request, status: "withdrawn" },
+        { id: "nowhere", status: "unknown" },
+      ],
+    })
+
+    // One id or several, never both.
+    const both = await client.callTool({
+      name: "check_permission",
+      arguments: { id: owner.request, ids: [owner.request] },
+    })
+    expect(both.isError).toBe(true)
+    expect(both._meta?.[ERROR_META_KEY]).toMatchObject({
+      code: "invalid_arguments",
+    })
+
+    // A mode is for several ids.
+    const bare = await client.callTool({
+      name: "check_permission",
+      arguments: { mode: "all" },
+    })
+    expect(bare.isError).toBe(true)
 
     const unknown = await client.callTool({
       name: "check_server",

@@ -168,7 +168,21 @@ test("a tool that asks the owner stops the program until they allow it", async (
   )
   expect(callsOf("send_postcard")).toHaveLength(1)
 
-  const ran = await run(baseURL!, program)
+  // The program again: the postcard the owner's answer sent is not sent a
+  // second time (the duplicate guard), and the program hears how it went.
+  const again = await run(baseURL!, program)
+  expect(again).toContain(`Not run again: ${SLUG}/send_postcard`)
+  expect(again).toContain("The owner allowed it and it ran")
+  expect(callsOf("send_postcard")).toHaveLength(1)
+
+  // Sent again on purpose, it goes.
+  const ran = await run(
+    baseURL!,
+    program.replace(
+      'message: "Sum: " + sum })',
+      'message: "Sum: " + sum }, { rerun: true, reason: "A second card." })',
+    ),
+  )
   expect(returned(ran)).toBe("Sent to Grace: Sum: 5")
   expect(callsOf("send_postcard")).toHaveLength(2)
 })

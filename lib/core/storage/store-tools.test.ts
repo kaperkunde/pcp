@@ -153,4 +153,27 @@ describe("the store tools", () => {
     expect(textOf(unknown)).toMatch(/no store called scans.*pcp-files/s)
     expect(await db().storageEntry.count()).toBe(0)
   })
+
+  it("answer a whole get_attachment answer given as the file with the handle inside it", async () => {
+    const own = await ensureOwnStore(ctx)
+    await setServerToolAccess(ctx, tokenId, own, "allowed")
+    const mcp = await connect()
+
+    const answer = await mcp.callTool({
+      name: "save_file",
+      arguments: {
+        path: "plan.pdf",
+        file: {
+          name: "plan.pdf",
+          type: "application/pdf",
+          size: 9,
+          result: { $result: "abc123" },
+        },
+      },
+    })
+
+    expect(answer.isError).toBe(true)
+    expect(textOf(answer)).toContain("/file/result")
+    expect(await db().storageEntry.count()).toBe(0)
+  })
 })

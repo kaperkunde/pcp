@@ -115,6 +115,7 @@ COPY --from=builder --chown=pcp:nodejs /app/.next/static ./.next/static
 # Applied at boot by instrumentation.ts (lib/core/migrate.ts).
 COPY --from=builder /app/prisma/migrations ./prisma/migrations
 COPY docker/start.cjs ./start.cjs
+COPY docker/peer-stamp.cjs ./peer-stamp.cjs
 # The Linux installer (install.sh), for the installer on the host: when it
 # updates PCP, it reads this file out of the image it has just pulled, in a
 # container of its own with no network, and runs it in place of the copy it

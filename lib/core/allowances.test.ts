@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest"
 
 import {
   allowSiteFor,
+  loadSiteAllowances,
   allowToolFor,
   endAllowance,
   listTokenAllowances,
@@ -71,8 +72,9 @@ describe("allowances", () => {
     const now = new Date()
 
     await allowToolFor(tokenId, serverId, "send_postcard", 480, now)
-    await allowSiteFor(tokenId, "example.com", 15, now)
+    await allowSiteFor(ctx, tokenId, "example.com", 15, now)
     await allowSiteFor(
+      ctx,
       tokenId,
       "old.example",
       15,
@@ -107,7 +109,7 @@ describe("allowances", () => {
   it("the owner ends one early, and only in their own vault", async () => {
     const { ctx, serverId, tokenId } = await setup()
     await allowToolFor(tokenId, serverId, "send_postcard", 60)
-    await allowSiteFor(tokenId, "example.com", 60)
+    await allowSiteFor(ctx, tokenId, "example.com", 60)
 
     await expect(
       endAllowance({ ...ctx, vaultId: "another" }, tokenId, {
@@ -132,17 +134,18 @@ describe("allowances", () => {
   })
 
   it("cleanup removes the ones that ran out", async () => {
-    const { serverId, tokenId } = await setup()
+    const { ctx, serverId, tokenId } = await setup()
     const now = new Date()
     const past = new Date(now.getTime() - 60 * 60_000)
 
     await allowToolFor(tokenId, serverId, "send_postcard", 15, past)
-    await allowSiteFor(tokenId, "old.example", 15, past)
-    await allowSiteFor(tokenId, "example.com", 60, now)
+    await allowSiteFor(ctx, tokenId, "old.example", 15, past)
+    await allowSiteFor(ctx, tokenId, "example.com", 60, now)
 
     expect(await pruneAllowances(now)).toBe(2)
-    expect(await db().apiTokenSiteAllowance.findMany()).toMatchObject([
-      { host: "example.com" },
+    expect([...(await loadSiteAllowances(ctx, tokenId)).keys()]).toEqual([
+      "example.com",
     ])
+    expect(await db().apiTokenSiteAllowance.count()).toBe(1)
   })
 })

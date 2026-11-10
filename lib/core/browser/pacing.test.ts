@@ -374,7 +374,7 @@ describe.skipIf(!executable)(
         tabPace(runningBrowser(ctx.vaultId)!.tabs.get(other.tab)!),
       ).toBeNull()
       expect(await getSetting(ctx, SETTING_PACING)).toBe(before)
-      expect((await readPacingConfig(ctx.vaultId)).assistant).toEqual({
+      expect((await readPacingConfig(ctx)).assistant).toEqual({
         browser_act: { minMs: 200, maxMs: 2_000 },
       })
     })

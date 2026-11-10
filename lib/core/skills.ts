@@ -29,6 +29,7 @@ import {
 import { openRequestFor, type OpenRequest } from "./permission-fold"
 import { canonicalJson } from "./permission-rules"
 import { readStrictYaml } from "./strict-yaml"
+import { TOKEN_NAME_SELECT, tokenName } from "./token-names"
 
 /**
  * Skills: procedures the owner approved, for an assistant to follow when a
@@ -831,9 +832,9 @@ async function summaries(
       ? (
           await db().apiToken.findMany({
             where: { vaultId: ctx.vaultId, id: { in: tokenIds } },
-            select: { id: true, name: true },
+            select: TOKEN_NAME_SELECT,
           })
-        ).map((token) => [token.id, token.name])
+        ).map((token) => [token.id, tokenName(ctx, token)])
       : [],
   )
 

@@ -26,6 +26,7 @@ import {
   SYNC_FREQUENCIES,
   type SyncFrequency,
 } from "./limits"
+import { SECRET_META_SELECT, secretName, secretNameWhere } from "../secret-meta"
 
 /**
  * The repositories the owner linked and the items linked to them, as rows:
@@ -129,7 +130,7 @@ async function viewOf(ctx: VaultContext, row: Repo): Promise<RepoView> {
   const secret = row.secretId
     ? await db().secret.findFirst({
         where: { id: row.secretId, vaultId: ctx.vaultId },
-        select: { name: true, kind: true },
+        select: { ...SECRET_META_SELECT, kind: true },
       })
     : null
 
@@ -140,7 +141,8 @@ async function viewOf(ctx: VaultContext, row: Repo): Promise<RepoView> {
     access: row.access === "write" ? "write" : "read",
     signIn: !secret ? "none" : secret.kind === "oauth" ? "github" : "token",
     secretId: secret ? row.secretId : null,
-    secretName: secret && secret.kind === "text" ? secret.name : null,
+    secretName:
+      secret && secret.kind === "text" ? secretName(ctx, secret) : null,
     visibility:
       row.private === null ? "unknown" : row.private ? "private" : "public",
     createdAt: row.createdAt,
@@ -195,14 +197,15 @@ async function checkSecret(
 
   const secret = await db().secret.findFirst({
     where: { id: secretId, vaultId: ctx.vaultId },
-    select: { kind: true, name: true },
+    select: { ...SECRET_META_SELECT, kind: true },
   })
 
   if (
     !secret ||
     !(
       secret.kind === "text" ||
-      (secret.kind === "oauth" && secret.name === GITHUB_SIGNIN_SECRET)
+      (secret.kind === "oauth" &&
+        secretName(ctx, secret) === GITHUB_SIGNIN_SECRET)
     )
   ) {
     throw invalid(
@@ -217,10 +220,8 @@ async function checkSecret(
 export async function githubSignInSecret(
   ctx: VaultContext,
 ): Promise<string | null> {
-  const row = await db().secret.findUnique({
-    where: {
-      vaultId_name: { vaultId: ctx.vaultId, name: GITHUB_SIGNIN_SECRET },
-    },
+  const row = await db().secret.findFirst({
+    where: secretNameWhere(ctx, GITHUB_SIGNIN_SECRET),
     select: { id: true, kind: true },
   })
 

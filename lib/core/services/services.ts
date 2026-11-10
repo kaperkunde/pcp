@@ -117,6 +117,7 @@ import {
   type ServiceCall,
 } from "./tools"
 import { checkUpdateImage, prepareServiceUpdate } from "./updates"
+import { SECRET_META_SELECT, secretName } from "../secret-meta"
 
 /**
  * Services: containers PCP runs with the owner's own Docker or Podman, on
@@ -180,6 +181,13 @@ export type ServiceAccess = {
   proxyAuth?: ProxyAuth
   /** Waiting for health; tests shorten it. */
   timing?: { waitMs: number; intervalMs: number }
+  /**
+   * After a remake that came up healthy: reads the tools of the server the
+   * service registered again, in the same request (upstream.ts builds it,
+   * which holds the context and the public address). Its answer is a note
+   * when the read failed; the remake worked all the same.
+   */
+  afterRemake?: (loaded: LoadedService) => Promise<string | null>
 }
 
 /** A channel through the SSH connection, as the SSH server reaches the address. */
@@ -406,7 +414,7 @@ export async function prepareLaunch(
   const ids = [...new Set(Object.values(env))]
   const secrets = await db().secret.findMany({
     where: { vaultId: ctx.vaultId, id: { in: ids } },
-    select: { id: true, kind: true, name: true },
+    select: { ...SECRET_META_SELECT, kind: true },
   })
 
   for (const id of ids) {
@@ -418,7 +426,7 @@ export async function prepareLaunch(
 
     if (secret.kind !== "text") {
       throw invalid(
-        `${secret.name} is not a text secret: a service's variable takes one you typed in.`,
+        `${secretName(ctx, secret)} is not a text secret: a service's variable takes one you typed in.`,
       )
     }
   }
@@ -1460,6 +1468,11 @@ export async function recreateServiceOn(
     loaded.reach = reach
   }
 
+  // The image may serve other tools now: read them before the answer, so
+  // search, list_tools and the owner's levels start from the new list. Not
+  // when the registered server could not take its header (its row says so).
+  const readNote =
+    health.ok && !note ? ((await access.afterRemake?.(loaded)) ?? null) : null
   const status = await serviceStatusOn(loaded, access)
 
   if (!health.ok) {
@@ -1469,7 +1482,9 @@ export async function recreateServiceOn(
     )
   }
 
-  return note ? { ...status, note } : status
+  const notes = [note, readNote].filter(Boolean).join(" ")
+
+  return notes ? { ...status, note: notes } : status
 }
 
 /**
@@ -2480,7 +2495,7 @@ export async function serviceView(
   const ids = Object.values(loaded.env)
   const secrets = await db().secret.findMany({
     where: { vaultId: ctx.vaultId, id: { in: ids } },
-    select: { id: true, name: true },
+    select: SECRET_META_SELECT,
   })
   const registered = loaded.spec.registeredId
     ? await getServer(ctx, loaded.spec.registeredId).catch(() => null)
@@ -2516,8 +2531,9 @@ export async function serviceView(
         plain: entry.plain,
         value: loaded.values[entry.name] ?? null,
         secretId,
-        secretName:
-          secrets.find((secret) => secret.id === secretId)?.name ?? null,
+        secretName: ((secret) => (secret ? secretName(ctx, secret) : null))(
+          secrets.find((secret) => secret.id === secretId),
+        ),
       }
     }),
     registered: registered

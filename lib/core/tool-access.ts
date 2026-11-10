@@ -10,6 +10,7 @@ import { db } from "./db"
 import { invalid, notFound } from "./errors"
 import { newId } from "./ids"
 import { getServer } from "./servers"
+import { openRuleKey, sealedRuleKey } from "./fetch-rule-keys"
 
 /**
  * What each API token may do with each tool: allowed, ask (the default) or
@@ -322,16 +323,20 @@ export async function copyTokenAccess(
     ...(fetchRules.length > 0
       ? [
           db().webFetchRule.createMany({
-            data: fetchRules.map((rule) => ({
-              id: newId(),
-              vaultId: ctx.vaultId,
-              tokenId: targetId,
-              scope: targetId,
-              kind: rule.kind,
-              key: rule.key,
-              access: rule.access,
-              addedBy: rule.addedBy,
-            })),
+            data: fetchRules.map((rule) => {
+              // A site's key is sealed to its row: sealed again for the copy.
+              const id = newId()
+              return {
+                id,
+                vaultId: ctx.vaultId,
+                tokenId: targetId,
+                scope: targetId,
+                kind: rule.kind,
+                ...sealedRuleKey(ctx, id, rule.kind, openRuleKey(ctx, rule)),
+                access: rule.access,
+                addedBy: rule.addedBy,
+              }
+            }),
           }),
         ]
       : []),

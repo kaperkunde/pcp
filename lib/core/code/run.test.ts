@@ -19,7 +19,9 @@ import {
   loadGatewayServers,
   type GatewayScope,
 } from "../gateway"
+import { setDuplicateCallWindow } from "../calls/config"
 import { decidePermission, type PermissionExecutor } from "../permissions"
+import { withCallHandle } from "../test-handles"
 import { appendRequestLog } from "../request-log"
 import { createServer } from "../servers"
 import { scratchDatabase } from "../test-db"
@@ -1826,6 +1828,15 @@ describe("a program's tier", () => {
 describe("the same program again", () => {
   it("is answered with the run that just ended, unless rerun is true", async () => {
     await connect()
+    // Its call is one the owner keeps out of the duplicate guard, which
+    // would otherwise hold back each run's archive after the first.
+    await setDuplicateCallWindow(
+      ctx,
+      (await db().mcpServer.findFirstOrThrow({ where: { slug: "postcards" } }))
+        .id,
+      "archive",
+      "exempt",
+    )
     const program = `return await pcp.call("postcards", "archive")`
 
     const first = await run(program)
@@ -1906,11 +1917,12 @@ describe("the same program again", () => {
     expect(ran).toHaveLength(1)
     expect(await db().permissionRequest.count()).toBe(1)
 
-    // Once: the next run is asked about it again.
-    expect((await run(program, { rerun: true })).text).toContain(
-      "stopped at postcards/send_postcard",
-    )
-    expect(await db().permissionRequest.count()).toBe(2)
+    // Once: the next run is not asked about it again unaware, but held
+    // back by the duplicate guard with how the allowed run went (#115).
+    const third = await run(program, { rerun: true })
+    expect(third.text).toContain("Not run again: postcards/send_postcard")
+    expect(third.text).toContain("The owner allowed it and it ran")
+    expect(await db().permissionRequest.count()).toBe(1)
     expect(ran).toHaveLength(1)
   })
 
@@ -1965,6 +1977,209 @@ describe("the same program again", () => {
 
     expect((await run(program)).text).toContain("stopped at")
     expect((await run(program)).text).toContain("stopped at")
+  })
+})
+
+describe("the same call again (#115)", () => {
+  beforeEach(async () => {
+    await connect()
+  })
+
+  async function callTool(
+    tool: string,
+    args: Record<string, unknown> = {},
+    extra: Record<string, unknown> = {},
+  ) {
+    const result = await client.callTool({
+      name: "call_tool_destructive",
+      arguments: {
+        ...(await withCallHandle(client, {
+          server: "postcards",
+          tool,
+          arguments: args,
+        })),
+        ...extra,
+      },
+    })
+    const text = (result.content as Array<{ type: string; text?: string }>)
+      .map((part) => part.text ?? "")
+      .join("")
+
+    return {
+      isError: result.isError === true,
+      text,
+      code: (result._meta?.["gg.pcp/error"] as { code?: string } | undefined)
+        ?.code,
+    }
+  }
+
+  const postcards = async () =>
+    (await db().mcpServer.findFirstOrThrow({ where: { slug: "postcards" } })).id
+
+  it("answers a Write call made again with how the first went, and runs it once", async () => {
+    const first = await callTool("archive", { id: 7 })
+    expect(first.isError).toBe(false)
+    expect(ran).toHaveLength(1)
+
+    const again = await callTool("archive", { id: 7 })
+    expect(again.isError).toBe(true)
+    expect(again.code).toBe("duplicate_call")
+    expect(again.text).toContain(
+      "Not run again: postcards/archive was called with these same arguments",
+    )
+    expect(again.text).toContain("It succeeded")
+    expect(again.text).toContain("rerun: true and a reason")
+    expect(ran).toHaveLength(1)
+
+    // A short answer comes back with it, and no result is kept for it.
+    expect(again.text).toContain("It answered:\nran archive")
+    expect(await db().toolResult.count()).toBe(0)
+
+    // Only a keyed hash of the arguments is kept.
+    const [row] = await db().callRecord.findMany()
+    expect(row).toMatchObject({ toolName: "archive", status: "succeeded" })
+    expect(row!.argsHash).toMatch(/^[0-9a-f]{64}$/)
+  })
+
+  it("makes it again with rerun and a reason, and logs only that it was a rerun", async () => {
+    await callTool("archive", { id: 7 })
+
+    const refused = await callTool("archive", { id: 7 }, { rerun: true })
+    expect(refused.isError).toBe(true)
+    expect(refused.text).toContain("reason")
+
+    const again = await callTool(
+      "archive",
+      { id: 7 },
+      { rerun: true, reason: "The first archive went to the wrong box." },
+    )
+    expect(again.isError).toBe(false)
+    expect(ran).toHaveLength(2)
+
+    const line = logLines().at(-1)!
+    expect(line).toMatchObject({ upstreamTool: "archive", rerun: true })
+    expect(JSON.stringify(line)).not.toContain("wrong box")
+  })
+
+  it("notes the same tool with other arguments, without holding it back", async () => {
+    await callTool("archive", { id: 7 })
+
+    const other = await callTool("archive", { id: 8 })
+    expect(other.isError).toBe(false)
+    expect(other.text).toContain(
+      "Note: you called postcards/archive 0 seconds ago with other arguments",
+    )
+    expect(ran).toHaveLength(2)
+  })
+
+  it("leaves Read tools and the tools the owner exempted alone", async () => {
+    await callTool("list_cards")
+    expect((await callTool("list_cards")).isError).toBe(false)
+
+    await setDuplicateCallWindow(ctx, await postcards(), "archive", "exempt")
+    await callTool("archive", { id: 7 })
+    expect((await callTool("archive", { id: 7 })).isError).toBe(false)
+    expect(ran).toHaveLength(4)
+    expect(await db().callRecord.count()).toBe(0)
+  })
+
+  it("says whether a call that failed may have happened", async () => {
+    await callTool("broken")
+    const broken = await callTool("broken")
+    expect(broken.code).toBe("duplicate_call")
+    expect(broken.text).toContain(
+      "the tool answered with an error, so most likely nothing happened",
+    )
+
+    await expect(callTool("flaky")).resolves.toMatchObject({ isError: true })
+    const flaky = await callTool("flaky")
+    expect(flaky.code).toBe("duplicate_call")
+    expect(flaky.text).toContain("It failed on its way")
+    expect(flaky.text).toContain("may have gone through")
+  })
+
+  it("answers with the owner's request while it waits, once the tool no longer asks", async () => {
+    const asked = await callTool("send_postcard", { to: "Ada" })
+    expect(asked.text).toContain("Not done yet")
+    const request = await db().permissionRequest.findFirstOrThrow()
+
+    // Asked again, the request it already has (the permission flow's own).
+    expect((await callTool("send_postcard", { to: "Ada" })).text).toContain(
+      "Not done yet",
+    )
+    expect(await db().permissionRequest.count()).toBe(1)
+
+    await writeToolAccess(
+      scope.tokenId,
+      await postcards(),
+      "send_postcard",
+      "allowed",
+    )
+    // A new connection reads the levels anew, as a new request would.
+    await client.close()
+    const [clientSide, serverSide] = InMemoryTransport.createLinkedPair()
+    await buildGatewayServer(scope, await loadGatewayServers(scope), {
+      executor,
+    }).connect(serverSide)
+    client = new Client({ name: "test", version: "1.0.0" })
+    await client.connect(clientSide)
+    const again = await callTool("send_postcard", { to: "Ada" })
+    expect(again.code).toBe("duplicate_call")
+    expect(again.text).toContain(
+      `waiting for their answer: call check_permission with id "${request.id}"`,
+    )
+    expect(ran).toHaveLength(0)
+  })
+
+  it("holds back the third call once the owner's allow-once answer was used", async () => {
+    const asked = await callTool("send_postcard", { to: "Grace" })
+    expect(asked.text).toContain("Not done yet")
+    const request = await db().permissionRequest.findFirstOrThrow()
+    await decidePermission(
+      ctx,
+      request.id,
+      "allow_once",
+      { publicUrl: PUBLIC_URL },
+      executor,
+    )
+    expect(ran).toHaveLength(1)
+
+    // The second is answered with that run, by the permission flow.
+    const second = await callTool("send_postcard", { to: "Grace" })
+    expect(second.text).toContain("it already ran")
+    expect(ran).toHaveLength(1)
+
+    // The third neither runs nor asks the owner again unaware.
+    const third = await callTool("send_postcard", { to: "Grace" })
+    expect(third.code).toBe("duplicate_call")
+    expect(third.text).toContain("The owner allowed it and it ran")
+    expect(await db().permissionRequest.count()).toBe(1)
+    expect(ran).toHaveLength(1)
+  })
+
+  it("holds back a program's pcp.call made again, as an error it may catch", async () => {
+    await callTool("archive", { id: 7 })
+
+    const { text } = await run(`
+      try {
+        await pcp.call("postcards", "archive", { id: 7 })
+      } catch (error) {
+        return error.code
+      }
+    `)
+    expect(returned(text)).toBe("duplicate_call")
+    expect(ran).toHaveLength(1)
+
+    const rerun = await run(
+      `return await pcp.call("postcards", "archive", { id: 7 }, { rerun: true, reason: "again" })`,
+    )
+    expect(returned(rerun.text)).toBe("ran archive")
+    expect(ran).toHaveLength(2)
+
+    const unreasoned = await run(
+      `return await pcp.call("postcards", "archive", { id: 7 }, { rerun: true })`,
+    )
+    expect(unreasoned.text).toContain("pcp.call's rerun needs a reason")
   })
 })
 

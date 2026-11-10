@@ -1,6 +1,4 @@
 import { randomBytes } from "node:crypto"
-import fs from "node:fs/promises"
-import os from "node:os"
 import path from "node:path"
 
 import type {
@@ -53,6 +51,7 @@ import {
   TITLE_TIMEOUT_MS,
 } from "./limits"
 import { loadProfile, saveProfile } from "./profile"
+import { makeScratchDir, removeScratchDir } from "./scratch"
 import {
   startBrowserProxy,
   type AddressVerdict,
@@ -420,15 +419,13 @@ function verdict(
  * (~/.config), and when it cannot make one there it can abort as it starts:
  * a system user with no home, as PCP's image runs as, has none. Each
  * browser gets a private folder for it under the system's temporary folder
- * instead, removed once the browser has closed, so nothing of it lands in
- * the user's home and a crash report does not outlive the browser.
+ * instead (scratch.ts), with the file a download call waits for, removed
+ * once the browser has closed, so nothing of it lands in the user's home
+ * and a crash report does not outlive the browser. A folder a crashed PCP
+ * left behind is removed by the cleanup.
  */
-async function makeScratchDir(): Promise<string> {
-  return fs.mkdtemp(path.join(os.tmpdir(), "pcp-chromium-"))
-}
-
-function removeScratchDir(dir: string): void {
-  void fs.rm(dir, { recursive: true, force: true }).catch(() => {})
+function removeScratch(dir: string): void {
+  void removeScratchDir(dir)
 }
 
 async function launch(
@@ -574,7 +571,7 @@ async function start(
     admit: (site) => (vault ? admitConnection(vault, site) : true),
   })
 
-  const scratchDir = await makeScratchDir()
+  const scratchDir = await makeScratchDir("chromium")
   const wanted = wantedMode()
   const screen = wanted === "virtual" ? await acquireDisplay() : null
   const display = screen?.display ?? null
@@ -597,7 +594,7 @@ async function start(
   } catch (error) {
     screen?.release()
     await proxy.close()
-    removeScratchDir(scratchDir)
+    removeScratch(scratchDir)
     console.error("[browser] Chromium did not start", error)
     throw new PcpError(
       "state",
@@ -623,7 +620,7 @@ async function start(
   } catch (error) {
     await browser.close().catch(() => {})
     await proxy.close()
-    removeScratchDir(scratchDir)
+    removeScratch(scratchDir)
     throw error
   }
 
@@ -672,7 +669,7 @@ async function start(
     if (runtime().vaults.get(self.vaultId) === self) {
       void forget(self)
     }
-    removeScratchDir(self.scratchDir)
+    removeScratch(self.scratchDir)
   })
 
   runtime().vaults.set(ctx.vaultId, vault)

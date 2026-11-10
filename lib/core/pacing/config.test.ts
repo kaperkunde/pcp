@@ -132,7 +132,7 @@ describe("the owner's pace", () => {
       pace: SLOW,
     })
 
-    const config = await readPacingConfig(ctx.vaultId)
+    const config = await readPacingConfig(ctx)
     expect(config.classes).toEqual({ browser_act: CLASS })
     expect(config.sites).toEqual([
       { host: "example.com", subdomains: true, pace: SLOW },
@@ -140,7 +140,7 @@ describe("the owner's pace", () => {
 
     // The same as PCP's default is no override at all.
     await setPacingClass(ctx, "browser_act", PACING_DEFAULTS.browser_act)
-    expect((await readPacingConfig(ctx.vaultId)).classes).toEqual({})
+    expect((await readPacingConfig(ctx)).classes).toEqual({})
 
     await removePacingSite(ctx, "example.com")
     expect(await getSetting(ctx, SETTING_PACING)).toBeNull()
@@ -163,7 +163,7 @@ describe("the owner's pace", () => {
       own: false,
     })
     expect(overview.sites).toHaveLength(1)
-    expect((await readPacingConfig(ctx.vaultId)).servers).toEqual({
+    expect((await readPacingConfig(ctx)).servers).toEqual({
       [id]: SLOWER,
     })
   })
@@ -182,7 +182,7 @@ describe("the owner's pace", () => {
     await setPacingServer(ctx, id, SLOW)
     await db().mcpServer.delete({ where: { id } })
     await setPacingServer(ctx, other, "unpaced")
-    expect((await readPacingConfig(ctx.vaultId)).servers).toEqual({
+    expect((await readPacingConfig(ctx)).servers).toEqual({
       [other]: "unpaced",
     })
     await expect(setPacingServer(ctx, "nope", SLOW)).rejects.toThrow(
@@ -195,7 +195,7 @@ describe("the owner's pace", () => {
       { site: "b.test", subdomains: false, pace: "unpaced" },
       "a.test",
     )
-    expect((await readPacingConfig(ctx.vaultId)).sites).toEqual([
+    expect((await readPacingConfig(ctx)).sites).toEqual([
       { host: "b.test", subdomains: false, pace: "unpaced" },
     ])
   })
@@ -261,7 +261,7 @@ describe("the owner's pace", () => {
       },
     })
 
-    expect(await readPacingConfig(ctx.vaultId)).toEqual(EMPTY_PACING)
+    expect(await readPacingConfig(ctx)).toEqual(EMPTY_PACING)
   })
 
   it("carries a newer PCP's classes and bounds through every write, and reads the rest", async () => {
@@ -282,7 +282,7 @@ describe("the owner's pace", () => {
       },
     })
 
-    const read = await readPacingConfig(ctx.vaultId)
+    const read = await readPacingConfig(ctx)
     expect(read.classes).toEqual({ browser_act: CLASS })
     expect(read.assistant).toEqual({ browser_act: { minMs: 20, maxMs: 900 } })
 
@@ -319,7 +319,7 @@ describe("the owner's pace", () => {
       },
     })
 
-    expect(await readPacingConfig(ctx.vaultId)).toEqual({
+    expect(await readPacingConfig(ctx)).toEqual({
       ...EMPTY_PACING,
       classes: { browser_act: CLASS },
       unknown: { classes: { browser_scroll: CLASS }, assistant: {} },
@@ -329,14 +329,14 @@ describe("the owner's pace", () => {
 
 describe("what assistants may set", () => {
   it("is PCP's until the owner sets bounds of their own, each checked", async () => {
-    expect(assistantBounds(await readPacingConfig(ctx.vaultId))).toEqual(
+    expect(assistantBounds(await readPacingConfig(ctx))).toEqual(
       ASSISTANT_PACE_BOUNDS,
     )
 
     await setAssistantPaceBounds(ctx, {
       browser_act: { minMs: 20, maxMs: 2_000 },
     })
-    const config = await readPacingConfig(ctx.vaultId)
+    const config = await readPacingConfig(ctx)
     expect(config.assistant).toEqual({
       browser_act: { minMs: 20, maxMs: 2_000 },
     })

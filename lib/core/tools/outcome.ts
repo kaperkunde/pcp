@@ -64,6 +64,12 @@ export type ToolErrorCode =
    * (family.ts familyError).
    */
   | "browser_busy"
+  /**
+   * The same Write or Destructive call was made a little while ago, so it
+   * was not run again (lib/core/calls/guard.ts); the message says how that
+   * one went and how to repeat it on purpose.
+   */
+  | "duplicate_call"
   /** A fault in PCP itself. */
   | "internal"
 

@@ -38,6 +38,7 @@ model Vault {
   sharedToolAccess   VaultToolAccess[]
   webFetchRules      WebFetchRule[]
   toolResults        ToolResult[]
+  callRecords        CallRecord[]
   fileLinks          FileLink[]
   uploadLinks        UploadLink[]
   browserProfile     BrowserProfile?
@@ -93,7 +94,6 @@ model Session {
   expiresAt DateTime @map("expires_at")
   createdAt DateTime @default(now()) @map("created_at")
   lastSeenAt DateTime @default(now()) @map("last_seen_at")
-  userAgent String?  @map("user_agent")
 
   @@index([vaultId])
   @@map("session")
@@ -109,7 +109,12 @@ model ApiToken {
   vault           Vault     @relation(fields: [vaultId], references: [id], onDelete: Cascade)
   grantId         String    @unique @map("grant_id")
   grant           KeyGrant  @relation(fields: [grantId], references: [id], onDelete: Cascade)
-  name            String
+  /// The name from before it was sealed (#96): read only while sealedName
+  /// is null, "" once the row is sealed.
+  plainName       String    @map("name")
+  /// The name the owner gave it: AES-256-GCM under the vault's data key
+  /// with "api_token:<id>:name" as associated data (lib/core/token-names.ts).
+  sealedName      Bytes?    @map("sealed_name")
   /// The first characters of the token, so the owner can tell them apart.
   prefix          String
   allowAllServers Boolean   @default(true) @map("allow_all_servers")
@@ -185,6 +190,7 @@ model ApiToken {
   privateSkills      Skill[]
   webFetchRules      WebFetchRule[]
   toolResults        ToolResult[]
+  callRecords        CallRecord[]
   fileLinks          FileLink[]
   uploadLinks        UploadLink[]
   oauthCredentials   OAuthCredential[]
@@ -261,8 +267,13 @@ model ApiTokenToolAllowance {
 model ApiTokenSiteAllowance {
   tokenId   String   @map("token_id")
   token     ApiToken @relation(fields: [tokenId], references: [id], onDelete: Cascade)
-  /// The site's host, as WebFetchRule keys it.
+  /// The site's host as a keyed hash under the vault's key, the host itself
+  /// in sealed (#96); a row from before holds the host in plain text here
+  /// and no sealed one.
   host      String
+  /// The host, AES-256-GCM under the vault's data key with
+  /// "api_token_site_allowance:<token id>:<host hash>" as associated data.
+  sealed    Bytes?
   until     DateTime
   createdAt DateTime @default(now()) @map("created_at")
 
@@ -357,9 +368,15 @@ model WebFetchRule {
   scope         String
   /// method | site
   kind          String
-  /// A method: GET | POST | PUT | PATCH | DELETE | OTHER. A site: its host,
-  /// lower-case, with the port when it is not the scheme's own.
+  /// A method: GET | POST | PUT | PATCH | DELETE | OTHER. A site (and a
+  /// script's site): its host, lower-case, with the port when it is not the
+  /// scheme's own, kept as a keyed hash of it under the vault's key with the
+  /// host in sealed (lib/core/fetch-rule-keys.ts, #96); a row from before
+  /// holds the host itself. An exit: its id. private: "private".
   key           String
+  /// A site's host, AES-256-GCM under the vault's data key with
+  /// "web_fetch_rule:<id>:key" as associated data. Null for other kinds.
+  sealed        Bytes?
   /// allowed | ask | blocked. Null on a site: it follows the method rules.
   access        String?
   /// assistant (first seen in a fetch) | owner (added in PCP)
@@ -396,8 +413,11 @@ model PermissionRequest {
   /// The arguments (or the new server's settings) as JSON, AES-256-GCM under
   /// the vault's data key with "permission_request:<id>" as associated data.
   argsCiphertext   Bytes      @map("args_ciphertext")
-  /// sha256 of the kind, the target and the canonical arguments, so the same
-  /// request asked twice finds the row it already has.
+  /// HMAC-SHA256 of the kind, the target and the canonical arguments under a
+  /// key derived from the vault's data key, prefixed "h1:" (requestHash), so
+  /// the same request asked twice finds the row it already has and the
+  /// column confirms no guess without the key. Older rows hold a plain
+  /// sha256 and match nothing.
   argsHash         String     @map("args_hash")
   /// What the request is about (a skill, a shared memory, a note's item),
   /// as an HMAC under a key derived from the vault's data key, so the target
@@ -527,8 +547,18 @@ model Secret {
   id          String   @id
   vaultId     String   @map("vault_id")
   vault       Vault    @relation(fields: [vaultId], references: [id], onDelete: Cascade)
-  name        String
-  description String   @default("")
+  /// The name and description from before they were sealed (#96): read
+  /// only while meta is null, "" once the row is sealed.
+  plainName        String   @map("name")
+  plainDescription String   @default("") @map("description")
+  /// The name and description, as JSON {"name", "description"}: AES-256-GCM
+  /// under the vault's data key with "secret:<id>:meta" as associated data
+  /// (lib/core/secret-meta.ts). Null on a row from before, until sealed.
+  meta        Bytes?
+  /// The name, found by: a keyed hash of it under the vault's key
+  /// (keyedHash in lib/core/crypto.ts, label "pcp secret name"). Unique in
+  /// the vault.
+  nameKey     String?  @map("name_key")
   /// text | totp | oauth | ssh_key (PCP's own private key for an SSH server)
   kind        String   @default("text")
   /// nonce || ciphertext || tag, AES-256-GCM under the vault's data key
@@ -562,7 +592,7 @@ model Secret {
   browserOrigins SecretBrowserOrigin[]
   allowances     ApiTokenSecretAllowance[]
 
-  @@unique([vaultId, name])
+  @@unique([vaultId, nameKey])
   @@map("secret")
 }
 
@@ -574,8 +604,13 @@ model Secret {
 model SecretBrowserOrigin {
   secretId  String   @map("secret_id")
   secret    Secret   @relation(fields: [secretId], references: [id], onDelete: Cascade)
-  /// https://host[:port], as URL.origin writes it.
+  /// https://host[:port], as URL.origin writes it: kept as a keyed hash of
+  /// it under the vault's key, the origin itself in sealed (#96). A row
+  /// from before holds the origin in plain text here and no sealed one.
   origin    String
+  /// The origin, AES-256-GCM under the vault's data key with
+  /// "secret_browser_origin:<secret id>:<origin hash>" as associated data.
+  sealed    Bytes?
   /// The site and its subdomains: an origin at the same scheme and port
   /// whose host ends in this one's, within the same registrable domain
   /// (the public suffix list, browser-secrets.ts). Never another domain.
@@ -1167,6 +1202,46 @@ model ToolResult {
   @@map("tool_result")
 }
 
+/// A Write or Destructive call a token made (lib/core/calls/guard.ts), kept
+/// for the duplicate guard's window so the same call made again is answered
+/// with how this one went instead of running twice. Nothing of the
+/// arguments is stored but a keyed hash. Not exported; removed by the
+/// cleanup once past the longest window.
+model CallRecord {
+  id         String    @id
+  vaultId    String    @map("vault_id")
+  vault      Vault     @relation(fields: [vaultId], references: [id], onDelete: Cascade)
+  tokenId    String    @map("token_id")
+  token      ApiToken  @relation(fields: [tokenId], references: [id], onDelete: Cascade)
+  serverId   String    @map("server_id")
+  toolName   String    @map("tool_name")
+  /// HMAC-SHA256 of the server id, the tool and the canonical arguments (as
+  /// checked and renamed) under a key derived from the vault's data key
+  /// (callHash), so the same call compares equal and the column confirms no
+  /// guess without the key.
+  argsHash   String    @map("args_hash")
+  /// write | destructive: the tool's tier when it was called.
+  tier       String
+  /// running | succeeded | failed | may_have_happened (failed on its way,
+  /// so it may have gone through) | asked (the owner was asked: see
+  /// requestId)
+  status     String
+  /// The kept result (tool_result) a long answer already was, by its id.
+  resultId   String?   @map("result_id")
+  /// A short answer (MAX_INLINE_ANSWER_CHARS), AES-256-GCM under the vault's
+  /// data key with "call_record:<id>:answer" as associated data.
+  answer     Bytes?
+  /// The permission request it made, when it asked the owner.
+  requestId  String?   @map("request_id")
+  startedAt  DateTime  @default(now()) @map("started_at")
+  finishedAt DateTime? @map("finished_at")
+
+  @@index([tokenId, argsHash])
+  @@index([tokenId, serverId, toolName, startedAt])
+  @@index([startedAt])
+  @@map("call_record")
+}
+
 /// A cached embedding of one text search ranks (a tool's name and
 /// description, a skill, a memory), made by the provider the owner chose on
 /// Settings (lib/core/embeddings/). A cache: rebuilt when its text or the
@@ -1210,7 +1285,12 @@ model FileLink {
   secretHash String    @unique @map("secret_hash")
   /// The kept result a download serves, or the id an upload is kept under.
   resultId   String    @map("result_id")
-  name       String?
+  /// The file's name from before it was sealed (#96): null on a new row.
+  plainName  String?   @map("name")
+  /// The file's name, AES-256-GCM under the link's key with
+  /// "file_link_name:<id>", so only the link (or the token, through an
+  /// upload's wrapped key) shows it. Null for a file with no name.
+  sealedName Bytes?    @map("sealed_name")
   mediaType  String    @map("media_type")
   /// The file's bytes; 0 for an upload that has not arrived.
   length     Int       @default(0)
@@ -1297,6 +1377,10 @@ model UploadLink {
   /// it ({store, folder} as JSON): AES-256-GCM under the link's key with
   /// "upload_link_destination:<id>"; null for none.
   destination Bytes?
+  /// The name of the token that asked, as the page shows it: AES-256-GCM
+  /// under the link's key with "upload_link_assistant:<id>", since the page
+  /// has no other key (#96). Null on a page from before.
+  assistant   Bytes?
 
   @@index([tokenId])
   @@index([expiresAt])

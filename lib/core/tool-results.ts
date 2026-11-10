@@ -13,6 +13,7 @@ import { invalid, notFound } from "./errors"
 import { newId } from "./ids"
 import { bareType, charsetOf, decodeText, isTextType } from "./media-types"
 import { loadResourceLimits, resourceLimits } from "./resources/state"
+import { openLinkName } from "./link-names"
 
 /**
  * Answers too long to hand to an assistant in one piece, and files that move
@@ -385,7 +386,7 @@ async function claimUploads(
           // An upload page's file, or a receive_file link's.
           toolName: link.uploadLinkId ? "create_upload_link" : "receive_file",
           kind: "bytes",
-          name: cleanName(link.name),
+          name: cleanName(openLinkName(key, link)),
           mediaType: link.mediaType.slice(0, MAX_MEDIA_TYPE_CHARS),
           length: bytes.length,
           ciphertext: asBytes(encrypt(ctx.dek, bytes, aad(link.resultId))),

@@ -413,7 +413,7 @@ async function describe(
     action !== "delete" && after?.pace && paceChanged
       ? wrapperPaceOutside(
           after.pace,
-          assistantBounds(await readPacingConfig(ctx.vaultId)),
+          assistantBounds(await readPacingConfig(ctx)),
         )
       : []
   const paceLines =

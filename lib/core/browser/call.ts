@@ -166,6 +166,7 @@ import {
   type SecretTypeCall,
   type SecretTyper,
 } from "./types"
+import { TOKEN_NAME_SELECT, tokenName } from "../token-names"
 
 /**
  * Running a browser tool for an assistant: which tab, whether the site may
@@ -300,12 +301,12 @@ export function pageUrl(raw: string): URL {
   return url
 }
 
-async function tokenName(tokenId: string): Promise<string> {
+async function openerName(ctx: VaultContext, tokenId: string): Promise<string> {
   const token = await db().apiToken.findUnique({
     where: { id: tokenId },
-    select: { name: true },
+    select: TOKEN_NAME_SELECT,
   })
-  return token?.name ?? "an assistant"
+  return token ? tokenName(ctx, token) : "an assistant"
 }
 
 /**
@@ -327,7 +328,7 @@ async function driveAs(
   tab: Tab,
   scope: Pick<BrowserScope, "ctx" | "tokenId">,
 ): Promise<void> {
-  const rules = await loadFetchRules(scope.ctx.vaultId, scope.tokenId)
+  const rules = await loadFetchRules(scope.ctx, scope.tokenId)
   tab.rules = rules
   tab.privateAllowed = resolvePrivateAccess(rules)
   tab.lastUsedAt = Date.now()
@@ -900,7 +901,7 @@ async function newTab(
   return openTab(
     vault,
     {
-      openedBy: await tokenName(scope.tokenId),
+      openedBy: await openerName(scope.ctx, scope.tokenId),
       tokenId: scope.tokenId,
       rules: null,
       privateAllowed: false,
@@ -1194,7 +1195,7 @@ async function pacedTurn(
   const signals = [scope.signal, scope.clock?.expired].filter(
     (signal): signal is AbortSignal => signal !== undefined,
   )
-  const turn = await paceBrowserTurn(scope.ctx.vaultId, site, pacingClass, {
+  const turn = await paceBrowserTurn(scope.ctx, site, pacingClass, {
     serverId: scope.serverId,
     own: tabPaceFor(tab, pacingClass) ?? scope.pace ?? null,
     signal: signals.length > 0 ? AbortSignal.any(signals) : undefined,
@@ -1555,7 +1556,7 @@ function policyWords(policy: PacingPolicy | null): string {
 
 /** What tabs without a pace of their own follow, as tabs list ends. */
 async function ownerPaceLine(scope: BrowserScope): Promise<string> {
-  const config = await readPacingConfig(scope.ctx.vaultId)
+  const config = await readPacingConfig(scope.ctx)
   const paces: Partial<Record<BrowserPacingClass, string>> = {}
 
   for (const pacingClass of BROWSER_PACING_CLASSES) {
@@ -1603,7 +1604,7 @@ async function paceTab(
     throw error
   }
 
-  const config = await readPacingConfig(scope.ctx.vaultId)
+  const config = await readPacingConfig(scope.ctx)
   const bounds = assistantBounds(config)
   const outside = outsideBounds(pace, bounds)
 
@@ -1634,7 +1635,7 @@ async function tabPaceAnswer(
   tab: Tab,
   config?: PacingConfig,
 ): Promise<string> {
-  const read = config ?? (await readPacingConfig(scope.ctx.vaultId))
+  const read = config ?? (await readPacingConfig(scope.ctx))
   const site = tabSite(tab) ?? undefined
   const paces: Partial<Record<BrowserPacingClass, string>> = {}
 
@@ -3436,7 +3437,7 @@ async function runTool(
                 picture.fullPage
                   ? fullPageScale(picture)
                   : pictureScale(picture),
-                `To read the text in this picture, ${await ocrWords(scope)}; read_result does not show an image.`,
+                `To read the text in this picture, ${await ocrWords(scope)}; read_result does not show an image, and view_image with crop shows you part of it closer.`,
               ].join("\n"),
             },
             {
@@ -3518,6 +3519,7 @@ async function runTool(
       return onTab(scope, tab, spec, (current) =>
         evaluateInTab(
           {
+            ctx,
             vaultId: ctx.vaultId,
             tokenId,
             serverId: server.id,

@@ -313,7 +313,7 @@ export function unseenLine(unseen: Unseen, ocr: string): string | null {
       : []),
   ]
 
-  return `${listed(parts)} not included: the page shows more than this. Take a screenshot and OCR it to see them (${ocr}); click with a point (x, y) from the screenshot reaches into them.`
+  return `${listed(parts)} not included: the page shows more than this. Take a screenshot to see them (view_image with crop shows you part of it closer) and OCR it to read their text (${ocr}); click with a point (x, y) from the screenshot reaches into them.`
 }
 
 /**

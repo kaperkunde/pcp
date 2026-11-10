@@ -211,7 +211,7 @@ describe("opening a site the owner has not decided", () => {
       run,
     )
     expect(textOf(answer)).toBe("opened https://news.example/today")
-    const rules = await loadFetchRules(ctx.vaultId, tokenId)
+    const rules = await loadFetchRules(ctx, tokenId)
     expect(resolveFetchAccess(rules, "news.example", "GET").access).toBe(
       "allowed",
     )
@@ -486,7 +486,7 @@ describe("an assistant's script the owner has not allowed at a site", () => {
     return {
       ran,
       callTool: async (_ctx, _server, _tool, args) => {
-        const level = await decideScript(ctx.vaultId, tokenId, ask.site)
+        const level = await decideScript(ctx, tokenId, ask.site)
         const once = takeScriptOnce({
           tokenId,
           tabId: ask.tabId,
@@ -554,7 +554,7 @@ describe("an assistant's script the owner has not allowed at a site", () => {
     )
     expect(textOf(answer)).toContain("ran: 3")
     expect(run.ran).toEqual([ask.script])
-    expect(await decideScript(ctx.vaultId, tokenId, ask.site)).toBeNull()
+    expect(await decideScript(ctx, tokenId, ask.site)).toBeNull()
     await asked(run)
     expect(run.ran).toHaveLength(1)
   })
@@ -583,7 +583,7 @@ describe("an assistant's script the owner has not allowed at a site", () => {
     expect(run.ran).toEqual([ask.script, "1 + 1"])
 
     await removeScriptSite(ctx, tokenId, "shop.example")
-    expect(await decideScript(ctx.vaultId, tokenId, ask.site)).toBeNull()
+    expect(await decideScript(ctx, tokenId, ask.site)).toBeNull()
   })
 
   it("Block scripts at this site runs nothing and blocks scripts there, not the tool", async () => {
@@ -601,7 +601,7 @@ describe("an assistant's script the owner has not allowed at a site", () => {
       "The owner blocked scripts at shop.example for this token, so the script was not run.",
     )
     expect(run.ran).toEqual([])
-    expect(await decideScript(ctx.vaultId, tokenId, ask.site)).toBe("blocked")
+    expect(await decideScript(ctx, tokenId, ask.site)).toBe("blocked")
     expect(
       await db().apiTokenToolAccess.count({ where: { toolName: "evaluate" } }),
     ).toBe(0)

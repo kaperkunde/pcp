@@ -350,10 +350,15 @@ describe("call_tool with a call handle", () => {
   it("answers a name passed as a handle with the tool described, ready to call", async () => {
     const client = await connect()
 
-    for (const name of ["postcards/send_postcard", "send_postcard"]) {
+    // A different addressee each time: the same card twice is held back as
+    // a repeat (#115).
+    for (const [name, to] of [
+      ["postcards/send_postcard", "Grace"],
+      ["send_postcard", "Ada"],
+    ]) {
       const result = await call(client, "call_tool_destructive", {
         call_handle: name,
-        arguments: { to: "Grace" },
+        arguments: { to },
       })
 
       expect(result.isError).toBe(true)
@@ -363,7 +368,7 @@ describe("call_tool with a call handle", () => {
 
       const retried = await call(client, "call_tool_destructive", {
         call_handle: handleIn(result.text),
-        arguments: { to: "Grace" },
+        arguments: { to },
       })
       expect(retried.isError, retried.text).toBe(false)
       ran = []

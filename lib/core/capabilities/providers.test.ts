@@ -585,3 +585,67 @@ describe("the capability list", () => {
     expect(itemOfImage("docker.io/library/nginx")).toBeNull()
   })
 })
+
+describe("a PDF's page as a picture", () => {
+  const PATH = { type: "string" }
+  const renderer = (name: string, description: string) =>
+    tool("pages", name, description, {
+      type: "object",
+      properties: { file: FILE, page: { type: "integer" } },
+      required: ["file"],
+    })
+
+  it("is a tool that renders a page to an image, by its words", () => {
+    for (const [name, description] of [
+      ["render_page", "Render one page of a PDF."],
+      ["pdf_to_image", "Turn a PDF into pictures."],
+      ["convert", "Converts the pages of a PDF to PNG images."],
+    ] as const) {
+      const found = findProviders("page_image", [renderer(name, description)])
+      expect(
+        found.map((each) => each.tool.tool),
+        name,
+      ).toEqual([name])
+    }
+  })
+
+  it("is not one that pulls images out, makes a PDF of them, or reads text", () => {
+    for (const [name, description] of [
+      ["extract_images", "Extract embedded images from PDF pages."],
+      ["images_to_pdf", "Make a PDF of images, one per page."],
+      ["get_image_info", "Information about images in a PDF."],
+      ["add_signature_image", "Add a signature image on a page."],
+      ["extract_text", "Text of each page of a PDF."],
+    ] as const) {
+      expect(
+        findProviders("page_image", [renderer(name, description)]),
+        name,
+      ).toEqual([])
+    }
+  })
+
+  it("on paths, puts the PDF in place and fetches the PNG it wrote", () => {
+    const own = [
+      ...pdfServer.filter((each) =>
+        ["put_file", "get_file"].includes(each.tool),
+      ),
+      tool("pdf", "render_page", "Render a PDF page as an image.", {
+        type: "object",
+        properties: {
+          pdf_path: PATH,
+          output_path: PATH,
+          page_number: { type: "integer" },
+        },
+        required: ["pdf_path", "output_path", "page_number"],
+      }),
+    ]
+
+    const [found] = findProviders("page_image", own)
+
+    expect(found).toMatchObject({
+      input: { kind: "path", path: ["pdf_path"] },
+      output: ["output_path"],
+      step: { kind: "mcp", put: "put_file", get: "get_file" },
+    })
+  })
+})

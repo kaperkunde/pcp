@@ -4,7 +4,7 @@ import type { VaultContext } from "../context"
 import { db } from "../db"
 import { invalid, notFound } from "../errors"
 import { normalizeSite } from "../fetch/rules"
-import { getVaultSetting, setSetting } from "../settings"
+import { getSetting, setSetting } from "../settings"
 import {
   ASSISTANT_PACE_BOUNDS,
   BROWSER_PACING_CLASSES,
@@ -162,12 +162,14 @@ function known(parsed: z.infer<typeof ConfigSchema>): PacingConfig {
 }
 
 /**
- * The vault's pacing settings. Read on every paced call, without the vault
- * key (settings are not encrypted); a value that does not read as one (a
+ * The vault's pacing settings, sealed under its key (lib/core/settings.ts).
+ * Read on every paced call; a value that does not read as one (a
  * hand-edited export) counts as none, which is PCP's defaults.
  */
-export async function readPacingConfig(vaultId: string): Promise<PacingConfig> {
-  const raw = await getVaultSetting(vaultId, SETTING_PACING)
+export async function readPacingConfig(
+  ctx: VaultContext,
+): Promise<PacingConfig> {
+  const raw = await getSetting(ctx, SETTING_PACING)
 
   if (!raw) {
     return EMPTY_PACING
@@ -293,7 +295,7 @@ export async function setPacingClasses(
     checked.set(pacingClass, value == null ? null : checkOverride(value))
   }
 
-  const config = await readPacingConfig(ctx.vaultId)
+  const config = await readPacingConfig(ctx)
   const classes = { ...config.classes }
 
   for (const [pacingClass, value] of checked) {
@@ -318,7 +320,7 @@ export function setPacingClass(
 
 /** Every class back to PCP's defaults; servers and sites stay. */
 export async function resetPacingClasses(ctx: VaultContext): Promise<void> {
-  const config = await readPacingConfig(ctx.vaultId)
+  const config = await readPacingConfig(ctx)
   await writePacingConfig(ctx, {
     ...config,
     classes: {},
@@ -349,7 +351,7 @@ export async function setPacingServer(
     throw notFound("That server")
   }
 
-  const config = await readPacingConfig(ctx.vaultId)
+  const config = await readPacingConfig(ctx)
   const servers: Record<string, PacingOverride> = {}
 
   for (const [id, override] of Object.entries(config.servers)) {
@@ -381,7 +383,7 @@ export async function setPacingSite(
 ): Promise<string> {
   const host = normalizeSite(input.site)
   const pace = checkOverride(input.pace)
-  const config = await readPacingConfig(ctx.vaultId)
+  const config = await readPacingConfig(ctx)
   const old = replacing ? normalizeSite(replacing) : null
   const sites = config.sites.filter(
     (site) => site.host !== host && site.host !== old,
@@ -402,7 +404,7 @@ export async function removePacingSite(
   site: string,
 ): Promise<void> {
   const host = normalizeSite(site)
-  const config = await readPacingConfig(ctx.vaultId)
+  const config = await readPacingConfig(ctx)
   const sites = config.sites.filter((entry) => entry.host !== host)
 
   if (sites.length === config.sites.length) {
@@ -474,7 +476,7 @@ export async function setAssistantPaceBounds(
   ctx: VaultContext,
   values: Partial<Record<BrowserPacingClass, PaceRange | null>>,
 ): Promise<void> {
-  const config = await readPacingConfig(ctx.vaultId)
+  const config = await readPacingConfig(ctx)
   const assistant = { ...config.assistant }
 
   for (const [name, value] of Object.entries(values)) {
@@ -581,7 +583,7 @@ export type PacingOverview = {
 export async function pacingOverview(
   ctx: VaultContext,
 ): Promise<PacingOverview> {
-  const config = await readPacingConfig(ctx.vaultId)
+  const config = await readPacingConfig(ctx)
   const classes = {} as PacingOverview["classes"]
 
   for (const name of PACING_CLASSES) {
@@ -616,5 +618,5 @@ export async function serverPacing(
   ctx: VaultContext,
   serverId: string,
 ): Promise<PacingOverride | null> {
-  return (await readPacingConfig(ctx.vaultId)).servers[serverId] ?? null
+  return (await readPacingConfig(ctx)).servers[serverId] ?? null
 }

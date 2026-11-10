@@ -1,4 +1,5 @@
 import { db } from "../db"
+import { getHostSetting, setHostSetting } from "../host-settings"
 import { localStoresBytes } from "../storage/cleanup"
 import { MIN_RECLAIM_BYTES, MIN_RECLAIM_SHARE } from "./limits"
 
@@ -32,28 +33,75 @@ async function pages(): Promise<Pages> {
   }
 }
 
-/** Bytes the database file gave back to the disk. */
-export async function reclaimSpace(): Promise<number> {
+/**
+ * The host setting that says the database was rebuilt once since
+ * secure_delete was turned on (lib/core/db.ts): pages freed before then may
+ * still hold what was deleted, so the first cleanup rebuilds the file
+ * whatever its free pages come to. A flag of the machine's, nothing of a
+ * vault.
+ */
+export const SCRUBBED_KEY = "db.scrubbed"
+
+async function checkpoint(): Promise<void> {
   await db().$queryRawUnsafe("PRAGMA wal_checkpoint(TRUNCATE)")
+}
+
+/**
+ * Bytes the database file gave back to the disk. `force` rebuilds the file
+ * however little of it is free: for when what matters is that removed rows
+ * leave no trace, not the space.
+ */
+export async function reclaimSpace({
+  force = false,
+}: { force?: boolean } = {}): Promise<number> {
+  await checkpoint()
 
   const before = await pages()
   const free = before.freePages * before.pageSize
   const size = before.pageCount * before.pageSize
+  const firstSince = (await getHostSetting(SCRUBBED_KEY)) === null
 
   if (
-    free === 0 ||
-    (free < MIN_RECLAIM_BYTES && free < size * MIN_RECLAIM_SHARE)
+    !force &&
+    !firstSince &&
+    (free === 0 ||
+      (free < MIN_RECLAIM_BYTES && free < size * MIN_RECLAIM_SHARE))
   ) {
     return 0
   }
 
-  await db().$executeRawUnsafe("VACUUM")
-  // VACUUM writes the new file through the log too.
-  await db().$queryRawUnsafe("PRAGMA wal_checkpoint(TRUNCATE)")
+  await vacuum()
+
+  if (firstSince) {
+    await setHostSetting(SCRUBBED_KEY, new Date().toISOString())
+  }
 
   const after = await pages()
 
   return Math.max(0, size - after.pageCount * after.pageSize)
+}
+
+async function vacuum(): Promise<void> {
+  await db().$executeRawUnsafe("VACUUM")
+  // VACUUM writes the new file through the log too.
+  await checkpoint()
+}
+
+/**
+ * After the owner removed something (a server, a secret, the vault): the
+ * write-ahead log still holds the pages as they were before, so it is
+ * checkpointed and truncated; with `rebuild`, the file is rebuilt too
+ * (VACUUM), for when a whole vault's rows went. secure_delete has already
+ * zeroed the rows in the pages themselves. Outside any transaction, one at
+ * a time with the cleanup (scrubFreedPages in ./runtime.ts).
+ */
+export async function scrub({ rebuild }: { rebuild: boolean }): Promise<void> {
+  if (rebuild) {
+    await reclaimSpace({ force: true })
+    return
+  }
+
+  await checkpoint()
 }
 
 /**

@@ -2,6 +2,7 @@ import {
   createCipheriv,
   createDecipheriv,
   createHash,
+  createHmac,
   hkdfSync,
   randomBytes,
   scrypt,
@@ -52,6 +53,25 @@ export function randomSecret(bytes = 32): string {
 
 export function sha256Hex(input: string | Buffer): string {
   return createHash("sha256").update(input).digest("hex")
+}
+
+/**
+ * A key for one purpose, derived from `key` (the vault's data key) by HKDF
+ * with `label` as its info. Never stored: whoever lacks the vault key cannot
+ * make it, and a key for one label says nothing about another's.
+ */
+export function labelKey(key: Buffer, label: string): Buffer {
+  return Buffer.from(hkdfSync("sha256", key, Buffer.alloc(0), label, 32))
+}
+
+/**
+ * HMAC-SHA256 of `text` under `labelKey(key, label)`, in hex: what a column
+ * stores when equal values must compare equal (a request asked again, a
+ * call made again) and the column must say nothing without the vault key,
+ * not even to someone who can guess the value.
+ */
+export function keyedHash(key: Buffer, label: string, text: string): string {
+  return createHmac("sha256", labelKey(key, label)).update(text).digest("hex")
 }
 
 /**

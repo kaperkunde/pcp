@@ -175,6 +175,7 @@ import {
   scrubResult,
   type SecretGrant,
 } from "./wrappers/placeholders"
+import { SECRET_META_SELECT, secretName } from "./secret-meta"
 
 /**
  * Talking to the servers in the registry: opening a connection with the
@@ -1014,14 +1015,14 @@ export async function githubCredential(
 
   const row = await db().secret.findFirst({
     where: { id: secretId, vaultId: ctx.vaultId },
-    select: { kind: true, name: true },
+    select: { ...SECRET_META_SELECT, kind: true },
   })
 
   if (
     !row ||
     !(
       row.kind === "text" ||
-      (row.kind === "oauth" && row.name === GITHUB_SIGNIN_SECRET)
+      (row.kind === "oauth" && secretName(ctx, row) === GITHUB_SIGNIN_SECRET)
     )
   ) {
     throw new PcpError(
@@ -1175,7 +1176,7 @@ export async function embeddingProvider(
       config.model,
     ].join("\n"),
     async embed(texts, input, signal) {
-      const paced = await paceEmbeddings(ctx.vaultId, pace, {
+      const paced = await paceEmbeddings(ctx, pace, {
         signal,
         deadline: pacingNow() + EMBED_PACE_WAIT_MS + PACING_DEADLINE_MARGIN_MS,
       })
@@ -2198,7 +2199,7 @@ export async function callServerTool(
   options: CallOptions,
 ): Promise<CallToolResult> {
   if (server.kind !== "browser" && server.kind !== "wrapper") {
-    const paced = await paceServerCall(ctx.vaultId, server, toolName, {
+    const paced = await paceServerCall(ctx, server, toolName, {
       signal: options.signal,
       deadline: options.deadline,
     })
@@ -2851,6 +2852,13 @@ function refusedMessage(server: McpServer, said: string): string {
 export type ServiceOptions = {
   publicUrl: string
   timing?: ServiceAccess["timing"]
+  /**
+   * The owner asked for this (their action, their secret saved, an update
+   * they approved): the read of a registered server's tools after a remake
+   * is theirs too. An assistant's start, a call that wakes the service and
+   * the reconcile pass leave it off.
+   */
+  byOwner?: boolean
 }
 
 /**
@@ -2962,11 +2970,13 @@ async function serviceEnv(
 async function serviceAccess(
   ctx: VaultContext,
   loaded: LoadedService,
-  { publicUrl, timing }: ServiceOptions,
+  { publicUrl, timing, byOwner = false }: ServiceOptions,
 ): Promise<ServiceAccess | null> {
   if (!loaded.host) {
     return null
   }
+
+  const registers = loaded.definition.registers
 
   const connection = await serviceConnection(ctx, loaded.host, { publicUrl })
   const exitAuth =
@@ -2985,6 +2995,47 @@ async function serviceAccess(
       ? { loopback: connection.loopback, ...(proxyAuth ? { proxyAuth } : {}) }
       : {}),
     ...(timing ? { timing } : {}),
+    ...(registers.kind === "mcp" || registers.kind === "openapi"
+      ? {
+          afterRemake: (remade) =>
+            rereadRegisteredTools(ctx, remade, { publicUrl, byOwner }),
+        }
+      : {}),
+  }
+}
+
+/**
+ * The tools of the server a service registered, read again once the service
+ * was made again (an update, a saved secret, Start on a missing container):
+ * its image may serve others now. A read that fails is the remake's note,
+ * not its failure. The gateway reads rows per request and goes by the
+ * server's own lastSyncedAt, so the new list is the next answer's.
+ */
+async function rereadRegisteredTools(
+  ctx: VaultContext,
+  loaded: LoadedService,
+  { publicUrl, byOwner }: { publicUrl: string; byOwner: boolean },
+): Promise<string | null> {
+  const id = loaded.spec.registeredId
+
+  if (!id) {
+    return null
+  }
+
+  try {
+    const server = await db().mcpServer.findUnique({ where: { id } })
+
+    if (!server) {
+      return null
+    }
+
+    const sync = await syncServerTools(ctx, server, { publicUrl, byOwner })
+
+    return sync.status === "ok"
+      ? null
+      : `${loaded.server.name} was made again, but PCP could not read its tools yet: ${sync.message}`
+  } catch (error) {
+    return `${loaded.server.name} was made again, but PCP could not read its tools yet: ${error instanceof Error ? error.message : String(error)}`
   }
 }
 
@@ -3164,7 +3215,7 @@ export async function runServiceAction(
   return serviceActionOn(
     loaded,
     action,
-    await requireAccess(ctx, loaded, options),
+    await requireAccess(ctx, loaded, { ...options, byOwner: true }),
   )
 }
 
@@ -3175,7 +3226,10 @@ export async function recreateService(
   options: ServiceOptions,
 ): Promise<ServiceStatus> {
   const loaded = await loadService(ctx, id)
-  return recreateServiceOn(loaded, await requireAccess(ctx, loaded, options))
+  return recreateServiceOn(
+    loaded,
+    await requireAccess(ctx, loaded, { ...options, byOwner: true }),
+  )
 }
 
 /**
@@ -3192,7 +3246,7 @@ export async function updateService(
   const loaded = await loadService(ctx, id)
   return updateServiceOn(
     loaded,
-    await requireAccess(ctx, loaded, options),
+    await requireAccess(ctx, loaded, { ...options, byOwner: true }),
     choice,
   )
 }
@@ -3240,7 +3294,7 @@ export async function restartServicesUsingSecret(
       const loaded = await loadService(ctx, id)
       const status = await recreateServiceOn(
         loaded,
-        await requireAccess(ctx, loaded, options),
+        await requireAccess(ctx, loaded, { ...options, byOwner: true }),
       )
       outcomes.push({
         id,

@@ -18,6 +18,7 @@ import { chromiumExecutable } from "./executable"
 import { closeAllBrowsers, runningBrowser } from "./runtime"
 import { createBrowserServer } from "./server"
 import { isOwnerNeeded, type BrowserAsk } from "./types"
+import { secretNameWhere } from "../secret-meta"
 
 // Typing the owner's secrets into pages, against a real headless Chromium
 // and pages served on this machine, through upstream.ts as every call comes
@@ -210,7 +211,9 @@ function fieldValue(tab: string, selector: string): Promise<string> {
 }
 
 async function always(name = "Shop password") {
-  const secret = await db().secret.findFirstOrThrow({ where: { name } })
+  const secret = await db().secret.findFirstOrThrow({
+    where: secretNameWhere(ctx, name),
+  })
   await grantSecretUse(ctx, {
     tokenId,
     secretId: secret.id,
