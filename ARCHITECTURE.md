@@ -1884,7 +1884,13 @@ the GitHub client and sync itself build on it.
   format 4 (`documents.ts serviceFormat`); every other one keeps its format
   and its hash, so an older PCP refuses just that document as written by a
   newer PCP rather than failing on an unknown key; a format-3 document that
-  names either is refused here too.
+  names either is refused here too. Format 5 added a wrapper's or flow's
+  own `pace` (the pace of its browser calls, in `create_wrapper`'s
+  snake_case shape); only a wrapper document that has one is written as
+  format 5 (`documents.ts wrapperFormat`), and an older-format one naming
+  it is refused. A new or changed pace raises the review's `pace` flag
+  (with what goes past the owner's bounds for assistants), so it waits for
+  the owner like any wrapper change.
 - **Versions.** Each document carries `version`, a whole number: a skill's
   own version; for a server, endpoint or wrapper, `mcp_server.sync_version`
   (null reads as 1), which applying an item sets to the document's. PCP's
@@ -2544,6 +2550,45 @@ checkSyntax`), nothing has a character that does not show on screen
   `type` text (Browser, Secrets in pages). Scrubbing cannot catch a
   value a tool transforms or stores and answers with later: the owner's
   review of the place a secret goes is what decides, and the page says so.
+  Several secrets may share a place (a login name and a password, both
+  `browser/type` at `/text`): a binding is unique by place and secret.
+  A call whose placeholder has no binding is refused in `run.ts innerCall`
+  before anything is sent or asked, with the `secrets` entry to propose
+  through `update_wrapper` (`unboundSecretFix`); `upstream.ts` refuses it
+  again.
+- **Secrets a flow types, found in its program** (#120,
+  `secret-literals.ts`, `definition.ts foundBindings`). Each time a
+  definition is checked (an assistant's request, the owner's save, a
+  repository's document applied), PCP reads each tool's program for
+  placeholders written with a fixed name, `{"$secret": "<name>"}` in any
+  quoting QuickJS takes, with `"part"` or not (comments, strings and
+  regular expressions skipped; a name worked out as it runs, an object with
+  a computed key or a spread, and anything nested past 64 templates or
+  brackets deep is not found).
+  For a tool that calls a browser's `type`, each such name of a secret PCP
+  holds gets a binding at `browser/type` `/text` marked `found`, with the
+  `parts` the programs name of it (login name, password, or both), stored
+  in the definition (so its hash, the request's `basis` and the owner's
+  approval cover it) and shown on the review as found in the program, with
+  what it types. A found binding lets through only its parts: a call that
+  types another part is refused (`run.ts`, `placeholders.ts matchGrant`); a
+  binding given by name has no `parts`, which is both, as before. Only the browser: typing still
+  passes the browser's own gate at the moment of typing (the secret's
+  sites, the token's allowance, or a `secret_use` request), which no
+  binding changes, whereas a secret sent to any other tool goes without a
+  per-use ask, so it needs a binding the owner was asked for by name. A
+  found binding is never one an assistant or a document gives: `toInput`
+  keeps it out of `get_wrapper`'s `secrets` (it is `found_secrets` there),
+  the owner's form and the repository document, and a change finds it
+  again from the programs as they will be. Since what is found depends on
+  the secrets the vault holds, not on the text alone, every way a
+  definition is written says when it gains one: the request's review; a
+  repository's review, which compares the places the document would get
+  with the ones the wrapper has in the vault (`repos/found-review.ts
+reviewInVault`, `secret_binding`, so even a change of text only waits
+  for the owner) and is checked again when they take it (the number of
+  flags they were shown); and the owner's own save, whose message names
+  each new one. The wrapper's page lists them read only beside the form.
 - **Replacing.** A tool listed in `replaces` (it has to be among the
   tool's `calls`) is left out of `search`, `list_tools`, `pcp.tools`
   and the instructions' counts (`listedTools`) for a token while the
@@ -2887,7 +2932,7 @@ Hosts are never logged.
 **What an assistant gets.** The tools are `tabs`, `navigate`, `back`,
 `snapshot`, `read_page`, `find`, `click`, `drag`, `type`, `press_key`,
 `select_option`, `upload_file`, `scroll`, `wait_for`, `screenshot`,
-`download`, `handle_dialog`, `hand_over`, `request_secret`,
+`print_pdf`, `download`, `handle_dialog`, `hand_over`, `request_secret`,
 `update_secret_sites`, `evaluate`, `console_log` and `network_log`. Every one
 but `tabs`' open and list, `request_secret` and `update_secret_sites` names
 its tab (below). An assistant reads a snapshot (Playwright's
@@ -2960,7 +3005,18 @@ their refs back when they show again (a dialog over them closed); it goes
 with the tab. A screenshot steps its quality, then its size, down
 until it fits what an answer passes on inline (`MAX_ANSWER_IMAGE_CHARS`,
 an image's own budget, apart from the text's); one that never fits is kept
-and handed back as its handle. While the page shows a dialog (an alert),
+and handed back as its handle. With `full_page` it is the whole page from
+its top (`Page.getLayoutMetrics`' content size, `captureBeyondViewport`),
+cut at `MAX_FULL_PAGE_HEIGHT` CSS pixels down and `MAX_FULL_PAGE_WIDTH`
+across, through the same ladder; its answer says its pixels are the
+page's, not the viewport's. `print_pdf` prints the page with Chromium's
+`Page.printToPDF` on the tab's DevTools session (paper, landscape,
+backgrounds, page ranges) as a stream (`transferMode` "ReturnAsStream",
+read with `IO.read` in `PDF_READ_BYTES` chunks and stopped once it passes
+`resourceLimits().fileBytes`, so a huge PDF is never held whole; the print
+given longer for a longer page, within `PRINT_PDF_MAX_MS`), keeps the PDF
+as the token's result through `keepBytes` and answers its handle, as
+`download` does; it reads the page only, so it is Read and unpaced. While the page shows a dialog (an alert),
 every tool that needs the page answers at once with it and how to answer
 it with `handle_dialog`, rather than waiting on a page that cannot answer.
 No tool reads or sets cookies or storage directly; JavaScript runs only
@@ -3055,7 +3111,8 @@ the body could carry the secret encoded.
 A secret goes into a page only as `type`'s text, `{"$secret": name}`: in an
 assistant's call (`resolveCall` lets it through there and nowhere else),
 from run_code's `pcp.call`, or from a wrapper or flow whose binding names
-`browser/type` at `/text` with no template (`definition.ts`). Any other
+`browser/type` at `/text` with no template (`definition.ts`; given by name,
+or found in the program, Wrappers above). Any other
 browser tool or argument is refused, in `resolveCall` and in `upstream.ts`.
 `upstream.ts callBrowser` is the one path: it hands `callBrowserTool` a
 `SecretTyper`, never a value. The browser resolves the field (ref or
@@ -3085,8 +3142,13 @@ value, by page, in memory): while any field of the page has that value, as
 it is or reformatted (a bank writes an IBAN in groups of four), every answer
 to the token shows it as `[secret: name]` (the snapshot's field line, its
 `- text:` child where the field has a placeholder, and the value wherever
-else it appears, a title included), and `screenshot` is refused (a tool
-error). It lets go when no field has the value any more: the field changed,
+else it appears, a title included), and `screenshot` and `print_pdf` are
+refused (a tool error): both are pictures of the page. They are refused
+too while any frame of the page shows, in its text or a field, a secret
+PCP typed into one of the token's tabs (`held.ts typedShown`: each frame's
+`innerText` and field values through `maskTyped`'s matcher, read in PCP's
+own world; a frame that cannot be read refuses as well): an answer's text
+is masked, a picture or a PDF's text layer could not be. It lets go when no field has the value any more: the field changed,
 or a new document does not have it. For as long as the tab lives, whatever
 document it shows, every answer to the token (`callBrowserTool`'s
 `maskHeld`, so the snapshot, `find`, `read_page`, the logs and `evaluate`
@@ -3508,8 +3570,17 @@ above):
   server. execute_<tier>, run_<tier>'s `pcp.call`, a
   wrapper's calls and a call the owner allowed all end there. The browser's
   actions go through it too, and are paced in `browser/call.ts` by the tab's
-  site (for a navigation, the site it opens), before the call queues on its
-  tab: a wait for the site holds no lane and counts toward no deadline. A
+  site (for a navigation, the site it opens) as a turn taken on the tab's
+  lane right before the action (`pacedTurn`, `pacing/index.ts
+paceBrowserTurn`), held until the action is done: no two actions at a
+  site, from any tab or caller, follow closer than the pause, counted from
+  the previous one's end. The turn is held through the whole action, a
+  navigation's page load and site check included, on purpose: never a
+  double tap, at the cost of a slow page holding the site's other tabs
+  back that long. A download started by a click gives its turn back once
+  the click is done, not while the file comes in. A paced call holds its tab `PACED_TURN_WAIT_MS`
+  longer before the tab counts as not responding, and waits at most
+  `PACING_MAX_WAIT_MS` for its turn there (`browserTurnDeadline`). A
   wrapper's own tool is not paced; the calls its program makes are.
 - Web fetch's request path: `fetch/fetch.ts` paces each request it sends,
   every redirect it follows on the site included, and `web-fetch.ts`
@@ -3519,21 +3590,33 @@ above):
 Nothing at the gateway paces on its own: a new way in that reaches a server
 or a site goes through one of these, and so is paced.
 
-**Classes and defaults** (`pacing/limits.ts`, with why each is what it is).
-`browser_act` (navigate, back, click, type, press_key, select_option,
-upload_file, download, handle_dialog, scroll): 1.5 seconds between actions
-on a site and up to 2.5 more at random. `web_fetch`: a second and up to 0.75
-more. `server_change` (a tool its server does not mark read-only,
+**Classes and defaults** (`pacing/limits.ts`, with why each is what it is;
+`browserPacingClass` sorts the browser's tools, `entry-points.test.ts`
+pins it). `browser_act` (click, drag, type, press_key, select_option,
+upload_file, download by a click, handle_dialog, evaluate, scroll): 150 ms
+after the previous action on the site ended and up to 450 more at random,
+as a person moves from one field to the next; `type` fills a field in one
+go, with no pause per key. `browser_navigate` (navigate, back, tabs open,
+download by its address): the page the tab shows finishes loading first
+(`domcontentloaded`, at most `SETTLE_MS`), then 400 ms and up to 800 more.
+`web_fetch`: a second and up to 0.75 more. `server_change` (a tool its server does not mark read-only,
 `read-only.ts markedReadOnly`): no pause, at most 30 a minute per server.
 `server_read`: at most 300 a minute. The browser's reading tools (snapshot,
-find, read_page, screenshot, wait_for, tabs, hand_over) are never paced:
-they send the site nothing. Nothing names a site or a vendor.
+find, read_page, screenshot, print_pdf, wait_for, tabs but open,
+hand_over) are never paced: they send the site nothing. Nothing names a
+site or a vendor.
 
 **How a call waits** (`pacing/pace.ts`). State is in memory, per vault and
 destination (`server:<id>` or `site:<host>`; web fetch and the browser share
-a site's), on `globalThis`. A caller is given its slot the moment it asks,
-in order (the last slot, the pause, and a random extra wait; then the burst
-cap), so two callers never share one, and waits for it.
+a site's), on `globalThis`. A server's or web fetch's caller is given its
+slot the moment it asks, in order (the last slot, the pause, and a random
+extra wait; then the burst cap), so two callers never share one, and waits
+for it (`waitForSlot`). A browser action takes a turn instead (`takeTurn`):
+one at a time per site, each after the one before it released its turn,
+which sets the site's last action to when it ended, so a call that queued
+behind a long one still waits its pause after it. Waiting for the previous
+turn counts against the caller's budget as the pause does; one that gives
+up passes its place on once the one before it is done.
 
 How long a call may wait is its caller's: a `deadline` (epoch milliseconds,
 `CallOptions.deadline` in `upstream.ts`, `BrowserScope.deadline` for the
@@ -3568,7 +3651,30 @@ pace or "unpaced". A call follows the most specific: the site's, then the
 server's, then the class's, then PCP's default; bounds are checked in core
 (`PACING_BOUNDS`), and a stored value that does not read as one counts as
 none. Settings → Upkeep → Pacing shows the classes, a reset to PCP's
-defaults, and the sites, folded.
+defaults, the sites, and what assistants may set, folded.
+
+**A tab's or a wrapper's own pace.** An assistant may give a browser
+action a pace of its own, a range (`PaceRange`: a wait between `minMs` and
+`maxMs`) per browser class: a tab's, with `tabs` action `pace`
+(`browser/tab-pace.ts`, a WeakMap on the tab in memory, never stored or
+exported, gone with the tab; `tabs` list shows it), or a wrapper's, in its
+definition (`pace`: per class and per browser tool, approved with the rest
+on its `wrapper_change` page), which a program narrows per call with
+`pcp.call(…, { pace })` within it (`wrappers/run.ts callPace`; the bridge
+refuses the option outside a wrapper's program, `RunOptions.takesPace`),
+carried as `CallRun.pace` → `CallOptions.pace` → `BrowserScope.pace`. What
+an action follows (`resolveBrowserPolicy`): its tab's, else its wrapper's,
+before the server's and the class's, but never below the owner's own pace
+for the site, which stays a floor. What an assistant may set without
+asking is the vault setting's `assistant` bounds per class
+(`ASSISTANT_PACE_BOUNDS` where the owner set none; `MAX_ASSISTANT_PACE_MS`
+the most any goes to). A tab's pace outside them is a `tab_pace` request
+(the tab, the pace, the bounds then); the owner's yes sets it on that tab
+alone (`applyTabPace`) and never writes the vault's setting. A wrapper's
+outside them is flagged on its `wrapper_change` page (`paceOutside`, and
+the warning), and only the owner's yes there makes it. A wrapper's pace
+travels in its linked repository's document (format 5, Linked
+repositories).
 
 `PCP_PACING=off` turns it off for a process: the unit and end-to-end suites
 set it (`vitest.config.mts`, `playwright.config.ts`), and the tests that

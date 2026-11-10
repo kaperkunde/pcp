@@ -218,14 +218,22 @@ so in the summary; the bump itself waits for the request.
   vault's `toolTiers` setting for PCP's own tools; a wrapper tool's choice
   below what its calls came to since goes to the bell (`tierNotices`).
 - Pacing (`lib/core/pacing/`) applies only in `upstream.ts callServerTool`
-  (the browser by the tab's site, in `browser/call.ts`) and web fetch's
+  (the browser by the tab's site, in `browser/call.ts`, as a turn taken on
+  the tab's lane and held until the action ends, so actions at a site never
+  follow closer than the pause, whatever the callers) and web fetch's
   request path (`fetch/fetch.ts`, `web-fetch.ts runFetch`), so every way in
   is paced: execute_<tier>, run_<tier>, wrappers and flows,
   owner-approved calls, each as a read or a change by its tier; and to
   search's embeddings requests, as a read (`paceEmbeddings`).
   New defaults and bounds go in `pacing/limits.ts`, by class of action;
   nothing names a site or vendor. The owner's overrides are the vault's
-  `pacing` setting, never a host setting.
+  `pacing` setting, never a host setting. An assistant's own pace for a
+  browser action is a tab's (`tabs` action `pace`, in memory with the tab,
+  never stored) or a wrapper's (its definition's `pace`, narrowed per call
+  by `pcp.call`'s `pace` within it); either within the owner's bounds
+  (the setting's `assistant`) or as the owner allowed it (a `tab_pace`
+  request for that tab alone; the `wrapper_change` page), never below the
+  owner's own pace for the site, and never written into the setting.
 - Linked repositories (`lib/core/repos/`) share items, never secrets, and
   are never a backup. Their documents carry `pcp_format` and change only
   backward compatibly (add fields with defaults, never repurpose one).
@@ -246,7 +254,11 @@ so in the summary; the bump itself waits for the request.
   and leaves `services/` alone. Format 4 adds `auth` on a service's MCP
   server and a service's `files`; only a service document that has either
   is written as format 4 (`serviceFormat`), and a format-3 one naming
-  either is refused. PCP's common items,
+  either is refused. Format 5 adds a wrapper's or flow's own `pace`
+  (snake_case, as `create_wrapper` takes it); only one that has a pace is
+  written as format 5 (`wrapperFormat`), an older-format one naming it is
+  refused, and a pace change is never `textOnly` (its review flags it, and
+  says where it goes past the owner's bounds). PCP's common items,
   `kaperkunde/pcp-gg-common` (`repos/common.ts`), are offered in one click,
   linked read-only and untrusted (pinned imports), read without a sign-in.
   A push is one commit per item, fast-forward only, and
@@ -696,7 +708,19 @@ embeddingProvider`, which hands `embeddings/provider.ts` the header;
   and written in `upstream.ts`, scrubbed from the answer, errors and status
   there, and refused in an assistant's own call. Into the browser it goes
   only as `type`'s text (in a wrapper, a binding for `browser/type` at
-  `/text`, no template), through the browser's own gate below.
+  `/text`, no template), through the browser's own gate below. A binding
+  is unique by place and secret, so a login name and a password share
+  `/text`. A secret a flow's program types by a fixed name
+  (`secret-literals.ts`) gets that binding when the definition is checked,
+  for a secret PCP holds, marked `found` with the `parts` the program
+  names (only those are typed), shown on the review and approved with the
+  wrapper; never for any other tool, never one an assistant or a
+  repository document gives (`toInput` leaves it out), and it changes
+  nothing of the gate. It depends on the vault's secrets, so a repository's
+  review flags each one the wrapper does not have yet against the vault
+  (`repos/found-review.ts reviewInVault`, never text only), and the
+  owner's save and page name them. A call whose secret has no binding is refused
+  before anything is sent, with the `secrets` entry to propose.
   An assistant's create, change and delete are a permission request
   (`wrapper_change`) that shows every program, schema, call, replaced tool
   and secret place in full and writes only that, to the wrapper as it was
@@ -751,7 +775,8 @@ embeddingProvider`, which hands `embeddings/provider.ts` the header;
   process: there Chromium has a window of its own kept off the screen,
   its pages opened in the background (`launch.ts`). A
   tool that needs the owner throws `OwnerNeeded`, which `runCall` turns into
-  a permission request (`browse`, `browser_handover`, `script_use`); a site is asked
+  a permission request (`browse`, `browser_handover`, `script_use`,
+  `tab_pace`); a site is asked
   about only for the address in the call's arguments, so a call the owner
   allowed opens it without a second ask. `navigate` waits for a check that
   passes on its own; one that does not is the owner's, through `hand_over`,
@@ -791,7 +816,9 @@ embeddingProvider`, which hands `embeddings/provider.ts` the header;
   it, as typed or as the page reformatted it (`browser/held.ts`, keyed
   hashes of the value and of its normalised form, white space and
   separators out and upper case, never the value), every answer shows it as
-  `[secret: name]` and `screenshot` is refused; a password field's value
+  `[secret: name]` and `screenshot` and `print_pdf` are refused (also while
+  any frame's text shows a secret typed into one of the token's tabs, as
+  `maskTyped` finds it: `held.ts typedShown`); a password field's value
   never shows, its snapshot `- text:` child included. For the life of the
   tab, every answer to the token masks each secret typed into any of its
   tabs wherever the text has it once normalised (`maskTyped`: a keyed

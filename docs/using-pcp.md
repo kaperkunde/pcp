@@ -488,7 +488,8 @@ desktop apps do not add it; JavaScript works everywhere.
 **The browser.** On the **Browser** page, **Add the browser**: it becomes a
 server like any other, with tools to open a page (`navigate`, `back`, `tabs`),
 read it (`snapshot`, which names each element with a ref; `read_page`; `find`;
-`screenshot`; `console_log` and `network_log`, the tab's console and requests
+`screenshot`, of the viewport or the whole page; `print_pdf`, the page as a
+PDF kept as a file; `console_log` and `network_log`, the tab's console and requests
 without credentials), act on it (`click`, `drag`, `type`, `select_option`,
 `press_key`, `scroll`, `wait_for`, `handle_dialog`; `click`, `scroll` and
 `drag` also at a point of the page, for a canvas app), move files

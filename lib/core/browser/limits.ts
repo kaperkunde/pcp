@@ -1,4 +1,5 @@
 import { BROWSER_VIEWPORT, MAX_SIGN_IN_IMPORT_BYTES } from "../constants"
+import { PACING_MAX_WAIT_MS } from "../pacing/limits"
 
 /**
  * Bounds on what the browser makes PCP do. Addresses, text to type and
@@ -67,6 +68,24 @@ export const MAX_SCREENSHOT_QUALITY = 90
  */
 export const SCREENSHOT_SCALED_QUALITY = 40
 export const SCREENSHOT_SCALES = [0.75, 0.5, 0.35, 0.25] as const
+/**
+ * screenshot's full_page: the most of a page it takes, down and across, in
+ * CSS pixels (Chromium draws no larger picture in one piece). A longer page
+ * is taken from its top, and the answer says it was cut.
+ */
+export const MAX_FULL_PAGE_HEIGHT = 16_000
+export const MAX_FULL_PAGE_WIDTH = 4 * BROWSER_VIEWPORT.width
+/** print_pdf's page_ranges, in characters. */
+export const MAX_PDF_PAGE_RANGES_CHARS = 100
+/**
+ * print_pdf: Chromium's print is given ACTION_TIMEOUT_MS and a second more
+ * for every this many CSS pixels of the page's height, up to
+ * PRINT_PDF_MAX_MS (well inside TAB_DEADLINE_MS); the PDF is read in
+ * chunks of PDF_READ_BYTES and stopped past the largest file PCP keeps.
+ */
+export const PRINT_PDF_PX_PER_SECOND = 2_000
+export const PRINT_PDF_MAX_MS = 60_000
+export const PDF_READ_BYTES = 1024 * 1024
 /** The narrowest picture screenshot's max_width may ask for, in pixels. */
 export const MIN_SCREENSHOT_WIDTH = 200
 /** The size every tab renders at, in CSS pixels. */
@@ -214,6 +233,17 @@ export const DOWNLOAD_TIMEOUT_MS = 120_000
  */
 export const TAB_DEADLINE_MS =
   2 * NAVIGATION_TIMEOUT_MS + CHALLENGE_WAIT_MS + 2 * ACTION_TIMEOUT_MS
+/** How long settle waits for what an action started to load. */
+export const SETTLE_MS = 5_000
+/**
+ * The most a call waits on its tab for its turn at the site under pacing
+ * (lib/core/pacing/, pacing's own PACING_MAX_WAIT_MS), with the time a page
+ * opened first takes to settle: a paced call holds its tab this much
+ * longer before the tab counts as not responding.
+ */
+export const PACED_TURN_WAIT_MS = PACING_MAX_WAIT_MS + SETTLE_MS
+/** TAB_DEADLINE_MS for a paced call. */
+export const PACED_TAB_DEADLINE_MS = TAB_DEADLINE_MS + PACED_TURN_WAIT_MS
 /**
  * timeout_ms (call.ts): how long a browser call waits, in all, before it is
  * answered with a `timeout` tool error naming the step it was at. tabs

@@ -26,6 +26,7 @@ import {
   listRemote,
   type FetchedItem,
 } from "@/lib/core/repos/remote"
+import { reviewInVault } from "@/lib/core/repos/found-review"
 import { reviewItem } from "@/lib/core/repos/review"
 import { specServerUrls } from "@/lib/core/repos/share-review"
 import { clientFor, getRepo } from "@/lib/core/repos/store"
@@ -225,7 +226,7 @@ export default async function ImportPage({
     )
   }
 
-  const review = reviewItem(null, document)
+  const review = await reviewInVault(ctx, null, document, null)
   const secrets = (await listSecrets(ctx))
     .filter((secret) => secret.kind === "text")
     .map(({ id: secretId, name }) => ({ id: secretId, name }))

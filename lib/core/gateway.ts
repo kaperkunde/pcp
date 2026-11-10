@@ -6,6 +6,7 @@ import {
   type Icon,
   type ServerContext,
 } from "@modelcontextprotocol/server"
+import { wrapperPaceInput, type WrapperPaceInput } from "./pacing/input"
 import { z } from "zod"
 
 import type { McpServer as McpServerRow } from "@/lib/generated/prisma/client"
@@ -500,7 +501,7 @@ const WRAPPER_INSTRUCTIONS =
  * tool calls the browser's tools).
  */
 export const FLOW_INSTRUCTIONS = (slug: string) =>
-  `Browser flows: after you have done a task on a site with the owner, offer to make it a flow, a wrapper (create_wrapper) whose tool does it again in one call. Write down the steps you took, each in await pcp.step("<what it does>", async () => { … }) so a failure names its step, and target elements by role and name (target), never by ref. Take an argument for every value you typed or chose, except a password or one-time code: that goes in as type's text {"$secret": "<name>"}, with a secret place for it (browser/type, argument "/text"), never as an argument. Open a tab of its own with ${slug}/tabs (action open) and pass tab to every call. Go to the task's own address rather than clicking through overlays. Check first whether it is done already (the message already in the thread) and if so return {already: true} without acting; after acting, confirm the result on the page. Return {ok, url}, and on failure also step and a screenshot's handle. On a CAPTCHA, a sign-in or a page you did not expect, call ${slug}/hand_over and stop rather than guess. A flow that sends, buys or deletes stays at "ask": do not propose it as allowed.`
+  `Browser flows: after you have done a task on a site with the owner, offer to make it a flow, a wrapper (create_wrapper) whose tool does it again in one call. Write down the steps you took, each in await pcp.step("<what it does>", async () => { … }) so a failure names its step, and target elements by role and name (target), never by ref. Take an argument for every value you typed or chose, except a password or one-time code: that goes in as type's text {"$secret": "<name>"} with the secret's name written as it is (a login name as {"$secret": "<name>", "part": "username"}), never as an argument; PCP finds each such name of a secret it holds in the program and shows it to the owner with the flow, so it needs no secrets entry (one PCP does not hold yet does: browser/type, argument "/text"). Open a tab of its own with ${slug}/tabs (action open) and pass tab to every call. Go to the task's own address rather than clicking through overlays. Check first whether it is done already (the message already in the thread) and if so return {already: true} without acting; after acting, confirm the result on the page. Return {ok, url}, and on failure also step and a screenshot's handle. On a CAPTCHA, a sign-in or a page you did not expect, call ${slug}/hand_over and stop rather than guess. A flow that sends, buys or deletes stays at "ask": do not propose it as allowed.`
 
 const MANAGE_INSTRUCTIONS =
   "This token can also read and change API endpoints: get_endpoint reads one, update_endpoint changes one. A change to an endpoint you registered switches it off until the owner enables it again. Once it sends one of the owner's secrets, or the owner has allowed private addresses, it is theirs: you can turn read-only on, and ask them to fix its schema with edits or better tool descriptions, which they answer in PCP. You cannot change a credential. list_secrets names the owner's secrets and what uses each, never a value: name one of them in register_server rather than a new one, so the owner need not enter it again."
@@ -5911,7 +5912,7 @@ export function buildGatewayServer(
         .min(1)
         .max(MAX_PROGRAM_CHARS)
         .describe(
-          'The body of an async function, as for run_read and its kin: args holds the arguments it was called with, await pcp.call(server, tool, args, { fields, decode, keep }) calls one of the tools in calls, pcp.read, pcp.keep, pcp.image, pcp.video, pcp.sleep and pcp.withTimeout work as in run_read and its kin, await pcp.step("name", async () => { … }) runs one step and names it in the trace and in any error from it, and return hands back the answer (a string as it is, anything else as JSON). A secret goes in as {"$secret": "<its name>"} where secrets allows it. For example: const issues = await pcp.call("github", "list_issues", { owner: "me", repo: args.repo }, { fields: ["number", "title"] }); return issues',
+          'The body of an async function, as for run_read and its kin: args holds the arguments it was called with, await pcp.call(server, tool, args, { fields, decode, keep }) calls one of the tools in calls, pcp.read, pcp.keep, pcp.image, pcp.video, pcp.sleep and pcp.withTimeout work as in run_read and its kin, await pcp.step("name", async () => { … }) runs one step and names it in the trace and in any error from it, and return hands back the answer (a string as it is, anything else as JSON). A secret goes in as {"$secret": "<its name>"} where secrets allows it; one typed into a page with browser/type, its name written as it is, needs no secrets entry when PCP holds it (PCP finds it in the program and shows the owner). For example: const issues = await pcp.call("github", "list_issues", { owner: "me", repo: args.repo }, { fields: ["number", "title"] }); return issues',
         ),
       calls: z
         .array(z.string())
@@ -5961,6 +5962,7 @@ export function buildGatewayServer(
           `How it is written there, with ${SECRET_PLACEHOLDER} where the value goes ("Bearer ${SECRET_PLACEHOLDER}"); the value alone by default.`,
         ),
     })
+    const wrapperPaceArg = wrapperPaceInput.optional()
     type WrapperToolArg = z.output<typeof wrapperTool>
     /** A tool as the assistant wrote it, as wrappers/ reads one. */
     const wrapperToolInput = ({
@@ -5989,7 +5991,7 @@ export function buildGatewayServer(
       name: "get_wrapper",
       title: "Read a wrapper",
       description:
-        "Get a wrapper's tools as the owner approved them: each one's description, input and output schema, program, the tools it calls and replaces, whose levels its calls follow (call_levels), and where a secret goes in (by the secret's name, never its value). Read it before update_wrapper: its tools are in the shape update_wrapper takes.",
+        "Get a wrapper's tools as the owner approved them: each one's description, input and output schema, program, the tools it calls and replaces, whose levels its calls follow (call_levels), and where a secret goes in (by the secret's name, never its value; found_secrets: the ones its programs type into pages, found in them, with the parts each may type). Read it before update_wrapper: its tools are in the shape update_wrapper takes.",
       input: z.object({
         wrapper: z
           .string()
@@ -6000,6 +6002,7 @@ export function buildGatewayServer(
         slug: z.string(),
         call_levels: z.enum(["approved", "token"]),
         tools: z.array(z.looseObject({ name: z.string() })),
+        pace: z.looseObject({}).optional(),
       }),
       annotations: READS,
       log: serverNamed("wrapper"),
@@ -6011,15 +6014,17 @@ export function buildGatewayServer(
           )
         }
 
-        const { callLevels, tools, ...view } = await getWrapper(scope.ctx, {
-          slug: args.wrapper,
-        })
+        const { callLevels, tools, foundSecrets, ...view } = await getWrapper(
+          scope.ctx,
+          { slug: args.wrapper },
+        )
 
         // In the names update_wrapper takes; its id is PCP's own.
         return json({
           ...view,
           id: undefined,
           call_levels: callLevels,
+          ...(foundSecrets.length > 0 ? { found_secrets: foundSecrets } : {}),
           tools: tools.map(({ inputSchema, outputSchema, ...tool }) => ({
             ...tool,
             input_schema: inputSchema,
@@ -6071,9 +6076,10 @@ export function buildGatewayServer(
           .max(MAX_SECRET_BINDINGS)
           .optional()
           .describe(
-            'Every place a secret goes in a call its tools make, where a program\'s {"$secret": name} is allowed.',
+            'Every place a secret goes in a call its tools make, where a program\'s {"$secret": name} is allowed; several may go to one place (a login name and a password, both browser/type at "/text"). A secret PCP holds that a program types into pages, its name written as it is, needs none: PCP finds it.',
           ),
         call_levels: callLevelsArg,
+        pace: wrapperPaceArg,
         definition: z
           .string()
           .max(100)
@@ -6093,6 +6099,7 @@ export function buildGatewayServer(
         tools?: WrapperToolArg[]
         secrets?: Parameters<typeof proposeWrapper>[1]["secrets"]
         call_levels?: "approved" | "token"
+        pace?: WrapperPaceInput
         definition?: string
         note?: string
         tool_access?: ToolAccessArg
@@ -6115,6 +6122,7 @@ export function buildGatewayServer(
             : {}),
           ...(args.secrets !== undefined ? { secrets: args.secrets } : {}),
           ...(callLevels !== undefined ? { callLevels } : {}),
+          ...(args.pace !== undefined ? { pace: args.pace } : {}),
         }
 
         if (definition !== undefined) {
@@ -6122,10 +6130,11 @@ export function buildGatewayServer(
             tools !== undefined ||
             args.secrets !== undefined ||
             callLevels !== undefined ||
+            args.pace !== undefined ||
             args.description !== undefined
           ) {
             return failure(
-              "With definition, the programs, secrets, call_levels and description are that wrapper's: pass only name, and note if you like.",
+              "With definition, the programs, secrets, call_levels, pace and description are that wrapper's: pass only name, and note if you like.",
             )
           }
 
@@ -6209,9 +6218,15 @@ export function buildGatewayServer(
           .max(MAX_SECRET_BINDINGS)
           .optional()
           .describe(
-            "Every place a secret goes, replacing the ones it has; [] takes them all out.",
+            "Every place a secret goes, replacing the ones it has; [] takes them all out. The ones PCP found in the programs (get_wrapper's found_secrets) are found again, not listed here.",
           ),
         call_levels: callLevelsArg,
+        pace: wrapperPaceInput
+          .nullable()
+          .optional()
+          .describe(
+            "Its own pace for the browser calls its tools make, replacing the one it has; null takes it out, so they follow the owner's. A random wait between min_ms and max_ms after the previous action at the site ended, per kind of action and per browser tool; a program picks within it per call with pcp.call(…, { pace: { min_ms, max_ms } }).",
+          ),
         note: noteChangeArg,
         detach: detachArg,
         tool_access: TOOL_ACCESS_ARG,
@@ -6228,6 +6243,7 @@ export function buildGatewayServer(
         remove_tools?: string[]
         secrets?: Parameters<typeof proposeWrapperChange>[2]["secrets"]
         call_levels?: "approved" | "token"
+        pace?: WrapperPaceInput | null
         note?: string
         detach?: boolean
         tool_access?: ToolAccessArg
@@ -6317,6 +6333,7 @@ export function buildGatewayServer(
                 removeTools: args.remove_tools,
                 secrets: args.secrets,
                 callLevels: args.call_levels,
+                ...(args.pace !== undefined ? { pace: args.pace } : {}),
               },
               servers,
             ),

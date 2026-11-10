@@ -30,12 +30,21 @@ export type PacingOverride = PacingPolicy | "unpaced"
 
 export const PACING_CLASSES = [
   "browser_act",
+  "browser_navigate",
   "web_fetch",
   "server_change",
   "server_read",
 ] as const
 
 export type PacingClass = (typeof PACING_CLASSES)[number]
+
+/** The browser's classes: what a tab's or a wrapper's own pace may set. */
+export const BROWSER_PACING_CLASSES = [
+  "browser_act",
+  "browser_navigate",
+] as const
+
+export type BrowserPacingClass = (typeof BROWSER_PACING_CLASSES)[number]
 
 const MINUTE = 60_000
 
@@ -45,14 +54,24 @@ const MINUTE = 60_000
  */
 export const PACING_DEFAULTS: Record<PacingClass, PacingPolicy> = {
   /**
-   * The browser acting on a page: navigate, back, click, type, press_key,
-   * select_option, upload_file, download, handle_dialog and scroll (which
-   * makes a page load more, as long lists do). This is where a site sees
-   * a visitor's behaviour most closely, so a pause of a person's length:
-   * one and a half seconds, and up to two and a half more at random. The
-   * pause caps how many go out, so no burst limit on top.
+   * The browser acting in a page: click, drag, type, press_key,
+   * select_option, upload_file, download by a click, handle_dialog,
+   * evaluate and scroll (which makes a page load more, as long
+   * lists do). A person moves from one field or button to the next in a
+   * few hundred milliseconds, so that: 150 ms, and up to 450 more at
+   * random, after the previous action on the site ended. type fills a
+   * field in one go, so there is no pause per key. The pause caps how many
+   * go out, so no burst limit on top.
    */
-  browser_act: { minIntervalMs: 1_500, jitterMs: 2_500, burst: null },
+  browser_act: { minIntervalMs: 150, jitterMs: 450, burst: null },
+  /**
+   * The browser opening a page: navigate, back, tabs opening one, and
+   * download by an address. It first waits for the page the tab shows to
+   * finish loading (browser/call.ts pacedTurn), not for a fixed time, then
+   * 400 ms and up to 800 more at random, as a person glances at a page
+   * before they leave it.
+   */
+  browser_navigate: { minIntervalMs: 400, jitterMs: 800, burst: null },
   /**
    * Web fetch's requests, every redirect it follows on a site and the read
    * through the browser included: a second between requests, with a little
@@ -83,6 +102,94 @@ export const PACING_DEFAULTS: Record<PacingClass, PacingPolicy> = {
   },
 }
 
+/** Browser tools that open a page, paced as browser_navigate. */
+const NAVIGATING_BROWSER_TOOLS: ReadonlySet<string> = new Set([
+  "navigate",
+  "back",
+])
+
+/**
+ * The class a browser tool is paced as, null for one that is never paced:
+ * a page opened (navigate, back, tabs open, download by its address) is a
+ * navigation; anything else done in a page is an action. tabs' other
+ * actions read or close tabs, and send a site nothing.
+ */
+export function browserPacingClass(
+  toolName: string,
+  args: Record<string, unknown> = {},
+): BrowserPacingClass | null {
+  if (toolName === "tabs") {
+    return args.action === "open" ? "browser_navigate" : null
+  }
+
+  if (UNPACED_BROWSER_TOOLS.has(toolName)) {
+    return null
+  }
+
+  return NAVIGATING_BROWSER_TOOLS.has(toolName) ||
+    (toolName === "download" && typeof args.url === "string")
+    ? "browser_navigate"
+    : "browser_act"
+}
+
+/**
+ * A pace an assistant gives a tab, or a wrapper for its calls: a wait
+ * between `minMs` and `maxMs` after the previous action, picked at random.
+ */
+export type PaceRange = { minMs: number; maxMs: number }
+
+/** A pace of a tab's or a wrapper's own, per class, as an assistant names it. */
+export type BrowserPace = {
+  /** browser_act: what is done in a page. */
+  actions?: PaceRange
+  /** browser_navigate: a page opened. */
+  navigations?: PaceRange
+}
+
+/**
+ * A wrapper's pace for the browser calls its tools make, part of its
+ * definition: per kind of action, and per browser tool (by its name), the
+ * tool's own first.
+ */
+export type WrapperPace = BrowserPace & { tools?: Record<string, PaceRange> }
+
+/** The most browser tools a wrapper's pace names. */
+export const MAX_WRAPPER_PACE_TOOLS = 30
+
+/** BrowserPace's keys, by class. */
+export const PACE_KEY_OF: Record<BrowserPacingClass, keyof BrowserPace> = {
+  browser_act: "actions",
+  browser_navigate: "navigations",
+}
+
+/**
+ * What an assistant may give a tab, or a wrapper, without asking the owner,
+ * per class, unless the owner set bounds of their own (Settings → Pacing,
+ * the vault's `pacing` setting's `assistant`): from a third of PCP's
+ * default down to a few times it up. Faster or slower asks the owner (a
+ * tab: a tab_pace request; a wrapper: its wrapper_change page says so).
+ */
+export const ASSISTANT_PACE_BOUNDS: Record<BrowserPacingClass, PaceRange> = {
+  browser_act: { minMs: 50, maxMs: 5_000 },
+  browser_navigate: { minMs: 150, maxMs: 10_000 },
+}
+
+/**
+ * The most any of these ranges goes to, the owner's bounds included: a
+ * call that waits longer than PACING_MAX_WAIT_MS between actions is
+ * answered "Paced" rather than served.
+ */
+export const MAX_ASSISTANT_PACE_MS = 30_000
+
+/** A range as the policy it stands for: the low end, and the rest at random. */
+export function rangePolicy(range: PaceRange): PacingPolicy {
+  return {
+    minIntervalMs: range.minMs,
+    jitterMs: Math.max(0, range.maxMs - range.minMs),
+    burst: null,
+  }
+}
+
 /**
  * Browser tools that are never paced: they read the page the tab already
  * has (or wait on it, or list tabs) and send the site nothing it would not
@@ -90,11 +197,12 @@ export const PACING_DEFAULTS: Record<PacingClass, PacingPolicy> = {
  * owner's hand_over is theirs, and request_secret and update_secret_sites
  * ask only the owner.
  */
-export const UNPACED_BROWSER_TOOLS: ReadonlySet<string> = new Set([
+export const UNPACED_BROWSER_TOOLS: ReadonlySet<string> = new Set<string>([
   "snapshot",
   "find",
   "read_page",
   "screenshot",
+  "print_pdf",
   "console_log",
   "network_log",
   "wait_for",

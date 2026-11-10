@@ -7,8 +7,12 @@ import { getSetting } from "../settings"
 import { scratchDatabase } from "../test-db"
 import { setupVault } from "../vault"
 import {
+  assistantBounds,
+  EMPTY_PACING,
   pacingOverview,
   readPacingConfig,
+  resolveBrowserPolicy,
+  setAssistantPaceBounds,
   removePacingSite,
   resetPacingClasses,
   resolvePolicy,
@@ -19,7 +23,12 @@ import {
   setPacingSite,
   type PacingConfig,
 } from "./config"
-import { PACING_DEFAULTS, type PacingPolicy } from "./limits"
+import {
+  ASSISTANT_PACE_BOUNDS,
+  MAX_ASSISTANT_PACE_MS,
+  PACING_DEFAULTS,
+  type PacingPolicy,
+} from "./limits"
 
 // The owner's own pace: what a call follows (site, then server, then the
 // class, then PCP's default), the bounds held in core, and how it is kept.
@@ -55,6 +64,7 @@ describe("resolvePolicy", () => {
   const config: PacingConfig = {
     classes: { browser_act: CLASS, web_fetch: "unpaced" },
     servers: { browser1: SLOWER },
+    assistant: {},
     sites: [
       { host: "example.com", subdomains: true, pace: SLOW },
       { host: "shop.example.com", subdomains: false, pace: "unpaced" },
@@ -251,10 +261,147 @@ describe("the owner's pace", () => {
       },
     })
 
-    expect(await readPacingConfig(ctx)).toEqual({
-      classes: {},
+    expect(await readPacingConfig(ctx)).toEqual(EMPTY_PACING)
+  })
+
+  it("carries a newer PCP's classes and bounds through every write, and reads the rest", async () => {
+    const newer = {
+      classes: { browser_act: CLASS, browser_scroll: SLOW },
       servers: {},
       sites: [],
+      assistant: {
+        browser_act: { minMs: 20, maxMs: 900 },
+        browser_scroll: { minMs: 5, maxMs: 50 },
+      },
+    }
+    await db().setting.create({
+      data: {
+        vaultId: ctx.vaultId,
+        key: SETTING_PACING,
+        value: JSON.stringify(newer),
+      },
     })
+
+    const read = await readPacingConfig(ctx)
+    expect(read.classes).toEqual({ browser_act: CLASS })
+    expect(read.assistant).toEqual({ browser_act: { minMs: 20, maxMs: 900 } })
+
+    await setPacingSite(ctx, { site: "a.test", subdomains: false, pace: SLOW })
+    await setPacingClass(ctx, "web_fetch", CLASS)
+    await setAssistantPaceBounds(ctx, {
+      browser_navigate: { minMs: 300, maxMs: 4_000 },
+    })
+
+    const stored = JSON.parse((await getSetting(ctx, SETTING_PACING))!)
+    expect(stored.classes).toEqual({
+      browser_act: CLASS,
+      browser_scroll: SLOW,
+      web_fetch: CLASS,
+    })
+    expect(stored.assistant).toEqual({
+      browser_act: { minMs: 20, maxMs: 900 },
+      browser_navigate: { minMs: 300, maxMs: 4_000 },
+      browser_scroll: { minMs: 5, maxMs: 50 },
+    })
+    expect(stored.sites).toHaveLength(1)
+  })
+
+  it("keeps the rest of a value that names a class this PCP does not have", async () => {
+    await db().setting.create({
+      data: {
+        vaultId: ctx.vaultId,
+        key: SETTING_PACING,
+        value: JSON.stringify({
+          classes: { browser_act: CLASS, browser_scroll: CLASS },
+          servers: {},
+          sites: [],
+        }),
+      },
+    })
+
+    expect(await readPacingConfig(ctx)).toEqual({
+      ...EMPTY_PACING,
+      classes: { browser_act: CLASS },
+      unknown: { classes: { browser_scroll: CLASS }, assistant: {} },
+    })
+  })
+})
+
+describe("what assistants may set", () => {
+  it("is PCP's until the owner sets bounds of their own, each checked", async () => {
+    expect(assistantBounds(await readPacingConfig(ctx))).toEqual(
+      ASSISTANT_PACE_BOUNDS,
+    )
+
+    await setAssistantPaceBounds(ctx, {
+      browser_act: { minMs: 20, maxMs: 2_000 },
+    })
+    const config = await readPacingConfig(ctx)
+    expect(config.assistant).toEqual({
+      browser_act: { minMs: 20, maxMs: 2_000 },
+    })
+    expect(assistantBounds(config).browser_navigate).toEqual(
+      ASSISTANT_PACE_BOUNDS.browser_navigate,
+    )
+
+    await expect(
+      setAssistantPaceBounds(ctx, {
+        browser_navigate: { minMs: 900, maxMs: 100 },
+      }),
+    ).rejects.toThrow("the shortest wait comes first")
+    await expect(
+      setAssistantPaceBounds(ctx, {
+        browser_navigate: { minMs: 0, maxMs: MAX_ASSISTANT_PACE_MS + 1 },
+      }),
+    ).rejects.toThrow("between 0 and")
+
+    // PCP's own again: stored as none, so a better default reaches it.
+    await setAssistantPaceBounds(ctx, {
+      browser_act: { ...ASSISTANT_PACE_BOUNDS.browser_act },
+    })
+    expect(await getSetting(ctx, SETTING_PACING)).toBeNull()
+  })
+
+  it("puts a tab's or a wrapper's own pace before the server's and the class's, never below the owner's for the site", () => {
+    const config: PacingConfig = {
+      ...EMPTY_PACING,
+      classes: { browser_act: SLOWER },
+      servers: { browser1: SLOWER },
+      sites: [
+        { host: "slow.test", subdomains: false, pace: SLOW },
+        { host: "free.test", subdomains: false, pace: "unpaced" },
+      ],
+    }
+    const own = { minMs: 50, maxMs: 150 }
+
+    expect(
+      resolveBrowserPolicy(config, "browser_act", {
+        serverId: "browser1",
+        site: "other.test",
+        own,
+      }),
+    ).toEqual({ minIntervalMs: 50, jitterMs: 100, burst: null })
+    // The owner's pace for the site is a floor under it.
+    expect(
+      resolveBrowserPolicy(config, "browser_act", {
+        serverId: "browser1",
+        site: "slow.test",
+        own,
+      }),
+    ).toEqual({
+      minIntervalMs: SLOW.minIntervalMs,
+      jitterMs: SLOW.jitterMs,
+      burst: SLOW.burst,
+    })
+    expect(
+      resolveBrowserPolicy(config, "browser_act", { site: "free.test", own }),
+    ).toEqual({ minIntervalMs: 50, jitterMs: 100, burst: null })
+    // Without one, as resolvePolicy.
+    expect(
+      resolveBrowserPolicy(config, "browser_act", {
+        serverId: "browser1",
+        site: "other.test",
+      }),
+    ).toEqual(SLOWER)
   })
 })

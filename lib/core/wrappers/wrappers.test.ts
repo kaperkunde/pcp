@@ -41,7 +41,7 @@ import { setToolTier, toolTier, toolTierInfo } from "../tool-tiers"
 import { tierNotices } from "../owner-notices"
 import { keepBytes } from "../tool-results"
 import { setupVault } from "../vault"
-import { setPacingServer } from "../pacing/config"
+import { setAssistantPaceBounds, setPacingServer } from "../pacing/config"
 import { resetPacing, setPacingClock } from "../pacing/pace"
 import { EMPTY_CONFIG, saveResourceConfig } from "../resources/state"
 import {
@@ -53,7 +53,7 @@ import {
 } from "./definition"
 import { flowSites } from "./flow-sites"
 import { FLOW_RUN_TIMEOUT_MS, WRAPPER_RUN_TIMEOUT_MS } from "./limits"
-import { withWrappers, wrapperRunTimeout } from "./run"
+import { callPace, withWrappers, wrapperRunTimeout } from "./run"
 
 /** The run limits as tests set them; the real ones unless a test says. */
 const timeouts = vi.hoisted(() => ({
@@ -2241,5 +2241,178 @@ describe("a wrapper whose calls no longer fit", () => {
     } finally {
       await jmap.close()
     }
+  })
+})
+
+describe("a browser flow's own pace", () => {
+  beforeEach(async () => {
+    await createBrowserServer(ctx)
+  })
+
+  const PACE = {
+    actions: { min_ms: 100, max_ms: 300 },
+    tools: [{ tool: "click", min_ms: 80, max_ms: 120 }],
+  }
+
+  it("is part of the definition the owner approves, shown in full, and read back by get_wrapper", async () => {
+    const { view } = await approved([FLOW_TOOL], { pace: PACE })
+    const definition = readDefinition(
+      (await db().wrapperSpec.findFirstOrThrow()).definition,
+    )
+
+    expect(definition.pace).toEqual({
+      actions: { minMs: 100, maxMs: 300 },
+      tools: { click: { minMs: 80, maxMs: 120 } },
+    })
+    expect(view.lines.join("\n")).toContain(
+      "Its own pace for the browser calls its tools make, in place of yours (a site you paced yourself never goes faster): before actions in a page 0.1 to 0.3 s; before click 0.08 to 0.12 s",
+    )
+    expect(view.warning ?? "").not.toContain("pace")
+    expect(view.wrapper!.paceOutside).toBeUndefined()
+
+    const read = JSON.parse(
+      (await call("get_wrapper", { wrapper: "chat" })).text,
+    )
+    expect(read.pace).toEqual(PACE)
+  })
+
+  it("flags a pace outside what the owner lets assistants set, and only their yes allows it", async () => {
+    await setAssistantPaceBounds(ctx, {
+      browser_act: { minMs: 200, maxMs: 3_000 },
+    })
+    const { view } = await approved([FLOW_TOOL], { pace: PACE })
+
+    expect(view.wrapper!.paceOutside).toEqual([
+      "before actions in a page 0.1 to 0.3 s (assistants may set 0.2 to 3 s)",
+      "before click 0.08 to 0.12 s (assistants may set 0.2 to 3 s for actions in a page)",
+    ])
+    expect(view.warning).toContain(
+      "Its pace goes past what you let assistants set without asking",
+    )
+    // The owner said yes on that page: it is the wrapper's.
+    expect(
+      readDefinition((await db().wrapperSpec.findFirstOrThrow()).definition)
+        .pace?.actions,
+    ).toEqual({ minMs: 100, maxMs: 300 })
+  })
+
+  it("refuses a pace for a tool the browser does not have", async () => {
+    const unknown = await call("create_wrapper", {
+      name: "Chat",
+      tools: [FLOW_TOOL],
+      pace: { tools: [{ tool: "zoom", min_ms: 100, max_ms: 200 }] },
+    })
+    expect(unknown.isError).toBe(true)
+    expect(unknown.text).toContain("zoom is not a browser tool")
+  })
+
+  it("holds a download's own pace to the bounds of opening a page too, as one by address opens one", async () => {
+    const { view } = await approved([FLOW_TOOL], {
+      pace: { tools: [{ tool: "download", min_ms: 60, max_ms: 100 }] },
+    })
+
+    expect(view.wrapper!.paceOutside).toEqual([
+      "before download 0.06 to 0.1 s (assistants may set 0.15 to 10 s for opening a page)",
+    ])
+  })
+
+  it("refuses a pace for a tool that is never paced, and one whose shortest wait is past its longest", async () => {
+    const reading = await call("create_wrapper", {
+      name: "Chat",
+      tools: [FLOW_TOOL],
+      pace: { tools: [{ tool: "snapshot", min_ms: 0, max_ms: 10 }] },
+    })
+    expect(reading.isError).toBe(true)
+    expect(reading.text).toContain(
+      "snapshot is not a browser tool that is paced",
+    )
+
+    const inverted = await call("create_wrapper", {
+      name: "Chat",
+      tools: [FLOW_TOOL],
+      pace: { navigations: { min_ms: 900, max_ms: 100 } },
+    })
+    expect(inverted.isError).toBe(true)
+    expect(inverted.text).toContain("the shortest wait comes first")
+    expect(await db().permissionRequest.count()).toBe(0)
+  })
+
+  it("keeps the pace on a change that leaves it out, shows a new one, and takes it out with null", async () => {
+    await approved([FLOW_TOOL], { pace: PACE })
+    const definition = async () =>
+      readDefinition((await db().wrapperSpec.findFirstOrThrow()).definition)
+    const change = async (args: Record<string, unknown>) => {
+      const asked = await call("update_wrapper", { wrapper: "chat", ...args })
+      expect(asked.text, asked.text).toContain("Not done yet")
+      const row = await newestRequest()
+      const view = await getPermissionView(ctx, row.id, {
+        publicUrl: PUBLIC_URL,
+      })
+      await decidePermission(ctx, row.id, "allow_once", {
+        publicUrl: PUBLIC_URL,
+      })
+      return view!
+    }
+
+    await change({ description: "The chat, quicker." })
+    expect((await definition()).pace?.tools).toEqual({
+      click: { minMs: 80, maxMs: 120 },
+    })
+
+    const quicker = await change({
+      pace: { navigations: { min_ms: 300, max_ms: 600 } },
+    })
+    expect(quicker.lines.join("\n")).toContain(
+      "New pace for the browser calls its tools make, in place of yours (a site you paced yourself never goes faster): before opening a page 0.3 to 0.6 s (was: before actions in a page 0.1 to 0.3 s; before click 0.08 to 0.12 s)",
+    )
+    expect((await definition()).pace).toEqual({
+      navigations: { minMs: 300, maxMs: 600 },
+    })
+
+    const gone = await change({ pace: null })
+    expect(gone.lines.join("\n")).toContain("Its own pace goes")
+    expect((await definition()).pace).toBeUndefined()
+  })
+})
+
+describe("the pace of a wrapper's call", () => {
+  const browser = { kind: "browser" }
+  const declared = {
+    actions: { minMs: 100, maxMs: 300 },
+    tools: { click: { minMs: 80, maxMs: 120 } },
+  }
+  const pace = (
+    tool: string,
+    args: Record<string, unknown>,
+    asked?: { min_ms: number; max_ms: number },
+    target: { kind: string } = browser,
+    own: typeof declared | undefined = declared,
+  ) =>
+    callPace(target as never, tool, args, own, asked, `browser/${tool}`, "post")
+
+  it("is the tool's own, else its kind's, else none", () => {
+    expect(pace("click", {})).toEqual({ pace: { minMs: 80, maxMs: 120 } })
+    expect(pace("type", {})).toEqual({ pace: { minMs: 100, maxMs: 300 } })
+    expect(pace("navigate", {})).toEqual({ pace: null })
+    expect(pace("type", {}, undefined, browser, {} as never)).toEqual({
+      pace: null,
+    })
+  })
+
+  it("takes the program's pick only within the wrapper's own", () => {
+    expect(pace("type", {}, { min_ms: 150, max_ms: 200 })).toEqual({
+      pace: { minMs: 150, maxMs: 200 },
+    })
+    expect(pace("click", {}, { min_ms: 50, max_ms: 100 })).toMatchObject({
+      refused: expect.stringContaining("outside the one its wrapper declares"),
+    })
+    expect(pace("navigate", {}, { min_ms: 500, max_ms: 600 })).toMatchObject({
+      refused: expect.stringContaining("declares no pace for browser/navigate"),
+    })
+    expect(
+      pace("echo", {}, { min_ms: 150, max_ms: 200 }, { kind: "openapi" }),
+    ).toMatchObject({
+      refused: expect.stringContaining("is for the browser's calls"),
+    })
   })
 })

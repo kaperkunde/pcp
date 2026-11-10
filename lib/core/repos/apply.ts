@@ -115,6 +115,7 @@ export function wrapperInput(document: WrapperDocument): WrapperInput {
     name: document.displayName,
     description: document.description,
     callLevels: document.callLevels,
+    pace: document.pace ?? null,
     tools: document.tools.map((tool) => ({
       name: tool.name,
       title: tool.title,

@@ -240,14 +240,18 @@ password gives its try back, since it is no guess and only someone who knows
 it can type it, so you never lock yourself out by signing in. Recovery keys
 and export passwords are counted the same way, each on its own, and Touch ID
 has a budget of its own rather than spending the password's. scrypt makes
-each guess expensive. The address is the one the proxy in front of PCP
-reports (`X-Forwarded-For`), which a client reaching port 3000 directly can
-set to anything; the 60 for the whole instance holds either way. PCP takes
-the right-most address in that header: the one the proxy in front of PCP
-appended, or the only one behind a proxy that replaces the header. Behind
-more than one proxy, set `PCP_TRUSTED_PROXIES` to your proxies' addresses,
-and PCP reads the header from the right, past them and loopback, to the
-client they saw (see
+each guess expensive. The address is the one that connected to PCP,
+unless that is a proxy: PCP's server stamps the connecting address on every
+request itself (a client's own stamp is removed), and reads `X-Forwarded-For`
+only from loopback or from an address in `PCP_TRUSTED_PROXIES`. A client that
+reaches port 3000 directly cannot choose its own address that way. A proxy PCP
+was not told about is counted as one address for all its clients (the 60 for
+the whole instance holds either way), and PCP says so once in its log. Behind
+a reverse proxy, set `PCP_TRUSTED_PROXIES` to its own address, or the
+subnet of the Docker network you share with it, and keep port 3000 reachable
+from your proxies alone: PCP then
+reads the header from the right, past your proxies and loopback, to the client
+they saw (see
 [docs/self-hosting.md](docs/self-hosting.md#i-already-have-a-proxy)). The counts
 are kept in memory, so a restart starts them again.
 

@@ -1,6 +1,11 @@
 import type { PasswordRecipe, ToolAccess } from "../constants"
 import type { FetchArgs } from "../fetch/request"
 import type { ServiceUpdateAsk } from "../services/updates"
+import type {
+  BrowserPace,
+  BrowserPacingClass,
+  PaceRange,
+} from "../pacing/limits"
 
 /**
  * What the rest of PCP knows about the browser without loading it: a tab
@@ -161,6 +166,23 @@ export type ScriptUseAsk = {
   script: string
 }
 
+/**
+ * An assistant's pace for one tab (tabs, action pace) outside what the
+ * owner lets assistants set without asking (lib/core/pacing/): the tab,
+ * the pace, and the owner's bounds then. Allowed, it applies to that tab
+ * only, while it is open; it never changes the owner's pacing settings.
+ */
+export type TabPaceAsk = {
+  serverId: string
+  tabId: string
+  url: string
+  title: string
+  pace: BrowserPace
+  /** The classes outside the bounds. */
+  outside: BrowserPacingClass[]
+  bounds: Record<BrowserPacingClass, PaceRange>
+}
+
 export type BrowserAsk =
   | { kind: "browse"; input: BrowseAsk }
   | { kind: "browser_handover"; input: HandoverAsk }
@@ -169,6 +191,7 @@ export type BrowserAsk =
   | { kind: "secret_sites_change"; input: SecretSitesChangeAsk }
   | { kind: "exit_use"; input: ExitUseAsk }
   | { kind: "script_use"; input: ScriptUseAsk }
+  | { kind: "tab_pace"; input: TabPaceAsk }
 
 /** Where a call types a secret: what upstream.ts is told when it is typed. */
 export type SecretUseContext = {

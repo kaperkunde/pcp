@@ -176,6 +176,7 @@ export type PermissionKind =
   | "secret_sites_change"
   | "exit_use"
   | "script_use"
+  | "tab_pace"
   | "wrapper_change"
   | "skill_change"
   | "repo_change"

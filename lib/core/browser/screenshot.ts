@@ -4,6 +4,8 @@ import { MAX_ANSWER_IMAGE_CHARS } from "../answers"
 import { PcpError } from "../errors"
 import {
   ACTION_TIMEOUT_MS,
+  MAX_FULL_PAGE_HEIGHT,
+  MAX_FULL_PAGE_WIDTH,
   MAX_SCREENSHOT_BYTES,
   SCREENSHOT_QUALITIES,
   SCREENSHOT_SCALED_QUALITY,
@@ -83,33 +85,69 @@ export async function fitPicture(
 
 type Area = { x: number; y: number; width: number; height: number }
 
-async function viewport(tab: Tab) {
-  const metrics = await bounded(
+async function layout(tab: Tab) {
+  return bounded(
     tab.cdp.send("Page.getLayoutMetrics"),
     ACTION_TIMEOUT_MS,
     "page.screenshot",
   )
-  return metrics.cssVisualViewport
 }
 
 /**
- * The tab's viewport, or the part of an element that shows in it (scrolled
- * into view first), as a picture that fits; null when the element shows
- * nowhere on the page.
+ * The area full_page takes: the whole page from its top left, as its
+ * content size says, held to MAX_FULL_PAGE_WIDTH and MAX_FULL_PAGE_HEIGHT;
+ * `cut` when the page goes on past that.
+ */
+export function fullPageArea(content: { width: number; height: number }): {
+  area: Area
+  cut: boolean
+} {
+  const width = Math.max(1, Math.ceil(content.width))
+  const height = Math.max(1, Math.ceil(content.height))
+
+  return {
+    area: {
+      x: 0,
+      y: 0,
+      width: Math.min(width, MAX_FULL_PAGE_WIDTH),
+      height: Math.min(height, MAX_FULL_PAGE_HEIGHT),
+    },
+    cut: width > MAX_FULL_PAGE_WIDTH || height > MAX_FULL_PAGE_HEIGHT,
+  }
+}
+
+/**
+ * The tab's viewport, the whole page (`fullPage`, from its top, as far as
+ * fullPageArea goes), or the part of an element that shows in the viewport
+ * (scrolled into view first), as a picture that fits; null when the element
+ * shows nowhere on the page.
  */
 export async function takePicture(
   tab: Tab,
   {
     element,
+    fullPage = false,
     maxWidth,
     quality,
-  }: { element?: Locator; maxWidth?: number; quality?: number },
+  }: {
+    element?: Locator
+    fullPage?: boolean
+    maxWidth?: number
+    quality?: number
+  },
 ): Promise<
   | (Picture & {
       width: number
       height: number
-      /** Where its top left is in the viewport, in CSS pixels. */
+      /**
+       * Where its top left is in the viewport, in CSS pixels; for the whole
+       * page, where the viewport's top left is in it, negated.
+       */
       origin: { x: number; y: number }
+      /** The whole page: taken from the page's top, not the viewport. */
+      fullPage: boolean
+      /** The whole page went on past what full_page takes. */
+      cut: boolean
     })
   | null
 > {
@@ -119,13 +157,19 @@ export async function takePicture(
       .catch(() => {})
   }
 
-  const view = await viewport(tab)
+  const metrics = await layout(tab)
+  const view = metrics.cssVisualViewport
   // Document coordinates, as the protocol takes them.
   let area: Area = {
     x: view.pageX,
     y: view.pageY,
     width: view.clientWidth,
     height: view.clientHeight,
+  }
+  let cut = false
+
+  if (fullPage) {
+    ;({ area, cut } = fullPageArea(metrics.cssContentSize))
   }
 
   if (element) {
@@ -159,6 +203,7 @@ export async function takePicture(
         format: "jpeg",
         quality: shot.quality,
         clip: { ...area, scale: shot.scale },
+        ...(fullPage ? { captureBeyondViewport: true } : {}),
       }),
       ACTION_TIMEOUT_MS,
       "page.screenshot",
@@ -171,5 +216,7 @@ export async function takePicture(
     width: Math.round(area.width * picture.scale),
     height: Math.round(area.height * picture.scale),
     origin: { x: area.x - view.pageX, y: area.y - view.pageY },
+    fullPage,
+    cut,
   }
 }

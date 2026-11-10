@@ -1,14 +1,22 @@
 import type { VaultContext } from "../context"
 import { markedReadOnly } from "../read-only"
-import { readPacingConfig, resolvePolicy } from "./config"
+import { readPacingConfig, resolveBrowserPolicy, resolvePolicy } from "./config"
 import {
   PACING_CALL_WAIT_MS,
   PACING_DEADLINE_MARGIN_MS,
+  PACING_MAX_WAIT_MS,
   pacingOff,
-  UNPACED_BROWSER_TOOLS,
+  type BrowserPacingClass,
+  type PaceRange,
   type PacingClass,
 } from "./limits"
-import { pacingNow, waitForSlot, type PacedRefusal } from "./pace"
+import {
+  pacingNow,
+  takeTurn,
+  waitForSlot,
+  type PacedRefusal,
+  type Turn,
+} from "./pace"
 
 /**
  * One pacing for everything an assistant does (limits.ts says why), applied
@@ -16,7 +24,8 @@ import { pacingNow, waitForSlot, type PacedRefusal } from "./pace"
  * embeddings requests (paceEmbeddings): upstream.ts
  * callServerTool for a server's tools (execute_<tier>, run_<tier>'s
  * pcp.call, a wrapper's calls, a call the owner allowed; the
- * browser's actions are paced inside browser/call.ts by the tab's site),
+ * browser's actions are paced inside browser/call.ts by the tab's site,
+ * as a turn taken on the tab's lane: paceBrowserTurn),
  * and web fetch's request path (fetch/fetch.ts each request and redirect,
  * web-fetch.ts the read through the browser). Each answers null when the
  * action may go, after waiting for its turn, or a refusal (pacedResult
@@ -30,8 +39,13 @@ import { pacingNow, waitForSlot, type PacedRefusal } from "./pace"
  * deadline less PACING_DEADLINE_MARGIN_MS, and never past its signal.
  */
 
-export type { PacingClass } from "./limits"
-export { pacedResult, pacedRetryAfter, type PacedRefusal } from "./pace"
+export type { BrowserPacingClass, PacingClass } from "./limits"
+export {
+  pacedResult,
+  pacedRetryAfter,
+  type PacedRefusal,
+  type Turn,
+} from "./pace"
 
 /** The options every pacing call takes. */
 export type PaceOptions = {
@@ -124,13 +138,61 @@ export async function paceEmbeddings(
 }
 
 /**
- * An action on a site: a web fetch request, or a browser action on the
- * tab's site (the browser's own server id given, for its override).
+ * The deadline a browser action's turn waits to: the caller's, but never
+ * past PACING_MAX_WAIT_MS from now, as the turn is waited for while the
+ * call holds its tab (browser/limits.ts PACED_TURN_WAIT_MS).
  */
+export function browserTurnDeadline(deadline: number | undefined): number {
+  const most = pacingNow() + PACING_MAX_WAIT_MS + PACING_DEADLINE_MARGIN_MS
+  return deadline === undefined ? most : Math.min(deadline, most)
+}
+
+/** A turn that holds nothing back: pacing is off, or the site unpaced. */
+const NO_TURN: Turn = { release: () => {} }
+
+/**
+ * A browser action's turn at its site (browser/call.ts, on the tab's lane,
+ * right before the action): one action at a site at a time, across its
+ * tabs, each after the previous one ended and its pause went by (takeTurn).
+ * `own` is the action's own pace: its tab's, else its wrapper's
+ * (resolveBrowserPolicy). Release it when the action is done.
+ */
+export async function paceBrowserTurn(
+  ctx: VaultContext,
+  host: string,
+  pacingClass: BrowserPacingClass,
+  {
+    serverId,
+    own,
+    signal,
+    deadline,
+  }: PaceOptions & { serverId?: string; own?: PaceRange | null } = {},
+): Promise<PacedRefusal | Turn> {
+  if (pacingOff() || !host) {
+    return NO_TURN
+  }
+
+  const policy = resolveBrowserPolicy(
+    await readPacingConfig(ctx),
+    pacingClass,
+    { site: host, serverId, own },
+  )
+
+  if (!policy) {
+    return NO_TURN
+  }
+
+  return takeTurn(siteKey(ctx.vaultId, host), host, policy, {
+    signal,
+    deadline,
+  })
+}
+
+/** A web fetch request to a site. */
 export async function paceSite(
   ctx: VaultContext,
   host: string,
-  pacingClass: Extract<PacingClass, "browser_act" | "web_fetch">,
+  pacingClass: Extract<PacingClass, "web_fetch">,
   { serverId, signal, deadline }: PaceOptions & { serverId?: string } = {},
 ): Promise<PacedRefusal | null> {
   if (pacingOff() || !host) {
@@ -152,7 +214,4 @@ export async function paceSite(
   })
 }
 
-/** Whether a browser tool is paced: the ones that act on the page. */
-export function browserToolPaced(toolName: string): boolean {
-  return !UNPACED_BROWSER_TOOLS.has(toolName)
-}
+export { browserPacingClass } from "./limits"

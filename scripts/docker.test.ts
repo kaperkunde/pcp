@@ -322,3 +322,97 @@ describe("the images' signatures", () => {
     )
   })
 })
+
+// The app's own server entries stamp the connecting address into x-pcp-peer
+// before Next handles a request (docker/peer-stamp.cjs), so a client cannot
+// name itself and lib/server/client-ip.ts can tell a proxy from a client.
+describe("the peer stamp", () => {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const { stampPeer, install } = require("../docker/peer-stamp.cjs") as {
+    stampPeer: (
+      req: {
+        headers: Record<string, string>
+        socket: { remoteAddress?: string }
+      },
+      name: string,
+    ) => void
+    install: (http: typeof import("node:http")) => void
+  }
+
+  it("overwrites a header the client sent with the socket's address", () => {
+    const req = {
+      headers: { "x-pcp-peer": "6.6.6.6" },
+      socket: { remoteAddress: "172.18.0.2" },
+    }
+
+    stampPeer(req, "x-pcp-peer")
+    expect(req.headers["x-pcp-peer"]).toBe("172.18.0.2")
+  })
+
+  it("stamps a sentinel, never nothing, when the socket has no address", () => {
+    const req = { headers: { "x-pcp-peer": "6.6.6.6" }, socket: {} }
+
+    stampPeer(req, "x-pcp-peer")
+    expect(req.headers["x-pcp-peer"]).toBe("unknown")
+  })
+
+  it("marks only the requests whose client sent forwarded headers", () => {
+    const sent = (headers: Record<string, string>) => {
+      const req = { headers, socket: { remoteAddress: "192.168.1.5" } }
+
+      stampPeer(req, "x-pcp-peer")
+      // What Next does next (base-server.js): fills it from the socket.
+      req.headers["x-forwarded-for"] ??= req.socket.remoteAddress
+
+      return req.headers["x-pcp-forwarded"]
+    }
+
+    expect(sent({})).toBeUndefined()
+    expect(sent({ "x-pcp-forwarded": "1" })).toBeUndefined()
+    expect(sent({ "x-forwarded-for": "6.6.6.6" })).toBe("1")
+    expect(sent({ "x-real-ip": "6.6.6.6" })).toBe("1")
+  })
+
+  it("stamps every request a Node http server handles", async () => {
+    const http = await import("node:http")
+    const seen = await new Promise<string | undefined>((resolve) => {
+      install(http)
+      const server = http.createServer((req, res) => {
+        res.end()
+        server.close()
+        resolve(req.headers["x-pcp-peer"] as string | undefined)
+      })
+
+      server.listen(0, "127.0.0.1", () => {
+        const { port } = server.address() as { port: number }
+
+        http.get(
+          { port, host: "127.0.0.1", headers: { "x-pcp-peer": "6.6.6.6" } },
+          (res) => res.resume(),
+        )
+      })
+    })
+
+    expect(seen).toBe("127.0.0.1")
+  })
+
+  it("is wired into the image and the desktop's staged server", () => {
+    const dockerfile = readFileSync(path.join(root, "Dockerfile"), "utf8")
+    const start = readFileSync(path.join(root, "docker/start.cjs"), "utf8")
+    const entry = readFileSync(
+      path.join(root, "desktop/server-entry.cjs"),
+      "utf8",
+    )
+    const stage = readFileSync(
+      path.join(root, "desktop/scripts/stage.mjs"),
+      "utf8",
+    )
+    const main = readFileSync(path.join(root, "desktop/main.mjs"), "utf8")
+
+    expect(dockerfile).toContain("COPY docker/peer-stamp.cjs ./peer-stamp.cjs")
+    expect(start).toContain('require("./peer-stamp.cjs")')
+    expect(entry).toContain('require("./peer-stamp.cjs")')
+    expect(stage).toContain("peer-stamp.cjs")
+    expect(main).toContain("server-entry.cjs")
+  })
+})
