@@ -6,6 +6,7 @@ import { generateDek } from "../crypto"
 import { db } from "../db"
 import { createServer } from "../servers"
 import { scratchDatabase } from "../test-db"
+import { keepBytes, openResult } from "../tool-results"
 import { setupVault } from "../vault"
 import {
   readDuplicateCalls,
@@ -138,6 +139,98 @@ describe("guardCall", () => {
       "ticket" in
         (await guardCall(scope(), target(), {}, { again: AGAIN, now: later })),
     ).toBe(true)
+  })
+
+  it("holds back the later of two identical calls whatever times they took", async () => {
+    const now = Date.now()
+    // The second took its time before the first, then got in after it.
+    const first = await guardCall(
+      scope(),
+      target(),
+      { to: "Ada" },
+      {
+        again: AGAIN,
+        now: new Date(now + 5),
+      },
+    )
+    const second = await guardCall(
+      scope(),
+      target(),
+      { to: "Ada" },
+      {
+        again: AGAIN,
+        now: new Date(now),
+      },
+    )
+
+    expect("ticket" in first).toBe(true)
+    expect("duplicate" in second).toBe(true)
+    expect(await db().callRecord.count()).toBe(1)
+  })
+
+  it("says to make it again when what it acts on changed in between", async () => {
+    const made = await guardCall(scope(), target(), {}, { again: AGAIN })
+    await endCall("ticket" in made ? made.ticket : null, {
+      status: "succeeded",
+    })
+
+    const again = await guardCall(scope(), target(), {}, { again: AGAIN })
+    expect("duplicate" in again && again.duplicate).toContain(
+      "If what it acts on changed since (you turned something off and on again), make it again with a reason.",
+    )
+  })
+
+  it("answers with a short answer itself and a long one's kept result, and keeps nothing else", async () => {
+    const file = await keepBytes(ctx, {
+      tokenId,
+      serverId: null,
+      toolName: "get_file",
+      bytes: Buffer.from("a file"),
+      mediaType: "application/octet-stream",
+      name: "a.bin",
+    })
+
+    // More successes than a token keeps results: none pushes the file out.
+    for (let i = 0; i < 301; i++) {
+      const made = await guardCall(scope(), target(), { i }, { again: AGAIN })
+      await endCall("ticket" in made ? made.ticket : null, {
+        status: "succeeded",
+        answer: { text: `sent ${i}`, mediaType: "text/plain" },
+      })
+    }
+    expect(await openResult(ctx, { tokenId, id: file.id })).not.toBeNull()
+    expect(await db().toolResult.count()).toBe(1)
+
+    const short = await guardCall(scope(), target(), { i: 7 }, { again: AGAIN })
+    expect("duplicate" in short && short.duplicate).toContain(
+      "It answered:\nsent 7",
+    )
+
+    const long = await guardCall(
+      scope(),
+      target(),
+      { long: 1 },
+      { again: AGAIN },
+    )
+    await endCall("ticket" in long ? long.ticket : null, {
+      status: "succeeded",
+      answer: {
+        text: `${"x".repeat(5_000)}\n… (PCP kept the whole answer: 9,000 characters as result ${file.id}, readable until 2026-11-11T00:00:00.000Z.)`,
+        mediaType: "text/plain",
+      },
+    })
+    const repeated = await guardCall(
+      scope(),
+      target(),
+      { long: 1 },
+      {
+        again: AGAIN,
+      },
+    )
+    expect("duplicate" in repeated && repeated.duplicate).toContain(
+      `{"$result": "${file.id}"}`,
+    )
+    expect("duplicate" in repeated && repeated.duplicate).not.toContain("xxxxx")
   })
 
   it("says a call still marked running long after it started may have happened", async () => {

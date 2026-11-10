@@ -2093,6 +2093,32 @@ describe("the same call again (#115)", () => {
     expect(ran).toHaveLength(0)
   })
 
+  it("holds back the third call once the owner's allow-once answer was used", async () => {
+    const asked = await callTool("send_postcard", { to: "Grace" })
+    expect(asked.text).toContain("Not done yet")
+    const request = await db().permissionRequest.findFirstOrThrow()
+    await decidePermission(
+      ctx,
+      request.id,
+      "allow_once",
+      { publicUrl: PUBLIC_URL },
+      executor,
+    )
+    expect(ran).toHaveLength(1)
+
+    // The second is answered with that run, by the permission flow.
+    const second = await callTool("send_postcard", { to: "Grace" })
+    expect(second.text).toContain("it already ran")
+    expect(ran).toHaveLength(1)
+
+    // The third neither runs nor asks the owner again unaware.
+    const third = await callTool("send_postcard", { to: "Grace" })
+    expect(third.code).toBe("duplicate_call")
+    expect(third.text).toContain("The owner allowed it and it ran")
+    expect(await db().permissionRequest.count()).toBe(1)
+    expect(ran).toHaveLength(1)
+  })
+
   it("holds back a program's pcp.call made again, as an error it may catch", async () => {
     await callTool("archive", { id: 7 })
 
