@@ -2408,7 +2408,8 @@ run_code cannot learn in time that nobody is waiting. It does not try to:
   id, state and calls instead of running again; `rerun: true` runs it all
   the same. A run that stopped for the owner is not held to this: its
   answer says to check on the owner's next message and to run it again
-  once they allowed the call.
+  once they allowed the call. The program's calls that change things are
+  held to the call guard all the same ("The same call twice", below).
 
 A wrapper's run reports the same way but does not outlive its call: it
 stops when its request goes away, as before.
@@ -4368,6 +4369,60 @@ the request's page with what the owner left there. A wrapper tool's row
 keeps the tier its calls came to when the owner chose (`seen_tier`); the
 header's bell names one whose calls come to more since and whose choice is
 below them (`owner-notices.ts tierNotices`), until the owner chooses again.
+
+### The same call twice
+
+An assistant sometimes makes a call that changes things again: it lost the
+answer, a run timed out, it retried out of caution. So a Write or
+Destructive call is remembered for a while (`lib/core/calls/guard.ts`, a
+`call_record` row: token, server id, tool, tier, status, times, the kept
+result of its answer and the permission request it made), and the same
+call (server, tool and arguments as checked and renamed) made again by the
+same token within the window (`DUPLICATE_CALL_MS`, 30 minutes, in
+`calls/limits.ts`) is not run. It is answered as a tool error with code
+`duplicate_call` saying how the first went: still running, succeeded (with
+its answer kept as a result for the token, a handle to read), failed (the
+tool answered an error, so most likely nothing happened), failed on its way
+(`MAY_HAVE_GONE_THROUGH`), or asking the owner (its request and
+`check_permission`). A call still marked running past `STALE_RUNNING_MS`
+never reported back and may have happened. A call that came to nothing
+(paced, refused, a server to connect, an ask the owner declined or let
+expire) is forgotten. The same tool with other arguments is only noted in
+the answer.
+
+The arguments are never stored: `args_hash` is an HMAC under a key derived
+from the vault key ("pcp call record v1", `keyedHash` in `crypto.ts`), so
+the table confirms no guess without it. Rows are not exported, go in
+`wipeVault`, and the cleanup removes them once past the longest window an
+owner may set (`CALL_RECORD_KEEP_MS`).
+
+The guard sits where a call is resolved, after its arguments are checked
+and before it asks or runs: `gateway.ts callResolved` for
+`call_tool_write` and `call_tool_destructive`, `forwardCall` for
+run_code's `pcp.call`, and `wrappers/run.ts innerCall` for a wrapper's
+calls; never in `upstream.ts`, so a call the owner allowed on PCP's page
+(and a wrapper's calls in a run the owner allowed) is not guarded. Not
+guarded either: Read tools (by `effectiveTier`), the browser, SSH's
+`run_command`, stores (PCP's own store tools, which have no rerun, and the
+stores' tools: a repeat fails or does the same), a capability tool's calls
+to its provider, and tools the owner exempted. An ask-level call leaves its
+repeats to the permission flow (the same request, or the answer of the run
+the owner allowed once) and is held back only by a call that ran.
+
+An assistant repeats a call on purpose with `rerun: true` and a `reason`
+(required with it, under `allOf`) on `call_tool_write` and
+`call_tool_destructive`, or `{ rerun: true, reason }` in `pcp.call`'s
+options (`--rerun REASON` and `rerun=True, reason=…` in the sandbox). The
+request log notes `rerun` on the call's line; the reason is the assistant's
+own words and stays out, as arguments do. A wrapper's tool repeated so
+repeats the calls its program makes (`asRerun`). run_code's own `rerun`
+is the program's duplicate guard (`DUPLICATE_RUN_MS`, in memory, below)
+and does not reach its calls: a program run again after it stopped for the
+owner meets `duplicate_call` on the calls that already ran.
+
+The owner's own windows are the vault's `duplicateCalls` setting
+(`calls/config.ts`): per tool, by server id and name, minutes between 1 and
+24 hours, or `exempt`.
 
 ### Call handles
 

@@ -186,6 +186,14 @@ and these tools:
 | `register_server`       | Proposes a new MCP server, an API from an OpenAPI 3 schema, a mail account (JMAP or IMAP) or a calendar account (CalDAV), with no auth, a secret by name, a user name and password, or OAuth; or another server of one it sees (`definition`), with a note for you to keep. |
 | `propose_tool_access`   | Proposes which tools its token may run, many at once and across servers, and hears which tools would change; you review and save it in PCP.                                                                                                                                 |
 
+A Write or Destructive call an assistant makes again with the same
+arguments within half an hour (from `call_tool_*`, a program's `pcp.call` or
+a wrapper) is not run twice: PCP answers with how the first one went (still
+running, done and its answer, failed, or waiting for you), and runs it again
+only when the assistant says it means to, with a reason (`rerun`). The log
+marks such a repeat. Read tools, the browser, SSH commands, stores and calls
+you allowed on PCP's page are not held back.
+
 Options on a token's page, each off until you tick it, add more tools,
 described further down:
 

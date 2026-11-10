@@ -6,6 +6,23 @@ release, with a note in front of the answer ("addPatches was renamed to
 add_patches; use add_patches."); after that it is refused like any other
 unknown key.
 
+## The same Write or Destructive call twice is answered, not run
+
+No tool or argument was renamed. A Write or Destructive call made again by
+the same token with the same server, tool and arguments within 30 minutes
+(the owner can change that per tool, or turn it off) is no longer run a
+second time: `call_tool_write` and `call_tool_destructive` answer a tool
+error with code `duplicate_call` saying how the first call went, and a
+program's `pcp.call` (run_code, a wrapper) throws an Error with that code.
+To make it again on purpose, pass `rerun: true` with a `reason` on
+`call_tool_write`/`call_tool_destructive`, or `{ rerun: true, reason }` in
+`pcp.call`'s options (`--rerun REASON` for the sandbox's `pcp call`,
+`rerun=True, reason=…` in Python). A program run again after it stopped
+for the owner meets `duplicate_call` on the calls that already ran: leave
+them out of the program or catch the error. Read tools, the browser, SSH's
+`run_command`, stores and calls the owner allowed on PCP's page are not
+guarded.
+
 ## Services: an MCP server a service registers can send a secret header
 
 No tool or argument was renamed. A service's definition (`register_server`

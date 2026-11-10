@@ -178,6 +178,19 @@ async function populate() {
   // The owner's tier for a tool, kept apart from its row.
   await setToolTier(ctx, server.id, "alpha", "read")
   await setSetting(ctx, SETTING_PUBLIC_URL, "https://pcp.example")
+  // A call the duplicate guard remembers.
+  await db().callRecord.create({
+    data: {
+      vaultId,
+      tokenId,
+      id: "call1",
+      serverId: server.id,
+      toolName: "alpha",
+      argsHash: "h",
+      tier: "write",
+      status: "succeeded",
+    },
+  })
   // A search vector cached for the owner's embeddings provider.
   await db().embeddingVector.create({
     data: {
@@ -213,6 +226,7 @@ describe("deleteVault", { timeout: 30_000 }, () => {
     expect(before.repo_item).toBe(1)
     expect(before.secret_browser_origin).toBe(1)
     expect(before.api_token_secret_allowance).toBe(1)
+    expect(before.call_record).toBe(1)
     expect(before.server_definition).toBe(1)
     expect(before.service_spec).toBe(1)
     expect(before.storage_root).toBe(1)

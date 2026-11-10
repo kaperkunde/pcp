@@ -169,12 +169,17 @@ def _paths(value):
     return list(value)
 
 
-def call(server, tool, args=None, *, fields=None, decode=None, keep=None):
-    """Runs a tool and returns its answer: the parsed JSON, or the text."""
+def call(server, tool, args=None, *, fields=None, decode=None, keep=None, rerun=False, reason=None):
+    """Runs a tool and returns its answer: the parsed JSON, or the text.
+    rerun=True with a reason makes a call again that PCP would otherwise
+    answer with how the same call went a little while ago."""
     payload = {"server": server, "tool": tool, "args": {} if args is None else args}
     for name, value in (("fields", fields), ("decode", decode), ("keep", keep)):
         if value is not None:
             payload[name] = _paths(value)
+    if rerun:
+        payload["rerun"] = True
+        payload["reason"] = reason
     return _ask("call", payload)
 
 
@@ -359,6 +364,7 @@ def frames(handle, *, at=None, every=None, count=None, max_width=None):
 
 USAGE = """usage:
   pcp call SERVER TOOL [ARGS_JSON | -] [--fields A,B] [--decode A] [--keep A]
+           [--rerun REASON]
   pcp read [--base64 | --bytes] HANDLE_OR_ID
   pcp keep [--name NAME] [--type TYPE] [--bytes] [FILE]
   pcp tools [SERVER]
@@ -407,7 +413,10 @@ def main(argv=None):
         command, argv = argv[0], argv[1:]
 
         if command == "call":
-            rest, options = _options(argv, {"fields", "decode", "keep"})
+            rest, options = _options(argv, {"fields", "decode", "keep", "rerun"})
+            if "rerun" in options:
+                options["reason"] = options.pop("rerun")
+                options["rerun"] = True
             if len(rest) not in (2, 3):
                 raise PcpError(USAGE)
             text = rest[2] if len(rest) == 3 else "{}"

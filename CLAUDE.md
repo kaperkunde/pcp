@@ -579,7 +579,8 @@ embeddingProvider`, which hands `embeddings/provider.ts` the header;
   HTTP.
 - The request log (`lib/core/request-log.ts`) is a token's calls by name:
   tool, server, upstream tool, time, outcome, the permission request an
-  ask made, and for a secret the browser typed, its name and the origin.
+  ask made, whether it was a repeat the assistant confirmed (`rerun`, never
+  its reason), and for a secret the browser typed, its name and the origin.
   Never arguments, results, other sites or a secret's value; the Log page
   (`lib/core/activity.ts`) reads only the vault's own lines. A new way a call
   can ask the owner calls `noteOwnerAsked`. The cleanup
@@ -587,6 +588,17 @@ embeddingProvider`, which hands `embeddings/provider.ts` the header;
   credential and reads nothing it deletes; its schedule is refused if it
   leaves more than a day between runs. Anything new that PCP keeps only for
   a while is removed by a part there, with a test.
+- The duplicate guard (`lib/core/calls/`): a Write or Destructive call a
+  token makes again with the same server, tool and arguments within the
+  window (`calls/limits.ts`, the owner's `duplicateCalls` per tool) is not
+  run but answered `duplicate_call` with how the first went, unless the
+  assistant passes `rerun` with a `reason`. It sits after the arguments
+  are checked in `callResolved`, `forwardCall` (a program's `pcp.call`) and
+  a wrapper's `innerCall`, never in `upstream.ts`: what the owner allowed
+  on PCP's page is not guarded. `call_record` keeps only an HMAC of the
+  arguments under the vault key (`crypto.ts keyedHash`), is never
+  exported and is pruned by the cleanup. A new way to call a tool goes
+  through it, with a test.
 - `lib/core/openapi` never fetches a remote `$ref`, never follows a redirect
   on a call, and never lets an argument set a header or leave the base URL.
   A schema is untrusted input: new limits go in `openapi/limits.ts`.
