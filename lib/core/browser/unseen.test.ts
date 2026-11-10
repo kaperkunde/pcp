@@ -80,7 +80,7 @@ describe("what the tree leaves out", () => {
         "pass its handle to ocr/read",
       ),
     ).toBe(
-      "2 cross-origin iframes (refs e3, e8), 1 iframe, 1 closed shadow root and 2 canvases not included: the page shows more than this. Take a screenshot and OCR it to see them (pass its handle to ocr/read); click with a point (x, y) from the screenshot reaches into them.",
+      "2 cross-origin iframes (refs e3, e8), 1 iframe, 1 closed shadow root and 2 canvases not included: the page shows more than this. Take a screenshot to see them (view_image with crop shows you part of it closer) and OCR it to read their text (pass its handle to ocr/read); click with a point (x, y) from the screenshot reaches into them.",
     )
   })
 

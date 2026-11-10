@@ -124,7 +124,8 @@ const findFiles = defineInnerTool({
 const getFile = defineInnerTool({
   name: "get_file",
   title: "Get a file",
-  description: "Gets one file as a kept result's handle.",
+  description:
+    "Gets one file as a kept result's handle. To see a picture yourself, pass the handle to view_image.",
   input: z.strictObject({
     path: path("The file, relative to the top of this storage folder."),
   }),

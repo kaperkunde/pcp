@@ -256,6 +256,7 @@ const GATEWAY_TOOLS = [
   "call_tool_write",
   "call_tool_destructive",
   "read_image",
+  "view_image",
   "convert_document",
   "edit_pdf",
   // PCP's own store, and the others by store (#90).

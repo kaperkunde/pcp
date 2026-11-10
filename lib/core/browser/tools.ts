@@ -709,7 +709,7 @@ const INPUTS: readonly BrowserToolInput[] = [
   {
     name: "screenshot",
     title: "Take a screenshot",
-    description: `A picture of what the tab shows now (its viewport, ${VIEWPORT.width} by ${VIEWPORT.height}), or of one element (ref, or target), as a JPEG. It is made smaller (its quality, then its size) until it can be passed on; max_width and quality ask for smaller from the start. The answer says how its pixels map to the viewport's CSS pixels, which click, scroll and drag take as x and y. To read the text in it, pass its handle to an OCR tool (the answer names one this token can call, when there is one); read_result does not show an image.`,
+    description: `A picture of what the tab shows now (its viewport, ${VIEWPORT.width} by ${VIEWPORT.height}), or of one element (ref, or target), as a JPEG. It is made smaller (its quality, then its size) until it can be passed on; max_width and quality ask for smaller from the start. The answer says how its pixels map to the viewport's CSS pixels, which click, scroll and drag take as x and y. To read the text in it, pass its handle to an OCR tool (the answer names one this token can call, when there is one); read_result does not show an image, and view_image with crop shows you part of it closer.`,
     input: z.strictObject({
       tab,
       ref: ref.optional(),
@@ -739,7 +739,7 @@ const INPUTS: readonly BrowserToolInput[] = [
     name: "download",
     title: "Download a file",
     description:
-      "Keeps the file a page offers for download: clicks the element (ref) that starts it, or opens its address (url, in the tab, at a site the tab may open now: navigate asks the owner for another), and waits for it. Answers with a handle to the file ({\"$result\": id}), kept for this token for a day: pass it where a tool wants a file (upload_file's files, send_email's attachments, a field that takes base64), or read it with read_result. A file larger than PCP keeps of one is stopped.",
+      "Keeps the file a page offers for download: clicks the element (ref) that starts it, or opens its address (url, in the tab, at a site the tab may open now: navigate asks the owner for another), and waits for it. Answers with a handle to the file ({\"$result\": id}), kept for this token for a day: pass it where a tool wants a file (upload_file's files, send_email's attachments, a field that takes base64), or read it with read_result. If you can analyse images yourself, call view_image with the handle to see a picture or a video's frame (a PDF's page: convert_document to \"png\" first). A file larger than PCP keeps of one is stopped.",
     input: z.strictObject({ tab, ref: ref.optional(), url: url.optional() }),
     rules: [exactlyOne(["ref", "url"], "Give a ref or a url, one of them.")],
     annotations: ACTS,

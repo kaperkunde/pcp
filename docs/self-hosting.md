@@ -112,8 +112,8 @@ tools**) runs JavaScript programs inside PCP. From a checkout, a third file
 adds a sandbox container where it can also run bash and Python programs; it
 has no network and reaches PCP only through a shared volume. It carries
 ffmpeg (Debian's package), which takes frames from videos: without the
-sandbox, a program's `pcp.video.frames` says that video needs it. (Images
-need nothing: PCP makes them smaller itself.) The installer does not add it.
+sandbox, a program's `pcp.video.frames` and `view_image` on a video say
+that video needs it. (Images need nothing: PCP makes them smaller itself.) The installer does not add it.
 From the `pcp` folder:
 
 ```bash
