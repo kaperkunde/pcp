@@ -63,7 +63,8 @@ into `main` when it is ready to ship.
 Versions are `MAJOR.MINOR.PATCH`, held in `package.json` and read by the app
 (`lib/core/version.ts`). On each push to `main`, `.github/workflows/release.yml`
 raises the patch (`0.1.0` → `0.1.1`), commits it to `main` as
-`Release vX.Y.Z`, tags it, drafts a GitHub Release with generated notes, and
+`Release vX.Y.Z` with the release's section of [CHANGELOG.md](CHANGELOG.md)
+(below), tags it, drafts a GitHub Release whose notes are that section, and
 fast-forwards `develop` to it. If `develop` has commits `main` lacks by then,
 the fast-forward is skipped; merge `main` into `develop` before the next
 release. The desktop apps are then built on macOS and Windows runners and
@@ -115,6 +116,32 @@ already runs. Only the newest five builds stay on the
 release page. `release.yml` and `develop.yml` share the app and image builds
 (`build-desktop.yml`, `build-images.yml`), and `release.yml` ignores the `-dev`
 tags, so merging `develop` into `main` still releases.
+
+**The changelog** is written from pull requests, never by hand
+(`scripts/changelog.mjs`, tested in `scripts/changelog.test.ts`). The
+workflow lists the commits since the release before and the pull requests
+merged into `develop` around them (`gh pr list`), and the script keeps
+those whose merge commit is in the range: each gives the lines of its
+`## Changelog` section (the pull request template has one), or its title when
+that is empty; a section that says `none` leaves it out. Commits pushed to
+`develop` without a pull request are listed by subject. So write that
+section for the people who run PCP: a line or a few, plain words, what they
+will notice. Each build of `develop` gets the same lines, from the build
+before, as its pre-release's notes (`develop.yml`, which commits nothing);
+a release's section covers every build that led to it. `CHANGELOG.md` is
+left out of Prettier, so the file stays as the script wrote it.
+
+The releases before the changelog existed are filled in once, by hand, from
+a checkout with every tag (`git fetch --tags`) and `gh` signed in:
+
+```bash
+gh pr list --repo kaperkunde/pcp --base develop --state merged --limit 1000 \
+  --json number,title,body,url,mergedAt,mergeCommit,commits > /tmp/prs.json
+node scripts/changelog.mjs backfill --repo kaperkunde/pcp --prs /tmp/prs.json > CHANGELOG.md
+```
+
+then committed on `develop` like any change; the next release adds its
+section on top.
 
 MAJOR and MINOR are raised by hand, in a commit on `develop`, when the
 maintainer decides a release warrants one; a contributor does not bump, and
@@ -279,6 +306,7 @@ helper, and change it there.
 | `lib/core/updates/`                  | The daily check for a newer release; what it found                    |
 | `lib/core/version.ts`                | `PCP_VERSION`, read from `package.json`                               |
 | `scripts/version.mjs`                | The next release's version; `pnpm version:bump`                       |
+| `scripts/changelog.mjs`              | CHANGELOG.md and the release notes, from merged pull requests         |
 | `lib/core/request-log.ts`            | The request log: writing, reading a page, pruning old days            |
 | `lib/core/activity.ts`               | The Log page's lines: token names, how a request was answered         |
 | `lib/core/cleanup/`                  | The scheduled cleanup (node-cron): schedule, parts, status            |

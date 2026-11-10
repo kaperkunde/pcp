@@ -3,9 +3,15 @@
 # a MAJOR or MINOR raised on develop (`pnpm version:bump minor`) ships as
 # written, anything else raises the patch of the latest release. The version
 # is committed to package.json on main (the build reads it from there), tagged
-# vX.Y.Z and published as a GitHub Release with generated notes. develop is
-# fast-forwarded to the release when it has nothing main lacks; otherwise it
-# is left for a person to merge.
+# vX.Y.Z and published as a GitHub Release. develop is fast-forwarded to the
+# release when it has nothing main lacks; otherwise it is left for a person
+# to merge.
+#
+# The release commit also adds the release's section to CHANGELOG.md
+# (scripts/changelog.mjs): the pull requests merged into develop since the
+# release before, each by its "## Changelog" section or its title, and the
+# commits pushed without one. The same lines are the release's notes, and
+# the images' signed digests are added to them when the images are built.
 #
 # The release is created as a draft, the desktop apps (desktop/) are built on
 # macOS and Windows runners and attached to it under stable names
@@ -52,6 +58,11 @@ jobs:
     name: tag and draft
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    # pull-requests: the changelog reads the pull requests merged since the
+    # release before.
+    permissions:
+      contents: write
+      pull-requests: read
     outputs:
       version: ${{ steps.version.outputs.version }}
       skip: ${{ steps.version.outputs.skip }}
@@ -78,6 +89,38 @@ jobs:
           version="$(node scripts/version.mjs next)"
           echo "Releasing v$version"
           echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: Write the changelog
+        if: steps.version.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ steps.version.outputs.version }}
+        # What changed since the release before (never a build of develop):
+        # its commits, and the pull requests merged into develop from the day
+        # before the first of them, of which the script keeps those whose
+        # merge commit is in the range. Into CHANGELOG.md, and the notes.
+        run: |
+          previous="$(git tag --list 'v*' --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | grep -vx "v$VERSION" | head -n 1 || true)"
+          range="${previous:+$previous..}HEAD"
+          git log --format='%H%x09%P%x09%cI%x09%s' "$range" > "$RUNNER_TEMP/commits.txt"
+          since="$(node scripts/changelog.mjs since --commits "$RUNNER_TEMP/commits.txt")"
+          set -- --base develop --state merged --limit 1000 \
+            --json number,title,body,url,mergedAt,mergeCommit,commits
+          if [ -n "$since" ]; then
+            set -- "$@" --search "merged:>=$since"
+          fi
+          gh pr list "$@" > "$RUNNER_TEMP/prs.json"
+          node scripts/changelog.mjs release --version "$VERSION" \
+            --date "$(date -u +%F)" --repo "$GH_REPO" \
+            --prs "$RUNNER_TEMP/prs.json" --commits "$RUNNER_TEMP/commits.txt" \
+            --notes "$RUNNER_TEMP/entries.md"
+          {
+            if [ -n "$previous" ]; then
+              echo "Changes since $previous:"
+              echo
+            fi
+            cat "$RUNNER_TEMP/entries.md"
+          } > "$RUNNER_TEMP/notes.md"
       - name: Commit and tag
         if: steps.version.outputs.skip != 'true'
         env:
@@ -86,8 +129,9 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           node scripts/version.mjs set "$VERSION"
-          if ! git diff --quiet -- package.json; then
-            git commit -m "Release v$VERSION" -- package.json
+          git add package.json CHANGELOG.md
+          if ! git diff --cached --quiet; then
+            git commit -m "Release v$VERSION"
           fi
           git tag -a "v$VERSION" -m "v$VERSION"
           git push --atomic origin HEAD:main "refs/tags/v$VERSION"
@@ -115,14 +159,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ steps.version.outputs.version }}
+        # The notes are the changelog's section, written above.
         run: |
-          # The notes start at the release before, not at a build of develop.
-          previous="$(git tag --list 'v*' --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | grep -vx "v$VERSION" | head -n 1 || true)"
-          set -- --verify-tag --title "v$VERSION" --generate-notes --draft
-          if [ -n "$previous" ]; then
-            set -- "$@" --notes-start-tag "$previous"
-          fi
-          gh release create "v$VERSION" "$@"
+          gh release create "v$VERSION" --verify-tag --title "v$VERSION" \
+            --notes-file "$RUNNER_TEMP/notes.md" --draft
 
   desktop:
     name: desktop apps
