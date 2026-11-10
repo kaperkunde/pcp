@@ -488,13 +488,14 @@ address**.
 PCP limits password tries per address, and it knows the address that connected
 to it. `X-Forwarded-For` counts only when that address is your proxy's, so a
 client cannot pick its own limit by writing the header. **Set
-`PCP_TRUSTED_PROXIES` to your proxy's address or range** (IP addresses and
-CIDR ranges, comma-separated). Without it, every client behind the proxy
+`PCP_TRUSTED_PROXIES` to your proxy's own address, or the subnet of the
+Docker network you share with it** (IP addresses and CIDR ranges,
+comma-separated; nothing wider, since whatever can connect from a trusted
+range may name any client). Without it, every client behind the proxy
 counts as the proxy, shares one limit, and PCP says so once in its log. A
 proxy on the same machine that connects over loopback is always trusted. Under
-Docker the proxy usually connects from the bridge network, so
-`PCP_TRUSTED_PROXIES=172.16.0.0/12` covers the default ranges (use your
-network's own if you changed them).
+Docker the proxy connects from the network it shares with PCP: `docker network
+inspect` shows its subnet.
 
 With it set, PCP reads the header from the right, past your addresses and
 loopback, and counts the first one that is not yours: the client a proxy that

@@ -241,8 +241,9 @@ only from loopback or from an address in `PCP_TRUSTED_PROXIES`. A client that
 reaches port 3000 directly cannot choose its own address that way. A proxy PCP
 was not told about is counted as one address for all its clients (the 60 for
 the whole instance holds either way), and PCP says so once in its log. Behind
-a reverse proxy, set `PCP_TRUSTED_PROXIES` to its address or range (under
-Docker it usually connects from the bridge network, `172.16.0.0/12`): PCP then
+a reverse proxy, set `PCP_TRUSTED_PROXIES` to its own address, or the
+subnet of the Docker network you share with it, and keep port 3000 reachable
+from your proxies alone: PCP then
 reads the header from the right, past your proxies and loopback, to the client
 they saw (see
 [docs/self-hosting.md](docs/self-hosting.md#i-already-have-a-proxy)). The counts
