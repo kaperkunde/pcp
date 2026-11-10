@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs"
 import path from "node:path"
 import { describe, expect, it } from "vitest"
+import { parse } from "yaml"
 
 // The Chromium in the Docker image is the build the app's patchright-core
 // drives: Playwright pins one Chromium per version, and another may not
@@ -136,6 +137,22 @@ describe("the compose files' ports", () => {
       '"443:8443"',
     ])
     expect(https).not.toMatch(/"3000:3000"/)
+  })
+})
+
+// #100: what PCP's browser keeps in /tmp while it runs (downloads,
+// Chromium's folders, its shared memory under --disable-dev-shm-usage) is in
+// memory only, as install.sh does it (install.test.ts).
+describe("the compose file's /tmp", () => {
+  it("is a tmpfs with a size, for the pcp service", () => {
+    const compose = parse(
+      readFileSync(path.join(root, "docker-compose.yaml"), "utf8"),
+    ) as { services: { pcp: { tmpfs?: string[] } } }
+    const install = readFileSync(path.join(root, "install.sh"), "utf8")
+    const tmpfs = "/tmp:rw,nosuid,nodev,noexec,mode=1777,size=1g"
+
+    expect(compose.services.pcp.tmpfs).toEqual([tmpfs])
+    expect(install).toContain(`TMPFS="${tmpfs}"`)
   })
 })
 

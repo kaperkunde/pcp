@@ -457,6 +457,16 @@ Not defended against:
   the updater takes only an app signed with the same Developer ID; the
   Windows app is not signed yet, so there the download is checked against
   the checksum published beside it, and no more.
+- While PCP's browser runs, it keeps a few things in clear in the system's
+  temporary folder: a file a `download` call waits for (read and removed
+  before the call answers), Chromium's crash reporter and cache folders, and
+  the virtual display's cookie. Its sign-ins are not among them (the
+  browser's contexts are off the record, in memory; the saved copy is in the
+  vault). A PCP that crashes or is killed leaves these folders behind; the
+  cleanup removes them when PCP starts and on its schedule. In the container
+  image (the installer, `docker-compose.yaml`) `/tmp` is a tmpfs of at most
+  1 GB, so none of it is ever on the disk; that memory counts against the
+  machine's.
 - Back up the data volume, or export from Settings. Losing both loses the
   vault.
 - An export file (Settings → Export) holds the vault's rows as they are: the

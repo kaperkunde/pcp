@@ -32,6 +32,15 @@ services:
       - "3000:3000"
     volumes:
       - pcp-data:/data
+    # /tmp in memory: what PCP's browser keeps there while it runs (a
+    # download a call waits for, Chromium's own folders and its shared
+    # memory) never reaches the disk, a snapshot or a backup, and is gone
+    # with the container. It takes memory only as it fills, up to the size:
+    # the largest file PCP picks by itself is at most 256 MB, Chromium's
+    # shared memory for a few tabs a few hundred more. Raise it if you set a
+    # larger file under Settings → Resources. install.sh does the same.
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,noexec,mode=1777,size=1g
     # Optional. The time zone and language of the browser PCP runs follow the
     # container's, which has neither and so shows sites UTC and en-US, however
     # far from that you are. install.sh passes the host's on; here, set yours

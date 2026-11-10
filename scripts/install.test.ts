@@ -23,7 +23,9 @@ import { afterEach, describe, expect, it } from "vitest"
 
 const INSTALL_SH = fileURLToPath(new URL("../install.sh", import.meta.url))
 const IMAGE = "ghcr.io/kaperkunde/pcp:latest"
-const RUN = `run -d --name pcp --restart unless-stopped -p 3000:3000 -e PCP_HOST_UPDATER=2 -v pcp-data:/data ${IMAGE}`
+/** /tmp in memory, for what PCP's browser keeps there (#100). */
+const TMPFS = "/tmp:rw,nosuid,nodev,noexec,mode=1777,size=1g"
+const RUN = `run -d --name pcp --restart unless-stopped --tmpfs ${TMPFS} -p 3000:3000 -e PCP_HOST_UPDATER=2 -v pcp-data:/data ${IMAGE}`
 
 /** The real programs the script needs besides the ones a host fakes. */
 const TOOLS = [
@@ -55,6 +57,7 @@ Image=${IMAGE}
 ContainerName=pcp
 PublishPort=3000:3000
 Volume=pcp-data:/data
+Tmpfs=${TMPFS}
 Environment=PCP_HOST_UPDATER=2
 
 [Service]
@@ -459,7 +462,7 @@ describe("install.sh with Docker", () => {
     expect(result.status).toBe(0)
     expect(result.calls).toContain("docker pull example.com/pcp:1.2.3")
     expect(result.calls).toContain(
-      "docker run -d --name pcp --restart unless-stopped -p 127.0.0.1:8080:3000 -p 80:8080 -p 443:8443 -v vault:/data example.com/pcp:1.2.3",
+      `docker run -d --name pcp --restart unless-stopped --tmpfs ${TMPFS} -p 127.0.0.1:8080:3000 -p 80:8080 -p 443:8443 -v vault:/data example.com/pcp:1.2.3`,
     )
     expect(result.calls).toContain(
       "curl -fs -o /dev/null --max-time 3 http://127.0.0.1:8080/api/health",
@@ -481,13 +484,13 @@ describe("install.sh with Docker", () => {
     const again = machine.run()
     expect(again.status).toBe(0)
     expect(again.calls).toContain(
-      `docker run -d --name pcp --restart unless-stopped -p 127.0.0.1:8080:3000 -p 80:8080 -p 443:8443 -e PCP_HOST_UPDATER=2 -v pcp-data:/data ${IMAGE}`,
+      `docker run -d --name pcp --restart unless-stopped --tmpfs ${TMPFS} -p 127.0.0.1:8080:3000 -p 80:8080 -p 443:8443 -e PCP_HOST_UPDATER=2 -v pcp-data:/data ${IMAGE}`,
     )
 
     const without = machine.run([], { PCP_HTTPS: "0" })
     expect(without.status).toBe(0)
     expect(without.calls).toContain(
-      `docker run -d --name pcp --restart unless-stopped -p 8080:3000 -e PCP_HOST_UPDATER=2 -v pcp-data:/data ${IMAGE}`,
+      `docker run -d --name pcp --restart unless-stopped --tmpfs ${TMPFS} -p 8080:3000 -e PCP_HOST_UPDATER=2 -v pcp-data:/data ${IMAGE}`,
     )
   })
 
@@ -497,7 +500,7 @@ describe("install.sh with Docker", () => {
     expect(result.status).toBe(0)
     expect(result.calls).toContain("docker pull ghcr.io/kaperkunde/pcp:develop")
     expect(result.calls).toContain(
-      "docker run -d --name pcp --restart unless-stopped -p 3000:3000 -e PCP_HOST_UPDATER=2 -v pcp-data:/data ghcr.io/kaperkunde/pcp:develop",
+      `docker run -d --name pcp --restart unless-stopped --tmpfs ${TMPFS} -p 3000:3000 -e PCP_HOST_UPDATER=2 -v pcp-data:/data ghcr.io/kaperkunde/pcp:develop`,
     )
     expect(result.stdout).toContain("develop's builds")
     expect(readFileSync(machine.conf, "utf8")).toContain(
@@ -577,6 +580,22 @@ describe("install.sh with Podman", () => {
     expect(existsSync(machine.unit)).toBe(false)
   })
 
+  // #100: /tmp in memory, so what the browser keeps there never reaches
+  // the disk. Quadlet knows Tmpfs= from 4.5; 4.4 has VolatileTmp= only.
+  it("puts /tmp in memory, with VolatileTmp= on Podman 4.4", () => {
+    const current = host({ podman: "4.5.0" })
+    expect(current.run().status).toBe(0)
+    expect(readFileSync(current.unit, "utf8")).toContain(
+      `Volume=pcp-data:/data\nTmpfs=${TMPFS}\n`,
+    )
+
+    const older = host({ podman: "4.4.2" })
+    expect(older.run().status).toBe(0)
+    const unit = readFileSync(older.unit, "utf8")
+    expect(unit).toContain("Volume=pcp-data:/data\nVolatileTmp=yes\n")
+    expect(unit).not.toContain("Tmpfs=")
+  })
+
   it("falls back to podman run on Podman older than 4.4", () => {
     const machine = host({ podman: "4.3.1" })
     const result = machine.run()
@@ -638,7 +657,7 @@ describe("install.sh updating PCP by itself", () => {
     const result = machine.run([], { PCP_AUTO_UPDATE: "1" })
     expect(result.status).toBe(0)
     expect(result.calls).toContain(
-      `docker run -d --name pcp --restart unless-stopped -p 3000:3000 -e PCP_AUTO_UPDATE=1 -e PCP_HOST_UPDATER=2 -v pcp-data:/data ${IMAGE}`,
+      `docker run -d --name pcp --restart unless-stopped --tmpfs ${TMPFS} -p 3000:3000 -e PCP_AUTO_UPDATE=1 -e PCP_HOST_UPDATER=2 -v pcp-data:/data ${IMAGE}`,
     )
     expect(readFileSync(machine.updater, "utf8")).toBe(
       readFileSync(INSTALL_SH, "utf8"),
@@ -663,7 +682,7 @@ describe("install.sh updating PCP by itself", () => {
     const again = machine.run()
     expect(again.status).toBe(0)
     expect(again.calls).toContain(
-      `docker run -d --name pcp --restart unless-stopped -p 3000:3000 -e PCP_AUTO_UPDATE=1 -e PCP_HOST_UPDATER=2 -v pcp-data:/data ${IMAGE}`,
+      `docker run -d --name pcp --restart unless-stopped --tmpfs ${TMPFS} -p 3000:3000 -e PCP_AUTO_UPDATE=1 -e PCP_HOST_UPDATER=2 -v pcp-data:/data ${IMAGE}`,
     )
     expect(existsSync(machine.timer)).toBe(true)
 
@@ -761,7 +780,7 @@ describe("install.sh update", () => {
     expect(result.status).toBe(0)
     expect(result.calls).toContain(`docker pull -q ${IMAGE}`)
     expect(result.calls).toContain(
-      `docker run -d --name pcp --restart unless-stopped -p 8080:3000 -e PCP_HOST_UPDATER=2 -v pcp-data:/data ${IMAGE}`,
+      `docker run -d --name pcp --restart unless-stopped --tmpfs ${TMPFS} -p 8080:3000 -e PCP_HOST_UPDATER=2 -v pcp-data:/data ${IMAGE}`,
     )
     expect(result.stdout).toContain("PCP is updated")
     expect(result.stdout).not.toContain("Open it now")
@@ -958,7 +977,7 @@ describe("install.sh update with the installer in the image", () => {
     expect(result.status).toBe(0)
     expect(result.calls).toContain(`docker ${READ} ${develop} /app/install.sh`)
     expect(result.calls).toContain(
-      `docker run -d --name pcp --restart unless-stopped -p 3000:3000 -e PCP_HOST_UPDATER=2 -v pcp-data:/data ${develop}`,
+      `docker run -d --name pcp --restart unless-stopped --tmpfs ${TMPFS} -p 3000:3000 -e PCP_HOST_UPDATER=2 -v pcp-data:/data ${develop}`,
     )
     expect(result.stdout).toContain(
       `PCP is updated by the installer from the image: ${develop}.`,
@@ -1052,7 +1071,7 @@ describe("install.sh as root", () => {
 
     const again = machine.run([], user(machine))
     expect(again.calls).toContain(
-      `docker run -d --name pcp --restart unless-stopped -p 8080:3000 -e PCP_HOST_UPDATER=2 -v pcp-data:/data ${IMAGE}`,
+      `docker run -d --name pcp --restart unless-stopped --tmpfs ${TMPFS} -p 8080:3000 -e PCP_HOST_UPDATER=2 -v pcp-data:/data ${IMAGE}`,
     )
   })
 
@@ -1062,7 +1081,7 @@ describe("install.sh as root", () => {
     mkdirSync(dirname(machine.conf), { recursive: true })
     writeFileSync(machine.conf, text)
   }
-  const HTTPS_RUN = `docker run -d --name pcp --restart unless-stopped -p 127.0.0.1:8080:3000 -p 80:8080 -p 443:8443 -e PCP_HOST_UPDATER=2 -v pcp-data:/data ${IMAGE}`
+  const HTTPS_RUN = `docker run -d --name pcp --restart unless-stopped --tmpfs ${TMPFS} -p 127.0.0.1:8080:3000 -p 80:8080 -p 443:8443 -e PCP_HOST_UPDATER=2 -v pcp-data:/data ${IMAGE}`
 
   it("carries the settings of an older install over from HOME, once", () => {
     const machine = host({ docker: "works", uid: 0 })
@@ -1090,7 +1109,7 @@ describe("install.sh as root", () => {
     const result = machine.run([], { ...user(machine), PCP_PORT: "7000" })
     expect(result.status).toBe(0)
     expect(result.calls).toContain(
-      `docker run -d --name pcp --restart unless-stopped -p 127.0.0.1:7000:3000 -p 80:8080 -p 443:8443 -e PCP_HOST_UPDATER=2 -v vault:/data ${IMAGE}`,
+      `docker run -d --name pcp --restart unless-stopped --tmpfs ${TMPFS} -p 127.0.0.1:7000:3000 -p 80:8080 -p 443:8443 -e PCP_HOST_UPDATER=2 -v vault:/data ${IMAGE}`,
     )
     expect(readFileSync(machine.sys.conf, "utf8")).toContain("PCP_PORT=7000\n")
   })
@@ -1341,7 +1360,7 @@ describe("install.sh installing when PCP asks", () => {
     const off = machine.run([], { PCP_UPDATE_BUTTON: "0" })
     expect(off.status).toBe(0)
     expect(off.calls).toContain(
-      `docker run -d --name pcp --restart unless-stopped -p 3000:3000 -v pcp-data:/data ${IMAGE}`,
+      `docker run -d --name pcp --restart unless-stopped --tmpfs ${TMPFS} -p 3000:3000 -v pcp-data:/data ${IMAGE}`,
     )
     expect(off.calls).toContain(
       "systemctl --user disable --now pcp-update-request.timer",
@@ -1365,7 +1384,7 @@ describe("install.sh installing when PCP asks", () => {
     const result = machine.run([], { PCP_VERSION: "1.2.3" })
     expect(result.status).toBe(0)
     expect(result.calls).toContain(
-      "docker run -d --name pcp --restart unless-stopped -p 3000:3000 -v pcp-data:/data ghcr.io/kaperkunde/pcp:1.2.3",
+      `docker run -d --name pcp --restart unless-stopped --tmpfs ${TMPFS} -p 3000:3000 -v pcp-data:/data ghcr.io/kaperkunde/pcp:1.2.3`,
     )
     expect(existsSync(machine.watchTimer)).toBe(false)
   })
@@ -1416,7 +1435,7 @@ describe("install.sh installing when PCP asks", () => {
     expect(result.status).toBe(0)
     expect(result.calls).toContain(`docker pull -q ${develop}`)
     expect(result.calls).toContain(
-      `docker run -d --name pcp --restart unless-stopped -p 3000:3000 -e PCP_HOST_UPDATER=2 -v pcp-data:/data ${develop}`,
+      `docker run -d --name pcp --restart unless-stopped --tmpfs ${TMPFS} -p 3000:3000 -e PCP_HOST_UPDATER=2 -v pcp-data:/data ${develop}`,
     )
     expect(readFileSync(machine.conf, "utf8")).toContain(
       "PCP_CHANNEL=develop\n",
@@ -1519,7 +1538,7 @@ describe("install.sh installing when PCP asks", () => {
 describe("install.sh passing on the host's time zone and language", () => {
   const BERLIN = { TZ: "Europe/Berlin", LANG: "de_DE.UTF-8" }
   const runLine = (...env: string[]) =>
-    `docker run -d --name pcp --restart unless-stopped -p 3000:3000 -e PCP_HOST_UPDATER=2${env
+    `docker run -d --name pcp --restart unless-stopped --tmpfs ${TMPFS} -p 3000:3000 -e PCP_HOST_UPDATER=2${env
       .map((entry) => ` -e ${entry}`)
       .join("")} -v pcp-data:/data ${IMAGE}`
   const put = (file: string, text: string) => {
@@ -1550,7 +1569,7 @@ describe("install.sh passing on the host's time zone and language", () => {
       PCP_AUTO_UPDATE: "1",
     })
     expect(result.calls).toContain(
-      `docker run -d --name pcp --restart unless-stopped -p 3000:3000 -e PCP_AUTO_UPDATE=1 -e PCP_HOST_UPDATER=2 -e TZ=Europe/Berlin -e LANG=de_DE.UTF-8 -v pcp-data:/data ${IMAGE}`,
+      `docker run -d --name pcp --restart unless-stopped --tmpfs ${TMPFS} -p 3000:3000 -e PCP_AUTO_UPDATE=1 -e PCP_HOST_UPDATER=2 -e TZ=Europe/Berlin -e LANG=de_DE.UTF-8 -v pcp-data:/data ${IMAGE}`,
     )
   })
 
@@ -1720,7 +1739,7 @@ describe("install.sh passing on the host's graphics card", () => {
   const OPEN = { mode: "crw-rw-rw-", gid: 105, group: "render" }
   const GROUP_ONLY = { mode: "crw-rw----+", gid: 105, group: "render" }
   const runLine = (...gpu: string[]) =>
-    `docker run -d --name pcp --restart unless-stopped -p 3000:3000 -e PCP_HOST_UPDATER=2${gpu
+    `docker run -d --name pcp --restart unless-stopped --tmpfs ${TMPFS} -p 3000:3000 -e PCP_HOST_UPDATER=2${gpu
       .map((entry) => ` ${entry}`)
       .join("")} -v pcp-data:/data ${IMAGE}`
   const note = (stderr: string) =>

@@ -700,11 +700,20 @@ http_bind() {
   fi
 }
 
+# The container's /tmp is a tmpfs, so what PCP's browser keeps there while it
+# runs (a download a call waits for, Chromium's own folders, its shared
+# memory) is in memory only and gone with the container, never in a snapshot
+# or a backup of the disk. Its size caps it, and it takes memory only as it
+# fills: the largest file PCP picks by itself is at most 256 MB, Chromium's
+# shared memory for a few tabs a few hundred more, and 1 GB leaves room.
+TMPFS="/tmp:rw,nosuid,nodev,noexec,mode=1777,size=1g"
+
 # Docker, or Podman without Quadlet: one container the runtime restarts.
 install_container() {
   pull_image
   "$RUNTIME" rm -f "$CONTAINER" >/dev/null 2>&1 || true
-  set -- -d --name "$CONTAINER" --restart unless-stopped -p "$(http_bind)$PCP_PORT:3000"
+  set -- -d --name "$CONTAINER" --restart unless-stopped --tmpfs "$TMPFS" \
+    -p "$(http_bind)$PCP_PORT:3000"
   if [ "$PCP_HTTPS" = 1 ]; then
     set -- "$@" -p 80:8080 -p 443:8443
   fi
@@ -753,6 +762,13 @@ write_unit() {
       printf 'PublishPort=80:8080\nPublishPort=443:8443\n'
     fi
     printf 'Volume=%s:/data\n' "$PCP_DATA_VOLUME"
+    # Quadlet takes Tmpfs= since Podman 4.5; 4.4 has VolatileTmp=, a tmpfs
+    # of its own size (512 MB) on /tmp.
+    if podman_at_least 4 5; then
+      printf 'Tmpfs=%s\n' "$TMPFS"
+    else
+      printf 'VolatileTmp=yes\n'
+    fi
     # The label is what podman-auto-update.timer looks for, so it goes only
     # on a unit that asked for the daily update: the timer may be on for
     # other containers.

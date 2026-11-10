@@ -161,6 +161,15 @@ describe("what Chromium is started with", () => {
     expect(options.env).not.toHaveProperty("DISPLAY")
   })
 
+  // #100: the contexts are off the record, so their cache is in memory;
+  // Chromium's own profile (Playwright's user data folder) keeps a disk
+  // cache all the same, which a crash would leave in the temporary folder.
+  it("keeps no disk cache to speak of, in any mode", () => {
+    for (const mode of ["window", "virtual", "headless"] as const) {
+      expect(launchArgs(mode), mode).toContain("--disk-cache-size=1")
+    }
+  })
+
   it("never with the automation switch, in any mode", () => {
     for (const mode of ["window", "virtual", "headless"] as const) {
       const options = launchOptions({ ...base, mode })

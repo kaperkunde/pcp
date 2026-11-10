@@ -2618,7 +2618,17 @@ Its config and cache folders (`XDG_CONFIG_HOME`, `XDG_CACHE_HOME`) are a
 private temporary folder of its own, removed once it has closed: its crash
 reporter keeps its database there, and without a folder it can write to
 (a system user with no home, as the Docker image runs as) Chromium can abort
-as it starts. It starts without `--enable-automation`, with
+as it starts. The folder (`pcp-chromium-<pid>-…`, `browser/scratch.ts`) also
+holds the file a `download` call waits for, and the virtual display's cookie
+is in one beside it (`pcp-display-<pid>-…`). Sign-ins never are: the contexts
+are off the record, their cookies and storage in memory. A PCP that crashes
+or is killed leaves these folders behind, so the process's id is in their
+names and the cleanup removes those of a process that is gone, and the
+process's own that no browser or display holds (never Playwright's own
+`playwright_*` folders beside them). Chromium starts with
+`--disk-cache-size=1`, so the disk cache of its own profile, in Playwright's
+folder, holds nothing to speak of; in the container image `/tmp` is a tmpfs
+(`docker-compose.yaml`, `install.sh`), so none of it reaches the disk at all. It starts without `--enable-automation`, with
 `--disable-blink-features=AutomationControlled`, and with
 `--disable-popup-blocking` and `--disable-back-forward-cache`, which
 patchright-core leaves out (script-opened popups reach the gate, and a back
@@ -4031,8 +4041,9 @@ ended sign-ins, unfinished OAuth sign-ins, apps' codes and tokens past their
 expiry (with their grants) and registrations no sign-in used within a day
 (PCP's authorization server), permission requests a week past
 their expiry, kept results past their day, search's cached embeddings no
-search used for a month, and days of the request log older
-than the owner keeps (90 by default, 1 to 3,650). It runs when PCP starts and
+search used for a month, the browser's temporary folders a crashed or
+killed PCP left behind (by the process id in their names), and days of the
+request log older than the owner keeps (90 by default, 1 to 3,650). It runs when PCP starts and
 then on a node-cron task, one per process and kept on `globalThis` like the
 update timer, unref'd, with no overlap: runs from the start, the schedule and
 the owner's **Clean up now** go one at a time. Each part runs on its own, so
