@@ -94,19 +94,27 @@ export async function openTabAction(
   return result
 }
 
-/** A tab's buttons: each one thing to the tab, answered with an ActionState. */
-async function onTab(run: () => Promise<void>): Promise<ActionState> {
+/**
+ * A tab's buttons: each one thing to the tab, answered with an ActionState.
+ * Taking over and handing back leave the page alone (`revalidate: false`):
+ * the live view shows the change itself and the tab list polls, so the
+ * answer never waits on the page being drawn again.
+ */
+async function onTab(
+  run: () => Promise<void>,
+  { revalidate = true }: { revalidate?: boolean } = {},
+): Promise<ActionState> {
   const result = await guarded(async () => {
     await run()
     return {}
   })
-  revalidateBrowser()
+  if (revalidate) revalidateBrowser()
   return result
 }
 
 export async function takeOverTabAction(tabId: string): Promise<ActionState> {
   const ctx = await requireContext()
-  return onTab(() => takeOverTab(ctx, tabId))
+  return onTab(() => takeOverTab(ctx, tabId), { revalidate: false })
 }
 
 /** Hands the tab to the token chosen; lib/core checks the token itself. */
@@ -115,7 +123,9 @@ export async function handBackTabAction(
   tokenId: string,
 ): Promise<ActionState> {
   const ctx = await requireContext()
-  return onTab(() => handBackTab(ctx, tabId, String(tokenId)))
+  return onTab(() => handBackTab(ctx, tabId, String(tokenId)), {
+    revalidate: false,
+  })
 }
 
 export async function closeTabAction(tabId: string): Promise<ActionState> {

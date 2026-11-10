@@ -1,7 +1,7 @@
 "use client"
 
 import { useRouter } from "next/navigation"
-import { useCallback, useEffect, useRef, useState, useTransition } from "react"
+import { useCallback, useEffect, useRef, useState } from "react"
 
 import { FormError } from "@kaperkunde/ui/form-status"
 import { Badge } from "@kaperkunde/ui/badge"
@@ -76,7 +76,9 @@ export function BrowserTabView({
   const [address, setAddress] = useState(initial.url)
   const [editing, setEditing] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const [pending, startTransition] = useTransition()
+  // Not a transition: a transition stays pending until every refresh the
+  // page started has drawn, and a slow tab list would keep the buttons off.
+  const [pending, setPending] = useState(false)
   // Hand back offers the token whose tab it was; a tab you opened that no
   // token had yet waits for you to choose one.
   const [handTo, setHandTo] = useState(
@@ -372,27 +374,43 @@ export function BrowserTabView({
 
     if (control === "owner") choose(control)
 
-    startTransition(async () => {
-      if (control === "assistant") {
-        await drain()
-        choose(control)
+    setPending(true)
+    void (async () => {
+      try {
+        if (control === "assistant") {
+          await drain()
+          choose(control)
+        }
+
+        const result = await run()
+        setError(result.status === "error" ? result.error : null)
+
+        if (result.status === "error" && control) {
+          pinned.current = null
+          setView((current) => ({
+            ...current,
+            control: control === "owner" ? "assistant" : "owner",
+          }))
+        } else if (control) {
+          pinned.current = { control, until: Date.now() + 3_000 }
+        }
+      } catch {
+        setError("That did not go through. Try again.")
+        if (control) {
+          pinned.current = null
+          setView((current) => ({
+            ...current,
+            control: control === "owner" ? "assistant" : "owner",
+          }))
+        }
+      } finally {
+        setPending(false)
       }
 
-      const result = await run()
-      setError(result.status === "error" ? result.error : null)
-
-      if (result.status === "error" && control) {
-        pinned.current = null
-        setView((current) => ({
-          ...current,
-          control: control === "owner" ? "assistant" : "owner",
-        }))
-      } else if (control) {
-        pinned.current = { control, until: Date.now() + 3_000 }
-      }
-
-      router.refresh()
-    })
+      // The list around the view catches up on its own; closing a tab
+      // changes the page, so that one asks for it, and nothing waits on it.
+      if (!control) router.refresh()
+    })()
   }
 
   // An assistant handed it over: it goes back when you answer its request.
