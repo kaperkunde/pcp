@@ -1,5 +1,6 @@
 import type { VaultContext } from "../context"
 import { db } from "../db"
+import { assistantBounds, readPacingConfig } from "../pacing/config"
 import {
   newFoundPlaces,
   readDefinition,
@@ -30,7 +31,11 @@ export async function reviewInVault(
   incoming: ItemDocument,
   currentId: string | null,
 ): Promise<ItemReview> {
-  const review = reviewItem(current, incoming)
+  // A wrapper's pace is flagged against what this owner lets assistants
+  // set, not PCP's defaults.
+  const review = reviewItem(current, incoming, {
+    paceBounds: assistantBounds(await readPacingConfig(ctx)),
+  })
 
   if (
     review.same ||

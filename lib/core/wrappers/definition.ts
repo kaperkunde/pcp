@@ -10,6 +10,13 @@ import { invalid } from "../errors"
 import { hiddenCharacter, withoutPresentation } from "../memories"
 import { outlineSchema } from "../openapi/outline"
 import { parsePointer } from "../openapi/patch"
+import {
+  emptyPace,
+  fromWrapperPaceInput,
+  type WrapperPaceInput,
+} from "../pacing/input"
+import type { WrapperPace } from "../pacing/limits"
+import { browserToolSpec } from "../browser/tools"
 import { canonicalJson } from "../permission-rules"
 import {
   findOwnerSecretByName,
@@ -126,6 +133,13 @@ export type WrapperDefinition = {
    * levels, as every wrapper did before the setting existed.
    */
   callLevels?: "approved"
+  /**
+   * The pace of the browser calls its tools make (lib/core/pacing/), in
+   * place of the owner's: approved with the rest, so one outside what
+   * assistants may set was shown to the owner as such. Left out when it has
+   * none, so a definition without one is stored (and hashed) as it was.
+   */
+  pace?: WrapperPace
 }
 
 /** A tool as an assistant or the owner sends it: other tools as server/tool. */
@@ -155,6 +169,8 @@ export type WrapperInput = {
   secrets?: SecretBindingInput[]
   /** Left out: "approved" for a new wrapper. */
   callLevels?: CallLevels
+  /** The pace of its browser calls; left out or null for none. */
+  pace?: WrapperPaceInput | null
 }
 
 const TOOL_NAME = /^[A-Za-z0-9_.-]{1,64}$/
@@ -166,6 +182,7 @@ const ANNOTATION_KEYS = new Set([
 ])
 
 const refSchema = z.object({ serverId: z.string(), tool: z.string() })
+const rangeSchema = z.object({ minMs: z.number(), maxMs: z.number() })
 
 const storedSchema = z.object({
   version: z.literal(1),
@@ -203,6 +220,13 @@ const storedSchema = z.object({
     }),
   ),
   callLevels: z.literal("approved").optional(),
+  pace: z
+    .object({
+      actions: rangeSchema.optional(),
+      navigations: rangeSchema.optional(),
+      tools: z.record(z.string(), rangeSchema).optional(),
+    })
+    .optional(),
 })
 
 /** A stored definition, checked as it is read. */
@@ -409,6 +433,10 @@ export async function resolveDefinition(
       'call_levels is "approved" (the calls its tools list run on your approval of the wrapper) or "token" (at the calling token\'s own levels).',
     )
   }
+
+  const pace = input.pace
+    ? fromWrapperPaceInput(input.pace, (tool) => !!browserToolSpec(tool))
+    : null
 
   if (!Array.isArray(input.tools) || input.tools.length === 0) {
     throw invalid("A wrapper has at least one tool.")
@@ -835,6 +863,7 @@ export async function resolveDefinition(
       tools: resolvedTools,
       secrets,
       ...(callLevels === "approved" ? { callLevels } : {}),
+      ...(pace && !emptyPace(pace) ? { pace } : {}),
     },
     newSecret,
   }

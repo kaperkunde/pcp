@@ -18,7 +18,7 @@ import type { ServerActionResult } from "./servers"
  * the token's page: a wrapper is a server to them.
  */
 
-/** The tools field: { tools: [...], secrets: [...] } as JSON. */
+/** The tools field: { tools: [...], secrets: [...], pace? } as JSON. */
 function inputFrom(formData: FormData): WrapperInput {
   let parsed: unknown
 
@@ -36,7 +36,17 @@ function inputFrom(formData: FormData): WrapperInput {
     )
   }
 
-  const { tools, secrets } = parsed as Record<string, unknown>
+  const { tools, secrets, pace } = parsed as Record<string, unknown>
+
+  if (
+    pace !== undefined &&
+    pace !== null &&
+    (typeof pace !== "object" || Array.isArray(pace))
+  ) {
+    throw invalid(
+      'The pace is an object: {"actions": {"min_ms": 150, "max_ms": 600}}.',
+    )
+  }
 
   const callLevels = field(formData, "callLevels")
 
@@ -50,6 +60,7 @@ function inputFrom(formData: FormData): WrapperInput {
     secrets: (Array.isArray(secrets) ? secrets : []) as NonNullable<
       WrapperInput["secrets"]
     >,
+    pace: (pace ?? null) as WrapperInput["pace"],
   }
 }
 

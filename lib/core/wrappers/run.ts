@@ -52,6 +52,18 @@ import {
 import { typedPartsLabel } from "./secret-literals"
 import { checkCallArguments } from "../call-arguments"
 import {
+  checkPaceRange,
+  describeRange,
+  paceWithin,
+  type PaceRangeInput,
+} from "../pacing/input"
+import {
+  browserPacingClass,
+  PACE_KEY_OF,
+  type PaceRange,
+  type WrapperPace,
+} from "../pacing/limits"
+import {
   ok,
   passOn,
   toCallToolResult,
@@ -236,6 +248,8 @@ async function callWrapperTool(
       ...(env.codeExecutor ? { executor: env.codeExecutor } : {}),
       timeoutMs: wrapperRunTimeout(flow),
       runId,
+      // pcp.call's pace option, held to the wrapper's own pace (innerCall).
+      takesPace: true,
       // Called from a run (run_code's), its calls wait under pacing no
       // longer than that run lasts. A call straight from a request or the
       // owner's answer gives the wrapper its own limit.
@@ -448,10 +462,11 @@ async function innerCall(
     args,
     run,
     lookedUp,
+    pace: asked,
     rerun,
     ...shape
   }: Parameters<Parameters<typeof runProgram>[2]["call"]>[0],
-  definition: Pick<WrapperDefinition, "secrets" | "callLevels">,
+  definition: Pick<WrapperDefinition, "secrets" | "callLevels" | "pace">,
   { wrapper, notes }: { wrapper: string; notes: string[] },
 ): Promise<CodeCallOutcome> {
   // On the owner's approval the calls are the wrapper's own: any enabled
@@ -557,6 +572,20 @@ async function innerCall(
     }
   }
 
+  const paced = callPace(
+    target,
+    name,
+    checked.args,
+    definition.pace,
+    asked,
+    `${slug}/${name}`,
+    tool.name,
+  )
+
+  if ("refused" in paced) {
+    return { ok: false, refused: true, error: paced.refused }
+  }
+
   notes.push(...fixes)
 
   // A secret the owner has not allowed here is refused before anything is
@@ -578,6 +607,10 @@ async function innerCall(
   }
 
   lookedUp?.(await markedReadOnly(target.id, name))
+  const sent =
+    target.kind === "browser" && name === "tabs"
+      ? clampTabPace(checked.args, definition.pace)
+      : checked.args
 
   // The same Write or Destructive call the token made a little while ago,
   // through this wrapper or any other way, is not made twice
@@ -587,7 +620,7 @@ async function innerCall(
     : await guardCall(
         env,
         { server: target, tool: name, tier: await toolTier(target.id, name) },
-        checked.args,
+        sent,
         { rerun: rerun === true, again: RERUN_IN_CODE },
       )
 
@@ -611,12 +644,12 @@ async function innerCall(
   const before = noteBefore()
 
   try {
-    const outcome = await runCodeCall(env.ctx, target, name, checked.args, {
+    const outcome = await runCodeCall(env.ctx, target, name, sent, {
       publicUrl: env.publicUrl,
       tokenId: env.tokenId,
       max: resourceLimits().answerChars,
       executor: base,
-      run,
+      run: paced.pace && run ? { ...run, pace: paced.pace } : run,
       // Always handed on, empty or not: a wrapper's call carries a secret
       // only where a binding says so, the browser's type included
       // (upstream.ts).
@@ -629,4 +662,95 @@ async function innerCall(
     await endCall(guarded.ticket, endOfThrow(error))
     throw error
   }
+}
+
+/**
+ * The pace a wrapper's browser call goes at (lib/core/pacing/): the one the
+ * program picked for it (pcp.call's pace), which must sit within the
+ * wrapper's own for the tool, or for its kind of action; else the
+ * wrapper's own; else none, and the browser follows the owner's. A pace
+ * on any other server's call is refused: only the browser is paced per
+ * action.
+ */
+export function callPace(
+  target: Pick<McpServer, "kind">,
+  toolName: string,
+  args: Record<string, unknown>,
+  declared: WrapperPace | undefined,
+  asked: PaceRangeInput | undefined,
+  label: string,
+  wrapperTool: string,
+): { pace: PaceRange | null } | { refused: string } {
+  if (target.kind !== "browser") {
+    return asked
+      ? {
+          refused: `pcp.call's pace is for the browser's calls; ${label} is not paced per action.`,
+        }
+      : { pace: null }
+  }
+
+  const pacingClass = browserPacingClass(toolName, args)
+  const own =
+    declared?.tools?.[toolName] ??
+    (pacingClass ? declared?.[PACE_KEY_OF[pacingClass]] : undefined) ??
+    null
+
+  if (!asked) {
+    return { pace: own }
+  }
+
+  if (!own) {
+    return {
+      refused: `${wrapperTool}'s wrapper declares no pace for ${label}, so its program cannot pick one: the wrapper's pace (update_wrapper's pace) says what its browser calls may go at.`,
+    }
+  }
+
+  let range: PaceRange
+
+  try {
+    range = checkPaceRange(
+      { minMs: asked.min_ms, maxMs: asked.max_ms },
+      `the pace for ${label}`,
+    )
+  } catch (error) {
+    if (error instanceof PcpError) return { refused: error.message }
+    throw error
+  }
+
+  return paceWithin(range, own)
+    ? { pace: range }
+    : {
+        refused: `The pace for ${label} goes outside the one its wrapper declares for it (${describeRange(own)}): pick one within it, or change the wrapper's pace with update_wrapper.`,
+      }
+}
+
+/**
+ * A tab's pace a wrapper's program sets (browser tabs, action pace), held
+ * within the wrapper's own pace for each kind it declares: a flow never
+ * makes a tab go faster or slower than the owner approved for it. A kind
+ * it declares no pace for is left to the owner's bounds (the browser asks
+ * past them).
+ */
+export function clampTabPace(
+  args: Record<string, unknown>,
+  declared: WrapperPace | undefined,
+): Record<string, unknown> {
+  const pace = args.pace as
+    Record<string, { min_ms: number; max_ms: number } | undefined> | undefined
+
+  if (args.action !== "pace" || !pace || !declared) {
+    return args
+  }
+
+  const held: Record<string, { min_ms: number; max_ms: number }> = {}
+
+  for (const [key, range] of Object.entries(pace)) {
+    if (!range) continue
+    const own = declared[key as "actions" | "navigations"]
+    const within = (ms: number) =>
+      own ? Math.min(Math.max(ms, own.minMs), own.maxMs) : ms
+    held[key] = { min_ms: within(range.min_ms), max_ms: within(range.max_ms) }
+  }
+
+  return { ...args, pace: held }
 }

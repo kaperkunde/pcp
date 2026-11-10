@@ -41,6 +41,7 @@ describe("the browser's tools", () => {
       "scroll",
       "wait_for",
       "screenshot",
+      "print_pdf",
       "download",
       "handle_dialog",
       "hand_over",
@@ -68,6 +69,7 @@ describe("the browser's tools", () => {
       "scroll",
       "wait_for",
       "screenshot",
+      "print_pdf",
       "console_log",
       "network_log",
     ])
@@ -428,6 +430,26 @@ describe("the browser's tools", () => {
     ).toEqual({ tab: "t1", max_width: 640, quality: 50 })
     expect(() => parse("screenshot", { tab: "t1", max_width: 5000 })).toThrow()
     expect(() => parse("screenshot", { tab: "t1", quality: 100 })).toThrow()
+    expect(parse("screenshot", { tab: "t1", full_page: true })).toEqual({
+      tab: "t1",
+      full_page: true,
+    })
+    expect(() =>
+      parse("screenshot", { tab: "t1", full_page: true, ref: "e1" }),
+    ).toThrow(/whole page/)
+    expect(
+      parse("print_pdf", {
+        tab: "t1",
+        paper: "a4",
+        landscape: true,
+        print_background: true,
+        page_ranges: "1-3, 5",
+      }),
+    ).toMatchObject({ paper: "a4", page_ranges: "1-3, 5" })
+    expect(() => parse("print_pdf", { tab: "t1", paper: "a0" })).toThrow()
+    expect(() =>
+      parse("print_pdf", { tab: "t1", page_ranges: "1;rm" }),
+    ).toThrow(/like 1-3, 5/)
     expect(parse("find", { tab: "t1", text: "Reply", within: "e12" })).toEqual({
       tab: "t1",
       text: "Reply",

@@ -285,7 +285,7 @@ describe.skipIf(!executable)("pacing a tab", { timeout: 60_000 }, () => {
     vi.unstubAllEnvs()
   })
 
-  it("paces acting by the site, before the call queues, and lets reading go", async () => {
+  it("paces acting by the site on the tab's turn, opening a page apart from acting in it, and lets reading go", async () => {
     const tab = await openTab("/a")
     expect(waits).toEqual([])
 
@@ -294,10 +294,10 @@ describe.skipIf(!executable)("pacing a tab", { timeout: 60_000 }, () => {
 
     const went = await call("navigate", { tab, url: `${api.origin}/b` })
     expect(textOf(went)).toContain("Page /b")
-    expect(waits).toEqual([1_500])
+    expect(waits).toEqual([400])
 
     await call("press_key", { tab, key: "Tab" })
-    expect(waits).toEqual([1_500, 1_500])
+    expect(waits).toEqual([400, 150])
   })
 })
 

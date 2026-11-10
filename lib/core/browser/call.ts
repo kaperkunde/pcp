@@ -18,7 +18,35 @@ import { resolvePrivateAccess, siteKey } from "../fetch/rules"
 import { bareType, fileMediaType } from "../media-types"
 import { markdownLink } from "../owner-link"
 import { hiddenCharacter, withoutPresentation } from "../memories"
-import { browserToolPaced, pacedResult, paceSite } from "../pacing"
+import {
+  browserPacingClass,
+  browserTurnDeadline,
+  pacedResult,
+  paceBrowserTurn,
+  type BrowserPacingClass,
+  type Turn,
+} from "../pacing"
+import {
+  assistantBounds,
+  readPacingConfig,
+  resolveBrowserPolicy,
+  type PacingConfig,
+} from "../pacing/config"
+import {
+  BROWSER_CLASS_WORDS,
+  describeRange,
+  fromPaceInput,
+  outsideBounds,
+  type BrowserPaceInput,
+} from "../pacing/input"
+import {
+  BROWSER_PACING_CLASSES,
+  PACE_KEY_OF,
+  pacingOff,
+  type BrowserPace,
+  type PaceRange,
+  type PacingPolicy,
+} from "../pacing/limits"
 import { PERMISSION_TTL_MS } from "../permission-rules"
 import { checkRateLimit } from "@kaperkunde/security"
 import { loadResourceLimits } from "../resources/state"
@@ -43,7 +71,14 @@ import { catchDownload, offeredName, tabOwnsFrame } from "./downloads"
 import { evaluateInTab } from "./evaluate"
 import { atStep, callClock, timeoutMessage, type CallClock } from "./clock"
 import { coveringElement, coveringLine, failureReason } from "./failures"
-import { heldSecret, heldValues, holdSecret, maskTypedResult } from "./held"
+import {
+  heldSecret,
+  heldValues,
+  holdSecret,
+  maskTypedResult,
+  typedShown,
+  UNREAD,
+} from "./held"
 import { clickAt, dragBetween, wheelAt, type MouseButton } from "./input"
 import {
   ACTION_TIMEOUT_MS,
@@ -60,7 +95,14 @@ import {
   MAX_QUEUE_WAIT_MS,
   MAX_TABS,
   MAX_UPLOAD_BYTES,
+  MAX_FULL_PAGE_HEIGHT,
   MAX_URL_LENGTH,
+  PACED_TAB_DEADLINE_MS,
+  PACED_TURN_WAIT_MS,
+  PDF_READ_BYTES,
+  PRINT_PDF_MAX_MS,
+  PRINT_PDF_PX_PER_SECOND,
+  SETTLE_MS,
   MAX_WAIT_MS,
   MIN_READ_PAGE_TEXT_CHARS,
   NAVIGATION_TIMEOUT_MS,
@@ -69,6 +111,7 @@ import {
 } from "./limits"
 import { bounded, inLane, LaneBusy, LaneGaveUp, pause } from "./queue"
 import { ocrHint, ocrToolFor } from "./ocr"
+import { setTabPace, tabPace, tabPaceFor } from "./tab-pace"
 import { leftOutNote, readableMarkdown } from "./read-page"
 import { missingRefMessage, resolveTabRef, tabSnapshot } from "./refs"
 import {
@@ -188,6 +231,12 @@ export type BrowserScope = {
    * runs out.
    */
   clock?: CallClock
+  /**
+   * The pace the wrapper whose run made the call chose for it (its own,
+   * or the one its program picked within it): what the call follows unless
+   * its tab has a pace of its own (lib/core/pacing/ resolveBrowserPolicy).
+   */
+  pace?: PaceRange
   /**
    * The exits the token may name, and opening one for a tab
    * (exits/use.ts browserExits, built where the key is: upstream.ts and
@@ -379,7 +428,7 @@ async function tabLines(
 
   return open.map(
     ({ view, tab }) =>
-      `- ${view.id}: ${view.title || "(no title)"} · ${view.url}${view.control === "owner" ? " · the owner has it" : ""}${tab.unresponsive ? " · not responding" : ""}${tab.openedIn ? ` · opened by ${runName(tab.openedIn)}` : ""}${tab.run?.endedAt != null ? " · its run has ended" : ""} · ${tab.running ? "in use now" : `idle ${spanWords(now - tab.lastUsedAt)}`} · ${markdownLink(`Watch tab ${view.id}`, tabLink(scope.publicUrl, view.id))}`,
+      `- ${view.id}: ${view.title || "(no title)"} · ${view.url}${view.control === "owner" ? " · the owner has it" : ""}${tab.unresponsive ? " · not responding" : ""}${tab.openedIn ? ` · opened by ${runName(tab.openedIn)}` : ""}${tab.run?.endedAt != null ? " · its run has ended" : ""} · ${tab.running ? "in use now" : `idle ${spanWords(now - tab.lastUsedAt)}`}${tabPaceText(tab) ? ` · ${tabPaceText(tab)}` : ""} · ${markdownLink(`Watch tab ${view.id}`, tabLink(scope.publicUrl, view.id))}`,
   )
 }
 
@@ -712,7 +761,7 @@ export function fileShownWords(
 /** Waits briefly for what an action started to load, and for its check. */
 async function settle(tab: Tab): Promise<void> {
   await tab.page
-    .waitForLoadState("domcontentloaded", { timeout: 5_000 })
+    .waitForLoadState("domcontentloaded", { timeout: SETTLE_MS })
     .catch(() => {})
   await passCheck(tab)
 }
@@ -1097,26 +1146,63 @@ function tabSite(tab: Tab): string | null {
   }
 }
 
-/**
- * Waits for the site's turn under pacing (lib/core/pacing/), before the
- * call queues on its tab, up to the caller's deadline; the tool error to
- * answer with when that turn is further off.
- */
-async function paceAction(
-  scope: BrowserScope,
-  site: string | null,
-): Promise<CallToolResult | null> {
-  if (!site) {
+/** The site of an address an assistant gave, or null when it is none. */
+function addressSite(raw: string): string | null {
+  try {
+    return siteKey(pageUrl(raw))
+  } catch {
     return null
   }
+}
 
-  const paced = await paceSite(scope.ctx, site, "browser_act", {
+/** A turn that holds nothing back: an action with no site to pace. */
+const NO_TURN: Turn = { release: () => {} }
+
+function isTurn(value: Turn | CallToolResult): value is Turn {
+  return "release" in value
+}
+
+/**
+ * The action's turn at its site under pacing (lib/core/pacing/), taken on
+ * the tab's lane right before the action and held until it is done, so no
+ * two actions at a site, whatever tab or caller they come from, follow
+ * closer than its pause (pacing/pace.ts takeTurn). A page opened first
+ * waits for the one the tab shows to settle. The pace is the tab's own
+ * (tab-pace.ts), else the one its wrapper chose for the call
+ * (`scope.pace`), else the owner's; the tool error to answer with when the
+ * turn is further off than the call can wait.
+ */
+async function pacedTurn(
+  scope: BrowserScope,
+  tab: Tab,
+  site: string | null,
+  pacingClass: BrowserPacingClass | null,
+): Promise<Turn | CallToolResult> {
+  if (!site || !pacingClass) {
+    return NO_TURN
+  }
+
+  // A page opened waits for the one the tab shows to finish loading first
+  // (a site's check is the navigation's own to wait for, not the pause's).
+  if (pacingClass === "browser_navigate" && !pacingOff()) {
+    atStep(scope.clock, `waiting for tab ${tab.id}'s page to settle`)
+    await tab.page
+      .waitForLoadState("domcontentloaded", { timeout: SETTLE_MS })
+      .catch(() => {})
+  }
+
+  atStep(scope.clock, `waiting for its turn at ${site} under pacing`)
+  const signals = [scope.signal, scope.clock?.expired].filter(
+    (signal): signal is AbortSignal => signal !== undefined,
+  )
+  const turn = await paceBrowserTurn(scope.ctx, site, pacingClass, {
     serverId: scope.serverId,
-    signal: scope.signal,
-    deadline: scope.deadline,
+    own: tabPaceFor(tab, pacingClass) ?? scope.pace ?? null,
+    signal: signals.length > 0 ? AbortSignal.any(signals) : undefined,
+    deadline: browserTurnDeadline(scope.deadline),
   })
 
-  return paced ? pacedResult(paced) : null
+  return "release" in turn ? turn : pacedResult(turn)
 }
 
 /**
@@ -1149,11 +1235,6 @@ export async function performNavigate(
   }
 
   const note = tab ? holderNote(scope, tab) : null
-  const paced = await paceAction(scope, siteKey(url))
-
-  if (paced) {
-    return withLead(paced, note)
-  }
 
   if (tab && vault.tabs.get(tab.id) !== tab) {
     tab = null
@@ -1224,13 +1305,40 @@ export async function performNavigate(
 
   const current = tab
 
-  const answer = onLane(scope, vault, current, TAB_DEADLINE_MS, async () => {
-    await driveAs(vault, current, scope)
+  const answer = onLane(
+    scope,
+    vault,
+    current,
+    PACED_TAB_DEADLINE_MS,
+    async () => {
+      await driveAs(vault, current, scope)
 
-    if (current.dialog) {
-      return dialogOpen(current, "navigate")
-    }
+      if (current.dialog) {
+        return dialogOpen(current, "navigate")
+      }
 
+      const turn = await pacedTurn(
+        scope,
+        current,
+        siteKey(url),
+        "browser_navigate",
+      )
+
+      if (!isTurn(turn)) {
+        return turn
+      }
+
+      try {
+        return await openIn(current)
+      } finally {
+        turn.release()
+      }
+    },
+  )
+
+  return withLead(await answer, note)
+
+  async function openIn(current: Tab): Promise<CallToolResult> {
     if (allowedByOwner) {
       current.allowedHosts.add(siteKey(url))
     }
@@ -1279,9 +1387,7 @@ export async function performNavigate(
     await passCheck(current, scope.clock)
     await saveVaultProfile(scope.ctx, vault, { force: true })
     return report(scope, current, { first, signIns: true, unseen: true })
-  })
-
-  return withLead(await answer, note)
+  }
 }
 
 /** tabs open and navigate: decided per site before anything opens. */
@@ -1365,7 +1471,13 @@ async function openSite(
 
 async function tabs(
   scope: BrowserScope,
-  args: { action: string; url?: string; tab?: string; exit?: string },
+  args: {
+    action: string
+    url?: string
+    tab?: string
+    exit?: string
+    pace?: BrowserPaceInput
+  },
 ): Promise<CallToolResult> {
   const vault = runningBrowser(scope.ctx.vaultId)
 
@@ -1382,6 +1494,7 @@ async function tabs(
         : [
             `This token's open tabs (${tabUsage(vault, scope.tokenId)}):`,
             ...lines,
+            await ownerPaceLine(scope),
           ].join("\n"),
     )
   }
@@ -1394,6 +1507,10 @@ async function tabs(
 
   if (ownerHas(picked)) {
     return ownerHolds(picked)
+  }
+
+  if (args.action === "pace") {
+    return paceTab(scope, picked, args.pace)
   }
 
   // Neither waits behind a call that hangs on the tab: that call ends with
@@ -1416,6 +1533,152 @@ async function tabs(
     ),
     `${upper(tabUsage(vault, scope.tokenId))}.`,
   )
+}
+
+/** A pace per class, in words: "actions in a page 0.05 to 0.15 s". */
+function paceWords(paces: Partial<Record<BrowserPacingClass, string>>): string {
+  return BROWSER_PACING_CLASSES.flatMap((pacingClass) =>
+    paces[pacingClass]
+      ? [`before ${BROWSER_CLASS_WORDS[pacingClass]} ${paces[pacingClass]}`]
+      : [],
+  ).join(", ")
+}
+
+/** A policy in words, or "no wait" for none. */
+function policyWords(policy: PacingPolicy | null): string {
+  return policy
+    ? describeRange({
+        minMs: policy.minIntervalMs,
+        maxMs: policy.minIntervalMs + policy.jitterMs,
+      })
+    : "no wait"
+}
+
+/** What tabs without a pace of their own follow, as tabs list ends. */
+async function ownerPaceLine(scope: BrowserScope): Promise<string> {
+  const config = await readPacingConfig(scope.ctx)
+  const paces: Partial<Record<BrowserPacingClass, string>> = {}
+
+  for (const pacingClass of BROWSER_PACING_CLASSES) {
+    paces[pacingClass] = policyWords(
+      resolveBrowserPolicy(config, pacingClass, { serverId: scope.serverId }),
+    )
+  }
+
+  return `A tab without a pace of its own waits, after the previous action at its site, ${paceWords(paces)} (the owner's pace; a site of theirs may have its own). tabs with action pace gives one tab a pace of its own.`
+}
+
+/** A tab's own pace, as tabs list shows it; null when it has none. */
+function tabPaceText(tab: Tab): string | null {
+  const own = tabPace(tab)
+
+  if (!own) return null
+
+  const paces: Partial<Record<BrowserPacingClass, string>> = {}
+
+  for (const pacingClass of BROWSER_PACING_CLASSES) {
+    const range = own[PACE_KEY_OF[pacingClass]]
+    if (range) paces[pacingClass] = describeRange(range)
+  }
+
+  return `its own pace: ${paceWords(paces)}`
+}
+
+/**
+ * tabs' action pace: the tab's own pace (tab-pace.ts), in memory with the
+ * tab. Within the owner's bounds it applies at once; outside them the
+ * owner is asked (a tab_pace request), and nothing changes until they say
+ * yes. Without pace, the tab follows the owner's again.
+ */
+async function paceTab(
+  scope: BrowserScope,
+  tab: Tab,
+  input: BrowserPaceInput | undefined,
+): Promise<CallToolResult> {
+  let pace: BrowserPace
+
+  try {
+    pace = fromPaceInput(input ?? {})
+  } catch (error) {
+    if (error instanceof PcpError) return text(error.message, true)
+    throw error
+  }
+
+  const config = await readPacingConfig(scope.ctx)
+  const bounds = assistantBounds(config)
+  const outside = outsideBounds(pace, bounds)
+
+  if (outside.length > 0) {
+    const view = await tabView(tab)
+
+    throw new OwnerNeeded({
+      kind: "tab_pace",
+      input: {
+        serverId: scope.serverId,
+        tabId: tab.id,
+        url: view.url,
+        title: view.title,
+        pace,
+        outside,
+        bounds,
+      },
+    })
+  }
+
+  setTabPace(tab, pace)
+  return text(await tabPaceAnswer(scope, tab, config))
+}
+
+/** What a tab follows now, per class, as tabs' pace answers. */
+async function tabPaceAnswer(
+  scope: BrowserScope,
+  tab: Tab,
+  config?: PacingConfig,
+): Promise<string> {
+  const read = config ?? (await readPacingConfig(scope.ctx))
+  const site = tabSite(tab) ?? undefined
+  const paces: Partial<Record<BrowserPacingClass, string>> = {}
+
+  for (const pacingClass of BROWSER_PACING_CLASSES) {
+    const own = tabPaceFor(tab, pacingClass)
+    paces[pacingClass] = `${policyWords(
+      resolveBrowserPolicy(read, pacingClass, {
+        serverId: scope.serverId,
+        site,
+        own,
+      }),
+    )} (${own ? "its own" : "the owner's"})`
+  }
+
+  const bounds = assistantBounds(read)
+
+  return [
+    `Tab ${tab.id} waits, after the previous action at its site ended, ${paceWords(paces)}${site ? ` at ${site}` : ""}. For this tab only, while it is open; a site the owner paced themselves never goes faster than they set.`,
+    `Assistants may set ${paceWords({
+      browser_act: describeRange(bounds.browser_act),
+      browser_navigate: describeRange(bounds.browser_navigate),
+    })} without asking; anything else asks the owner.`,
+  ].join("\n")
+}
+
+/**
+ * A tab's pace the owner allowed on a tab_pace request: set on that tab,
+ * still the token's and open, whatever the bounds. False when it is gone.
+ */
+export function applyTabPace(
+  ctx: Pick<VaultContext, "vaultId">,
+  tokenId: string,
+  tabId: string,
+  pace: BrowserPace,
+): boolean {
+  const tab = runningBrowser(ctx.vaultId)?.tabs.get(tabId)
+
+  if (!tab || tab.tokenId !== tokenId) {
+    return false
+  }
+
+  setTabPace(tab, pace)
+  return true
 }
 
 function upper(line: string): string {
@@ -1451,6 +1714,7 @@ const NEEDS_THE_PAGE = new Set<BrowserToolName>([
   "scroll",
   "wait_for",
   "download",
+  "print_pdf",
   "evaluate",
 ])
 
@@ -1458,7 +1722,19 @@ async function onTab(
   scope: BrowserScope,
   tabId: string,
   spec: BrowserToolSpec,
-  run: (tab: Tab, vault: VaultBrowser) => Promise<CallToolResult>,
+  run: (tab: Tab, vault: VaultBrowser, turn: Turn) => Promise<CallToolResult>,
+  {
+    pacing = browserPacingClass(spec.name),
+    site,
+  }: {
+    /** How the call is paced, when not as its tool is (download by url). */
+    pacing?: BrowserPacingClass | null
+    /**
+     * The site whose turn it takes, when not the tab's: the address a
+     * download by its address opens.
+     */
+    site?: string | null
+  } = {},
 ): Promise<CallToolResult> {
   const vault = runningBrowser(scope.ctx.vaultId)
   const picked = await pickTab(scope, vault, tabId)
@@ -1491,19 +1767,12 @@ async function onTab(
     )
   }
 
-  if (browserToolPaced(spec.name)) {
-    const paced = await paceAction(scope, tabSite(picked))
-
-    if (paced) {
-      return withLead(paced, note)
-    }
-  }
-
   const answer = await onLane(
     scope,
     vault!,
     picked,
-    spec.name === "download" ? DOWNLOAD_DEADLINE_MS : TAB_DEADLINE_MS,
+    (spec.name === "download" ? DOWNLOAD_DEADLINE_MS : TAB_DEADLINE_MS) +
+      (pacing ? PACED_TURN_WAIT_MS : 0),
     async () => {
       await driveAs(vault!, picked, scope)
       const refused = offLimits(vault!, picked)
@@ -1516,37 +1785,57 @@ async function onTab(
         return dialogOpen(picked, spec.name)
       }
 
-      atStep(
-        scope.clock,
-        `running ${spec.name} on tab ${picked.id}`,
-        !spec.annotations.readOnlyHint,
+      const turn = await pacedTurn(
+        scope,
+        picked,
+        site === undefined ? tabSite(picked) : site,
+        pacing,
       )
-      let result: CallToolResult
+
+      if (!isTurn(turn)) {
+        return turn
+      }
 
       try {
-        result = await run(picked, vault!)
-      } catch (error) {
-        if (error instanceof PcpError || error instanceof OwnerNeeded) {
-          throw error
-        }
-
-        // A dialog the action opened is why it stopped.
-        const dialog = dialogNote(picked)
-        result = text(
-          dialog ? `${failureReason(error)}\n${dialog}` : failureReason(error),
-          true,
-        )
+        return await acting(picked, turn)
+      } finally {
+        turn.release()
       }
-
-      if (spec.changes) {
-        await saveVaultProfile(scope.ctx, vault!, { force: true })
-      }
-
-      return result
     },
   )
 
   return withLead(answer, note)
+
+  /** The tool's own work, its turn taken. */
+  async function acting(tab: Tab, turn: Turn): Promise<CallToolResult> {
+    atStep(
+      scope.clock,
+      `running ${spec.name} on tab ${tab.id}`,
+      !spec.annotations.readOnlyHint,
+    )
+    let result: CallToolResult
+
+    try {
+      result = await run(tab, vault!, turn)
+    } catch (error) {
+      if (error instanceof PcpError || error instanceof OwnerNeeded) {
+        throw error
+      }
+
+      // A dialog the action opened is why it stopped.
+      const dialog = dialogNote(tab)
+      result = text(
+        dialog ? `${failureReason(error)}\n${dialog}` : failureReason(error),
+        true,
+      )
+    }
+
+    if (spec.changes) {
+      await saveVaultProfile(scope.ctx, vault!, { force: true })
+    }
+
+    return result
+  }
 }
 
 /**
@@ -1891,6 +2180,7 @@ async function downloadFile(
   tab: Tab,
   args: { ref?: string; url?: string },
   keepBytes: BytesKeeper | undefined,
+  turn: Turn = NO_TURN,
 ): Promise<CallToolResult> {
   if (!keepBytes) {
     return text(
@@ -1958,7 +2248,15 @@ async function downloadFile(
         : mayOpen(vault, tab, address)
           ? "take"
           : "refuse",
-    start,
+    // The site's turn is the click's or the page's opening, not the file
+    // coming in: the site's other tabs go on meanwhile.
+    start: async () => {
+      try {
+        return await start()
+      } finally {
+        turn.release()
+      }
+    },
     maxBytes: fileBytes,
   })
   const failedWith = async (lead: string) =>
@@ -2101,6 +2399,245 @@ function pictureScale(picture: {
   ].join("")
 
   return `Scale ${Math.round(scale * 1000) / 1000}${left || top ? `, its top left at x ${left}, y ${top} of the viewport` : ""}: a point at x, y in this picture is x ${across}, y ${down} in the viewport's CSS pixels, which click, scroll and drag take.`
+}
+
+/** How a picture of the whole page maps to the page, in words. */
+function fullPageScale(picture: {
+  scale: number
+  height: number
+  origin: { x: number; y: number }
+  cut: boolean
+}): string {
+  const factor = Math.round((1 / picture.scale) * 1000) / 1000
+  const top = Math.round(-picture.origin.y)
+
+  return [
+    `The whole page from its top${picture.cut ? `, cut at ${MAX_FULL_PAGE_HEIGHT.toLocaleString("en")} CSS pixels down (the page goes on past that)` : ""}.`,
+    picture.scale === 1
+      ? "Its pixels are the page's CSS pixels,"
+      : `A pixel here is ${factor} of the page's CSS pixels,`,
+    `not the viewport's: the viewport shows the part from y ${top} down, so scroll to a part before you click, scroll or drag at a point of it.`,
+  ].join(" ")
+}
+
+/**
+ * A capture of the page (screenshot, print_pdf) refused while a field holds
+ * a secret PCP typed: the picture would show it.
+ */
+async function capturesRefused(
+  scope: Pick<BrowserScope, "ctx" | "tokenId">,
+  tab: Tab,
+  what: string,
+): Promise<CallToolResult | null> {
+  const held = await heldSecret(tab.page)
+
+  if (held) {
+    return text(
+      `A field in tab ${tab.id} holds the secret "${held}", which PCP typed, so the tab takes no ${what} until the field changes or the page moves on. Take a snapshot to see the page: it shows the field as ${secretMask(held)}.`,
+      true,
+    )
+  }
+
+  // A secret typed into any of the token's tabs, as every answer masks it
+  // (maskHeld), that this page shows as its text: a picture or a PDF would
+  // carry it past the masking.
+  const pages = [...(runningBrowser(scope.ctx.vaultId)?.tabs.values() ?? [])]
+    .filter((other) => other.tokenId === scope.tokenId)
+    .map((other) => other.page)
+  const shown = await typedShown(tab.page, pages)
+
+  if (shown === UNREAD) {
+    return text(
+      `Tab ${tab.id}'s page could not be read to check it shows no secret PCP typed, so it takes no ${what} now. Try again in a moment.`,
+      true,
+    )
+  }
+
+  return shown
+    ? text(
+        `Tab ${tab.id} shows the secret "${shown}", which PCP typed, in its page, so it takes no ${what} while the page shows it. Take a snapshot to see the page: it shows it as ${secretMask(shown)}.`,
+        true,
+      )
+    : null
+}
+
+/** print_pdf's paper sizes, in inches across and down. */
+const PAPER: Record<string, { width: number; height: number }> = {
+  letter: { width: 8.5, height: 11 },
+  legal: { width: 8.5, height: 14 },
+  tabloid: { width: 11, height: 17 },
+  a3: { width: 11.69, height: 16.54 },
+  a4: { width: 8.27, height: 11.69 },
+  a5: { width: 5.83, height: 8.27 },
+}
+
+/**
+ * print_pdf: the tab's page printed to a PDF by Chromium (Page.printToPDF on
+ * the tab's own DevTools session), kept for the token as a file and
+ * answered with its handle. Refused while a field holds a typed secret.
+ */
+async function printPdf(
+  scope: BrowserScope,
+  tab: Tab,
+  args: Record<string, unknown>,
+  keepBytes: BytesKeeper | undefined,
+): Promise<CallToolResult> {
+  if (!keepBytes) {
+    return text(
+      "A PDF is kept as a result for the token, which this call cannot make.",
+      true,
+    )
+  }
+
+  const held = await capturesRefused(scope, tab, "PDFs")
+
+  if (held) {
+    return held
+  }
+
+  const paper = PAPER[(args.paper as string | undefined) ?? "letter"]!
+  const printed = await printedPdf(tab, args, paper)
+
+  if (!Buffer.isBuffer(printed)) {
+    return printed
+  }
+
+  const bytes = printed
+  let title = ""
+
+  try {
+    title = await tab.page.title()
+  } catch {
+    // A page that went away keeps the default name.
+  }
+
+  let kept: Awaited<ReturnType<BytesKeeper>>
+
+  try {
+    kept = await keepBytes({
+      bytes,
+      mediaType: "application/pdf",
+      name: `${pdfName(title)}.pdf`,
+      serverId: scope.serverId,
+      toolName: "print_pdf",
+    })
+  } catch (error) {
+    if (error instanceof PcpError) return text(error.message, true)
+    throw error
+  }
+
+  return text(
+    JSON.stringify(
+      {
+        tab: tab.id,
+        file: handleOf(kept),
+        from: tab.page.url().slice(0, MAX_URL_LENGTH),
+        note: `PCP keeps this PDF for you: pass {"$result": "${kept.id}"} where a tool wants a file (send_email's or create_draft's attachments, save_file, convert_document), read it with read_result, or get it onto your own computer with share_result's link where this token has it.`,
+      },
+      null,
+      2,
+    ),
+  )
+}
+
+/**
+ * The page printed by Chromium (Page.printToPDF), read as a stream in
+ * chunks (IO.read) and stopped once it passes the largest file PCP keeps,
+ * so a page that prints to more is never held whole. The print itself is
+ * given longer for a longer page, within PRINT_PDF_MAX_MS. The tool error
+ * to answer with when it fails or is too large.
+ */
+async function printedPdf(
+  tab: Tab,
+  args: Record<string, unknown>,
+  paper: { width: number; height: number },
+): Promise<Buffer | CallToolResult> {
+  const { fileBytes } = await loadResourceLimits()
+  const height = await bounded(
+    tab.cdp.send("Page.getLayoutMetrics"),
+    ACTION_TIMEOUT_MS,
+    "page.pdf",
+  )
+    .then((metrics) => metrics.cssContentSize.height)
+    .catch(() => 0)
+  let stream: string
+
+  try {
+    ;({ stream } = (await bounded(
+      tab.cdp.send("Page.printToPDF", {
+        landscape: args.landscape === true,
+        printBackground: args.print_background === true,
+        paperWidth: paper.width,
+        paperHeight: paper.height,
+        transferMode: "ReturnAsStream",
+        ...(typeof args.page_ranges === "string"
+          ? { pageRanges: args.page_ranges.replace(/\s+/g, "") }
+          : {}),
+      }),
+      printPdfTimeout(height),
+      "page.pdf",
+    )) as { stream: string })
+  } catch (error) {
+    return text(
+      /range/i.test(firstLine(error))
+        ? `The page has no ${String(args.page_ranges)}: ask for pages it has, or leave out page_ranges for all of them.`
+        : `The page could not be printed: ${failureReason(error)}`,
+      true,
+    )
+  }
+
+  const chunks: Buffer[] = []
+  let total = 0
+
+  try {
+    for (;;) {
+      const piece = await bounded(
+        tab.cdp.send("IO.read", { handle: stream, size: PDF_READ_BYTES }),
+        ACTION_TIMEOUT_MS,
+        "page.pdf",
+      )
+      const bytes = Buffer.from(
+        piece.data,
+        piece.base64Encoded ? "base64" : "latin1",
+      )
+      total += bytes.length
+
+      if (total > fileBytes) {
+        return text(
+          `The PDF of the page is larger than PCP keeps of one file (${fileBytes.toLocaleString("en")} bytes), so it was stopped and nothing was kept. Ask for fewer pages (page_ranges) or leave out print_background; the owner can raise that in PCP's settings, under Resources.`,
+          true,
+        )
+      }
+
+      chunks.push(bytes)
+
+      if (piece.eof) break
+    }
+  } catch (error) {
+    return text(`The page could not be printed: ${failureReason(error)}`, true)
+  } finally {
+    await tab.cdp.send("IO.close", { handle: stream }).catch(() => {})
+  }
+
+  return Buffer.concat(chunks)
+}
+
+/** How long a page's print may take: longer for a longer page, bounded. */
+export function printPdfTimeout(heightCss: number): number {
+  const extra = Math.ceil(Math.max(0, heightCss) / PRINT_PDF_PX_PER_SECOND)
+  return Math.min(PRINT_PDF_MAX_MS, ACTION_TIMEOUT_MS + extra * 1000)
+}
+
+/** A file name from a page's title: its words, or "page". */
+function pdfName(title: string): string {
+  const name = title
+    .replace(/[\u0000-\u001f\u007f/\\:*?"<>|]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 80)
+    .trim()
+
+  return name || "page"
 }
 
 /** Characters of a text that are not white space. */
@@ -2378,6 +2915,7 @@ async function runBrowserTool(
     runId,
     secret,
     exits,
+    pace,
   }: {
     tokenId: string
     publicUrl: string
@@ -2407,6 +2945,8 @@ async function runBrowserTool(
      * another call that arrives while it has the tab is told so.
      */
     runId?: string
+    /** The pace a wrapper's run chose for the call (BrowserScope.pace). */
+    pace?: PaceRange
     /**
      * The secret a type call carries as {"$secret": name}, from upstream.ts:
      * the only way one reaches a page.
@@ -2432,6 +2972,7 @@ async function runBrowserTool(
     signal,
     deadline,
     ...(exits ? { exits } : {}),
+    ...(pace ? { pace } : {}),
     runId,
   }
   const listsOrOpens =
@@ -2604,10 +3145,7 @@ async function runTool(
 
   switch (spec.name) {
     case "tabs":
-      return tabs(
-        scope,
-        args as { action: string; url?: string; tab?: string; exit?: string },
-      )
+      return tabs(scope, args as Parameters<typeof tabs>[1])
     case "navigate":
       return openSite(scope, tab, args.url as string, "navigate")
     case "back":
@@ -2780,14 +3318,26 @@ async function runTool(
       })
     }
     case "download":
-      return onTab(scope, tab, spec, (current, vault) =>
-        downloadFile(
-          scope,
-          vault,
-          current,
-          args as { ref?: string; url?: string },
-          keepBytes,
-        ),
+      return onTab(
+        scope,
+        tab,
+        spec,
+        (current, vault, turn) =>
+          downloadFile(
+            scope,
+            vault,
+            current,
+            args as { ref?: string; url?: string },
+            keepBytes,
+            turn,
+          ),
+        {
+          pacing: browserPacingClass("download", args),
+          // By its address: the turn at the site it opens.
+          ...(typeof args.url === "string"
+            ? { site: addressSite(args.url) }
+            : {}),
+        },
       )
     case "scroll":
       return onTab(scope, tab, spec, async (current) => {
@@ -2848,13 +3398,10 @@ async function runTool(
           return report(scope, current, { snapshot: false })
         }
 
-        const held = await heldSecret(current.page)
+        const held = await capturesRefused(scope, current, "screenshots")
 
         if (held) {
-          return text(
-            `A field in tab ${current.id} holds the secret "${held}", which PCP typed, so the tab takes no screenshots until the field changes or the page moves on. Take a snapshot to see the page: it shows the field as ${secretMask(held)}.`,
-            true,
-          )
+          return held
         }
 
         let label: string | null = null
@@ -2869,6 +3416,7 @@ async function runTool(
 
         const picture = await takePicture(current, {
           element: locator,
+          fullPage: args.full_page === true,
           maxWidth: args.max_width as number | undefined,
           quality: args.quality as number | undefined,
         })
@@ -2885,8 +3433,10 @@ async function runTool(
             {
               type: "text",
               text: [
-                `Tab ${current.id}: ${current.page.url()} (${label ? `${label}, ` : ""}${picture.width} by ${picture.height}${picture.scale < 1 ? ", made smaller to pass on" : ""}, JPEG quality ${picture.quality}; the owner can watch the tab: ${markdownLink(`Watch tab ${current.id}`, tabLink(publicUrl, current.id))})`,
-                pictureScale(picture),
+                `Tab ${current.id}: ${current.page.url()} (${label ? `${label}, ` : picture.fullPage ? "the whole page, " : ""}${picture.width} by ${picture.height}${picture.scale < 1 ? ", made smaller to pass on" : ""}, JPEG quality ${picture.quality}; the owner can watch the tab: ${markdownLink(`Watch tab ${current.id}`, tabLink(publicUrl, current.id))})`,
+                picture.fullPage
+                  ? fullPageScale(picture)
+                  : pictureScale(picture),
                 `To read the text in this picture, ${await ocrWords(scope)}; read_result does not show an image, and view_image with crop shows you part of it closer.`,
               ].join("\n"),
             },
@@ -2898,6 +3448,10 @@ async function runTool(
           ],
         }
       })
+    case "print_pdf":
+      return onTab(scope, tab, spec, (current) =>
+        printPdf(scope, current, args, keepBytes),
+      )
     case "handle_dialog":
       return onTab(scope, tab, spec, async (current) => {
         const dialog = current.dialog

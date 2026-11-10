@@ -18,8 +18,9 @@ import { writeToolAccess } from "../tool-access"
 import { setupVault } from "../vault"
 import { setFetchPrivate, setFetchSite } from "../web-fetch"
 import { setToolTier } from "../tool-tiers"
+import { browserTools } from "../browser/tools"
 import { setPacingClass, setPacingServer, setPacingSite } from "./config"
-import { PACING_CALL_WAIT_MS } from "./limits"
+import { browserPacingClass, PACING_CALL_WAIT_MS } from "./limits"
 import { resetPacing, setPacingClock } from "./pace"
 
 // Pacing holds whatever way a call comes in, because it sits where every
@@ -377,10 +378,58 @@ try {
     await call("call_tool_destructive", COUNT)
     expect(waits).toEqual([])
 
-    // The owner says Write: paced as a change.
+    // The owner says Write: paced as a change. The second is made again on
+    // purpose, past the duplicate guard (calls/guard.ts).
     await setToolTier(ctx, endpointId, "count", "write")
     await call("call_tool_destructive", COUNT)
-    await call("call_tool_destructive", COUNT)
+    await call("call_tool_destructive", {
+      ...COUNT,
+      rerun: true,
+      reason: "A second count is meant.",
+    })
     expect(waits).toEqual([5_000])
+  })
+})
+
+describe("the browser's tools, each paced by its kind of action", () => {
+  it("pins every browser tool to its class, or to none", () => {
+    const classes = Object.fromEntries(
+      browserTools().map((tool) => [tool.name, browserPacingClass(tool.name)]),
+    )
+
+    expect(classes).toEqual({
+      tabs: null,
+      navigate: "browser_navigate",
+      back: "browser_navigate",
+      snapshot: null,
+      read_page: null,
+      find: null,
+      click: "browser_act",
+      drag: "browser_act",
+      type: "browser_act",
+      press_key: "browser_act",
+      select_option: "browser_act",
+      upload_file: "browser_act",
+      scroll: "browser_act",
+      wait_for: null,
+      screenshot: null,
+      print_pdf: null,
+      download: "browser_act",
+      handle_dialog: "browser_act",
+      hand_over: null,
+      request_secret: null,
+      update_secret_sites: null,
+      evaluate: "browser_act",
+      console_log: null,
+      network_log: null,
+    })
+    // A page opened through tabs, or a download by its address, opens a page.
+    expect(browserPacingClass("tabs", { action: "open" })).toBe(
+      "browser_navigate",
+    )
+    expect(browserPacingClass("tabs", { action: "pace" })).toBeNull()
+    expect(
+      browserPacingClass("download", { url: "https://example.com/a.pdf" }),
+    ).toBe("browser_navigate")
   })
 })

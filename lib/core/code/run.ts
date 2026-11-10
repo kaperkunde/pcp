@@ -1,3 +1,5 @@
+import type { PaceRangeInput } from "../pacing/input"
+import type { PaceRange } from "../pacing/limits"
 import type { CallToolResult } from "@modelcontextprotocol/server"
 
 import type { ToolTier } from "../constants"
@@ -135,6 +137,11 @@ export type CallRun = {
   signal: AbortSignal
   deadline: number
   onRun?: (runId: string) => void
+  /**
+   * A browser call's pace, as a wrapper's run chose it (wrappers/run.ts):
+   * handed on to the browser (upstream.ts CallOptions.pace).
+   */
+  pace?: PaceRange
 }
 
 /** How the gateway runs a program's call: by name, at the token's level. */
@@ -152,6 +159,12 @@ export type CodeCaller = (
     run: CallRun
     /** Says, once the tool is found, whether it is in the Read tier. */
     lookedUp?: (readOnly: boolean) => void
+    /**
+     * pcp.call's pace option, as the program gave it: only a wrapper's
+     * program has one (RunOptions.takesPace), which wrappers/run.ts holds
+     * to its wrapper's declared pace.
+     */
+    pace?: PaceRangeInput
     /**
      * The program repeats on purpose a call it (or the token) made a little
      * while ago, with a reason (pcp.call's options): the duplicate guard
@@ -696,6 +709,12 @@ export type RunOptions = {
    * of it and the run's own limit comes first.
    */
   deadline?: number
+  /**
+   * A wrapper's program: pcp.call takes a pace option ({min_ms, max_ms})
+   * for a browser call, which its caller holds to the wrapper's own pace.
+   * Anywhere else the option is refused.
+   */
+  takesPace?: boolean
 }
 
 /** How one program's run went, before it is put into words. */
@@ -750,6 +769,7 @@ export async function runProgram(
     runId = newRunId(),
     trace = [],
     deadline: outerDeadline,
+    takesPace = false,
   }: RunOptions,
 ): Promise<ProgramRun> {
   const limits = await loadResourceLimits()
@@ -852,6 +872,33 @@ export async function runProgram(
       )
     }
 
+    let pace: PaceRangeInput | undefined
+
+    if (payload.pace !== undefined && payload.pace !== null) {
+      if (!takesPace) {
+        return refuse(
+          "pcp.call's pace is for a wrapper's program, within the pace its wrapper declares. A tab's own pace is set with the browser's tabs (action pace).",
+        )
+      }
+
+      const given = payload.pace
+
+      if (
+        !isRecord(given) ||
+        Object.keys(given).some(
+          (key) => key !== "min_ms" && key !== "max_ms",
+        ) ||
+        typeof given.min_ms !== "number" ||
+        typeof given.max_ms !== "number"
+      ) {
+        return refuse(
+          "pcp.call's pace is { min_ms, max_ms }: the shortest and the longest wait before the call, in milliseconds.",
+        )
+      }
+
+      pace = { min_ms: given.min_ms, max_ms: given.max_ms }
+    }
+
     let shape: AnswerShape
 
     try {
@@ -941,6 +988,7 @@ export async function runProgram(
             lookedUp: (readOnly) => {
               entry.readOnly = readOnly
             },
+            ...(pace ? { pace } : {}),
             ...(rerun ? { rerun } : {}),
             ...shape,
           }),

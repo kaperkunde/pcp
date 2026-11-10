@@ -1482,6 +1482,45 @@ describe("how a run says it ended", () => {
     expect(run).toMatchObject({ state: "failed", reason: "gone" })
   })
 
+  it("takes pcp.call's pace only in a wrapper's program, and hands it to the call as given", async () => {
+    await connect()
+    const paces: unknown[] = []
+    const call: Parameters<typeof runProgram>[2]["call"] = async ({ pace }) => {
+      paces.push(pace)
+      return { ok: true, value: null }
+    }
+    const code = `
+      const out = []
+      for (const pace of [{ min_ms: 50, max_ms: 90 }, { min: 1 }, "fast"]) {
+        try { await pcp.call("browser", "click", {}, { pace }); out.push("ok") }
+        catch (error) { out.push(error.message) }
+      }
+      return out`
+
+    const inWrapper = await runProgram(
+      scope,
+      { code, label: "wrapper" },
+      { call, takesPace: true },
+    )
+    expect(inWrapper).toMatchObject({ state: "finished" })
+    expect(paces).toEqual([{ min_ms: 50, max_ms: 90 }])
+    const returned = JSON.parse(
+      (inWrapper as { result: { returned: string } }).result.returned,
+    ) as string[]
+    expect(returned[0]).toBe("ok")
+    expect(returned[1]).toContain("pace is { min_ms, max_ms }")
+    expect(returned[2]).toContain("pace is { min_ms, max_ms }")
+
+    paces.length = 0
+    const inRunCode = await runProgram(scope, { code }, { call })
+    expect(paces).toEqual([])
+    expect(
+      JSON.parse(
+        (inRunCode as { result: { returned: string } }).result.returned,
+      )[0],
+    ).toContain("pcp.call's pace is for a wrapper's program")
+  })
+
   it("hands each call the run's deadline, its caller's run's when that ends first", async () => {
     await connect()
     const deadlines: number[] = []
