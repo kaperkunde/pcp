@@ -96,6 +96,26 @@ const LONG = `<!doctype html><title>Statement: March</title>
 <div style="height: 2400px; background: linear-gradient(#fff, #9cf)"></div>
 <p>The end</p>`
 
+/** A page of pictures that do not compress: its PDF is several megabytes. */
+const NOISE = `<!doctype html><title>Noise</title>
+<div id="pictures"></div>
+<script>
+for (let n = 0; n < 2; n++) {
+  const canvas = document.createElement("canvas")
+  canvas.width = 800
+  canvas.height = 800
+  const context = canvas.getContext("2d")
+  const image = context.createImageData(800, 800)
+  for (let i = 0; i < image.data.length; i++) image.data[i] = Math.random() * 256
+  context.putImageData(image, 0, 0)
+  const picture = document.createElement("img")
+  picture.src = canvas.toDataURL("image/png")
+  picture.style.width = "600px"
+  document.getElementById("pictures").append(picture)
+}
+document.title = "Noise ready"
+</script>`
+
 beforeEach(async () => {
   ;({ cleanup } = await scratchDatabase())
   forgetResourceLimits()
@@ -144,6 +164,10 @@ beforeEach(async () => {
 
     if (request.url.startsWith("/long")) {
       return res.end(LONG)
+    }
+
+    if (request.url.startsWith("/noise")) {
+      return res.end(NOISE)
     }
 
     if (request.url.startsWith("/sent")) {
@@ -323,6 +347,25 @@ describe.skipIf(!executable)(
       await page.locator("code").evaluate((code) => code.remove())
       const picture = await call("screenshot", { tab })
       expect(picture.isError, textOf(picture)).toBeUndefined()
+    })
+
+    it("stops a PDF larger than PCP keeps of one file as it comes, and keeps nothing", async () => {
+      await saveResourceConfig({ ...EMPTY_CONFIG, fileMb: 1 })
+      const tab = tabOf(
+        await call("tabs", { action: "open", url: `${api.origin}/noise` }),
+      )
+      await expect
+        .poll(() => runningBrowser(ctx.vaultId)!.tabs.get(tab)!.page.title())
+        .toBe("Noise ready")
+      const before = await db().toolResult.count()
+
+      const big = await call("print_pdf", { tab, print_background: true })
+
+      expect(big.isError).toBe(true)
+      expect(textOf(big)).toContain(
+        "The PDF of the page is larger than PCP keeps of one file",
+      )
+      expect(await db().toolResult.count()).toBe(before)
     })
 
     it("takes a screenshot of the whole page with full_page", async () => {
