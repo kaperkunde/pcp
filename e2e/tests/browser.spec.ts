@@ -352,6 +352,13 @@ test("a secret for the browser: its login name, a password PCP makes, and its si
   })
   await expect(generate).toBeChecked()
   await expect(page.getByLabel("Length")).toHaveValue("20")
+  // Enter in a field of the form is not Allow: the sites are still unseen.
+  await page.getByLabel("Length").press("Enter")
+  await login.press("Enter")
+  await expect(page.getByTestId("permission-outcome")).toHaveCount(0)
+  await expect(
+    page.getByRole("button", { name: "Save, allow one use" }),
+  ).toBeEnabled()
   await expect(
     page.getByRole("checkbox", { name: "https://www.frankenergie.nl" }),
   ).toBeChecked()
