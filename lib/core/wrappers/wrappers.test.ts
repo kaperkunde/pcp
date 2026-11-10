@@ -2073,6 +2073,36 @@ describe("a wrapper whose calls no longer fit", () => {
     expect(api.requests).toHaveLength(0)
   })
 
+  it("says the arguments came from the wrapper's own, and names the handle inside an answer passed on", async () => {
+    const { wrapper } = await approved([
+      {
+        ...PLAIN_TOOL,
+        input_schema: {
+          type: "object",
+          properties: { file: { type: "object" } },
+        },
+        program:
+          'return await pcp.call("things", "echo", { key: "k", q: args.file })',
+      },
+    ])
+    await writeToolAccess(scope.tokenId, wrapper.id, "lookup", "allowed")
+
+    const result = await call("call_tool_destructive", {
+      server: wrapper.slug,
+      tool: "lookup",
+      arguments: {
+        file: { name: "plan.pdf", size: 9, result: { $result: "abc123" } },
+      },
+    })
+
+    expect(result.isError).toBe(true)
+    expect(result.text).toContain(
+      `The wrapper ${wrapper.slug}'s tool lookup built these arguments from its own`,
+    )
+    expect(result.text).toContain("/q/result")
+    expect(api.requests).toHaveLength(0)
+  })
+
   it("says in its answer how to change an old argument name of a family's tool", async () => {
     const fake = createFakeJmap({ authorize: () => true })
     const jmap = await startTestApi((request, res) => {
