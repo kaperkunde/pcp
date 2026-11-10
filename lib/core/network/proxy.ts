@@ -41,6 +41,9 @@ export function forwardedHeaders(
   delete headers["forwarded"]
   delete headers["x-forwarded-port"]
   delete headers["x-real-ip"]
+  // The app stamps its own from the socket (docker/peer-stamp.cjs); one a
+  // client sent is never passed on.
+  delete headers["x-pcp-peer"]
   headers["x-forwarded-proto"] = proto
   headers["x-forwarded-for"] = clientAddress(req)
 
