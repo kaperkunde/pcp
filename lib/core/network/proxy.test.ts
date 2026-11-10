@@ -143,6 +143,7 @@ it("passes on no x-pcp-peer a client sent, and replaces what it forwarded", () =
   const req = {
     headers: {
       "x-pcp-peer": "6.6.6.6",
+      "x-pcp-forwarded": "1",
       "x-forwarded-for": "6.6.6.6",
       "x-real-ip": "6.6.6.6",
     },
@@ -151,6 +152,7 @@ it("passes on no x-pcp-peer a client sent, and replaces what it forwarded", () =
   const headers = forwardedHeaders(req, "https")
 
   expect(headers["x-pcp-peer"]).toBeUndefined()
+  expect(headers["x-pcp-forwarded"]).toBeUndefined()
   expect(headers["x-real-ip"]).toBeUndefined()
   expect(headers["x-forwarded-for"]).toBe("203.0.113.7")
 })

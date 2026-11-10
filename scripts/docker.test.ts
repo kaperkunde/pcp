@@ -349,11 +349,28 @@ describe("the peer stamp", () => {
     expect(req.headers["x-pcp-peer"]).toBe("172.18.0.2")
   })
 
-  it("leaves no header when the socket has no address", () => {
+  it("stamps a sentinel, never nothing, when the socket has no address", () => {
     const req = { headers: { "x-pcp-peer": "6.6.6.6" }, socket: {} }
 
     stampPeer(req, "x-pcp-peer")
-    expect(req.headers).not.toHaveProperty("x-pcp-peer")
+    expect(req.headers["x-pcp-peer"]).toBe("unknown")
+  })
+
+  it("marks only the requests whose client sent forwarded headers", () => {
+    const sent = (headers: Record<string, string>) => {
+      const req = { headers, socket: { remoteAddress: "192.168.1.5" } }
+
+      stampPeer(req, "x-pcp-peer")
+      // What Next does next (base-server.js): fills it from the socket.
+      req.headers["x-forwarded-for"] ??= req.socket.remoteAddress
+
+      return req.headers["x-pcp-forwarded"]
+    }
+
+    expect(sent({})).toBeUndefined()
+    expect(sent({ "x-pcp-forwarded": "1" })).toBeUndefined()
+    expect(sent({ "x-forwarded-for": "6.6.6.6" })).toBe("1")
+    expect(sent({ "x-real-ip": "6.6.6.6" })).toBe("1")
   })
 
   it("stamps every request a Node http server handles", async () => {
