@@ -18,7 +18,7 @@ import { createServer } from "../servers"
 import { scratchDatabase } from "../test-db"
 import { writeToolAccess } from "../tool-access"
 import { setToolTier } from "../tool-tiers"
-import { keepBytes } from "../tool-results"
+import { keepBytes, openResult } from "../tool-results"
 import { setupVault } from "../vault"
 import { PROVIDER_FILES } from "./run"
 
@@ -534,62 +534,59 @@ async function png(width: number, height: number): Promise<Buffer> {
     .toBuffer()
 }
 
-describe("view_image on a PDF", () => {
-  it("answers with the owner's link to set up PDF pages when no tool makes one", async () => {
+describe("convert_document to a picture of a PDF's page", () => {
+  const picture = (bytes: Buffer) => () => ({
+    content: [
+      {
+        type: "image" as const,
+        data: bytes.toString("base64"),
+        mimeType: "image/png",
+      },
+    ],
+  })
+
+  it("answers with the owner's link when no tool renders a page, saying what it takes", async () => {
+    await server("conv", CONVERTER)
     const id = await keptFile("letter.pdf", "application/pdf")
 
-    const answer = await call("view_image", { file: { $result: id } })
+    const answer = await call("convert_document", {
+      file: { $result: id },
+      to: "png",
+    })
 
     expect(answer.structured).toMatchObject({
       kind: "needs_owner",
       reason: "setup",
-      url: `${PUBLIC_URL}/plugins/pdf_pages`,
-      capability: "pdf_pages",
+      url: `${PUBLIC_URL}/plugins/convert_document`,
+      capability: "convert_document",
     })
-    expect(answer.text).toContain("call view_image again")
+    expect(answer.text).toContain("turns a PDF's page into a picture")
+    expect(answer.text).toContain("renders a page to an image")
+    // No common item does it: the text offers none to launch.
+    expect(answer.text).not.toContain("Docling")
     expect(answer.text.trimEnd().split("\n").at(-1)).toBe(
-      `[Set up PDF pages in PCP](${PUBLIC_URL}/plugins/pdf_pages)`,
+      `[Set up document conversion in PCP](${PUBLIC_URL}/plugins/convert_document)`,
     )
     expect(ran).toEqual([])
   })
 
-  it("has a provider make the page a picture, and shows it", async () => {
+  it("has a provider that takes the file by handle render the page, counting from 0 where it does", async () => {
     await server(
       "pages",
-      renderer(
-        { readOnlyHint: true },
-        {
-          page_index: {
-            type: "integer",
-            description: "The page, 0-based.",
-          },
-        },
-      ),
+      renderer(WRITES, {
+        page_index: { type: "integer", description: "The page, 0-based." },
+      }),
     )
     const id = await keptFile("letter.pdf", "application/pdf")
-    const picture = await png(300, 400)
-    answers["pages/render_page"] = () => ({
-      content: [
-        {
-          type: "image",
-          data: picture.toString("base64"),
-          mimeType: "image/png",
-        },
-      ],
+    answers["pages/render_page"] = picture(await png(300, 400))
+
+    const answer = await call("convert_document", {
+      file: { $result: id },
+      to: "png",
+      page: 3,
     })
 
-    const client = await connect()
-    const result = (await client.callTool({
-      name: "view_image",
-      arguments: { file: { $result: id }, page: 3 },
-    })) as CallToolResult
-    await client.close()
-    const text = result.content
-      .map((part) => (part.type === "text" ? part.text : ""))
-      .join("\n")
-
-    expect(result.isError, text).toBeFalsy()
-    // Page 3, to a tool that counts from 0.
+    expect(answer.isError, answer.text).toBe(false)
     expect(ran).toEqual([
       {
         server: "pages",
@@ -597,57 +594,111 @@ describe("view_image on a PDF", () => {
         args: { file: { $result: id }, page_index: 2, dpi: 150 },
       },
     ])
-    expect(text).toContain("Page 3 of letter.pdf")
-    expect(text).toContain("made a picture by pages/render_page")
-    const image = result.content.find((part) => part.type === "image")!
-    expect(image.mimeType).toBe("image/jpeg")
-    expect(
-      await sharp(Buffer.from(image.data, "base64")).metadata(),
-    ).toMatchObject({ width: 300, height: 400 })
+    expect(answer.structured).toMatchObject({
+      kind: "page_image",
+      provider: "pages/render_page",
+      page: 3,
+      file: { $result: expect.any(String), type: "image/png" },
+    })
+    // The handle is the token's own picture, for view_image.
+    const made = await openResult(ctx, {
+      tokenId: scope.tokenId,
+      id: (answer.structured.file as { $result: string }).$result,
+    })
+    expect(await sharp(made!.bytes()).metadata()).toMatchObject({
+      width: 300,
+      height: 400,
+    })
     expect(vi.mocked(appendRequestLog)).toHaveBeenCalledWith(
       expect.objectContaining({
-        tool: "view_image",
+        tool: "convert_document",
         server: "pages",
         upstreamTool: "render_page",
       }),
     )
   })
 
-  it("refuses a provider above view_image's own tier (Read), naming the entry that runs it", async () => {
-    await server("pages", renderer(WRITES, { page: { type: "integer" } }))
+  it("puts the PDF in a provider's folder and fetches the PNG it wrote, the page as it is", async () => {
+    const PAGE_SERVER: FakeTool[] = [
+      ...PDF_SERVER.filter((tool) =>
+        ["put_file", "get_file"].includes(tool.name),
+      ),
+      {
+        name: "render_page",
+        description: "Render a PDF page as an image.",
+        schema: {
+          type: "object",
+          properties: {
+            pdf_path: PATH,
+            output_path: PATH,
+            page_number: { type: "integer", description: "From 1." },
+          },
+          required: ["pdf_path", "output_path", "page_number"],
+          additionalProperties: false,
+        },
+        annotations: WRITES,
+      },
+    ]
+    await server("pdf", PAGE_SERVER)
     const id = await keptFile("letter.pdf", "application/pdf")
-
-    const answer = await call("view_image", { file: { $result: id } })
-
-    expect(answer.isError).toBe(true)
-    expect(answer.text).toContain(
-      "pages/render_page is a Write tool, above view_image (Read)",
-    )
-    expect(answer.text).toContain("call_tool_write")
-    expect(ran).toEqual([])
-  })
-
-  it("passes a 1-based page as it is", async () => {
-    await server(
-      "pages",
-      renderer({ readOnlyHint: true }, { page_number: { type: "integer" } }),
-    )
-    const id = await keptFile("letter.pdf", "application/pdf")
-    const picture = await png(20, 20)
-    answers["pages/render_page"] = () => ({
+    const bytes = await png(40, 60)
+    answers["pdf/get_file"] = () => ({
       content: [
         {
-          type: "image",
-          data: picture.toString("base64"),
-          mimeType: "image/png",
+          type: "resource",
+          resource: {
+            uri: "file:///data/pcp/x/page_image.png",
+            mimeType: "image/png",
+            blob: bytes.toString("base64"),
+          },
         },
       ],
     })
 
-    const answer = await call("view_image", { file: { $result: id } })
+    const answer = await call("convert_document", {
+      file: { $result: id },
+      to: "png",
+      page: 2,
+    })
 
     expect(answer.isError, answer.text).toBe(false)
-    expect(ran[0]!.args).toMatchObject({ page_number: 1 })
+    expect(ran.map((entry) => entry.tool)).toEqual([
+      "put_file",
+      "render_page",
+      "get_file",
+    ])
+    const render = ran[1]!
+    expect(render.args).toMatchObject({
+      pdf_path: ran[0]!.args.file_path,
+      page_number: 2,
+    })
+    expect(String(render.args.output_path)).toMatch(/\/page_image\.png$/)
+    expect(ran[2]!.args).toEqual({ file_path: render.args.output_path })
+    expect(answer.structured).toMatchObject({
+      kind: "page_image",
+      provider: "pdf/render_page",
+      file: { type: "image/png" },
+    })
+  })
+
+  it("refuses page without to png, and a picture, which view_image shows as it is", async () => {
+    const pdf = await keptFile("letter.pdf", "application/pdf")
+    const photo = await keptFile("photo.png", "image/png")
+
+    const paged = await call("convert_document", {
+      file: { $result: pdf },
+      page: 2,
+    })
+    const pictured = await call("convert_document", {
+      file: { $result: photo },
+      to: "png",
+    })
+
+    expect(paged.isError).toBe(true)
+    expect(paged.text).toContain('page goes with to "png"')
+    expect(pictured.isError).toBe(true)
+    expect(pictured.text).toContain("view_image")
+    expect(ran).toEqual([])
   })
 })
 

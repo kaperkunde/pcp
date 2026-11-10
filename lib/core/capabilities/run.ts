@@ -132,9 +132,21 @@ export const READ_IMAGE_OUTPUT = z.discriminatedUnion("kind", [
   NEEDS_OWNER,
   READINGS,
 ])
+/** A page of a PDF made into a picture (convert_document's to "png"). */
+export const PAGE_IMAGE = z.object({
+  kind: z.literal("page_image"),
+  provider: z.string(),
+  /** The page, counted from 1. */
+  page: z.number(),
+  /** The picture, as a handle for view_image. */
+  file: RESULT_HANDLE,
+  failed: z.array(z.object({ provider: z.string(), error: z.string() })),
+})
+
 export const CONVERT_OUTPUT = z.discriminatedUnion("kind", [
   NEEDS_OWNER,
   CONVERTED,
+  PAGE_IMAGE,
 ])
 export const EDIT_OUTPUT = z.discriminatedUnion("kind", [NEEDS_OWNER, EDITED])
 
@@ -157,6 +169,8 @@ export function setupOutcome(
   cap: Capability,
   publicUrl: string,
   why: string,
+  /** The common items that would do it, when not all of the capability's. */
+  { items = cap.items }: { items?: CommonItem[] } = {},
 ): Outcome {
   const url = capabilityPage(publicUrl, cap.id)
 
@@ -170,8 +184,8 @@ export function setupOutcome(
       capability: cap.id,
     },
     `Not done yet: ${why} ${
-      cap.items.length > 0
-        ? `PCP's page at the link below offers ${itemNames(cap.items)} for the owner to launch on one of their SSH servers, in a few clicks. Once it runs, call ${cap.tool} again with the same arguments: it uses what they launched, at the levels they give this token.`
+      items.length > 0
+        ? `PCP's page at the link below offers ${itemNames(items)} for the owner to launch on one of their SSH servers, in a few clicks. Once it runs, call ${cap.tool} again with the same arguments: it uses what they launched, at the levels they give this token.`
         : `PCP's page at the link below says what the owner can add for it. Once they have, call ${cap.tool} again with the same arguments: it uses what they added, at the levels they give this token.`
     } ${nextMessageCheck(`${cap.tool} again`, "nothing is set up yet")}\n\n${linkLastText(url, cap.label)}`,
   )
@@ -685,17 +699,10 @@ export function convertDocument(
   )
 }
 
-/** A page of a PDF made into a picture: the provider, and the picture. */
-export const PAGE_IMAGE = z.object({
-  kind: z.literal("page_image"),
-  provider: z.string(),
-  file: RESULT_HANDLE,
-})
-
 /**
- * view_image on a PDF: the best provider that turns its page into a
- * picture, which comes back as a handle (from the path it wrote, or an
- * image in its answer) for view_image to show.
+ * convert_document's to "png": the best provider that turns a PDF's page
+ * into a picture, which comes back as a handle (from the path it wrote, or
+ * an image in its answer) for view_image to show.
  */
 export function pdfPageImage(
   cap: Capability,
@@ -726,7 +733,9 @@ export function pdfPageImage(
       return ok({
         kind: "page_image",
         provider: providerName(provider),
+        page,
         file: made,
+        failed,
       })
     },
   )

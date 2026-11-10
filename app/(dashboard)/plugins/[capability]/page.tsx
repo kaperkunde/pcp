@@ -65,10 +65,8 @@ export default async function CapabilityPage({
           Assistants call <code className="font-mono">{cap.tool}</code>, which
           uses a server or API endpoint you have that can do the work, at the
           levels you give each token: one you have not allowed yet asks you
-          first, as any other tool does.{" "}
-          {cap.items.length > 0
-            ? "Launch one below; once it runs, the assistant can try again."
-            : "None of PCP's common items does it yet: add a server or API endpoint of your own that does (on Servers); once it is there, the assistant can try again."}
+          first, as any other tool does. Launch one below; once it runs, the
+          assistant can try again.
         </p>
       </Card>
 
@@ -95,7 +93,7 @@ export default async function CapabilityPage({
         </Card>
       ) : null}
 
-      {repoId === null && cap.items.length > 0 ? (
+      {repoId === null ? (
         <Card className="items-start gap-3 sm:p-6">
           <p className="font-medium">Start from PCP&apos;s common items</p>
           <p className="text-muted-foreground">

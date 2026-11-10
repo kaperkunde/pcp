@@ -231,17 +231,38 @@ describe("view_image refuses", () => {
     expect(answer.text).toContain("sandbox")
   })
 
-  it("page for a file that is not a PDF, and a file that is no picture", async () => {
-    const png = await kept(await gradient(50, 50), "image/png", "a.png")
+  it("a file that is no picture", async () => {
     const text = await kept(Buffer.from("hello"), "text/plain", "a.txt")
 
-    const paged = await view({ file: { $result: png }, page: 2 })
     const plain = await view({ file: { $result: text } })
 
-    expect(paged.isError).toBe(true)
-    expect(paged.text).toContain("page is for a PDF")
     expect(plain.isError).toBe(true)
     expect(plain.text).toContain("is text/plain, not a picture")
+  })
+
+  it("a PDF, naming the convert_document call that makes its page a picture", async () => {
+    const id = await kept(
+      Buffer.from("%PDF-1.7\n%…"),
+      "application/pdf",
+      "letter.pdf",
+    )
+
+    const answer = await view({ file: { $result: id } })
+
+    expect(answer.isError).toBe(true)
+    expect(answer.text).toContain(
+      `convert the page first with convert_document {"file":{"$result":"${id}"},"to":"png","page":1}`,
+    )
+    expect(answer.image).toBeNull()
+  })
+
+  it("page, which is convert_document's", async () => {
+    const id = await kept(await gradient(50, 50), "image/png", "a.png")
+
+    const answer = await view({ file: { $result: id }, page: 2 })
+
+    expect(answer.isError).toBe(true)
+    expect(answer.text).toMatch(/page/)
   })
 })
 

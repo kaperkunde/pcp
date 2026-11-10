@@ -14,7 +14,6 @@ import {
 import { compressImage, imageSize } from "./code/media"
 import { runProgram } from "./code/run"
 import { sandboxLanguages } from "./code/sandbox"
-import type { InputFile } from "./capabilities/run"
 import { isPcpError } from "./errors"
 import { bareType, sniffMediaType } from "./media-types"
 import type { PermissionScope } from "./permissions"
@@ -33,16 +32,15 @@ import { passOn, toolError, type Outcome } from "./tools/outcome"
  *   encoded as a JPEG small enough to pass on inline, stepping its quality
  *   and then its size down as a screenshot's are (browser/screenshot.ts
  *   fitPicture and shotLadder), decoded and encoded by code/media.ts.
- * - A PDF's page is made into a picture by a provider among the token's
- *   own tools (capabilities/, pdf_pages), through the gateway's bridge at
- *   view_image's own tier and the token's levels; with none, the owner's
- *   link to set one up.
+ * - A PDF is refused with the call that makes its page a picture first:
+ *   convert_document's to "png" (capabilities/, a provider at its own
+ *   Write tier). view_image is Read and calls no tool.
  * - A video's frame is taken by ffmpeg in the sandbox, as run_code's
  *   pcp.video.frames takes it (a program of PCP's own through runProgram,
  *   with no tool to call): only when the sandbox runner is connected.
  *
- * A page or frame made on the way is kept as a result of the token's, so
- * the assistant can look closer at it (crop) without making it again.
+ * A frame taken on the way is kept as a result of the token's, so the
+ * assistant can look closer at it (crop) without taking it again.
  */
 
 export type Crop = { x: number; y: number; width: number; height: number }
@@ -53,7 +51,6 @@ export type ViewImageArgs = {
   crop?: Crop
   grayscale?: boolean
   quality?: number
-  page?: number
   time_s?: number
 }
 
@@ -206,6 +203,11 @@ function handleText(id: string): string {
   return JSON.stringify({ $result: id })
 }
 
+/** convert_document's arguments that make a PDF's first page a picture. */
+export function pdfCall(id: string): string {
+  return JSON.stringify({ file: { $result: id }, to: "png", page: 1 })
+}
+
 /** The answer: a line on what was shown and how, then the picture. */
 async function show(
   bytes: Buffer,
@@ -335,12 +337,7 @@ async function takeFrame(
 }
 
 export type ViewImageDeps = {
-  /**
-   * A PDF's page as a picture, by a provider (capabilities/run.ts
-   * pdfPageImage): ok with { kind: "page_image", provider, file }, or what
-   * to answer instead (the owner's link, a refusal).
-   */
-  pdfPage: (file: InputFile, page: number) => Promise<Outcome>
+  /** The request's: a frame's run stops when it goes away. */
   signal?: AbortSignal
 }
 
@@ -363,10 +360,6 @@ export async function viewImage(
   const { kind, type } = viewKind(bytes, opened.mediaType)
   const refuse = (message: string) => toolError(message, { code: "validation" })
 
-  if (args.page !== undefined && kind !== "pdf") {
-    return refuse(`page is for a PDF; ${nameOf(opened)} is ${type}.`)
-  }
-
   if (args.time_s !== undefined && kind !== "video") {
     return refuse(`time_s is for a video; ${nameOf(opened)} is ${type}.`)
   }
@@ -378,47 +371,14 @@ export async function viewImage(
       return refuse(
         `${nameOf(opened)} is an SVG, which PCP does not show as a picture: it is text (markup that can hold scripts and links). Read it with read_result.`,
       )
-    case "pdf": {
-      const page = args.page ?? 1
-      const made = await deps.pdfPage(
-        { id: opened.id, name: opened.name, mediaType: "application/pdf" },
-        page,
+    case "pdf":
+      return refuse(
+        `${nameOf(opened)} is a PDF, not a picture: convert the page first with convert_document ${pdfCall(opened.id)} (page counts from 1), then call view_image with the handle it answers.`,
       )
-
-      if (made.type !== "ok") {
-        return made
-      }
-
-      const value = made.value as {
-        provider: string
-        file: { $result: string }
-      }
-      const picture = await openResult(scope.ctx, {
-        tokenId: scope.tokenId,
-        id: value.file.$result,
-      })
-      const pictureBytes = picture?.bytes()
-      const found = pictureBytes
-        ? viewKind(pictureBytes, picture!.mediaType)
-        : null
-
-      if (!picture || !pictureBytes || found?.kind !== "image") {
-        return toolError(
-          `${value.provider} answered with ${found ? found.type : "nothing PCP kept"} for page ${page}, not a picture PCP shows (PNG, JPEG, WebP or GIF).`,
-          { code: "upstream" },
-        )
-      }
-
-      return show(
-        pictureBytes,
-        args,
-        `Page ${page} of ${nameOf(opened)}, made a picture by ${value.provider} and kept as ${handleText(picture.id)} (pass that to view_image to crop it without making it again); ${found.type}`,
-      )
-    }
     case "video": {
       if (!sandboxLanguages().includes("python")) {
         return toolError(
-          `${nameOf(opened)} is a video (${type}): PCP takes a video's frames in its sandbox, which is not connected to this PCP. view_image shows pictures and PDF pages without it; the owner can add the sandbox (docs/self-hosting.md).`,
+          `${nameOf(opened)} is a video (${type}): PCP takes a video's frames in its sandbox, which is not connected to this PCP. view_image shows pictures without it; the owner can add the sandbox (docs/self-hosting.md).`,
           { code: "state" },
         )
       }

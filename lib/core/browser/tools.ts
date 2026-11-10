@@ -739,7 +739,7 @@ const INPUTS: readonly BrowserToolInput[] = [
     name: "download",
     title: "Download a file",
     description:
-      "Keeps the file a page offers for download: clicks the element (ref) that starts it, or opens its address (url, in the tab, at a site the tab may open now: navigate asks the owner for another), and waits for it. Answers with a handle to the file ({\"$result\": id}), kept for this token for a day: pass it where a tool wants a file (upload_file's files, send_email's attachments, a field that takes base64), or read it with read_result. If you can analyse images yourself, call view_image with the handle to see a picture, PDF page or video frame. A file larger than PCP keeps of one is stopped.",
+      "Keeps the file a page offers for download: clicks the element (ref) that starts it, or opens its address (url, in the tab, at a site the tab may open now: navigate asks the owner for another), and waits for it. Answers with a handle to the file ({\"$result\": id}), kept for this token for a day: pass it where a tool wants a file (upload_file's files, send_email's attachments, a field that takes base64), or read it with read_result. If you can analyse images yourself, call view_image with the handle to see a picture or a video's frame (a PDF's page: convert_document to \"png\" first). A file larger than PCP keeps of one is stopped.",
     input: z.strictObject({ tab, ref: ref.optional(), url: url.optional() }),
     rules: [exactlyOne(["ref", "url"], "Give a ref or a url, one of them.")],
     annotations: ACTS,

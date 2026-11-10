@@ -258,7 +258,7 @@ export const OPERATIONS: Record<OperationId, Operation> = {
   },
   page_image: {
     id: "page_image",
-    capability: "pdf_pages",
+    capability: "convert_document",
     match: [
       {
         name: /render|rasteri[sz]e|thumbnail|to_?(image|png|jpe?g|picture)|(page|pdf)s?_?(image|picture|png|jpe?g)/i,
