@@ -30,7 +30,7 @@ const CLASSES: Array<{ name: PacingClass; title: string; about: string }> = [
     name: "browser_act",
     title: "Browser actions in a page",
     about:
-      "Clicking, typing, choosing, scrolling and the like, per site, after the previous action there ended. Typing fills a field at once, not key by key. Reading what a tab already shows is never paced.",
+      "Clicking, typing, choosing, scrolling and the like, per site, after the previous action there ended. Typing fills a field at once, not key by key. Reading what a tab already shows is never paced. A pace you set here before now covers only these, not opening pages, which has its own below.",
   },
   {
     name: "browser_navigate",
