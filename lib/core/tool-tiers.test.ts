@@ -15,6 +15,7 @@ import {
   mergeToolTiers,
   readOwnToolTiers,
   runEntryFor,
+  SETTING_OWN_TOOL_TIERS,
   setToolTier,
   tierAllows,
   tierAnnotations,
@@ -23,6 +24,7 @@ import {
   toolTier,
   toolTierInfo,
 } from "./tool-tiers"
+import { getSetting, setSetting } from "./settings"
 import { setupVault } from "./vault"
 
 // One truth for how much a tool can do: the owner's choice, else a
@@ -251,5 +253,25 @@ describe("the owner's tiers", () => {
     ).rejects.toThrow(/no tool called execute_destructive/)
     await chooseOwnToolTier(ctx, "memory", null)
     expect(await readOwnToolTiers(ctx)).toEqual({})
+  })
+
+  it("ignores a choice saved for an entry or an old entry's name, and drops it on the next save (#113)", async () => {
+    await setSetting(
+      ctx,
+      SETTING_OWN_TOOL_TIERS,
+      JSON.stringify({
+        call_tool_destructive: "write",
+        run_code_read: "write",
+        execute_read: "destructive",
+        search: "write",
+        memory: "write",
+      }),
+    )
+    expect(await readOwnToolTiers(ctx)).toEqual({ memory: "write" })
+
+    await chooseOwnToolTier(ctx, "web_fetch", "write")
+    expect(
+      JSON.parse((await getSetting(ctx, SETTING_OWN_TOOL_TIERS))!),
+    ).toEqual({ memory: "write", web_fetch: "write" })
   })
 })
