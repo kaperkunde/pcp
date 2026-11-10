@@ -31,7 +31,11 @@ export function knownSealed(vaultId: string): boolean {
  * The vault's rows were replaced (a restore) or are gone (deleted): what
  * this process knew of them no longer holds.
  */
-export function forgetSealedVault(_vaultId: string): void {}
+export function forgetSealedVault(vaultId: string): void {
+  const state = sealingState()
+  state.sealed.delete(vaultId)
+  state.dirty.delete(vaultId)
+}
 
 /** Tests: forget every vault. */
 export function forgetSealedVaults(): void {

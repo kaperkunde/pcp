@@ -38,6 +38,7 @@ import {
 } from "./crypto"
 import { withBrowserClosed } from "./browser/runtime"
 import { scrubFreedPages } from "./cleanup/runtime"
+import { forgetSealedVault } from "./sealing/state"
 import { db } from "./db"
 import { backfillDefinitions } from "./definition-rows"
 import { invalid, isPcpError, PcpError } from "./errors"
@@ -470,7 +471,10 @@ export async function restoreExport(
   options: { restoreHostSettings: boolean },
 ): Promise<void> {
   if (target.into === "fresh") {
-    return writeExport(payload, target, options)
+    await writeExport(payload, target, options)
+    // What this process knew of the vault's sealing was of rows now gone.
+    forgetSealedVault(payload.vault.id)
+    return
   }
 
   // The vault's browser holds sign-ins from before and would save them over
@@ -479,6 +483,9 @@ export async function restoreExport(
   await withBrowserClosed(target.ctx, () =>
     writeExport(payload, target, options),
   )
+  // What this process knew of the vault's sealing was of the rows replaced.
+  forgetSealedVault(target.ctx.vaultId)
+  forgetSealedVault(payload.vault.id)
   // The replaced vault's rows were zeroed as they went; the log's older
   // pages and anything freed before secure_delete go with a rebuild.
   await scrubFreedPages({ rebuild: true }).catch((error) =>

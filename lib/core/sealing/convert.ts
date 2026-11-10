@@ -73,11 +73,12 @@ export const SEAL_CONVERTERS: Converter[] = [
         return false
       }
 
-      await db().setting.update({
-        where: { vaultId_key: { vaultId: row.vaultId, key: row.key } },
+      // Only over the value it read: one the owner saved since stays.
+      const { count } = await db().setting.updateMany({
+        where: { vaultId: row.vaultId, key: row.key, value: row.value },
         data: { value: storedSetting(ctx, row.key, row.value) },
       })
-      return true
+      return count === 1
     },
   }),
   converter({
@@ -94,8 +95,15 @@ export const SEAL_CONVERTERS: Converter[] = [
         take: limit,
       }),
     write: async (ctx, row) => {
-      await db().secret.update({
-        where: { id: row.id },
+      // Only a row still as it was read: a name the owner gave it since
+      // is sealed already, and stays.
+      const { count } = await db().secret.updateMany({
+        where: {
+          id: row.id,
+          meta: null,
+          plainName: row.plainName,
+          plainDescription: row.plainDescription,
+        },
         data: {
           ...sealedSecretMeta(ctx, row.id, {
             name: row.plainName,
@@ -105,7 +113,7 @@ export const SEAL_CONVERTERS: Converter[] = [
           updatedAt: row.updatedAt,
         },
       })
-      return true
+      return count === 1
     },
   }),
   converter({
@@ -117,11 +125,11 @@ export const SEAL_CONVERTERS: Converter[] = [
         take: limit,
       }),
     write: async (ctx, row) => {
-      await db().apiToken.update({
-        where: { id: row.id },
+      const { count } = await db().apiToken.updateMany({
+        where: { id: row.id, sealedName: null, plainName: row.plainName },
         data: sealedTokenName(ctx, row.id, row.plainName),
       })
-      return true
+      return count === 1
     },
   }),
   converter({
@@ -133,22 +141,26 @@ export const SEAL_CONVERTERS: Converter[] = [
       }),
     write: async (ctx, row) => {
       const sealed = sealedOrigin(ctx, row.secretId, row.origin)
-      // The origin is part of the row's key: the sealed row replaces it.
-      await db().$transaction([
-        db().secretBrowserOrigin.delete({
-          where: {
-            secretId_origin: { secretId: row.secretId, origin: row.origin },
-          },
-        }),
-        db().secretBrowserOrigin.upsert({
+      // The origin is part of the row's key: the sealed row replaces it,
+      // only if the plain one is still there.
+      return db().$transaction(async (tx) => {
+        const { count } = await tx.secretBrowserOrigin.deleteMany({
+          where: { secretId: row.secretId, origin: row.origin, sealed: null },
+        })
+
+        if (count === 0) {
+          return false
+        }
+
+        await tx.secretBrowserOrigin.upsert({
           where: {
             secretId_origin: { secretId: row.secretId, origin: sealed.origin },
           },
           create: { ...row, ...sealed },
           update: {},
-        }),
-      ])
-      return true
+        })
+        return true
+      })
     },
   }),
   converter({
@@ -160,17 +172,22 @@ export const SEAL_CONVERTERS: Converter[] = [
       }),
     write: async (ctx, row) => {
       const sealed = sealedSiteAllowance(ctx, row.tokenId, row.host)
-      await db().$transaction([
-        db().apiTokenSiteAllowance.delete({
-          where: { tokenId_host: { tokenId: row.tokenId, host: row.host } },
-        }),
-        db().apiTokenSiteAllowance.upsert({
+      return db().$transaction(async (tx) => {
+        const { count } = await tx.apiTokenSiteAllowance.deleteMany({
+          where: { tokenId: row.tokenId, host: row.host, sealed: null },
+        })
+
+        if (count === 0) {
+          return false
+        }
+
+        await tx.apiTokenSiteAllowance.upsert({
           where: { tokenId_host: { tokenId: row.tokenId, host: sealed.host } },
           create: { ...row, ...sealed },
           update: {},
-        }),
-      ])
-      return true
+        })
+        return true
+      })
     },
   }),
   converter({
@@ -190,14 +207,14 @@ export const SEAL_CONVERTERS: Converter[] = [
         return false
       }
 
-      await db().webFetchRule.update({
-        where: { id: row.id },
+      const { count } = await db().webFetchRule.updateMany({
+        where: { id: row.id, sealed: null, key: row.key },
         data: {
           ...sealedRuleKey(ctx, row.id, row.kind, row.key),
           updatedAt: row.updatedAt,
         },
       })
-      return true
+      return count === 1
     },
   }),
 ]
@@ -206,14 +223,35 @@ export { forgetSealedVaults } from "./state"
 
 /**
  * One batch of the vault's conversion. Answers true once nothing is left
- * in plain text.
+ * in plain text. One at a time per vault: a call while one runs gets its
+ * answer. A table that fails is left for the next request, said in the
+ * log by its name only, and keeps no other table or the rebuild from
+ * going on.
  */
-export async function ensureSealed(
+export function ensureSealed(
+  ctx: VaultContext,
+  options: { limit?: number; converters?: Converter[] } = {},
+): Promise<boolean> {
+  const { running } = sealingState()
+  const under = running.get(ctx.vaultId)
+
+  if (under) {
+    return under
+  }
+
+  const run = sealBatch(ctx, options).finally(() => {
+    running.delete(ctx.vaultId)
+  })
+  running.set(ctx.vaultId, run)
+  return run
+}
+
+async function sealBatch(
   ctx: VaultContext,
   {
     limit = SEAL_BATCH,
     converters = SEAL_CONVERTERS,
-  }: { limit?: number; converters?: Converter[] } = {},
+  }: { limit?: number; converters?: Converter[] },
 ): Promise<boolean> {
   const { sealed, dirty } = sealingState()
 
@@ -222,30 +260,35 @@ export async function ensureSealed(
   }
 
   let left = false
+  let failed = false
 
   for (const converter of converters) {
-    const writes = await converter.read(ctx, limit)
-    let count = 0
+    try {
+      const writes = await converter.read(ctx, limit)
+      let count = 0
 
-    for (const write of writes) {
-      if (await write()) {
-        count++
+      for (const write of writes) {
+        if (await write()) {
+          count++
+        }
       }
-    }
 
-    if (count > 0) {
-      dirty.add(ctx.vaultId)
-    }
+      if (count > 0) {
+        dirty.add(ctx.vaultId)
+      }
 
-    // A full batch may have more behind it.
-    left ||= writes.length >= limit
+      // A full batch may have more behind it.
+      left ||= writes.length >= limit
+    } catch {
+      // What failed may hold the very values being sealed: the table only.
+      console.error(`[sealing] could not seal the rows of ${converter.table}`)
+      failed = true
+    }
   }
 
   if (left) {
     return false
   }
-
-  sealed.add(ctx.vaultId)
 
   if (dirty.delete(ctx.vaultId)) {
     // The plain values are gone from the rows; the file's free pages and
@@ -253,5 +296,10 @@ export async function ensureSealed(
     await scrubFreedPages({ rebuild: true })
   }
 
+  if (failed) {
+    return false
+  }
+
+  sealed.add(ctx.vaultId)
   return true
 }

@@ -324,7 +324,7 @@ export function RestoreCard({
           <Field
             label="Password of the vault in the file"
             htmlFor="restore-vault-password"
-            hint="The password you signed in with when the export was made. Names in the file are sealed under it, so the check shows them only with it."
+            hint="The password you signed in with when the export was made. The file keeps its tokens' names locked with it: type it to see them here."
           >
             <Input
               id="restore-vault-password"
@@ -481,7 +481,7 @@ function PreviewList({ preview }: { preview: ExportPreview }) {
               {preview.tokens.map((token, index) => (
                 <li key={index}>
                   {token.name ?? (
-                    <span className="text-muted-foreground">Name sealed</span>
+                    <span className="text-muted-foreground">Name hidden</span>
                   )}
                   {token.prefix ? (
                     <span className="text-muted-foreground">

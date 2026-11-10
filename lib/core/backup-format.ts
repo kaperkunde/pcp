@@ -990,6 +990,18 @@ export function checkReferences(payload: ExportPayload): void {
  * `revoked` holds the tokens a restore keeps revoked though the file has
  * them live (`carriedRevocations` in lib/core/backup.ts).
  */
+/** A token's name in a file, or null when it does not open: shown hidden. */
+function openedName(
+  ctx: { vaultId: string; dek: Buffer },
+  row: { id: string; plainName: string; sealedName: Uint8Array | null },
+): string | null {
+  try {
+    return tokenName(ctx, row)
+  } catch {
+    return null
+  }
+}
+
 export function previewOf(
   payload: ExportPayload,
   revoked: ReadonlyMap<string, Date> = new Map(),
@@ -1004,7 +1016,7 @@ export function previewOf(
   const tokens = [...tables.apiTokens]
     .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime())
     .map((row): ExportedToken => ({
-      name: ctx ? tokenName(ctx, row) : row.sealedName ? null : row.plainName,
+      name: ctx ? openedName(ctx, row) : row.sealedName ? null : row.plainName,
       prefix: row.prefix,
       createdAt: row.createdAt.toISOString(),
       status:

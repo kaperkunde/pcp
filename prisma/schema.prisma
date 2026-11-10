@@ -551,7 +551,8 @@ model Secret {
   /// (lib/core/secret-meta.ts). Null on a row from before, until sealed.
   meta        Bytes?
   /// The name, found by: a keyed hash of it under the vault's key
-  /// (lib/core/keyed-hash.ts, label "secret name"). Unique in the vault.
+  /// (keyedHash in lib/core/crypto.ts, label "pcp secret name"). Unique in
+  /// the vault.
   nameKey     String?  @map("name_key")
   /// text | totp | oauth | ssh_key (PCP's own private key for an SSH server)
   kind        String   @default("text")
