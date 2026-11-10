@@ -264,6 +264,48 @@ describe("the owner's pace", () => {
     expect(await readPacingConfig(ctx.vaultId)).toEqual(EMPTY_PACING)
   })
 
+  it("carries a newer PCP's classes and bounds through every write, and reads the rest", async () => {
+    const newer = {
+      classes: { browser_act: CLASS, browser_scroll: SLOW },
+      servers: {},
+      sites: [],
+      assistant: {
+        browser_act: { minMs: 20, maxMs: 900 },
+        browser_scroll: { minMs: 5, maxMs: 50 },
+      },
+    }
+    await db().setting.create({
+      data: {
+        vaultId: ctx.vaultId,
+        key: SETTING_PACING,
+        value: JSON.stringify(newer),
+      },
+    })
+
+    const read = await readPacingConfig(ctx.vaultId)
+    expect(read.classes).toEqual({ browser_act: CLASS })
+    expect(read.assistant).toEqual({ browser_act: { minMs: 20, maxMs: 900 } })
+
+    await setPacingSite(ctx, { site: "a.test", subdomains: false, pace: SLOW })
+    await setPacingClass(ctx, "web_fetch", CLASS)
+    await setAssistantPaceBounds(ctx, {
+      browser_navigate: { minMs: 300, maxMs: 4_000 },
+    })
+
+    const stored = JSON.parse((await getSetting(ctx, SETTING_PACING))!)
+    expect(stored.classes).toEqual({
+      browser_act: CLASS,
+      browser_scroll: SLOW,
+      web_fetch: CLASS,
+    })
+    expect(stored.assistant).toEqual({
+      browser_act: { minMs: 20, maxMs: 900 },
+      browser_navigate: { minMs: 300, maxMs: 4_000 },
+      browser_scroll: { minMs: 5, maxMs: 50 },
+    })
+    expect(stored.sites).toHaveLength(1)
+  })
+
   it("keeps the rest of a value that names a class this PCP does not have", async () => {
     await db().setting.create({
       data: {
