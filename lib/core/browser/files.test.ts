@@ -37,7 +37,7 @@ import {
 } from "../tool-results"
 import { callServerTool } from "../upstream"
 import { setupVault } from "../vault"
-import { setFetchPrivate, setFetchSite } from "../web-fetch"
+import { listFetchRules, setFetchPrivate, setFetchSite } from "../web-fetch"
 import { callBrowserTool, printPdfTimeout } from "./call"
 import { PRINT_PDF_MAX_MS } from "./limits"
 import { chromiumExecutable } from "./executable"
@@ -62,6 +62,8 @@ vi.mock("./limits", async (importOriginal) => ({
 const executable = await chromiumExecutable()
 const PUBLIC_URL = "http://pcp.test"
 const PDF = Buffer.from("%PDF-1.4\n% an invoice\n")
+/** A PDF a site shows rather than offers (no attachment). */
+const STATEMENT = Buffer.from("%PDF-1.4\n% a statement\n")
 
 let cleanup: () => Promise<void>
 let api: TestApi
@@ -75,6 +77,10 @@ const FILES = `<!doctype html><title>Files</title>
 <a id="csv">Export</a>
 <a href="/big">Big</a>
 <button>Nothing</button>
+<button onclick="window.open('/invoice')">Invoice window</button>
+<button onclick="window.open('/statement')">Statement window</button>
+<button onclick="window.open('/closes')">Closing window</button>
+<button onclick="window.open('__ELSEWHERE__/x')">Elsewhere window</button>
 <script>
 const link = document.getElementById("csv")
 link.href = URL.createObjectURL(new Blob(["name,amount\\nAda,12\\n"], { type: "text/csv" }))
@@ -147,6 +153,11 @@ beforeEach(async () => {
       return res.end(PDF)
     }
 
+    if (request.url.startsWith("/statement")) {
+      res.setHeader("content-type", "application/pdf")
+      return res.end(STATEMENT)
+    }
+
     if (request.url.startsWith("/big")) {
       res.setHeader("content-type", "application/octet-stream")
       res.setHeader("content-disposition", 'attachment; filename="big.bin"')
@@ -156,7 +167,12 @@ beforeEach(async () => {
     res.setHeader("content-type", "text/html; charset=utf-8")
 
     if (request.url.startsWith("/files")) {
-      return res.end(FILES)
+      return res.end(FILES.replace("__ELSEWHERE__", elsewhere.origin))
+    }
+
+    // A window that closes itself as soon as it opens, with no file.
+    if (request.url.startsWith("/closes")) {
+      return res.end("<title>Closing</title><script>window.close()</script>")
     }
 
     if (request.url.startsWith("/form")) {
@@ -233,10 +249,16 @@ function tabOf(result: CallToolResult | string): string {
   return id
 }
 
+type Window = { tab?: string; url: string; closed?: true; refused?: true }
+
 type Downloaded = {
   tab: string
   file: { $result: string; type: string; size: number; name: string }
   from?: string
+  /** The new window the file came from. */
+  window?: Window
+  /** Other windows the page opened meanwhile. */
+  popups?: Window[]
   note: string
 }
 
@@ -536,6 +558,113 @@ describe.skipIf(!executable)(
       expect(opened.isError).toBe(true)
       expect(textOf(opened)).toContain("opened a page, not a file")
       expect(page2.isError).toBeUndefined()
+    })
+
+    it("takes the file a new window brings: its download once Chromium closed it, or the PDF it shows", async () => {
+      const page = await call("tabs", {
+        action: "open",
+        url: `${api.origin}/files`,
+      })
+      const tab = tabOf(page)
+
+      // The window's address was a download: Chromium closes the blank
+      // window as the download begins, before PCP can ask whose it was.
+      const fromGone = downloaded(
+        await call("download", {
+          tab,
+          ref: refOf(page, /button "Invoice window"/),
+        }),
+      )
+      expect(fromGone.file).toMatchObject({
+        type: "application/pdf",
+        size: PDF.length,
+        name: "invoice-42.pdf",
+      })
+      expect(fromGone.window).toMatchObject({
+        url: `${api.origin}/invoice`,
+        closed: true,
+      })
+      expect(fromGone.note).toContain("a new window the page opened")
+
+      // A window that shows a PDF: what it was answered with is the file,
+      // and the window shows it still, as a tab of the token's.
+      const shown = downloaded(
+        await call("download", {
+          tab,
+          ref: refOf(page, /button "Statement window"/),
+        }),
+      )
+      expect(shown.file).toMatchObject({
+        type: "application/pdf",
+        size: STATEMENT.length,
+        name: "statement.pdf",
+      })
+      expect(shown.from).toBe(`${api.origin}/statement`)
+      expect(shown.window?.url).toBe(`${api.origin}/statement`)
+      expect(shown.window?.closed).toBeUndefined()
+      const kept = await openResult(ctx, { tokenId, id: shown.file.$result })
+      expect(kept!.bytes().equals(STATEMENT)).toBe(true)
+      const popup = runningBrowser(ctx.vaultId)!.tabs.get(shown.window!.tab!)
+      expect(popup?.page.url()).toBe(`${api.origin}/statement`)
+
+      // The tab's own address showing a PDF, as a tab showing one is told
+      // to download it: kept the same way.
+      const byAddress = downloaded(
+        await call("download", { tab, url: `${api.origin}/statement?again` }),
+      )
+      expect(byAddress.file.name).toBe("statement.pdf")
+      expect(byAddress.window).toBeUndefined()
+
+      expect(await leftOnDisk()).toEqual([])
+    })
+
+    it("names the windows a click opened that brought no file: one that closed itself, one at a site the tab may not open", async () => {
+      const page = await call("tabs", {
+        action: "open",
+        url: `${api.origin}/files`,
+      })
+      const tab = tabOf(page)
+      const other = new URL(elsewhere.origin).host
+
+      const closing = await call("download", {
+        tab,
+        ref: refOf(page, /button "Closing window"/),
+      })
+      expect(closing.isError).toBe(true)
+      expect(textOf(closing)).toContain("Nothing started a download")
+      expect(textOf(closing)).toMatch(
+        new RegExp(
+          `A new window opened at ${api.origin}/closes( \\(tab \\S+\\))? and closed itself\\.`,
+        ),
+      )
+
+      const refused = await call("download", {
+        tab,
+        ref: refOf(page, /button "Elsewhere window"/),
+      })
+      expect(refused.isError).toBe(true)
+      expect(textOf(refused)).toContain(
+        `The page opened a new window at ${other}, which this token may not open yet, so it was closed.`,
+      )
+      expect(elsewhere.requests).toHaveLength(0)
+      expect(
+        (await listFetchRules(ctx, tokenId)).sites.map((site) => site.host),
+      ).toContain(other)
+
+      // A click with no download call waiting names the window too, and
+      // the file it offered.
+      const clicked = await call("click", {
+        tab,
+        ref: refOf(page, /button "Invoice window"/),
+      })
+      const waited = await call("wait_for", { tab, ms: 1_000 })
+      const both = `${textOf(clicked)}\n${textOf(waited)}`
+      expect(both).toContain(`A new window opened at ${api.origin}/invoice`)
+      expect(both).toContain("closed itself")
+      expect(both).toContain(
+        "The page offered a file to download (invoice-42.pdf)",
+      )
+      expect(await db().toolResult.count()).toBe(0)
     })
 
     it("puts kept files into a file field and its picker, read from handles through the gateway's path", async () => {
