@@ -334,6 +334,56 @@ function coveringWhere(ctx: VaultContext, origin: string) {
   }
 }
 
+/**
+ * A token's allowance for a secret at an origin is kept the same way: the
+ * origin as a keyed hash (the row's key), sealed beside it as
+ * "api_token_secret_allowance:<token id>:<secret id>:<hash>" (#96). A row
+ * from before holds the origin in plain text and nothing sealed.
+ */
+function allowanceKey(ctx: VaultContext, origin: string): string {
+  return keyedHash(ctx.dek, "pcp secret allowance origin", origin)
+}
+
+function allowanceAad(tokenId: string, secretId: string, key: string): string {
+  return `api_token_secret_allowance:${tokenId}:${secretId}:${key}`
+}
+
+/** What a row of a token's allowance for the secret at `origin` stores. */
+export function sealedAllowanceOrigin(
+  ctx: VaultContext,
+  tokenId: string,
+  secretId: string,
+  origin: string,
+): { origin: string; sealed: Sealed } {
+  const key = allowanceKey(ctx, origin)
+  return {
+    origin: key,
+    sealed: sealText(ctx.dek, allowanceAad(tokenId, secretId, key), origin),
+  }
+}
+
+function openAllowanceOrigin(
+  ctx: VaultContext,
+  row: {
+    tokenId: string
+    secretId: string
+    origin: string
+    sealed: Uint8Array | null
+  },
+): string {
+  return openText(
+    ctx.dek,
+    allowanceAad(row.tokenId, row.secretId, row.origin),
+    row.sealed,
+    row.origin,
+  )
+}
+
+/** The rows an allowance's origin may be kept as: its hash, or itself. */
+function allowanceOrigins(ctx: VaultContext, origin: string): string[] {
+  return [allowanceKey(ctx, origin), origin]
+}
+
 /** A secret the browser can type, by its name: one the owner entered. */
 export async function findTypableSecret(
   ctx: VaultContext,
@@ -423,23 +473,27 @@ export async function sitesOf(
  * stands for its subdomains, asks the owner again there.
  */
 async function dropUncoveredAllowances(
+  ctx: VaultContext,
   secretId: string,
   before: SecretSite[],
   after: SecretSite[],
 ): Promise<void> {
   const allowances = await db().apiTokenSecretAllowance.findMany({
     where: { secretId },
-    select: { origin: true },
+    select: { tokenId: true, secretId: true, origin: true, sealed: true },
   })
+  // By the row's own key: its hash, or the origin from before.
   const gone = [
     ...new Set(
       allowances
-        .map((allowance) => allowance.origin)
-        .filter(
-          (origin) =>
+        .filter((allowance) => {
+          const origin = openAllowanceOrigin(ctx, allowance)
+          return (
             before.some((site) => siteCovers(site, origin)) &&
-            !after.some((site) => siteCovers(site, origin)),
-        ),
+            !after.some((site) => siteCovers(site, origin))
+          )
+        })
+        .map((allowance) => allowance.origin),
     ),
   ]
 
@@ -496,6 +550,7 @@ export async function bindOrigin(
 
   if (known?.subdomains && subdomains === false) {
     await dropUncoveredAllowances(
+      ctx,
       secretId,
       before,
       await sitesOf(ctx, secretId),
@@ -523,9 +578,16 @@ export async function unbindOrigin(
     db().secretBrowserOrigin.deleteMany({
       where: { secretId, origin: { in: originKeys(ctx, [origin]) } },
     }),
-    db().apiTokenSecretAllowance.deleteMany({ where: { secretId, origin } }),
+    db().apiTokenSecretAllowance.deleteMany({
+      where: { secretId, origin: { in: allowanceOrigins(ctx, origin) } },
+    }),
   ])
-  await dropUncoveredAllowances(secretId, before, await sitesOf(ctx, secretId))
+  await dropUncoveredAllowances(
+    ctx,
+    secretId,
+    before,
+    await sitesOf(ctx, secretId),
+  )
 }
 
 /** Each of the vault's secrets' sites, by secret id. */
@@ -664,12 +726,21 @@ export async function grantSecretUse(
             (level === "once" ? SECRET_ONCE_MS : SECRET_ALLOW_MINUTES * 60_000),
         )
   const data = { until, once: level === "once" }
+  const sealed = sealedAllowanceOrigin(ctx, tokenId, secretId, origin)
 
-  await db().apiTokenSecretAllowance.upsert({
-    where: { tokenId_secretId_origin: { tokenId, secretId, origin } },
-    create: { tokenId, secretId, origin, ...data },
-    update: data,
-  })
+  await db().$transaction([
+    // One from before, in plain text, gives way to the sealed one.
+    db().apiTokenSecretAllowance.deleteMany({
+      where: { tokenId, secretId, origin },
+    }),
+    db().apiTokenSecretAllowance.upsert({
+      where: {
+        tokenId_secretId_origin: { tokenId, secretId, origin: sealed.origin },
+      },
+      create: { tokenId, secretId, ...sealed, ...data },
+      update: data,
+    }),
+  ])
 }
 
 /**
@@ -695,8 +766,9 @@ async function takeAllowance(
   }: { tokenId: string; secretId: string; origin: string },
   now: Date,
 ): Promise<false | "once" | "lasting"> {
-  const row = await db().apiTokenSecretAllowance.findUnique({
-    where: { tokenId_secretId_origin: { tokenId, secretId, origin } },
+  const keys = allowanceOrigins(ctx, origin)
+  const row = await db().apiTokenSecretAllowance.findFirst({
+    where: { tokenId, secretId, origin: { in: keys } },
   })
 
   if (!row) {
@@ -717,7 +789,13 @@ async function takeAllowance(
 
   // One use, however many calls race for it.
   const taken = await db().apiTokenSecretAllowance.deleteMany({
-    where: { tokenId, secretId, origin, once: true, until: { gt: now } },
+    where: {
+      tokenId,
+      secretId,
+      origin: row.origin,
+      once: true,
+      until: { gt: now },
+    },
   })
 
   return taken.count === 1 ? "once" : false
@@ -782,17 +860,25 @@ function endSignInWindows(tokenId: string | null, secretId: string): void {
 }
 
 /** A once allowance the call it was given for did not use, gone. */
-export async function dropOnceAllowance({
-  tokenId,
-  secretId,
-  origin,
-}: {
-  tokenId: string
-  secretId: string
-  origin: string
-}): Promise<void> {
+export async function dropOnceAllowance(
+  ctx: VaultContext,
+  {
+    tokenId,
+    secretId,
+    origin,
+  }: {
+    tokenId: string
+    secretId: string
+    origin: string
+  },
+): Promise<void> {
   await db().apiTokenSecretAllowance.deleteMany({
-    where: { tokenId, secretId, origin, once: true },
+    where: {
+      tokenId,
+      secretId,
+      origin: { in: allowanceOrigins(ctx, origin) },
+      once: true,
+    },
   })
 }
 
@@ -834,14 +920,15 @@ export async function listSecretAllowances(
       tokenName: tokenName(ctx, row.token),
       secretId: row.secretId,
       secretName: secretName(ctx, row.secret),
-      origin: row.origin,
+      origin: openAllowanceOrigin(ctx, row),
       until: row.until,
       once: row.once,
     }))
     .sort(
       (a, b) =>
         (a.until?.getTime() ?? Number.MAX_SAFE_INTEGER) -
-        (b.until?.getTime() ?? Number.MAX_SAFE_INTEGER),
+          (b.until?.getTime() ?? Number.MAX_SAFE_INTEGER) ||
+        (a.origin < b.origin ? -1 : a.origin > b.origin ? 1 : 0),
     )
 }
 
@@ -852,7 +939,13 @@ export async function endSecretAllowance(
 ): Promise<void> {
   await requireToken(ctx, target.tokenId)
   await requireTypable(ctx, target.secretId)
-  await db().apiTokenSecretAllowance.deleteMany({ where: target })
+  await db().apiTokenSecretAllowance.deleteMany({
+    where: {
+      tokenId: target.tokenId,
+      secretId: target.secretId,
+      origin: { in: allowanceOrigins(ctx, target.origin) },
+    },
+  })
   endSignInWindows(target.tokenId, target.secretId)
 }
 

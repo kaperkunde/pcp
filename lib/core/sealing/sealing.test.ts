@@ -11,7 +11,14 @@ import { allowSiteFor, loadSiteAllowances } from "../allowances"
 import { createApiToken, listApiTokens, resolveApiToken } from "../api-tokens"
 import { exportVault, readExport, restoreExport } from "../backup"
 import { previewOf } from "../backup-format"
-import { bindOrigin, isBoundOrigin, sitesOf } from "../browser-secrets"
+import {
+  bindOrigin,
+  grantSecretUse,
+  isBoundOrigin,
+  listSecretAllowances,
+  sitesOf,
+  takeSecretUse,
+} from "../browser-secrets"
 import {
   createSecret,
   findOwnerSecretByName,
@@ -248,6 +255,67 @@ describe("sites", () => {
         .map((site) => site.host)
         .sort(),
     ).toEqual(["added-marker.example", "fetched-marker.example"])
+  })
+
+  it("keeps a token's allowance for a secret at a site as a hash", async () => {
+    const tokenId = await token()
+    const { id: secretId } = await createSecret(ctx, { name: "S", value: "v" })
+    await grantSecretUse(ctx, {
+      tokenId,
+      secretId,
+      origin: "https://allowance-marker.example",
+      level: "hour",
+    })
+
+    expect(await onDisk("allowance-marker")).toBe(false)
+    expect(await listSecretAllowances(ctx)).toMatchObject([
+      { tokenId, secretId, origin: "https://allowance-marker.example" },
+    ])
+    expect(
+      await takeSecretUse(ctx, {
+        tokenId,
+        secretId,
+        origin: "https://allowance-marker.example",
+      }),
+    ).toBe(true)
+    expect(
+      await takeSecretUse(ctx, {
+        tokenId,
+        secretId,
+        origin: "https://other.example",
+      }),
+    ).toBe(false)
+  })
+
+  it("reads a secret's allowance from before, and seals it on a request", async () => {
+    const tokenId = await token()
+    const { id: secretId } = await createSecret(ctx, { name: "S", value: "v" })
+    await db().apiTokenSecretAllowance.create({
+      data: {
+        tokenId,
+        secretId,
+        origin: "https://old-allowance.example",
+        until: new Date(Date.now() + 60_000),
+        once: true,
+      },
+    })
+
+    expect(await listSecretAllowances(ctx)).toMatchObject([
+      { origin: "https://old-allowance.example", once: true },
+    ])
+    expect(await ensureSealed(ctx)).toBe(true)
+    expect(await onDisk("old-allowance")).toBe(false)
+    expect(await listSecretAllowances(ctx)).toMatchObject([
+      { origin: "https://old-allowance.example", once: true },
+    ])
+    // The once allowance is still used up once.
+    const target = {
+      tokenId,
+      secretId,
+      origin: "https://old-allowance.example",
+    }
+    expect(await takeSecretUse(ctx, target)).toBe(true)
+    expect(await takeSecretUse(ctx, target)).toBe(false)
   })
 
   it("reads sites from before, and seals them on a request", async () => {

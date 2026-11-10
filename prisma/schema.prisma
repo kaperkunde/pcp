@@ -291,8 +291,15 @@ model ApiTokenSecretAllowance {
   token     ApiToken  @relation(fields: [tokenId], references: [id], onDelete: Cascade)
   secretId  String    @map("secret_id")
   secret    Secret    @relation(fields: [secretId], references: [id], onDelete: Cascade)
-  /// https://host[:port], as URL.origin writes it.
+  /// A keyed hash of the origin (https://host[:port], as URL.origin writes
+  /// it) under the vault's key, the origin sealed in `sealed`; a row from
+  /// before holds the origin itself and nothing sealed
+  /// (lib/core/browser-secrets.ts).
   origin    String
+  /// The origin, AES-256-GCM under the vault's data key with
+  /// "api_token_secret_allowance:<token id>:<secret id>:<origin>" as
+  /// associated data.
+  sealed    Bytes?
   /// Null: always, until the owner ends it.
   until     DateTime?
   /// The next use only: it goes once a use takes it.

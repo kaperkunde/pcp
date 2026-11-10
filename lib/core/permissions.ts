@@ -2964,7 +2964,7 @@ async function executeSecretUse(
     )
   } finally {
     if (level === "once") {
-      await dropOnceAllowance(use)
+      await dropOnceAllowance(ctx, use)
     }
   }
 }

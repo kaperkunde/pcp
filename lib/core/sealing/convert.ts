@@ -2,7 +2,7 @@ import { scrubFreedPages } from "../cleanup/runtime"
 import type { VaultContext } from "../context"
 import { db } from "../db"
 import { sealedSiteAllowance } from "../allowances"
-import { sealedOrigin } from "../browser-secrets"
+import { sealedAllowanceOrigin, sealedOrigin } from "../browser-secrets"
 import { isSealedKind, sealedRuleKey } from "../fetch-rule-keys"
 import { sealedSecretMeta } from "../secret-meta"
 import { isSealedText } from "../sealed"
@@ -183,6 +183,49 @@ export const SEAL_CONVERTERS: Converter[] = [
 
         await tx.apiTokenSiteAllowance.upsert({
           where: { tokenId_host: { tokenId: row.tokenId, host: sealed.host } },
+          create: { ...row, ...sealed },
+          update: {},
+        })
+        return true
+      })
+    },
+  }),
+  converter({
+    table: "api_token_secret_allowance",
+    read: (ctx, limit) =>
+      db().apiTokenSecretAllowance.findMany({
+        where: { token: { vaultId: ctx.vaultId }, sealed: null },
+        take: limit,
+      }),
+    write: async (ctx, row) => {
+      const sealed = sealedAllowanceOrigin(
+        ctx,
+        row.tokenId,
+        row.secretId,
+        row.origin,
+      )
+      return db().$transaction(async (tx) => {
+        const { count } = await tx.apiTokenSecretAllowance.deleteMany({
+          where: {
+            tokenId: row.tokenId,
+            secretId: row.secretId,
+            origin: row.origin,
+            sealed: null,
+          },
+        })
+
+        if (count === 0) {
+          return false
+        }
+
+        await tx.apiTokenSecretAllowance.upsert({
+          where: {
+            tokenId_secretId_origin: {
+              tokenId: row.tokenId,
+              secretId: row.secretId,
+              origin: sealed.origin,
+            },
+          },
           create: { ...row, ...sealed },
           update: {},
         })
