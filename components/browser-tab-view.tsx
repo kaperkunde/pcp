@@ -42,7 +42,7 @@ import type { ActionState } from "@/lib/server/action-state"
  * browser will not give it, takes the text in a box you can paste into.
  */
 
-type Status = "connecting" | "live" | "lost" | "closed" | "full"
+type Status = "connecting" | "live" | "lost" | "closed" | "signed-out" | "full"
 
 const MODIFIERS = (event: {
   altKey: boolean
@@ -118,6 +118,8 @@ export function BrowserTabView({
     let latest: { data: string; metadata: FrameMetadata } | null = null
     let drawing = false
     let stopped = false
+    let opened = false
+    let check: AbortController | null = null
 
     const draw = () => {
       if (drawing || !latest) return
@@ -151,6 +153,7 @@ export function BrowserTabView({
         `/api/browser/tabs/${encodeURIComponent(tabId)}/stream`,
       )
       source.addEventListener("open", () => {
+        opened = true
         attempts = 0
         setStatus("live")
       })
@@ -176,9 +179,19 @@ export function BrowserTabView({
         source?.close()
       })
       source.addEventListener("full", () => {
+        source?.close()
+
+        // Watching before: our own earlier connection may still hold the
+        // place for a moment, so it is tried again.
+        if (opened) {
+          attempts += 1
+          setStatus("lost")
+          schedule()
+          return
+        }
+
         stopped = true
         setStatus("full")
-        source?.close()
       })
       source.addEventListener("error", () => {
         source?.close()
@@ -189,34 +202,41 @@ export function BrowserTabView({
       })
     }
 
-    // A dropped stream is tried again, further apart each time up to 30 s,
-    // and at once when the window comes back. Only the server saying the
-    // tab is closed, or no longer there, ends it.
+    // A dropped stream is tried again, further apart each time up to 30 s
+    // (with some jitter), and at once when the window comes back. Before each
+    // try a HEAD asks whether the tab is still there and the owner still
+    // signed in (it takes no place among the viewers); only the server saying
+    // the tab is closed or gone, or the owner signed out, ends it.
     const schedule = () => {
       if (retry) clearTimeout(retry)
-      retry = setTimeout(() => void probe(), Math.min(1000 * attempts, 30_000))
+      const base = Math.min(1000 * attempts, 30_000)
+      retry = setTimeout(() => void probe(), base * (0.75 + Math.random() / 2))
     }
     const probe = async () => {
       retry = null
       if (stopped) return
-      if (attempts > 5) {
-        const check = new AbortController()
-        try {
-          const response = await fetch(
-            `/api/browser/tabs/${encodeURIComponent(tabId)}/stream`,
-            { signal: check.signal },
-          )
-          const gone = response.status === 404
-          check.abort()
-          if (gone) {
-            stopped = true
-            setStatus("closed")
-            return
-          }
-        } catch {
-          // Still unreachable: the stream's own attempt decides.
-        }
+      check = new AbortController()
+      try {
+        const response = await fetch(
+          `/api/browser/tabs/${encodeURIComponent(tabId)}/stream`,
+          { method: "HEAD", signal: check.signal },
+        )
         if (stopped) return
+
+        if (response.status === 404) {
+          stopped = true
+          setStatus("closed")
+          return
+        }
+
+        if (response.status === 401 || response.status === 403) {
+          stopped = true
+          setStatus("signed-out")
+          return
+        }
+      } catch {
+        if (stopped) return
+        // Unreachable still: the stream's own attempt decides.
       }
       connect()
     }
@@ -224,8 +244,6 @@ export function BrowserTabView({
       if (stopped || document.visibilityState === "hidden") return
       if (retry) {
         clearTimeout(retry)
-        retry = null
-        attempts = Math.min(attempts, 1)
         void probe()
       }
     }
@@ -236,6 +254,7 @@ export function BrowserTabView({
 
     return () => {
       stopped = true
+      check?.abort()
       document.removeEventListener("visibilitychange", wake)
       window.removeEventListener("focus", wake)
       if (retry) clearTimeout(retry)
@@ -411,7 +430,11 @@ export function BrowserTabView({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [holding])
 
-  function act(run: () => Promise<ActionState>, control?: TabView["control"]) {
+  function act(
+    run: () => Promise<ActionState>,
+    control?: TabView["control"],
+    closing = false,
+  ) {
     const choose = (chosen: TabView["control"]) => {
       pinned.current = { control: chosen, until: Date.now() + 3_000 }
       setView((current) => ({ ...current, control: chosen }))
@@ -452,9 +475,9 @@ export function BrowserTabView({
         setPending(false)
       }
 
-      // The list around the view catches up on its own; closing a tab
-      // changes the page, so that one asks for it, and nothing waits on it.
-      if (!control) router.refresh()
+      // The view shows what the buttons did and the list around it polls;
+      // only closing a tab changes the page, so only that asks for a refresh.
+      if (closing) router.refresh()
     })()
   }
 
@@ -527,17 +550,19 @@ export function BrowserTabView({
               ? "Connecting…"
               : status === "lost"
                 ? "Connection lost; trying again…"
-                : status === "closed"
-                  ? "This tab is closed."
-                  : status === "full"
-                    ? "Too many people are watching this tab."
-                    : holding
-                      ? handover
-                        ? "What you do here goes to the page. The assistant waits until you say Done or Not now on its request."
-                        : view.tokenId === null
-                          ? "What you do here goes to the page. No assistant sees this tab until you hand it to one."
-                          : "What you do here goes to the page. The assistant whose tab it is waits until you hand it back."
-                      : "You are watching. Take it over to click and type."}
+                : status === "signed-out"
+                  ? "You are signed out. Sign in again to watch this tab."
+                  : status === "closed"
+                    ? "This tab is closed."
+                    : status === "full"
+                      ? "Too many people are watching this tab."
+                      : holding
+                        ? handover
+                          ? "What you do here goes to the page. The assistant waits until you say Done or Not now on its request."
+                          : view.tokenId === null
+                            ? "What you do here goes to the page. No assistant sees this tab until you hand it to one."
+                            : "What you do here goes to the page. The assistant whose tab it is waits until you hand it back."
+                        : "You are watching. Take it over to click and type."}
           </span>
         </div>
         <div className="flex flex-wrap gap-2">
@@ -607,7 +632,9 @@ export function BrowserTabView({
             <Button
               type="button"
               size="sm"
-              disabled={pending || status === "closed"}
+              disabled={
+                pending || status === "closed" || status === "signed-out"
+              }
               onClick={() => act(() => takeOverTabAction(tabId), "owner")}
             >
               Take over
@@ -617,10 +644,10 @@ export function BrowserTabView({
             type="button"
             variant="plain"
             size="sm"
-            disabled={pending || status === "closed"}
+            disabled={pending || status === "closed" || status === "signed-out"}
             onClick={() => {
               if (window.confirm("Close this tab?")) {
-                act(() => closeTabAction(tabId))
+                act(() => closeTabAction(tabId), undefined, true)
               }
             }}
           >

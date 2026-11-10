@@ -3915,6 +3915,7 @@ export async function checkPermissions(
   const told: string[] = []
   const lines: string[] = []
   const links: string[] = []
+  const checks: string[] = []
 
   for (const [id, view] of views) {
     if (!view) {
@@ -3925,26 +3926,84 @@ export async function checkPermissions(
       lines.push(
         `Request ${id}: still waiting for the owner. ${summaryText(view)}`,
       )
-      if (view.status === "pending")
+      if (view.status === "pending") {
         links.push(markdownLink(view.title, view.url))
+      }
     } else {
       const answer = await checkPermission(scope, id, { waitMs: 0 })
-      const said = answer.content
+      const full = answer.content
         .map((part) => (part.type === "text" ? part.text : ""))
         .join("")
         .trim()
-      entries.push({ id, status: view.status, outcome: said })
+      const structured = answer.structuredContent as
+        { kind?: unknown; url?: string; label?: string } | undefined
+
+      // Allowed, but the server it added needs connecting: that is a link for
+      // the owner, which goes last with the others, not in the middle.
+      if (structured?.kind === "needs_owner" && structured.url) {
+        // What came before the connect text, which carries its own link and
+        // check: those go with the others below.
+        const kept: string[] = []
+
+        for (const line of full.split("\n")) {
+          if (
+            /needs (connecting|an OAuth client)|Not connected yet/.test(line)
+          ) {
+            const lead = line.match(/^(.*?): /)?.[1]
+            if (lead && !/needs /.test(lead)) kept.push(lead)
+            break
+          }
+
+          kept.push(line)
+        }
+
+        const said = kept.join("\n").trim()
+        const server = view.connect
+          ? await getServer(scope.ctx, view.connect.serverId)
+          : null
+
+        entries.push({
+          id,
+          status: view.status,
+          outcome:
+            `${said}${said ? "\n" : ""}The server it added needs connecting first (link below).`.trim(),
+        })
+        lines.push(
+          `Request ${id} (${view.status}):\n${said}\nThe server it added needs connecting first (link below).`,
+        )
+        links.push(markdownLink(structured.label ?? view.title, structured.url))
+        checks.push(
+          nextMessageCheck(
+            server
+              ? `check_server with server "${server.slug}"`
+              : "check_server",
+            "it is still not connected",
+          ),
+        )
+        continue
+      }
+
+      entries.push({ id, status: view.status, outcome: full })
       told.push(id)
-      lines.push(`Request ${id} (${view.status}):\n${said}`)
+      lines.push(`Request ${id} (${view.status}):\n${full}`)
     }
   }
 
   const waiting = entries.filter(
     (entry) => entry.status === "pending" || entry.status === "running",
   )
+
+  if (links.length > 0 && waiting.length > 0) {
+    checks.unshift(
+      nextMessageCheck(
+        `check_permission with ids ${JSON.stringify(waiting.map((entry) => entry.id))} again`,
+      ),
+    )
+  }
+
   const tail =
     links.length > 0
-      ? `\n\n${nextMessageCheck(`check_permission with ids ${JSON.stringify(waiting.map((entry) => entry.id))} again`)} ${OWNER_LINK_RULE} Hand these over as they are below.\n${links.join("\n")}`
+      ? `\n\n${checks.join(" ")} ${OWNER_LINK_RULE} Hand these over as they are below.\n${links.join("\n")}`
       : ""
 
   return { entries, text: `${lines.join("\n\n")}${tail}`, told }

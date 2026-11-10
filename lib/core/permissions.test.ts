@@ -895,6 +895,25 @@ describe("check_permission on several requests", () => {
     expect(result.told).toEqual([b])
   })
 
+  it("stops waiting at once when the client goes away", async () => {
+    const { scope, a, b } = await two()
+    const gone = new AbortController()
+    const started = Date.now()
+    const checked = checkPermissions(scope, [a, b], {
+      mode: "all",
+      waitMs: 30_000,
+      signal: gone.signal,
+    })
+    setTimeout(() => gone.abort(), 100)
+    const result = await checked
+
+    expect(Date.now() - started).toBeLessThan(5_000)
+    expect(result.entries.map((entry) => entry.status)).toEqual([
+      "pending",
+      "pending",
+    ])
+  })
+
   it("answers at once when every id is unknown, and never shows another token's request", async () => {
     const { ctx, a } = await two()
     const { token } = await createApiToken(ctx, {
@@ -1310,6 +1329,16 @@ describe("adding a server", () => {
       reason: "connect",
       connect: { serverId: linear.id, slug: linear.slug },
     })
+
+    const several = await checkPermissions(scope, [id, "nope"], { waitMs: 50 })
+    expect(several.told).toEqual([])
+    expect(several.entries[0]).toMatchObject({ id, status: "executed" })
+    const lines = several.text.split("\n")
+    expect(lines.at(-1)).toMatch(/^\[Connect Linear in PCP\]\(.+\)$/)
+    expect(several.text).toContain(`check_server with server "${linear.slug}"`)
+    // The link appears once, at the end, never inside an entry.
+    expect(several.text.split("Connect Linear in PCP").length).toBe(2)
+
     expect(textOf(waiting)).toContain("Linear needs connecting")
 
     await db().mcpServer.update({

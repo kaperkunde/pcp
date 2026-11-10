@@ -96,7 +96,7 @@ export async function openTabAction(
 
 /**
  * A tab's buttons: each one thing to the tab, answered with an ActionState.
- * Taking over and handing back leave the page alone (`revalidate: false`):
+ * Taking over, handing back, back, reload and navigate leave the page alone (`revalidate: false`):
  * the live view shows the change itself and the tab list polls, so the
  * answer never waits on the page being drawn again.
  */
@@ -139,17 +139,19 @@ export async function navigateTabAction(
 ): Promise<ActionState> {
   const ctx = await requireContext()
   const publicUrl = await publicUrlFor(ctx)
-  return onTab(() => ownerNavigate(ctx, tabId, { url, publicUrl }))
+  return onTab(() => ownerNavigate(ctx, tabId, { url, publicUrl }), {
+    revalidate: false,
+  })
 }
 
 export async function backTabAction(tabId: string): Promise<ActionState> {
   const ctx = await requireContext()
-  return onTab(() => ownerBack(ctx, tabId))
+  return onTab(() => ownerBack(ctx, tabId), { revalidate: false })
 }
 
 export async function reloadTabAction(tabId: string): Promise<ActionState> {
   const ctx = await requireContext()
-  return onTab(() => ownerReload(ctx, tabId))
+  return onTab(() => ownerReload(ctx, tabId), { revalidate: false })
 }
 
 export async function closeBrowserAction(): Promise<ActionState> {

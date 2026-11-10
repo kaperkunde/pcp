@@ -470,6 +470,13 @@ describe("PCP's own tools", () => {
       code: "invalid_arguments",
     })
 
+    // A mode is for several ids.
+    const bare = await client.callTool({
+      name: "check_permission",
+      arguments: { mode: "all" },
+    })
+    expect(bare.isError).toBe(true)
+
     const unknown = await client.callTool({
       name: "check_server",
       arguments: { server: "nowhere" },

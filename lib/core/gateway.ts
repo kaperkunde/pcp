@@ -3095,7 +3095,7 @@ export function buildGatewayServer(
     name: "check_permission",
     title: "Check a permission request",
     description:
-      "Check permission requests' outcomes: whether the owner answered each, and how. Call it on the owner's next message after the link, whatever it says, before you send the link again or assume the request is still open; never in the same reply as the link (that would hide the link in some apps). If it is still open, it waits up to 45 seconds for them. Takes the id from the result that asked, or several in ids (mode any returns as soon as one is answered, with the rest's status; all waits for every one). If you have nothing else to do once you have handed the owner the links, you may call it with all their ids to answer each the moment they do; that is optional. Without an id, it lists your requests still waiting for the owner, and those they answered in the last hour.",
+      "Check permission requests' outcomes: whether the owner answered each, and how. Call it on the owner's next message after the link, whatever it says, before you send the link again or assume the request is still open; never in the same reply as the link (that would hide the link in some apps). If it is still open, it waits up to 45 seconds for them. Takes the id from the result that asked, or several in ids (mode any returns as soon as one is answered, with the rest's status; all waits for every one). With several requests open, call it with all their ids on the owner's next message, so each is answered as the owner decides it; waiting is only for a reply that has not handed over a link yet, never after it. Without an id, it lists your requests still waiting for the owner, and those they answered in the last hour.",
     input: z
       .object({
         id: z
@@ -3122,7 +3122,13 @@ export function buildGatewayServer(
           ),
       })
       // One id, or several.
-      .meta({ allOf: [{ not: { required: ["id", "ids"] } }] }),
+      .meta({
+        allOf: [
+          { not: { required: ["id", "ids"] } },
+          // A mode is for waiting on several.
+          { if: { required: ["mode"] }, then: { required: ["ids"] } },
+        ],
+      }),
     output: z.discriminatedUnion("kind", [
       NEEDS_OWNER,
       z.object({
