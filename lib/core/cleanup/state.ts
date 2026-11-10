@@ -54,6 +54,11 @@ export type CleanupCounts = {
    * before it.
    */
   storage?: number
+  /**
+   * The browser's temporary folders a crashed or killed PCP left behind.
+   * Missing from a status saved before it.
+   */
+  browser?: number
   logDays: number
 }
 
@@ -210,6 +215,7 @@ const REMOVED: Array<[keyof CleanupCounts, string, string]> = [
   ],
   ["vectors", "unused search vector", "unused search vectors"],
   ["storage", "leftover stored file", "leftover stored files"],
+  ["browser", "leftover browser folder", "leftover browser folders"],
   ["logDays", "day of log", "days of log"],
 ]
 

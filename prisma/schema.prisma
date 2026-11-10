@@ -38,6 +38,7 @@ model Vault {
   sharedToolAccess   VaultToolAccess[]
   webFetchRules      WebFetchRule[]
   toolResults        ToolResult[]
+  callRecords        CallRecord[]
   fileLinks          FileLink[]
   uploadLinks        UploadLink[]
   browserProfile     BrowserProfile?
@@ -189,6 +190,7 @@ model ApiToken {
   privateSkills      Skill[]
   webFetchRules      WebFetchRule[]
   toolResults        ToolResult[]
+  callRecords        CallRecord[]
   fileLinks          FileLink[]
   uploadLinks        UploadLink[]
   oauthCredentials   OAuthCredential[]
@@ -411,8 +413,11 @@ model PermissionRequest {
   /// The arguments (or the new server's settings) as JSON, AES-256-GCM under
   /// the vault's data key with "permission_request:<id>" as associated data.
   argsCiphertext   Bytes      @map("args_ciphertext")
-  /// sha256 of the kind, the target and the canonical arguments, so the same
-  /// request asked twice finds the row it already has.
+  /// HMAC-SHA256 of the kind, the target and the canonical arguments under a
+  /// key derived from the vault's data key, prefixed "h1:" (requestHash), so
+  /// the same request asked twice finds the row it already has and the
+  /// column confirms no guess without the key. Older rows hold a plain
+  /// sha256 and match nothing.
   argsHash         String     @map("args_hash")
   /// What the request is about (a skill, a shared memory, a note's item),
   /// as an HMAC under a key derived from the vault's data key, so the target
@@ -1195,6 +1200,46 @@ model ToolResult {
   @@index([tokenId, createdAt])
   @@index([expiresAt])
   @@map("tool_result")
+}
+
+/// A Write or Destructive call a token made (lib/core/calls/guard.ts), kept
+/// for the duplicate guard's window so the same call made again is answered
+/// with how this one went instead of running twice. Nothing of the
+/// arguments is stored but a keyed hash. Not exported; removed by the
+/// cleanup once past the longest window.
+model CallRecord {
+  id         String    @id
+  vaultId    String    @map("vault_id")
+  vault      Vault     @relation(fields: [vaultId], references: [id], onDelete: Cascade)
+  tokenId    String    @map("token_id")
+  token      ApiToken  @relation(fields: [tokenId], references: [id], onDelete: Cascade)
+  serverId   String    @map("server_id")
+  toolName   String    @map("tool_name")
+  /// HMAC-SHA256 of the server id, the tool and the canonical arguments (as
+  /// checked and renamed) under a key derived from the vault's data key
+  /// (callHash), so the same call compares equal and the column confirms no
+  /// guess without the key.
+  argsHash   String    @map("args_hash")
+  /// write | destructive: the tool's tier when it was called.
+  tier       String
+  /// running | succeeded | failed | may_have_happened (failed on its way,
+  /// so it may have gone through) | asked (the owner was asked: see
+  /// requestId)
+  status     String
+  /// The kept result (tool_result) a long answer already was, by its id.
+  resultId   String?   @map("result_id")
+  /// A short answer (MAX_INLINE_ANSWER_CHARS), AES-256-GCM under the vault's
+  /// data key with "call_record:<id>:answer" as associated data.
+  answer     Bytes?
+  /// The permission request it made, when it asked the owner.
+  requestId  String?   @map("request_id")
+  startedAt  DateTime  @default(now()) @map("started_at")
+  finishedAt DateTime? @map("finished_at")
+
+  @@index([tokenId, argsHash])
+  @@index([tokenId, serverId, toolName, startedAt])
+  @@index([startedAt])
+  @@map("call_record")
 }
 
 /// A cached embedding of one text search ranks (a tool's name and

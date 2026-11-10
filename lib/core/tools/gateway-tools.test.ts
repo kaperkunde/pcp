@@ -447,6 +447,36 @@ describe("PCP's own tools", () => {
         .join(""),
     })
 
+    // Several at once: the one withdrawn is answered, an unknown id listed.
+    const several = await client.callTool({
+      name: "check_permission",
+      arguments: { ids: [owner.request, "nowhere"], mode: "all" },
+    })
+    expect(several.structuredContent).toMatchObject({
+      kind: "statuses",
+      statuses: [
+        { id: owner.request, status: "withdrawn" },
+        { id: "nowhere", status: "unknown" },
+      ],
+    })
+
+    // One id or several, never both.
+    const both = await client.callTool({
+      name: "check_permission",
+      arguments: { id: owner.request, ids: [owner.request] },
+    })
+    expect(both.isError).toBe(true)
+    expect(both._meta?.[ERROR_META_KEY]).toMatchObject({
+      code: "invalid_arguments",
+    })
+
+    // A mode is for several ids.
+    const bare = await client.callTool({
+      name: "check_permission",
+      arguments: { mode: "all" },
+    })
+    expect(bare.isError).toBe(true)
+
     const unknown = await client.callTool({
       name: "check_server",
       arguments: { server: "nowhere" },

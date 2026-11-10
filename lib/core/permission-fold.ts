@@ -1,8 +1,6 @@
-import { createHmac, hkdfSync } from "node:crypto"
-
 import type { PermissionKind } from "./constants"
 import type { VaultContext } from "./context"
-import { decryptString } from "./crypto"
+import { decryptString, keyedHash } from "./crypto"
 import { db } from "./db"
 
 /**
@@ -36,11 +34,7 @@ export function isFoldingKind(kind: string): boolean {
 
 /** The keyed hash of a request's target, as `target_key` stores it. */
 export function targetKey(dek: Buffer, target: string): string {
-  const key = Buffer.from(
-    hkdfSync("sha256", dek, Buffer.alloc(0), KEY_LABEL, 32),
-  )
-
-  return createHmac("sha256", key).update(target).digest("hex")
+  return keyedHash(dek, KEY_LABEL, target)
 }
 
 /** A request still waiting for the owner, with what it asks for. */

@@ -181,6 +181,13 @@ export type ServiceAccess = {
   proxyAuth?: ProxyAuth
   /** Waiting for health; tests shorten it. */
   timing?: { waitMs: number; intervalMs: number }
+  /**
+   * After a remake that came up healthy: reads the tools of the server the
+   * service registered again, in the same request (upstream.ts builds it,
+   * which holds the context and the public address). Its answer is a note
+   * when the read failed; the remake worked all the same.
+   */
+  afterRemake?: (loaded: LoadedService) => Promise<string | null>
 }
 
 /** A channel through the SSH connection, as the SSH server reaches the address. */
@@ -1461,6 +1468,11 @@ export async function recreateServiceOn(
     loaded.reach = reach
   }
 
+  // The image may serve other tools now: read them before the answer, so
+  // search, list_tools and the owner's levels start from the new list. Not
+  // when the registered server could not take its header (its row says so).
+  const readNote =
+    health.ok && !note ? ((await access.afterRemake?.(loaded)) ?? null) : null
   const status = await serviceStatusOn(loaded, access)
 
   if (!health.ok) {
@@ -1470,7 +1482,9 @@ export async function recreateServiceOn(
     )
   }
 
-  return note ? { ...status, note } : status
+  const notes = [note, readNote].filter(Boolean).join(" ")
+
+  return notes ? { ...status, note: notes } : status
 }
 
 /**

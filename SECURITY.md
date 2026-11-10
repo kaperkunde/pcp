@@ -436,9 +436,38 @@ Not defended against:
   your address and PCP's version, which is all it sends. The answer is read as
   untrusted text: the version, date, notes and file names, never a link. In a
   container or a checkout PCP never updates itself. The Linux installer's
-  daily update (`PCP_AUTO_UPDATE=1`, by its own timer or Podman's) starts PCP
-  again from whatever image is published as `ghcr.io/kaperkunde/pcp:latest`,
-  with no step for you to look first.
+  daily update (`PCP_AUTO_UPDATE=1`, by its own timer) starts PCP again from
+  the image published as `ghcr.io/kaperkunde/pcp:latest`, with no step for
+  you to look first, once its signature checks out (below).
+- Every image PCP publishes (`pcp` and `pcp-sandbox`, releases and develop's
+  builds) is signed with cosign, keyless, by the workflow that built it
+  (`build-images.yml`, run from `main` or `develop`, with GitHub Actions'
+  OIDC token; the signature is in Sigstore's public log), and attested by
+  GitHub's build provenance; each release's notes list both digests. The
+  installer checks the signature of every image it pulls before it starts
+  it or reads its installer, with cosign's own image pinned by digest, and
+  then runs that digest, never the tag; one that does not check out is not
+  started, and PCP goes on running as it was. So a push to the registry
+  alone (a leaked package token, say) reaches no installer's PCP: it takes
+  a run of that workflow from `main` or `develop`, which takes a push there.
+  `PCP_INSECURE_SKIP_VERIFY=1` turns the check off for one run, never
+  remembered. Compose checks nothing by itself: pin the digests you checked
+  (`PCP_TAG`, `PCP_SANDBOX_TAG`; [self-hosting](docs/self-hosting.md)).
+  Podman's own `podman-auto-update.timer` checks no signature either, so
+  the installer no longer uses it: under Quadlet its own timer updates, and
+  PCP's unit runs the digest. (A `policy.json` rule could make Podman check
+  it, but Podman reads one such file for every image a user runs, so it
+  cannot be added for PCP's image without rewriting the host's policy for
+  all the others.) A Quadlet install from before this keeps Podman's timer
+  and the label on its unit until the installer runs again (the install
+  line, or Install and restart).
+- What the signature does not say, by design: which channel or version an
+  image is. The installer accepts an image signed from `develop` on the
+  stable channel too (both are PCP's own workflow on a branch only its
+  maintainers push to), and nothing ties a digest to a version, so an older
+  signed image, pushed back under `latest` by someone who can push to the
+  registry, passes the check: a rollback to a release PCP once published,
+  never to an image PCP did not build.
 - **Install and restart** under the Linux installer does the same when you
   choose it: PCP writes the request (an id and a time, nothing else) in its
   data folder, and the installer's watcher on the host reads it through
@@ -447,11 +476,11 @@ Not defended against:
   untrusted, so even a PCP that was taken over could do no more than have
   the published image pulled again, at most once every five minutes.
   `PCP_UPDATE_BUTTON=0` turns it off.
-- The installer's own updates (its daily timer, and Install and restart;
-  not Podman's timer, which only pulls) run the installer the image carries
-  (`/app/install.sh`) once it differs from the copy the installer saved: read out of the image just
-  pulled, by its id, in a throwaway container with no network and nothing
-  mounted, never out of the running PCP. So the host runs what it trusts as
+- The installer's own updates (its daily timer, and Install and restart)
+  run the installer the image carries (`/app/install.sh`) once it differs
+  from the copy the installer saved: read out of the image just pulled, by
+  the digest whose signature checked out, in a throwaway container with no
+  network and nothing mounted, never out of the running PCP. So the host runs what it trusts as
   much as the image it is about to start, and a PCP that was taken over still
   cannot change what the host runs. It replaces the saved copy, so the unit
   follows the version installed (the graphics card, for one). A file that is
@@ -468,6 +497,16 @@ Not defended against:
   server or a secret truncates the write-ahead log, and deleting the vault
   or restoring over it rebuilds the file. A copy of the data volume taken
   before the delete, a backup or a snapshot of the disk, keeps what it had.
+- While PCP's browser runs, it keeps a few things in clear in the system's
+  temporary folder: a file a `download` call waits for (read and removed
+  before the call answers), Chromium's crash reporter and cache folders, and
+  the virtual display's cookie. Its sign-ins are not among them (the
+  browser's contexts are off the record, in memory; the saved copy is in the
+  vault). A PCP that crashes or is killed leaves these folders behind; the
+  cleanup removes them when PCP starts and on its schedule. In the container
+  image (the installer, `docker-compose.yaml`) `/tmp` is a tmpfs of at most
+  1 GB, so none of it is ever on the disk; that memory counts against the
+  machine's.
 - Back up the data volume, or export from Settings. Losing both loses the
   vault.
 - An export file (Settings → Export) holds the vault's rows as they are: the

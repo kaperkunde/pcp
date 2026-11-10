@@ -182,7 +182,7 @@ const saveFile = defineInnerTool({
       })
       .optional()
       .describe(
-        'The file to save: a kept result, as {"$result": "<id>"} (a mail attachment get_attachment read, a file a tool answered with, an upload).',
+        'The file to save: a kept result, as {"$result": "<id>"} (the "result" handle inside a get_attachment answer, never the whole answer; a file a tool answered with; an upload).',
       ),
     text: z
       .string()
@@ -311,7 +311,7 @@ export function storageTools({
     find_files: `Finds files and folders by name in ${where} (or a folder inside it) and every folder under it, with * and ? in the name. Answers with each match's path, size and when it changed. Symbolic links are not followed.`,
     get_file: `Gets one file from ${where} as a kept result's handle, {"$result": "<id>"}, to pass on whole to another tool (send_email's attachments, save_file on another folder, an API's file field) without reading it yourself; a text file's start comes back as text too. A file larger than PCP keeps is refused.`,
     share_file: `Shares one file of ${where}, by a public download link anyone holding it can use, for as long and as many downloads as asked (an hour and ${DEFAULT_STORE_LINK_DOWNLOADS} by default, at most a week): to send a file to someone, or open it on another device. The link holds the key to that one file and nothing else; a file of PCP's own store is read in place and the link ends when it is changed or deleted, one elsewhere is copied when shared. Only for a token the owner lets move files by link.`,
-    save_file: `Saves a file in ${where}: a kept result's handle (file, {"$result": "<id>"}: a mail attachment, a scan, a converted document) or text. It is written whole before it takes its name, so a file is never half there. A file already there is replaced only with overwrite: true.${kept}`,
+    save_file: `Saves a file in ${where}: a kept result's handle (file, {"$result": "<id>"}: a mail attachment\'s "result" handle, a scan, a converted document) or text. It is written whole before it takes its name, so a file is never half there. A file already there is replaced only with overwrite: true.${kept}`,
     make_folder: `Makes a folder in ${where}, with parents: true also the folders above it. A folder already there is left as it is.`,
     move: `Moves or renames a file or folder within ${where}: from and to are both full paths inside it. A file at to is replaced only with overwrite: true; a folder never.`,
     delete: `Deletes a file or folder in ${where} for good: there is no Trash. A folder must be empty unless recursive: true. A symbolic link is deleted itself, never what it points to.`,

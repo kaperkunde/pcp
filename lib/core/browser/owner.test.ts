@@ -598,6 +598,10 @@ describe.skipIf(!executable)("the owner's tabs", { timeout: 90_000 }, () => {
 
     const { scratchDir } = runningBrowser(ctx.vaultId)!
     expect(path.dirname(scratchDir)).toBe(os.tmpdir())
+    // The process's id in the name, for the cleanup after a crash (#100).
+    expect(path.basename(scratchDir)).toMatch(
+      new RegExp(`^pcp-chromium-${process.pid}-[A-Za-z0-9]{6}$`),
+    )
     const [product] = await fs.readdir(path.join(scratchDir, "config"))
     expect(
       existsSync(path.join(scratchDir, "config", product!, "Crash Reports")),

@@ -51,6 +51,12 @@ export type RequestLogEntry = {
   origin?: string
   /** The exit the call went out through (lib/core/exits/), by name; never the site. */
   exit?: string
+  /**
+   * The assistant repeated a call it had made within the duplicate guard's
+   * window on purpose (rerun with a reason, lib/core/calls/guard.ts). The
+   * reason is its own words and stays out of the log, as arguments do.
+   */
+  rerun?: boolean
 }
 
 const FILE = /^mcp-(\d{4}-\d{2}-\d{2})\.jsonl$/
@@ -77,6 +83,7 @@ export type LogNote = {
   secret?: string
   origin?: string
   exit?: string
+  rerun?: boolean
 }
 
 const notes = new AsyncLocalStorage<LogNote>()
@@ -85,6 +92,20 @@ const notes = new AsyncLocalStorage<LogNote>()
 export function withLogNote<T>(run: (note: LogNote) => Promise<T>): Promise<T> {
   const note: LogNote = {}
   return notes.run(note, () => run(note))
+}
+
+/** The note of the logged call under way, if any. */
+export function currentLogNote(): LogNote | undefined {
+  return notes.getStore()
+}
+
+/** The call under way repeats an earlier one on purpose (calls/guard.ts). */
+export function noteRerun(): void {
+  const note = notes.getStore()
+
+  if (note) {
+    note.rerun = true
+  }
 }
 
 /** The call under way asked the owner (a permission request, by its id). */

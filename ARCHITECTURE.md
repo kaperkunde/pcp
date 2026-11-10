@@ -2436,7 +2436,8 @@ run_code cannot learn in time that nobody is waiting. It does not try to:
   id, state and calls instead of running again; `rerun: true` runs it all
   the same. A run that stopped for the owner is not held to this: its
   answer says to check on the owner's next message and to run it again
-  once they allowed the call.
+  once they allowed the call. The program's calls that change things are
+  held to the call guard all the same ("The same call twice", below).
 
 A wrapper's run reports the same way but does not outlive its call: it
 stops when its request goes away, as before.
@@ -2646,7 +2647,19 @@ Its config and cache folders (`XDG_CONFIG_HOME`, `XDG_CACHE_HOME`) are a
 private temporary folder of its own, removed once it has closed: its crash
 reporter keeps its database there, and without a folder it can write to
 (a system user with no home, as the Docker image runs as) Chromium can abort
-as it starts. It starts without `--enable-automation`, with
+as it starts. The folder (`pcp-chromium-<pid>-…`, `browser/scratch.ts`) also
+holds the file a `download` call waits for, and the virtual display's cookie
+is in one beside it (`pcp-display-<pid>-…`). Sign-ins never are: the contexts
+are off the record, their cookies and storage in memory. A PCP that crashes
+or is killed leaves these folders behind, so the process's id is in their
+names and the cleanup removes those of a process that is gone, and the
+process's own that no browser or display holds (one from before the id was
+in the name once it has not changed for a day, since an older PCP still
+running may hold it; never Playwright's own
+`playwright_*` folders beside them). Chromium starts with
+`--disk-cache-size=1`, so the disk cache of its own profile, in Playwright's
+folder, holds nothing to speak of; in the container image `/tmp` is a tmpfs
+(`docker-compose.yaml`, `install.sh`), so none of it reaches the disk at all. It starts without `--enable-automation`, with
 `--disable-blink-features=AutomationControlled`, and with
 `--disable-popup-blocking` and `--disable-back-forward-cache`, which
 patchright-core leaves out (script-opened popups reach the gate, and a back
@@ -3999,10 +4012,38 @@ build tells the server (`PCP_DESKTOP_UPDATER=manual`) and the page links to
 the download instead. `desktop/README.md` has the details.
 
 **The Linux installer can update it once a day** (`PCP_AUTO_UPDATE=1`,
-remembered like its other settings). Under Podman with Quadlet that is
-Podman's own `podman-auto-update.timer`, which follows the unit's autoupdate
-label; otherwise a systemd timer runs a copy of the installer with `update`,
-which pulls the image and starts PCP again only when the image changed. The
+remembered like its other settings): a systemd timer runs a copy of the
+installer with `update`, which pulls the image, checks its signature, and
+starts PCP again only when the container runs another image. Under Quadlet too: Podman's
+own `podman-auto-update.timer`, which an older installer turned on with the
+unit's autoupdate label, checks no signature and cannot follow an image
+pinned by digest, so the unit no longer carries the label.
+
+**Every image the installer runs is one PCP's workflow signed** (#98).
+`build-images.yml` signs each image's digest with cosign, keyless (GitHub's
+OIDC token, so the certificate names the workflow file and the branch it
+ran from; the signature is in Sigstore's log), `--recursive` so each
+platform's manifest is signed too, and attests GitHub's build provenance
+beside it; `release.yml` and `develop.yml` add both digests to the release
+notes. The installer, after every pull (`pull_image`, `update`), takes the
+image's repository digest (`image inspect` `RepoDigests`) and runs cosign's
+image, pinned by digest (`COSIGN_IMAGE`), with `verify
+--certificate-identity-regexp` naming `build-images.yml` on `main` or
+`develop` (`IMAGE_SIGNER`) and GitHub's issuer. Only once that passes does
+it touch the running container, and from then on the run, the Quadlet unit
+(`Image=`) and the installer it reads use `<image>@sha256:…`, never the tag.
+The check is `cosign_verify`, which hands cosign's container the proxy
+settings by name; `install.sh verify-image` runs it alone, and
+`build-images.yml` runs that on each digest right after signing, so the
+workflow and installs check alike. `update` decides by the image the
+container runs (`inspect -f {{.Image}}`) against the checked digest's id,
+not the tag before and after the pull, which a failed check would leave
+moved. A failure stops the run before anything changes; `PCP_INSECURE_SKIP_VERIFY=1`
+skips the check for one run, with a warning, and is not remembered. A
+`policy.json` rule that would have Podman check the signature itself is not
+written: Podman reads one policy file per user (or the system's), so a rule
+for PCP's image would mean rewriting the host's policy for every other
+image. Compose checks nothing; the guide pins digests instead. The
 installer passes `PCP_AUTO_UPDATE=1` into the container, so Settings says
 there is nothing to do. PCP itself still pulls and restarts nothing.
 
@@ -4032,8 +4073,9 @@ run was saved at install time, so an update through it would write the unit
 as that installer did, without anything added since (the graphics card,
 #38). The image carries `install.sh` at `/app/install.sh` (root's, `0644`;
 `scripts/docker.test.ts`), and `update`, after the pull, reads it with
-`run --rm --network none --no-healthcheck --entrypoint cat <image id>` from
-the image it just pulled (the pinned one, for a pinned version), never from
+`run --rm --network none --no-healthcheck --entrypoint cat <image>@<digest>`
+from the image it just pulled and checked (the pinned one, for a pinned
+version), never from
 the running container, which PCP could change. It takes the file only when it
 starts with `#!/bin/sh`, holds the line `# pcp-installer-format: 1`, passes
 `sh -n` and is at most 256 KB; then, if it differs from the copy, it moves it
@@ -4043,8 +4085,7 @@ the request named holds), and `PCP_UPDATER_REEXEC=1`, which reads no
 installer again and installs even from the same image, since the unit may be
 what changed. Anything else, including an image from before this, leaves the
 update to the copy with a note. With no copy (no timer of PCP's) nothing is
-read: Podman's own auto-update only pulls, and the unit changes when the
-installer next runs. `write_unit` leaves drop-ins in `pcp.container.d/` alone
+read, and the unit changes when the installer next runs. `write_unit` leaves drop-ins in `pcp.container.d/` alone
 and names them, since one may do what the unit now does itself.
 
 ## Cleanup and the log
@@ -4074,8 +4115,9 @@ ended sign-ins, unfinished OAuth sign-ins, apps' codes and tokens past their
 expiry (with their grants) and registrations no sign-in used within a day
 (PCP's authorization server), permission requests a week past
 their expiry, kept results past their day, search's cached embeddings no
-search used for a month, and days of the request log older
-than the owner keeps (90 by default, 1 to 3,650). It runs when PCP starts and
+search used for a month, the browser's temporary folders a crashed or
+killed PCP left behind (by the process id in their names), and days of the
+request log older than the owner keeps (90 by default, 1 to 3,650). It runs when PCP starts and
 then on a node-cron task, one per process and kept on `globalThis` like the
 update timer, unref'd, with no overlap: runs from the start, the schedule and
 the owner's **Clean up now** go one at a time. Each part runs on its own, so
@@ -4364,7 +4406,7 @@ message each (`app/mcp/route.ts`). The tools:
   is refused, naming the entry that runs it, before anything else.
 - `search_tools` and `describe_tool`, the old names, are gone after their
   release (docs/breaking-changes.md).
-- `check_permission(id?)`, `withdraw_request(id)`, `check_server(server)`,
+- `check_permission(id? | ids?, mode?)` (several ids wait together, `any` or `all`, `checkPermissions`), `withdraw_request(id)`, `check_server(server)`,
   `register_server(...)` and `propose_tool_access(changes)` belong to the
   permission flow below.
 - `check_run(id)`, beside `run_code_<tier>` for a token that runs code, says how
@@ -4411,6 +4453,74 @@ the request's page with what the owner left there. A wrapper tool's row
 keeps the tier its calls came to when the owner chose (`seen_tier`); the
 header's bell names one whose calls come to more since and whose choice is
 below them (`owner-notices.ts tierNotices`), until the owner chooses again.
+
+### The same call twice
+
+An assistant sometimes makes a call that changes things again: it lost the
+answer, a run timed out, it retried out of caution. So a Write or
+Destructive call is remembered for a while (`lib/core/calls/guard.ts`, a
+`call_record` row: token, server id, tool, tier, status, times, its answer
+and the permission request it made), and the same call (server, tool and
+arguments as checked and renamed) made again by the same token within the
+window (`DUPLICATE_CALL_MS`, 30 minutes, in `calls/limits.ts`) is not run.
+It is answered as a tool error with code `duplicate_call` saying how the
+first went: still running, succeeded (with its answer when it was short,
+`MAX_INLINE_ANSWER_CHARS`, kept encrypted on the row as
+`call_record:<id>:answer`, or the kept result a long answer already was;
+never a new kept result, which would count against the token's own),
+failed (the tool answered an error, so most likely nothing happened),
+failed on its way (`MAY_HAVE_GONE_THROUGH`), or asking the owner (its
+request and `check_permission`). Every such answer also says that if what
+the call acts on changed since (turned off and on again), the assistant
+makes it again with a reason: the guard does not guess at that. A call still marked running past `STALE_RUNNING_MS`
+never reported back and may have happened. A call that came to nothing
+(paced, refused, a server to connect, an ask the owner declined or let
+expire) is forgotten. The same tool with other arguments is only noted in
+the answer.
+
+The lookup and the new record are one transaction, which SQLite runs one
+at a time: of two identical calls, the second to get there finds the
+first, whatever times they took before.
+
+The arguments are never stored: `args_hash` is an HMAC under a key derived
+from the vault key ("pcp call record v1", `keyedHash` in `crypto.ts`), so
+the table confirms no guess without it. Rows are not exported, go in
+`wipeVault`, and the cleanup removes them once past the longest window an
+owner may set (`CALL_RECORD_KEEP_MS`).
+
+The guard sits where a call is resolved, after its arguments are checked
+and before it asks or runs: `gateway.ts callResolved` for
+`call_tool_write` and `call_tool_destructive`, `forwardCall` for
+run_code's `pcp.call`, and `wrappers/run.ts innerCall` for a wrapper's
+calls; never in `upstream.ts`, so a call the owner allowed on PCP's page
+(and a wrapper's calls in a run the owner allowed) is not guarded. Not
+guarded either: Read tools (by `effectiveTier`), the browser, SSH's
+`run_command`, stores (PCP's own store tools, which have no rerun, and the
+stores' tools: a repeat fails or does the same), a capability tool's calls
+to its provider, and tools the owner exempted. An ask-level call leaves its
+repeats to the permission flow while that flow answers them (the request
+still waiting or running, or the run the owner allowed once while its
+answer is there to take, `reuseUntil`); once that answer was taken, or the
+allowed run failed, the next identical call is held back rather than
+asking the owner again unaware.
+
+An assistant repeats a call on purpose with `rerun: true` and a `reason`
+(required with it, under `allOf`) on `call_tool_write` and
+`call_tool_destructive`, or `{ rerun: true, reason }` in `pcp.call`'s
+options (`--rerun REASON` and `rerun=True, reason=…` in the sandbox). The
+request log notes `rerun` on the call's line; the reason is the assistant's
+own words and stays out, as arguments do. A wrapper's tool repeated so
+repeats the calls its program makes (`asRerun`). run_code's own `rerun`
+is the program's duplicate guard (`DUPLICATE_RUN_MS`, in memory, below)
+and does not reach its calls: a program run again after it stopped for the
+owner meets `duplicate_call` on the calls that already ran.
+
+The owner's own windows are the vault's `duplicateCalls` setting
+(`calls/config.ts`), set on Settings → Repeated calls
+(`components/repeated-calls-card.tsx`, `lib/actions/repeated-calls.ts`): a
+default for every tool, and per tool (chosen from the vault's tools that
+change things, by server id and name) minutes between 1 and 24 hours, or
+`exempt` ("Never hold back").
 
 ### Call handles
 
@@ -4826,8 +4936,11 @@ nothing changes for it. The owner's answers to a request ("Always allow",
 A call to an "ask" tool becomes a `permission_request` row
 (`lib/core/permissions.ts`): the
 arguments encrypted under the vault's key with the row id as associated
-data, a hash of the call so the same call asked twice finds the same row,
-and a day to answer. The result is text for the assistant: what was asked,
+data, a hash of the call so the same call asked twice finds the same row
+(`args_hash`: an HMAC of the kind, target and canonical arguments under a key
+derived from the vault's, prefixed `h1:`, so the column and a backup's copy
+cannot confirm a guess at the arguments; `keyedHash` in `crypto.ts`, as
+`target_key` and call handles are made), and a day to answer. The result is text for the assistant: what was asked,
 the link to `/permissions/<id>` to end its reply with, and to call
 `check_permission` on the owner's next message, whatever it says. The signed-in
 owner answers on that page, and only there (the header's bell lists every
