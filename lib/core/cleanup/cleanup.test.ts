@@ -2,10 +2,12 @@ import {
   existsSync,
   mkdirSync,
   readdirSync,
+  rmSync,
   statSync,
   utimesSync,
   writeFileSync,
 } from "node:fs"
+import os from "node:os"
 import path from "node:path"
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
@@ -381,6 +383,29 @@ describe("a run", () => {
       (await db().embeddingVector.findMany()).map((row) => row.id),
     ).toEqual(["recent"])
     expect(describeRemoved(status.removed!)).toContain("1 unused search vector")
+  })
+
+  it("removes the browser's temporary folders a crashed PCP left behind (#100)", async () => {
+    // A process id no process has: the PCP that made it is gone.
+    const left = path.join(os.tmpdir(), "pcp-chromium-999999999-Cl3an0")
+    mkdirSync(path.join(left, "downloads"), { recursive: true })
+    writeFileSync(path.join(left, "downloads", "file"), "x")
+    const theirs = path.join(os.tmpdir(), "playwright-artifacts-Cl3an0")
+    mkdirSync(theirs, { recursive: true })
+
+    try {
+      const status = await runCleanup("start")
+
+      expect(existsSync(left)).toBe(false)
+      expect(existsSync(theirs)).toBe(true)
+      expect(status.removed?.browser).toBeGreaterThanOrEqual(1)
+      expect(describeRemoved({ ...status.removed!, browser: 1 })).toContain(
+        "1 leftover browser folder",
+      )
+    } finally {
+      rmSync(left, { recursive: true, force: true })
+      rmSync(theirs, { recursive: true, force: true })
+    }
   })
 
   it("runs every part when one fails, and names the one that did", async () => {

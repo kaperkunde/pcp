@@ -2618,7 +2618,19 @@ Its config and cache folders (`XDG_CONFIG_HOME`, `XDG_CACHE_HOME`) are a
 private temporary folder of its own, removed once it has closed: its crash
 reporter keeps its database there, and without a folder it can write to
 (a system user with no home, as the Docker image runs as) Chromium can abort
-as it starts. It starts without `--enable-automation`, with
+as it starts. The folder (`pcp-chromium-<pid>-…`, `browser/scratch.ts`) also
+holds the file a `download` call waits for, and the virtual display's cookie
+is in one beside it (`pcp-display-<pid>-…`). Sign-ins never are: the contexts
+are off the record, their cookies and storage in memory. A PCP that crashes
+or is killed leaves these folders behind, so the process's id is in their
+names and the cleanup removes those of a process that is gone, and the
+process's own that no browser or display holds (one from before the id was
+in the name once it has not changed for a day, since an older PCP still
+running may hold it; never Playwright's own
+`playwright_*` folders beside them). Chromium starts with
+`--disk-cache-size=1`, so the disk cache of its own profile, in Playwright's
+folder, holds nothing to speak of; in the container image `/tmp` is a tmpfs
+(`docker-compose.yaml`, `install.sh`), so none of it reaches the disk at all. It starts without `--enable-automation`, with
 `--disable-blink-features=AutomationControlled`, and with
 `--disable-popup-blocking` and `--disable-back-forward-cache`, which
 patchright-core leaves out (script-opened popups reach the gate, and a back
@@ -3956,10 +3968,38 @@ build tells the server (`PCP_DESKTOP_UPDATER=manual`) and the page links to
 the download instead. `desktop/README.md` has the details.
 
 **The Linux installer can update it once a day** (`PCP_AUTO_UPDATE=1`,
-remembered like its other settings). Under Podman with Quadlet that is
-Podman's own `podman-auto-update.timer`, which follows the unit's autoupdate
-label; otherwise a systemd timer runs a copy of the installer with `update`,
-which pulls the image and starts PCP again only when the image changed. The
+remembered like its other settings): a systemd timer runs a copy of the
+installer with `update`, which pulls the image, checks its signature, and
+starts PCP again only when the container runs another image. Under Quadlet too: Podman's
+own `podman-auto-update.timer`, which an older installer turned on with the
+unit's autoupdate label, checks no signature and cannot follow an image
+pinned by digest, so the unit no longer carries the label.
+
+**Every image the installer runs is one PCP's workflow signed** (#98).
+`build-images.yml` signs each image's digest with cosign, keyless (GitHub's
+OIDC token, so the certificate names the workflow file and the branch it
+ran from; the signature is in Sigstore's log), `--recursive` so each
+platform's manifest is signed too, and attests GitHub's build provenance
+beside it; `release.yml` and `develop.yml` add both digests to the release
+notes. The installer, after every pull (`pull_image`, `update`), takes the
+image's repository digest (`image inspect` `RepoDigests`) and runs cosign's
+image, pinned by digest (`COSIGN_IMAGE`), with `verify
+--certificate-identity-regexp` naming `build-images.yml` on `main` or
+`develop` (`IMAGE_SIGNER`) and GitHub's issuer. Only once that passes does
+it touch the running container, and from then on the run, the Quadlet unit
+(`Image=`) and the installer it reads use `<image>@sha256:…`, never the tag.
+The check is `cosign_verify`, which hands cosign's container the proxy
+settings by name; `install.sh verify-image` runs it alone, and
+`build-images.yml` runs that on each digest right after signing, so the
+workflow and installs check alike. `update` decides by the image the
+container runs (`inspect -f {{.Image}}`) against the checked digest's id,
+not the tag before and after the pull, which a failed check would leave
+moved. A failure stops the run before anything changes; `PCP_INSECURE_SKIP_VERIFY=1`
+skips the check for one run, with a warning, and is not remembered. A
+`policy.json` rule that would have Podman check the signature itself is not
+written: Podman reads one policy file per user (or the system's), so a rule
+for PCP's image would mean rewriting the host's policy for every other
+image. Compose checks nothing; the guide pins digests instead. The
 installer passes `PCP_AUTO_UPDATE=1` into the container, so Settings says
 there is nothing to do. PCP itself still pulls and restarts nothing.
 
@@ -3989,8 +4029,9 @@ run was saved at install time, so an update through it would write the unit
 as that installer did, without anything added since (the graphics card,
 #38). The image carries `install.sh` at `/app/install.sh` (root's, `0644`;
 `scripts/docker.test.ts`), and `update`, after the pull, reads it with
-`run --rm --network none --no-healthcheck --entrypoint cat <image id>` from
-the image it just pulled (the pinned one, for a pinned version), never from
+`run --rm --network none --no-healthcheck --entrypoint cat <image>@<digest>`
+from the image it just pulled and checked (the pinned one, for a pinned
+version), never from
 the running container, which PCP could change. It takes the file only when it
 starts with `#!/bin/sh`, holds the line `# pcp-installer-format: 1`, passes
 `sh -n` and is at most 256 KB; then, if it differs from the copy, it moves it
@@ -4000,8 +4041,7 @@ the request named holds), and `PCP_UPDATER_REEXEC=1`, which reads no
 installer again and installs even from the same image, since the unit may be
 what changed. Anything else, including an image from before this, leaves the
 update to the copy with a note. With no copy (no timer of PCP's) nothing is
-read: Podman's own auto-update only pulls, and the unit changes when the
-installer next runs. `write_unit` leaves drop-ins in `pcp.container.d/` alone
+read, and the unit changes when the installer next runs. `write_unit` leaves drop-ins in `pcp.container.d/` alone
 and names them, since one may do what the unit now does itself.
 
 ## Cleanup and the log
@@ -4031,8 +4071,9 @@ ended sign-ins, unfinished OAuth sign-ins, apps' codes and tokens past their
 expiry (with their grants) and registrations no sign-in used within a day
 (PCP's authorization server), permission requests a week past
 their expiry, kept results past their day, search's cached embeddings no
-search used for a month, and days of the request log older
-than the owner keeps (90 by default, 1 to 3,650). It runs when PCP starts and
+search used for a month, the browser's temporary folders a crashed or
+killed PCP left behind (by the process id in their names), and days of the
+request log older than the owner keeps (90 by default, 1 to 3,650). It runs when PCP starts and
 then on a node-cron task, one per process and kept on `globalThis` like the
 update timer, unref'd, with no overlap: runs from the start, the schedule and
 the owner's **Clean up now** go one at a time. Each part runs on its own, so

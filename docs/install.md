@@ -62,7 +62,8 @@ curl -fsSL https://raw.githubusercontent.com/kaperkunde/pcp/main/install.sh | sh
 
 The installer finds Docker or Podman on the computer (Bazzite and other
 Fedora Atomic systems come with Podman), pulls the published image
-(`ghcr.io/kaperkunde/pcp`) and keeps PCP running on port 3000 across reboots:
+(`ghcr.io/kaperkunde/pcp`), checks its signature, and keeps PCP running on
+port 3000 across reboots:
 as a container Docker restarts, or as a systemd unit under Podman. It never
 runs `sudo` or installs Docker for you; when neither is usable, it prints what
 to run. Run the same line again to update PCP, or choose **Install and

@@ -76,6 +76,8 @@ installer again):
   is built and ahead of the releases (they may break); `PCP_CHANNEL=stable`
   goes back to the releases from the next one on.
 - `PCP_VERSION=1.2.3`: a release other than the latest, for this run only.
+- `PCP_INSECURE_SKIP_VERIFY=1`: start an image whose signature does not
+  check out, for this run only (see [Signed images](#6-keeping-it-running)).
 
 Use either the installer or a checkout, not both: the installer stops if a
 checkout's PCP is running, and says how to take its vault over.
@@ -279,15 +281,18 @@ when there is a new release:
 curl -fsSL https://raw.githubusercontent.com/kaperkunde/pcp/main/install.sh | PCP_AUTO_UPDATE=1 sh
 ```
 
-Under Podman 4.4 or newer with systemd that turns on Podman's own
-`podman-auto-update.timer`. Otherwise it adds a daily `pcp-update.timer` to
-systemd (your user's, or the system's when you run it as root), or, without
-a systemd session, prints the line for your crontab. The timer runs a copy
-of the installer, kept in `~/.local/share/pcp/install.sh`; as root, in
-`/usr/local/lib/pcp/install.sh`, whatever `HOME` is, so that only root can
-change what root runs. `PCP_AUTO_UPDATE=0` takes it away again:
-`pcp-update.timer` and the copy, or under Podman the auto-update label on
-PCP's unit (Podman's timer stays on, since other containers may use it).
+That adds a daily `pcp-update.timer` to systemd (your user's, or the
+system's when you run it as root), or, without a systemd session, prints the
+line for your crontab. The timer runs a copy of the installer, kept in
+`~/.local/share/pcp/install.sh`; as root, in `/usr/local/lib/pcp/install.sh`,
+whatever `HOME` is, so that only root can change what root runs.
+`PCP_AUTO_UPDATE=0` takes it away again: `pcp-update.timer` and the copy.
+Under Podman too: an installer from before images were signed left the
+daily update to Podman's own `podman-auto-update.timer`, which starts
+whatever the tag names with nothing checked. That goes on until the
+installer runs again: run the install line once more, or use **Install and
+restart**, and it takes PCP's unit off that timer (the timer itself stays
+on, since other containers may use it).
 
 **Install and restart** works through a second timer, `pcp-update-request.timer`,
 which runs a copy of the installer every 30 seconds. It looks into the
@@ -301,11 +306,54 @@ Both timers run the installer that comes with the new image: after pulling
 it, the copy reads `install.sh` out of that image (never out of the running
 PCP) and, when it differs, takes it as the copy and lets it finish the
 update, so what a newer installer sets up (the graphics card, say) reaches
-an existing install without running the line again. Podman's own
-`podman-auto-update.timer` only pulls the image; there the unit follows the
-next time the installer runs. If you added drop-ins of your own in
+an existing install without running the line again. If you added drop-ins of your own in
 `~/.config/containers/systemd/pcp.container.d/`, the installer keeps them and
 lists them when it writes the unit, so you can check they are still needed.
+
+**Signed images.** Every image PCP publishes, `ghcr.io/kaperkunde/pcp` and
+`ghcr.io/kaperkunde/pcp-sandbox`, releases and develop's builds alike, is
+signed by the workflow that built it (cosign, keyless: the signature names
+`build-images.yml` on `main` or `develop` and is in Sigstore's public log),
+and each release's notes list both images by digest. The installer checks
+the signature of every image it pulls, before it starts it or reads the
+installer out of it, and then runs that digest rather than the tag, so a
+tag moved in between changes nothing. An image whose signature does not
+check out is not started, and PCP goes on running as it was; the message
+says why, and the next update tries again: it compares the image the
+container runs with the one it just checked, not the tag. Behind a proxy,
+the check gets `HTTPS_PROXY`, `HTTP_PROXY` and `NO_PROXY` as the installer
+has them; for the daily timer, set them in systemd's environment
+(`systemctl --user set-environment HTTPS_PROXY=…`, or without `--user` as
+root). `install.sh verify-image ghcr.io/kaperkunde/pcp@sha256:…` runs the
+check alone and changes nothing. `PCP_INSECURE_SKIP_VERIFY=1` runs one
+unchecked, for that run only (an image from before images were signed, or one you built): do not
+use it to get past a refusal you cannot explain, which is what the check
+is there to stop.
+
+To check an image yourself, with [cosign](https://docs.sigstore.dev/cosign/system_config/installation/)
+(or the image the installer uses, `ghcr.io/sigstore/cosign/cosign`), take
+the digest from the release notes:
+
+```bash
+cosign verify \
+  --certificate-identity-regexp '^https://github\.com/kaperkunde/pcp/\.github/workflows/build-images\.yml@refs/heads/(main|develop)$' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  ghcr.io/kaperkunde/pcp@sha256:…
+```
+
+GitHub's own record of the build is beside it:
+`gh attestation verify oci://ghcr.io/kaperkunde/pcp@sha256:… --repo kaperkunde/pcp`.
+With compose, pin both images to the digests you checked, so `pull` takes
+exactly those (a tag can be moved; a digest cannot):
+
+```bash
+PCP_TAG=0.5.0@sha256:… PCP_SANDBOX_TAG=0.5.0@sha256:… docker compose pull
+PCP_TAG=0.5.0@sha256:… PCP_SANDBOX_TAG=0.5.0@sha256:… docker compose up -d
+```
+
+(or put both lines in a `.env` file next to the compose files). Compose
+checks no signature by itself; Coolify, Portainer and the like neither, so
+pin a digest there too.
 
 **Develop's builds.** Every change to the `develop` branch is built once its
 checks pass and published as a pre-release, `vX.Y.Z-dev.N`, ahead of the
