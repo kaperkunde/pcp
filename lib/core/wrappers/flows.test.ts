@@ -11,7 +11,8 @@ import {
 
 import { createApiToken, resolveApiToken } from "../api-tokens"
 import { chromiumExecutable } from "../browser/executable"
-import { closeAllBrowsers } from "../browser/runtime"
+import { closeAllBrowsers, runningBrowser } from "../browser/runtime"
+import { tabPace } from "../browser/tab-pace"
 import { createBrowserServer } from "../browser/server"
 import type { VaultContext } from "../context"
 import { db } from "../db"
@@ -181,7 +182,7 @@ const POST_MESSAGE = {
 }
 
 async function approvedFlow(
-  tool: typeof POST_MESSAGE = POST_MESSAGE,
+  tool: Record<string, unknown> = POST_MESSAGE,
   extra: Record<string, unknown> = {},
 ) {
   const asked = await call("create_wrapper", {
@@ -310,6 +311,52 @@ describe.skipIf(!executable)("a browser flow", { timeout: 90_000 }, () => {
     // The typing at the flow's pace for actions, the click at the program's
     // pick within the flow's pace for clicks; not the owner's default.
     expect(waits).toEqual([100, 120])
+  })
+
+  it("holds a tab's pace its program sets within the flow's own", async () => {
+    const PACE_TAB = {
+      ...POST_MESSAGE,
+      name: "pace_tab",
+      description: "Opens the thread and paces its tab.",
+      output_schema: {
+        type: "object",
+        properties: { tab: { type: "string" } },
+        required: ["tab"],
+      },
+      program: `
+        const opened = await pcp.call("browser", "tabs", { action: "open", url: args.url })
+        const tab = opened.match(/^Tab (\\S+):/m)[1]
+        await pcp.call("browser", "tabs", { action: "pace", tab, pace: {
+          actions: { min_ms: 60, max_ms: 80 },
+          navigations: { min_ms: 600, max_ms: 9000 },
+        } })
+        return { tab }
+      `,
+      calls: ["browser/tabs"],
+    }
+    await approvedFlow(PACE_TAB, {
+      pace: {
+        actions: { min_ms: 100, max_ms: 300 },
+        navigations: { min_ms: 500, max_ms: 1_000 },
+      },
+    })
+    const wrapper = await db().mcpServer.findFirstOrThrow({
+      where: { kind: "wrapper" },
+    })
+    await writeToolAccess(scope.tokenId, wrapper.id, "pace_tab", "allowed")
+
+    const result = await call("call_tool_destructive", {
+      server: "chat",
+      tool: "pace_tab",
+      arguments: { url: `${api.origin}/thread`, text: "unused" },
+    })
+    expect(result.isError, result.text).toBe(false)
+    const { tab } = JSON.parse(result.text) as { tab: string }
+
+    expect(tabPace(runningBrowser(ctx.vaultId)!.tabs.get(tab)!)).toEqual({
+      actions: { minMs: 100, maxMs: 100 },
+      navigations: { minMs: 600, maxMs: 1_000 },
+    })
   })
 
   it("names the step that failed, on a page it did not expect", async () => {
