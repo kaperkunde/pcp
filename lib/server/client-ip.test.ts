@@ -142,3 +142,75 @@ describe("parseTrustedProxies", () => {
     expect(warn).toHaveBeenCalledTimes(1)
   })
 })
+
+// The app's own server entry (docker/peer-stamp.cjs) stamps the connecting
+// address into x-pcp-peer; with it, forwarded headers count only from a proxy.
+describe("clientIp with the connecting address known", () => {
+  it("trusts forwarded headers from a loopback peer", async () => {
+    expect(
+      await ipFor({
+        "x-pcp-peer": "127.0.0.1",
+        "x-forwarded-for": "6.6.6.6, 203.0.113.7",
+      }),
+    ).toBe("203.0.113.7")
+  })
+
+  it("is the peer itself, not 'local', with no forwarded headers", async () => {
+    expect(await ipFor({ "x-pcp-peer": "127.0.0.1" })).toBe("127.0.0.1")
+    expect(await ipFor({ "x-pcp-peer": "::ffff:198.51.100.4" })).toBe(
+      "198.51.100.4",
+    )
+  })
+
+  it("ignores forwarded headers from another peer and warns once", async () => {
+    vi.resetModules()
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {})
+    const fresh = (await import("./client-ip")).clientIp
+    const call = async (headers: Record<string, string>) => {
+      sent.headers = new Headers(headers)
+
+      return fresh()
+    }
+    const forged = {
+      "x-pcp-peer": "172.18.0.2",
+      "x-forwarded-for": "6.6.6.6",
+    }
+
+    expect(await call(forged)).toBe("172.18.0.2")
+    expect(await call({ ...forged, "x-forwarded-for": "7.7.7.7" })).toBe(
+      "172.18.0.2",
+    )
+    expect(
+      await call({ "x-pcp-peer": "172.18.0.2", "x-real-ip": "8.8.8.8" }),
+    ).toBe("172.18.0.2")
+    expect(warn).toHaveBeenCalledTimes(1)
+    expect(String(warn.mock.calls[0]?.[0])).toContain("PCP_TRUSTED_PROXIES")
+    // Not the address of anyone who connected.
+    expect(String(warn.mock.calls[0]?.[0])).not.toContain("172.18.0.2")
+    expect(String(warn.mock.calls[0]?.[0])).not.toContain("6.6.6.6")
+  })
+
+  it("does not warn when the peer sends no forwarded headers", async () => {
+    vi.resetModules()
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {})
+    const fresh = (await import("./client-ip")).clientIp
+
+    sent.headers = new Headers({ "x-pcp-peer": "203.0.113.50" })
+    expect(await fresh()).toBe("203.0.113.50")
+    expect(warn).not.toHaveBeenCalled()
+  })
+
+  it("reads forwarded headers from a peer inside PCP_TRUSTED_PROXIES", async () => {
+    vi.resetModules()
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {})
+    vi.stubEnv("PCP_TRUSTED_PROXIES", "172.16.0.0/12")
+    const fresh = (await import("./client-ip")).clientIp
+
+    sent.headers = new Headers({
+      "x-pcp-peer": "172.18.0.2",
+      "x-forwarded-for": "6.6.6.6, 203.0.113.7",
+    })
+    expect(await fresh()).toBe("203.0.113.7")
+    expect(warn).not.toHaveBeenCalled()
+  })
+})
