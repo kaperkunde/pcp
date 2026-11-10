@@ -485,17 +485,23 @@ off the internet: PCP believes those headers from whoever sends them. If PCP
 guesses its public address wrong, pin it under **Settings → Public
 address**.
 
-PCP counts the right-most `X-Forwarded-For` address. A proxy that replaces
-the header puts the client's address there, and so does one that appends
-to it (nginx's `$proxy_add_x_forwarded_for`, Caddy, Traefik) when it is the
-only proxy in front of PCP. Behind more than one (a CDN in front of your
-proxy, say), the right-most is the proxy before yours. For those, set
-`PCP_TRUSTED_PROXIES` to your proxies' addresses (IP addresses and CIDR
-ranges, comma-separated, such as `PCP_TRUSTED_PROXIES=172.16.0.0/12` for proxies on a Docker
-network): PCP then reads the header from the right, past those addresses
-and loopback, and counts the first one that is not yours. It is off unless
-you set it, and it still needs port 3000 to be reachable from your proxies
-alone.
+PCP limits password tries per address, and it knows the address that connected
+to it. `X-Forwarded-For` counts only when that address is your proxy's, so a
+client cannot pick its own limit by writing the header. **Set
+`PCP_TRUSTED_PROXIES` to your proxy's own address, or the subnet of the
+Docker network you share with it** (IP addresses and CIDR ranges,
+comma-separated; nothing wider, since whatever can connect from a trusted
+range may name any client). Without it, every client behind the proxy
+counts as the proxy, shares one limit, and PCP says so once in its log. A
+proxy on the same machine that connects over loopback is always trusted. Under
+Docker the proxy connects from the network it shares with PCP: `docker network
+inspect` shows its subnet.
+
+With it set, PCP reads the header from the right, past your addresses and
+loopback, and counts the first one that is not yours: the client a proxy that
+appends to the header (nginx's `$proxy_add_x_forwarded_for`, Caddy, Traefik)
+saw, or the one before yours when something such as a CDN sits in front. Keep
+port 3000 reachable from your proxies alone.
 
 PCP needs no environment variables. The optional ones (`PCP_DATA_DIR`,
 `PORT`, `PCP_HTTP_PORT`, `PCP_HTTPS_PORT`, `PCP_ACME_DIRECTORY`,

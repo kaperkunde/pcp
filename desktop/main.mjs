@@ -190,22 +190,26 @@ async function startServer() {
     `\n[${new Date().toISOString()}] starting PCP ${app.getVersion()} on ${host}:${settings.port}, data in ${dataDir}\n`,
   )
 
-  const child = utilityProcess.fork(path.join(serverDir, "server.js"), [], {
-    cwd: serverDir,
-    serviceName: "PCP server",
-    stdio: "pipe",
-    env: {
-      ...process.env,
-      NODE_ENV: "production",
-      PORT: String(settings.port),
-      HOSTNAME: host,
-      PCP_DATA_DIR: dataDir,
-      // Lets PCP's own pages say how this app is reached and configured,
-      // and whether it can install an update itself.
-      PCP_DESKTOP: "1",
-      PCP_DESKTOP_UPDATER: updater,
+  const child = utilityProcess.fork(
+    path.join(serverDir, "server-entry.cjs"),
+    [],
+    {
+      cwd: serverDir,
+      serviceName: "PCP server",
+      stdio: "pipe",
+      env: {
+        ...process.env,
+        NODE_ENV: "production",
+        PORT: String(settings.port),
+        HOSTNAME: host,
+        PCP_DATA_DIR: dataDir,
+        // Lets PCP's own pages say how this app is reached and configured,
+        // and whether it can install an update itself.
+        PCP_DESKTOP: "1",
+        PCP_DESKTOP_UPDATER: updater,
+      },
     },
-  })
+  )
   child.stdout?.on("data", (chunk) => log.write(chunk))
   child.stderr?.on("data", (chunk) => log.write(chunk))
 
