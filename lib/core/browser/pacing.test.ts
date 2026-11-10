@@ -28,6 +28,8 @@ import {
   withPermission,
 } from "../permissions"
 import { getSetting } from "../settings"
+import { resultKeepers } from "../tool-results"
+import { takeTurn } from "../pacing/pace"
 import { scratchDatabase } from "../test-db"
 import { setupVault } from "../vault"
 import { setFetchPrivate, setFetchSite } from "../web-fetch"
@@ -48,14 +50,19 @@ import { isOwnerNeeded, type OwnerNeeded } from "./types"
 const executable = await chromiumExecutable()
 const PUBLIC_URL = "http://pcp.test"
 const PAUSE_MS = 400
+/** How long the slow file takes to come in whole. */
+const SLOW_FILE_MS = 3_000
 
 /** Buttons that note when each click reached the page. */
 const TAPS = `<!doctype html><title>Taps</title>
 <button onclick="document.getElementById('taps').textContent += Date.now() + ' '">Tap</button>
-<p id="taps" hidden></p>`
+<p id="taps" hidden></p>
+<a href="/slow-file">File</a>`
 
 let cleanup: () => Promise<void>
 let api: TestApi
+/** Another site, whose file comes slowly. */
+let other: TestApi
 let ctx: VaultContext
 let tokenId: string
 let server: McpServer
@@ -76,11 +83,20 @@ beforeEach(async () => {
   server = await db().mcpServer.findUniqueOrThrow({
     where: { id: (await createBrowserServer(ctx)).id },
   })
-  api = await startTestApi((_, res) => {
+  const slowFile: Parameters<typeof startTestApi>[0] = (_, res) => {
+    res.setHeader("content-type", "application/octet-stream")
+    res.setHeader("content-disposition", 'attachment; filename="slow.bin"')
+    res.write(Buffer.alloc(1024, 1))
+    setTimeout(() => res.end(Buffer.alloc(1024, 2)), SLOW_FILE_MS)
+  }
+  api = await startTestApi((request, res) => {
+    if (request.url.startsWith("/slow-file")) return slowFile(request, res)
     res.setHeader("content-type", "text/html; charset=utf-8")
     res.end(TAPS)
   })
+  other = await startTestApi(slowFile)
   await setFetchSite(ctx, tokenId, new URL(api.origin).host, "allowed")
+  await setFetchSite(ctx, tokenId, new URL(other.origin).host, "allowed")
   await setFetchPrivate(ctx, tokenId, "allowed")
   await setPacingClass(ctx, "browser_act", {
     minIntervalMs: PAUSE_MS,
@@ -93,6 +109,7 @@ beforeEach(async () => {
 afterEach(async () => {
   await closeAllBrowsers()
   await api.close()
+  await other.close()
   await cleanup()
   resetPacing()
   vi.unstubAllEnvs()
@@ -106,6 +123,7 @@ function call(name: string, args: Record<string, unknown> = {}) {
   return callBrowserTool(ctx, server, name, args, {
     tokenId,
     publicUrl: PUBLIC_URL,
+    keepBytes: resultKeepers(ctx, tokenId).bytes,
   })
 }
 
@@ -196,6 +214,47 @@ describe.skipIf(!executable)(
       const times = await taps(tab)
       expect(times).toHaveLength(2)
       expect(gaps(times)[0]).toBeGreaterThanOrEqual(PAUSE_MS)
+    })
+
+    it("gives a download's turn back once its click is done, not while the file comes in", async () => {
+      const first = await open()
+      const second = await open()
+      const opened = await call("snapshot", { tab: first.tab })
+      const file = textOf(opened).match(/link "File" \[ref=(e\d+)\]/)![1]!
+
+      const downloading = call("download", { tab: first.tab, ref: file })
+      await new Promise((resolve) => setTimeout(resolve, 1_000))
+      await call("click", second)
+      const tapped = (await taps(second.tab))[0]!
+      const downloaded = await downloading
+      const done = Date.now()
+
+      expect(downloaded.isError, textOf(downloaded)).toBeFalsy()
+      // The other tab of the site acted while the file was still coming.
+      expect(done - tapped).toBeGreaterThan(1_000)
+    })
+
+    it("takes a download by its address in turn at that address's site, not the tab's", async () => {
+      await setPacingClass(ctx, "browser_navigate", {
+        minIntervalMs: 0,
+        jitterMs: 0,
+        burst: null,
+      })
+      const { tab } = await open()
+      const host = new URL(other.origin).host
+      const held = await takeTurn(`${ctx.vaultId}\nsite:${host}`, host, null)
+
+      try {
+        const waited = await call("download", {
+          tab,
+          url: `${other.origin}/slow-file`,
+          timeout_ms: 2_000,
+        })
+        expect(waited.isError).toBe(true)
+        expect(textOf(waited)).toContain(`waiting for its turn at ${host}`)
+      } finally {
+        if ("release" in held) held.release()
+      }
     })
 
     it("spaces a site's clicks across its tabs too", async () => {
