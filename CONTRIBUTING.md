@@ -85,6 +85,18 @@ is re-run. The package's visibility is set on GitHub, not here: a package
 takes the repository's visibility when it is first pushed, and anonymous
 pulls need it public.
 
+Both images are signed by the job that pushed them (`build-images.yml`):
+cosign, keyless, with the run's GitHub OIDC token, over each image's digest
+and each platform's (`--recursive`), and GitHub's build provenance is
+attested and pushed beside them (`id-token: write` and `attestations: write`,
+granted by both callers). The publish job adds both digests to the release
+notes, with the command that checks them. `install.sh` checks that signature
+before it runs an image, accepting only `build-images.yml` run from `main`
+or `develop`; so the workflow's file name and those branches are part of
+what installs trust, and renaming either is a change to `IMAGE_SIGNER` in
+`install.sh` in the same release (`scripts/docker.test.ts` checks they
+agree). The actions are pinned by commit, as everywhere here.
+
 Every push to `develop` gets the same, ahead of the releases
 (`.github/workflows/develop.yml`): the checks a pull request runs (`ci.yml`),
 and once they pass, the apps and images built from that commit as a GitHub
@@ -120,6 +132,16 @@ The workflow pushes with the workflow token and asks for `contents: write`
 itself, so the read-only default under Settings → Actions → "Workflow
 permissions" can stay. What would stop it is a branch rule on `main` that
 refuses pushes from GitHub Actions.
+
+Since a signature from `main` or `develop` is what installs accept, who can
+push there is who can ship. The repository's settings (not in this
+repository) should hold to that: rulesets on `main`, `develop` and the `v*`
+tags that require a reviewed pull request and refuse force pushes and
+deletion, with GitHub Actions as a bypass actor (`release.yml` pushes the
+release commit, the tag and the fast-forward of `develop` with the workflow
+token, and `develop.yml` deletes old builds' tags); and the packages'
+**Manage Actions access** limited to this repository, so no other
+repository's workflow can push to `ghcr.io/kaperkunde/pcp`.
 
 ## Desktop app
 

@@ -24,7 +24,10 @@ services:
     # both lines, `docker compose up -d` builds from this checkout when the
     # image is not on this computer yet and gives the build this name, and
     # `docker compose pull` fetches the published one instead. PCP_TAG picks
-    # another tag: `develop` follows develop's builds, a version pins one.
+    # another tag: `develop` follows develop's builds, a version pins one,
+    # and a version with the digest from its release notes
+    # (PCP_TAG=0.5.0@sha256:…) pins exactly the image whose signature you
+    # checked (docs/self-hosting.md, "Signed images").
     image: ghcr.io/kaperkunde/pcp:${PCP_TAG:-latest}
     build: .
     restart: unless-stopped

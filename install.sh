@@ -10,10 +10,19 @@
 # systemd unit under Podman (a plain `podman run` on Podman older than 4.4).
 # Running it again updates PCP and keeps the settings below; `uninstall`
 # removes the container and the unit and keeps the volume. With
-# PCP_AUTO_UPDATE=1 PCP is updated once a day by itself: under Podman with
-# Quadlet by Podman's own podman-auto-update.timer, otherwise by a timer
-# that runs a copy of this installer with `update`, which fetches the image
-# and starts PCP again only when there is a new one.
+# PCP_AUTO_UPDATE=1 PCP is updated once a day by itself, by a timer that runs
+# a copy of this installer with `update`, which fetches the image and starts
+# PCP again only when there is a new one.
+#
+# Every image it pulls is checked before anything runs it: its signature
+# (cosign, keyless, made by PCP's image workflow on GitHub Actions from main
+# or develop, logged in Sigstore's public log) has to check out for the
+# digest the registry gave it, and PCP then runs that digest, not the tag.
+# The check runs cosign's own image, pinned by its digest below. An image
+# that fails it is not started, and PCP goes on running as it was.
+# PCP_INSECURE_SKIP_VERIFY=1 skips the check for one run, with a warning:
+# for an image from before images were signed, or one you built yourself.
+# It is never remembered, so the daily update checks again.
 #
 # "Install and restart" on PCP's Settings page works through the same copy:
 # a timer runs it with `watch` every 30 seconds, which looks for the request
@@ -44,6 +53,8 @@
 #   PCP_VERSION=                    an image tag instead of the channel's: a
 #                                     version (0.4.2) stays put; not remembered
 #   PCP_IMAGE=ghcr.io/kaperkunde/pcp  the image
+#   PCP_INSECURE_SKIP_VERIFY=1        run an image whose signature does not
+#                                     check out (above); not remembered
 #
 # PCP's browser shows sites the time zone and language of the container, so
 # the container is started with this computer's: TZ from the environment,
@@ -98,6 +109,12 @@ DEFAULT_IMAGE="ghcr.io/kaperkunde/pcp"
 IMAGE_INSTALLER="/app/install.sh"
 INSTALLER_MARK="# pcp-installer-format: 1"
 INSTALLER_MAX_BYTES=262144
+# The signature's check (above): cosign's image, by its digest, and who may
+# have signed PCP's: the image workflow, run from main (a release) or
+# develop (a build of develop), with GitHub Actions' OIDC tokens.
+COSIGN_IMAGE="ghcr.io/sigstore/cosign/cosign:v3.1.4@sha256:0f06154836d2de34f887a5c273506d52ca43edaa1d9e53e6510fa78a48f69c2d"
+IMAGE_SIGNER='^https://github\.com/kaperkunde/pcp/\.github/workflows/build-images\.yml@refs/heads/(main|develop)$'
+IMAGE_ISSUER="https://token.actions.githubusercontent.com"
 CONTAINER="pcp"
 PORT_FILE="/proc/sys/net/ipv4/ip_unprivileged_port_start"
 
@@ -113,7 +130,7 @@ usage() {
   warn "Usage: install.sh [uninstall|update|watch]" "" \
     "Settings go in the environment: PCP_PORT, PCP_HTTPS, PCP_RUNTIME," \
     "PCP_DATA_VOLUME, PCP_AUTO_UPDATE, PCP_UPDATE_BUTTON, PCP_CHANNEL, PCP_VERSION," \
-    "PCP_IMAGE. The top of the script explains them."
+    "PCP_IMAGE, PCP_INSECURE_SKIP_VERIFY. The top of the script explains them."
   exit 2
 }
 
@@ -190,6 +207,7 @@ resolve_settings() {
   PCP_GPU=${PCP_GPU:-${conf_gpu:-1}}
   PINNED_VERSION=${PCP_VERSION:-}
   PCP_IMAGE=${PCP_IMAGE:-$DEFAULT_IMAGE}
+  SKIP_VERIFY=${PCP_INSECURE_SKIP_VERIFY:-0}
 
   case "$PCP_PORT" in
     '' | *[!0-9]*) usage_error "PCP_PORT must be a port number, not '$PCP_PORT'." ;;
@@ -213,6 +231,10 @@ resolve_settings() {
   case "$PCP_GPU" in
     0 | 1) ;;
     *) usage_error "PCP_GPU must be 0 or 1, not '$PCP_GPU'." ;;
+  esac
+  case "$SKIP_VERIFY" in
+    0 | 1) ;;
+    *) usage_error "PCP_INSECURE_SKIP_VERIFY must be 0 or 1, not '$SKIP_VERIFY'." ;;
   esac
   case "$PCP_RUNTIME" in
     '' | docker | podman) ;;
@@ -495,7 +517,8 @@ check_user_installs() {
   set --
   given=
   for setting in PCP_PORT PCP_HTTPS PCP_RUNTIME PCP_DATA_VOLUME PCP_AUTO_UPDATE \
-    PCP_UPDATE_BUTTON PCP_CHANNEL PCP_GPU PCP_VERSION PCP_IMAGE TZ LANG; do
+    PCP_UPDATE_BUTTON PCP_CHANNEL PCP_GPU PCP_VERSION PCP_IMAGE \
+    PCP_INSECURE_SKIP_VERIFY TZ LANG; do
     eval "given=\${$setting+set}"
     if [ "$given" = set ]; then
       eval "value=\$$setting"
@@ -679,9 +702,60 @@ gpu_note() {
 
 # --- Install ----------------------------------------------------------------
 
+# The image pulled from the registry, as repository@sha256:…: the first of
+# its repository digests that names PCP_IMAGE. Nothing for an image that was
+# built here, or that the registry gave no digest.
+image_digest_ref() {
+  "$RUNTIME" image inspect -f '{{range .RepoDigests}}{{println .}}{{end}}' "$IMAGE" 2>/dev/null |
+    while read -r ref; do
+      case "$ref" in
+        "$PCP_IMAGE"@sha256:*)
+          hex=${ref#"$PCP_IMAGE"@sha256:}
+          case "$hex" in
+            *[!0-9a-f]*) ;;
+            *)
+              if [ "${#hex}" -eq 64 ]; then
+                printf '%s\n' "$ref"
+                break
+              fi
+              ;;
+          esac
+          ;;
+      esac
+    done
+}
+
+# Checks the image just pulled (see the top) and sets IMAGE_REF, what PCP
+# runs and the installer is read from: the digest whose signature checked
+# out. With PCP_INSECURE_SKIP_VERIFY=1 the digest, or the tag when there is
+# none, unchecked. Anything else stops here, before PCP is touched.
+verify_image() {
+  ref=$(image_digest_ref)
+  if [ "$SKIP_VERIFY" = 1 ]; then
+    IMAGE_REF=${ref:-$IMAGE}
+    warn "WARNING: PCP_INSECURE_SKIP_VERIFY=1, so $IMAGE_REF runs without its signature checked. Leave it out of the next run."
+    return 0
+  fi
+  [ -n "$ref" ] || die "The image $IMAGE has no digest from its registry, so its signature cannot be checked, and PCP does not run it." \
+    "If it is an image you built yourself, run this installer with PCP_INSECURE_SKIP_VERIFY=1 to run it unchecked."
+  say "Checking the signature of $ref"
+  if ! problem=$("$RUNTIME" run --rm "$COSIGN_IMAGE" verify \
+    --certificate-identity-regexp "$IMAGE_SIGNER" \
+    --certificate-oidc-issuer "$IMAGE_ISSUER" "$ref" 2>&1 >/dev/null); then
+    warn "$problem"
+    die "" "The image $IMAGE (${ref#"$PCP_IMAGE"@}) is not one PCP's release workflow signed, or its signature could not be checked (the message above says which), so PCP does not run it and goes on as it was." \
+      "If cosign could not reach ghcr.io or Sigstore, run this installer again later. If the image is one of PCP's from before images were signed, or your own, PCP_INSECURE_SKIP_VERIFY=1 runs it unchecked, for that run only. Otherwise do not: report it at https://github.com/kaperkunde/pcp/security."
+  fi
+  IMAGE_REF=$ref
+}
+
+# Pulls the image and checks it, once a run: an update has done both before
+# it installs.
 pull_image() {
+  [ -z "$IMAGE_REF" ] || return 0
   say "Pulling $IMAGE"
   "$RUNTIME" pull "$IMAGE" || die "Could not pull $IMAGE. Check the message above, and that this computer reaches ghcr.io."
+  verify_image
 }
 
 start_failed() {
@@ -740,7 +814,7 @@ install_container() {
   if [ -n "$GPU_GROUP" ]; then
     set -- "$@" --group-add "$GPU_GROUP"
   fi
-  "$RUNTIME" run "$@" -v "$PCP_DATA_VOLUME:/data" "$IMAGE" >/dev/null || start_failed "$LOGS"
+  "$RUNTIME" run "$@" -v "$PCP_DATA_VOLUME:/data" "$IMAGE_REF" >/dev/null || start_failed "$LOGS"
   MODE=container
 }
 
@@ -756,7 +830,7 @@ write_unit() {
     printf '# PCP. Written by install.sh; running the installer again rewrites it.\n'
     printf '# Logs: %s\n' "$JOURNAL"
     printf '[Unit]\nDescription=PCP\n\n'
-    printf '[Container]\nImage=%s\nContainerName=%s\n' "$IMAGE" "$CONTAINER"
+    printf '[Container]\nImage=%s\nContainerName=%s\n' "$IMAGE_REF" "$CONTAINER"
     printf 'PublishPort=%s%s:3000\n' "$(http_bind)" "$PCP_PORT"
     if [ "$PCP_HTTPS" = 1 ]; then
       printf 'PublishPort=80:8080\nPublishPort=443:8443\n'
@@ -769,12 +843,12 @@ write_unit() {
     else
       printf 'VolatileTmp=yes\n'
     fi
-    # The label is what podman-auto-update.timer looks for, so it goes only
-    # on a unit that asked for the daily update: the timer may be on for
-    # other containers.
+    # No io.containers.autoupdate label: podman-auto-update.timer would
+    # pull and start whatever the tag names, with no signature checked, and
+    # it cannot follow an image pinned by its digest. The daily update is
+    # this installer's own timer, as without Quadlet.
     if [ "$PCP_AUTO_UPDATE" = 1 ]; then
       printf 'Environment=PCP_AUTO_UPDATE=1\n'
-      printf 'Label=io.containers.autoupdate=registry\n'
     fi
     if [ "$WATCH" = 1 ]; then
       printf 'Environment=PCP_HOST_UPDATER=2\n'
@@ -911,19 +985,12 @@ disable_auto_update() {
   unit_ctl daemon-reload >/dev/null 2>&1 || true
 }
 
-# PCP_AUTO_UPDATE=1. Under Quadlet the unit's autoupdate label and Podman's
-# timer do it; otherwise a daily timer runs `install.sh update`, and without
-# a systemd session the owner is given the cron line.
+# PCP_AUTO_UPDATE=1: a daily timer runs `install.sh update`, which checks the
+# image's signature, under Quadlet too (an older installer left that to
+# Podman's podman-auto-update.timer, which checks none; it may serve other
+# containers, so it stays as it is, and PCP's unit no longer carries its
+# label). Without a systemd session the owner is given the cron line.
 enable_auto_update() {
-  if [ "$MODE" = quadlet ]; then
-    disable_auto_update
-    if unit_ctl enable --now podman-auto-update.timer >/dev/null 2>&1; then
-      AUTO=timer
-    else
-      warn "" "Could not turn on podman-auto-update.timer; run this installer again to update PCP."
-    fi
-    return 0
-  fi
   if ! save_updater; then
     warn "" "Could not keep a copy of this installer for the daily update; run it again to update PCP."
     return 0
@@ -1070,8 +1137,9 @@ installer_ok() {
   /bin/sh -n "$1" 2>/dev/null
 }
 
-# The installer in the image just pulled ($1, its id, so it is that image and
-# not whatever the tag names by now), read in a container of its own with no
+# The installer in the image just pulled ($1, the digest whose signature
+# checked out, so it is that image and not whatever the tag names by now),
+# read in a container of its own with no
 # network and nothing mounted. Never out of the running PCP: a PCP that was
 # taken over could change its own files, not an image. When it differs from
 # the copy the timers run, it becomes that copy and runs this update in this
@@ -1087,7 +1155,7 @@ adopt_image_installer() {
   [ -f "$UPDATER" ] || return 0
   fresh="$UPDATER.image"
   if ! "$RUNTIME" run --rm --network none --no-healthcheck --entrypoint cat \
-    "${1:-$IMAGE}" "$IMAGE_INSTALLER" >"$fresh" 2>/dev/null; then
+    "${1:-$IMAGE_REF}" "$IMAGE_INSTALLER" >"$fresh" 2>/dev/null; then
     rm -f "$fresh"
     warn "Note: could not read the installer in $IMAGE; updating with the copy in $UPDATER."
     return 0
@@ -1123,20 +1191,23 @@ adopt_image_installer() {
   exec /bin/sh "$UPDATER" update
 }
 
-# What the daily timer runs: fetch the image, and start PCP again only when
-# there is a new one (or PCP is not running). A copy run in another's place
-# (PCP_UPDATER_REEXEC=1) finds the image pulled already, and installs: it
-# runs because the installer changed, and its unit may differ.
+# What the daily timer runs: fetch the image, check its signature, and start
+# PCP again only when there is a new one (or PCP is not running). An image
+# whose signature does not check out stops the update before anything is
+# read out of it. A copy run in another's place (PCP_UPDATER_REEXEC=1) finds
+# the image pulled already, checks it again itself, and installs: it runs
+# because the installer changed, and its unit may differ.
 update() {
   UPDATING=1
   before=$(image_id)
   "$RUNTIME" pull -q "$IMAGE" >/dev/null || die "Could not pull $IMAGE. Check that this computer reaches ghcr.io."
+  verify_image
   after=$(image_id)
   if [ "${PCP_UPDATER_REEXEC:-}" = 1 ]; then
     install
     return 0
   fi
-  adopt_image_installer "$after"
+  adopt_image_installer "$IMAGE_REF"
   if [ -n "$after" ] && [ "$before" = "$after" ] && container_running; then
     say "PCP is up to date: $IMAGE has not changed."
     return 0
@@ -1264,7 +1335,7 @@ install() {
   fi
   # The copy of this installer stays while a timer of PCP's runs it.
   NEEDS_UPDATER=$WATCH
-  if [ "$PCP_AUTO_UPDATE" = 1 ] && [ "$MODE" != quadlet ]; then
+  if [ "$PCP_AUTO_UPDATE" = 1 ]; then
     NEEDS_UPDATER=1
   fi
   if [ "$PCP_AUTO_UPDATE" = 1 ]; then
@@ -1329,6 +1400,7 @@ main() {
   MODE=
   AUTO=
   BUTTON=
+  IMAGE_REF=
   UPDATING=0
   UPDATER_SAVED=0
   NEEDS_UPDATER=0

@@ -178,3 +178,121 @@ describe("the Docker image's installer", () => {
     expect(ignored.split("\n")).not.toContain("install.sh")
   })
 })
+
+// #98: the images are signed by the workflow that builds them, keyless with
+// GitHub's OIDC, and install.sh accepts only that workflow's signature. The
+// identity install.sh checks has to be the file that signs.
+describe("the images' signatures", () => {
+  type Step = {
+    id?: string
+    uses?: string
+    run?: string
+    with?: Record<string, unknown>
+  }
+  type Workflow = {
+    permissions?: Record<string, string>
+    on: { workflow_call?: { outputs?: Record<string, { value: string }> } }
+    jobs: Record<
+      string,
+      {
+        permissions?: Record<string, string>
+        outputs?: Record<string, string>
+        steps?: Step[]
+        with?: Record<string, unknown>
+      }
+    >
+  }
+  const workflow = (name: string) =>
+    parse(
+      readFileSync(path.join(root, ".github", "workflows", name), "utf8"),
+    ) as Workflow
+  const images = workflow("build-images.yml")
+  const steps = images.jobs.image!.steps!
+
+  it("are made in build-images.yml for both digests, with every platform's", () => {
+    expect(images.permissions).toMatchObject({
+      "id-token": "write",
+      attestations: "write",
+    })
+    const sign = steps.find((s) => s.run?.includes("cosign sign"))
+    expect(sign?.run).toContain("cosign sign --yes --recursive")
+    const env = (sign as { env?: Record<string, string> }).env
+    expect(env).toMatchObject({
+      DIGEST: "${{ steps.pcp.outputs.digest }}",
+      SANDBOX_DIGEST: "${{ steps.sandbox.outputs.digest }}",
+    })
+    expect(steps.find((s) => s.id === "pcp")?.uses).toMatch(
+      /^docker\/build-push-action@[0-9a-f]{40}$/,
+    )
+    expect(steps.find((s) => s.id === "sandbox")?.uses).toMatch(
+      /^docker\/build-push-action@[0-9a-f]{40}$/,
+    )
+  })
+
+  it("come with GitHub's provenance attestations, pushed to the registry", () => {
+    const attest = steps.filter((s) =>
+      s.uses?.startsWith("actions/attest-build-provenance@"),
+    )
+    expect(attest.map((s) => s.with?.["subject-digest"])).toEqual([
+      "${{ steps.pcp.outputs.digest }}",
+      "${{ steps.sandbox.outputs.digest }}",
+    ])
+    for (const step of attest) {
+      expect(step.with?.["push-to-registry"]).toBe(true)
+    }
+  })
+
+  it("use actions pinned by their full commit", () => {
+    for (const step of steps) {
+      if (step.uses) expect(step.uses).toMatch(/@[0-9a-f]{40}$/)
+    }
+  })
+
+  it("are allowed by both callers, which publish the digests", () => {
+    for (const name of ["release.yml", "develop.yml"]) {
+      const caller = workflow(name)
+      expect(caller.jobs.image!.permissions, name).toMatchObject({
+        "id-token": "write",
+        attestations: "write",
+        packages: "write",
+      })
+      const publish = caller.jobs.publish!.steps!.find((s) =>
+        s.run?.includes("--draft=false"),
+      ) as Step & { env?: Record<string, string> }
+      expect(publish.env, name).toMatchObject({
+        DIGEST: "${{ needs.image.outputs.digest }}",
+        SANDBOX_DIGEST: "${{ needs.image.outputs.sandbox-digest }}",
+      })
+      expect(publish.run, name).toContain("## Container images")
+    }
+    expect(images.on.workflow_call?.outputs?.digest?.value).toBe(
+      "${{ jobs.image.outputs.digest }}",
+    )
+  })
+
+  it("are what install.sh checks: that workflow, on main or develop", () => {
+    const installer = readFileSync(path.join(root, "install.sh"), "utf8")
+    const signer = installer.match(/^IMAGE_SIGNER='(.*)'$/m)?.[1]
+    const pattern = new RegExp(signer!)
+
+    for (const branch of ["main", "develop"]) {
+      expect(
+        pattern.test(
+          `https://github.com/kaperkunde/pcp/.github/workflows/build-images.yml@refs/heads/${branch}`,
+        ),
+      ).toBe(true)
+    }
+    for (const other of [
+      "https://github.com/kaperkunde/pcp/.github/workflows/build-images.yml@refs/heads/feature",
+      "https://github.com/kaperkunde/pcp/.github/workflows/ci.yml@refs/heads/main",
+      "https://github.com/someone/pcp/.github/workflows/build-images.yml@refs/heads/main",
+      "https://github.com/kaperkunde/pcp/.github/workflows/build-images.yml@refs/tags/v1.0.0",
+      "https://githubXcom/kaperkunde/pcp/.github/workflows/build-images.yml@refs/heads/main",
+    ]) {
+      expect(pattern.test(other), other).toBe(false)
+    }
+    expect(installer).toMatch(
+      /^COSIGN_IMAGE="ghcr\.io\/sigstore\/cosign\/cosign:v[\d.]+@sha256:[0-9a-f]{64}"$/m,
+    )
+  })
+})

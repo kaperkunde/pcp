@@ -134,9 +134,13 @@ jobs:
     with:
       version: ${{ needs.release.outputs.version }}
       channel-tag: develop
+    # id-token and attestations: the images are signed and attested
+    # (build-images.yml), keyless, with this run's OIDC token.
     permissions:
       contents: read
       packages: write
+      id-token: write
+      attestations: write
 
   publish:
     name: publish
@@ -154,12 +158,37 @@ jobs:
           VERSION: ${{ needs.release.outputs.version }}
           APPS: ${{ needs.desktop.result }}
           IMAGE: ${{ needs.image.result }}
+          DIGEST: ${{ needs.image.outputs.digest }}
+          SANDBOX_DIGEST: ${{ needs.image.outputs.sandbox-digest }}
         run: |
           if [ "$APPS" != "success" ]; then
             echo "::warning::A desktop app build did not succeed; v$VERSION is published without it. Re-run the failed job to attach it."
           fi
           if [ "$IMAGE" != "success" ]; then
             echo "::warning::The container images did not build; v$VERSION is published without them and ghcr.io/$GH_REPO:develop stays at the build before. Re-run the failed job."
+          fi
+          # The images' digests, signed (build-images.yml), at the end of the
+          # notes: a re-run writes the section again rather than twice.
+          if [ "$IMAGE" = "success" ]; then
+            notes="$RUNNER_TEMP/notes.md"
+            gh release view "v$VERSION" --json body --jq .body > "$notes"
+            sed -i '/^## Container images$/,$d' "$notes"
+            {
+              echo
+              echo "## Container images"
+              echo
+              echo "By digest, signed with cosign by PCP's image workflow:"
+              echo
+              echo "- ghcr.io/$GH_REPO:$VERSION@$DIGEST"
+              echo "- ghcr.io/$GH_REPO-sandbox:$VERSION@$SANDBOX_DIGEST"
+              echo
+              echo "install.sh checks the signature before it runs an image. To check one yourself:"
+              echo
+              echo '```'
+              echo "cosign verify --certificate-identity-regexp '^https://github\.com/$GH_REPO/\.github/workflows/build-images\.yml@refs/heads/(main|develop)\$' --certificate-oidc-issuer https://token.actions.githubusercontent.com ghcr.io/$GH_REPO@$DIGEST"
+              echo '```'
+            } >> "$notes"
+            gh release edit "v$VERSION" --notes-file "$notes"
           fi
           gh release edit "v$VERSION" --draft=false --prerelease
       - name: Remove older builds

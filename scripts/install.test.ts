@@ -589,7 +589,8 @@ describe("install.sh with Podman", () => {
     expect(result.calls).toContain("systemctl --user daemon-reload")
     expect(result.calls).toContain("systemctl --user restart pcp.service")
     expect(result.calls).toContain("loginctl enable-linger")
-    expect(result.calls.some((call) => call.startsWith("podman run"))).toBe(
+    // The only podman run is the signature's check.
+    expect(result.calls.some((call) => call.startsWith("podman run -d"))).toBe(
       false,
     )
     expect(result.stdout).toContain("journalctl --user -u pcp -f")

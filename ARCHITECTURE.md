@@ -3966,10 +3966,32 @@ build tells the server (`PCP_DESKTOP_UPDATER=manual`) and the page links to
 the download instead. `desktop/README.md` has the details.
 
 **The Linux installer can update it once a day** (`PCP_AUTO_UPDATE=1`,
-remembered like its other settings). Under Podman with Quadlet that is
-Podman's own `podman-auto-update.timer`, which follows the unit's autoupdate
-label; otherwise a systemd timer runs a copy of the installer with `update`,
-which pulls the image and starts PCP again only when the image changed. The
+remembered like its other settings): a systemd timer runs a copy of the
+installer with `update`, which pulls the image, checks its signature, and
+starts PCP again only when the image changed. Under Quadlet too: Podman's
+own `podman-auto-update.timer`, which an older installer turned on with the
+unit's autoupdate label, checks no signature and cannot follow an image
+pinned by digest, so the unit no longer carries the label.
+
+**Every image the installer runs is one PCP's workflow signed** (#98).
+`build-images.yml` signs each image's digest with cosign, keyless (GitHub's
+OIDC token, so the certificate names the workflow file and the branch it
+ran from; the signature is in Sigstore's log), `--recursive` so each
+platform's manifest is signed too, and attests GitHub's build provenance
+beside it; `release.yml` and `develop.yml` add both digests to the release
+notes. The installer, after every pull (`pull_image`, `update`), takes the
+image's repository digest (`image inspect` `RepoDigests`) and runs cosign's
+image, pinned by digest (`COSIGN_IMAGE`), with `verify
+--certificate-identity-regexp` naming `build-images.yml` on `main` or
+`develop` (`IMAGE_SIGNER`) and GitHub's issuer. Only once that passes does
+it touch the running container, and from then on the run, the Quadlet unit
+(`Image=`) and the installer it reads use `<image>@sha256:…`, never the tag.
+A failure stops the run before anything changes; `PCP_INSECURE_SKIP_VERIFY=1`
+skips the check for one run, with a warning, and is not remembered. A
+`policy.json` rule that would have Podman check the signature itself is not
+written: Podman reads one policy file per user (or the system's), so a rule
+for PCP's image would mean rewriting the host's policy for every other
+image. Compose checks nothing; the guide pins digests instead. The
 installer passes `PCP_AUTO_UPDATE=1` into the container, so Settings says
 there is nothing to do. PCP itself still pulls and restarts nothing.
 
@@ -3999,8 +4021,9 @@ run was saved at install time, so an update through it would write the unit
 as that installer did, without anything added since (the graphics card,
 #38). The image carries `install.sh` at `/app/install.sh` (root's, `0644`;
 `scripts/docker.test.ts`), and `update`, after the pull, reads it with
-`run --rm --network none --no-healthcheck --entrypoint cat <image id>` from
-the image it just pulled (the pinned one, for a pinned version), never from
+`run --rm --network none --no-healthcheck --entrypoint cat <image>@<digest>`
+from the image it just pulled and checked (the pinned one, for a pinned
+version), never from
 the running container, which PCP could change. It takes the file only when it
 starts with `#!/bin/sh`, holds the line `# pcp-installer-format: 1`, passes
 `sh -n` and is at most 256 KB; then, if it differs from the copy, it moves it
@@ -4010,8 +4033,7 @@ the request named holds), and `PCP_UPDATER_REEXEC=1`, which reads no
 installer again and installs even from the same image, since the unit may be
 what changed. Anything else, including an image from before this, leaves the
 update to the copy with a note. With no copy (no timer of PCP's) nothing is
-read: Podman's own auto-update only pulls, and the unit changes when the
-installer next runs. `write_unit` leaves drop-ins in `pcp.container.d/` alone
+read, and the unit changes when the installer next runs. `write_unit` leaves drop-ins in `pcp.container.d/` alone
 and names them, since one may do what the unit now does itself.
 
 ## Cleanup and the log
