@@ -77,6 +77,15 @@ export const MAX_FULL_PAGE_HEIGHT = 16_000
 export const MAX_FULL_PAGE_WIDTH = 4 * BROWSER_VIEWPORT.width
 /** print_pdf's page_ranges, in characters. */
 export const MAX_PDF_PAGE_RANGES_CHARS = 100
+/**
+ * print_pdf: Chromium's print is given ACTION_TIMEOUT_MS and a second more
+ * for every this many CSS pixels of the page's height, up to
+ * PRINT_PDF_MAX_MS (well inside TAB_DEADLINE_MS); the PDF is read in
+ * chunks of PDF_READ_BYTES and stopped past the largest file PCP keeps.
+ */
+export const PRINT_PDF_PX_PER_SECOND = 2_000
+export const PRINT_PDF_MAX_MS = 60_000
+export const PDF_READ_BYTES = 1024 * 1024
 /** The narrowest picture screenshot's max_width may ask for, in pixels. */
 export const MIN_SCREENSHOT_WIDTH = 200
 /** The size every tab renders at, in CSS pixels. */

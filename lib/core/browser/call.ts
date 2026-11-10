@@ -99,6 +99,9 @@ import {
   MAX_URL_LENGTH,
   PACED_TAB_DEADLINE_MS,
   PACED_TURN_WAIT_MS,
+  PDF_READ_BYTES,
+  PRINT_PDF_MAX_MS,
+  PRINT_PDF_PX_PER_SECOND,
   SETTLE_MS,
   MAX_WAIT_MS,
   MIN_READ_PAGE_TEXT_CHARS,
@@ -2492,32 +2495,13 @@ async function printPdf(
   }
 
   const paper = PAPER[(args.paper as string | undefined) ?? "letter"]!
-  let data: string
+  const printed = await printedPdf(tab, args, paper)
 
-  try {
-    ;({ data } = await bounded(
-      tab.cdp.send("Page.printToPDF", {
-        landscape: args.landscape === true,
-        printBackground: args.print_background === true,
-        paperWidth: paper.width,
-        paperHeight: paper.height,
-        ...(typeof args.page_ranges === "string"
-          ? { pageRanges: args.page_ranges.replace(/\s+/g, "") }
-          : {}),
-      }),
-      ACTION_TIMEOUT_MS,
-      "page.pdf",
-    ))
-  } catch (error) {
-    return text(
-      /range/i.test(firstLine(error))
-        ? `The page has no ${String(args.page_ranges)}: ask for pages it has, or leave out page_ranges for all of them.`
-        : `The page could not be printed: ${failureReason(error)}`,
-      true,
-    )
+  if (!Buffer.isBuffer(printed)) {
+    return printed
   }
 
-  const bytes = Buffer.from(data, "base64")
+  const bytes = printed
   let title = ""
 
   try {
@@ -2553,6 +2537,94 @@ async function printPdf(
       2,
     ),
   )
+}
+
+/**
+ * The page printed by Chromium (Page.printToPDF), read as a stream in
+ * chunks (IO.read) and stopped once it passes the largest file PCP keeps,
+ * so a page that prints to more is never held whole. The print itself is
+ * given longer for a longer page, within PRINT_PDF_MAX_MS. The tool error
+ * to answer with when it fails or is too large.
+ */
+async function printedPdf(
+  tab: Tab,
+  args: Record<string, unknown>,
+  paper: { width: number; height: number },
+): Promise<Buffer | CallToolResult> {
+  const { fileBytes } = await loadResourceLimits()
+  const height = await bounded(
+    tab.cdp.send("Page.getLayoutMetrics"),
+    ACTION_TIMEOUT_MS,
+    "page.pdf",
+  )
+    .then((metrics) => metrics.cssContentSize.height)
+    .catch(() => 0)
+  let stream: string
+
+  try {
+    ;({ stream } = (await bounded(
+      tab.cdp.send("Page.printToPDF", {
+        landscape: args.landscape === true,
+        printBackground: args.print_background === true,
+        paperWidth: paper.width,
+        paperHeight: paper.height,
+        transferMode: "ReturnAsStream",
+        ...(typeof args.page_ranges === "string"
+          ? { pageRanges: args.page_ranges.replace(/\s+/g, "") }
+          : {}),
+      }),
+      printPdfTimeout(height),
+      "page.pdf",
+    )) as { stream: string })
+  } catch (error) {
+    return text(
+      /range/i.test(firstLine(error))
+        ? `The page has no ${String(args.page_ranges)}: ask for pages it has, or leave out page_ranges for all of them.`
+        : `The page could not be printed: ${failureReason(error)}`,
+      true,
+    )
+  }
+
+  const chunks: Buffer[] = []
+  let total = 0
+
+  try {
+    for (;;) {
+      const piece = await bounded(
+        tab.cdp.send("IO.read", { handle: stream, size: PDF_READ_BYTES }),
+        ACTION_TIMEOUT_MS,
+        "page.pdf",
+      )
+      const bytes = Buffer.from(
+        piece.data,
+        piece.base64Encoded ? "base64" : "latin1",
+      )
+      total += bytes.length
+
+      if (total > fileBytes) {
+        return text(
+          `The PDF of the page is larger than PCP keeps of one file (${fileBytes.toLocaleString("en")} bytes), so it was stopped and nothing was kept. Ask for fewer pages (page_ranges) or leave out print_background; the owner can raise that in PCP's settings, under Resources.`,
+          true,
+        )
+      }
+
+      chunks.push(bytes)
+
+      if (piece.eof) break
+    }
+  } catch (error) {
+    return text(`The page could not be printed: ${failureReason(error)}`, true)
+  } finally {
+    await tab.cdp.send("IO.close", { handle: stream }).catch(() => {})
+  }
+
+  return Buffer.concat(chunks)
+}
+
+/** How long a page's print may take: longer for a longer page, bounded. */
+export function printPdfTimeout(heightCss: number): number {
+  const extra = Math.ceil(Math.max(0, heightCss) / PRINT_PDF_PX_PER_SECOND)
+  return Math.min(PRINT_PDF_MAX_MS, ACTION_TIMEOUT_MS + extra * 1000)
 }
 
 /** A file name from a page's title: its words, or "page". */

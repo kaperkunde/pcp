@@ -38,7 +38,8 @@ import {
 import { callServerTool } from "../upstream"
 import { setupVault } from "../vault"
 import { setFetchPrivate, setFetchSite } from "../web-fetch"
-import { callBrowserTool } from "./call"
+import { callBrowserTool, printPdfTimeout } from "./call"
+import { PRINT_PDF_MAX_MS } from "./limits"
 import { chromiumExecutable } from "./executable"
 import { holdSecret } from "./held"
 import { closeAllBrowsers, runningBrowser } from "./runtime"
@@ -366,6 +367,9 @@ describe.skipIf(!executable)(
         "The PDF of the page is larger than PCP keeps of one file",
       )
       expect(await db().toolResult.count()).toBe(before)
+      // A longer page is given longer to print, within a bound.
+      expect(printPdfTimeout(40_000)).toBeGreaterThan(printPdfTimeout(800))
+      expect(printPdfTimeout(10_000_000)).toBe(PRINT_PDF_MAX_MS)
     })
 
     it("takes a screenshot of the whole page with full_page", async () => {

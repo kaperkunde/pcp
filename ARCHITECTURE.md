@@ -2923,8 +2923,11 @@ cut at `MAX_FULL_PAGE_HEIGHT` CSS pixels down and `MAX_FULL_PAGE_WIDTH`
 across, through the same ladder; its answer says its pixels are the
 page's, not the viewport's. `print_pdf` prints the page with Chromium's
 `Page.printToPDF` on the tab's DevTools session (paper, landscape,
-backgrounds, page ranges), keeps the PDF as the token's result through
-`keepBytes` (refused past the largest file) and answers its handle, as
+backgrounds, page ranges) as a stream (`transferMode` "ReturnAsStream",
+read with `IO.read` in `PDF_READ_BYTES` chunks and stopped once it passes
+`resourceLimits().fileBytes`, so a huge PDF is never held whole; the print
+given longer for a longer page, within `PRINT_PDF_MAX_MS`), keeps the PDF
+as the token's result through `keepBytes` and answers its handle, as
 `download` does; it reads the page only, so it is Read and unpaced. While the page shows a dialog (an alert),
 every tool that needs the page answers at once with it and how to answer
 it with `handle_dialog`, rather than waiting on a page that cannot answer.
