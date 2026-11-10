@@ -251,7 +251,10 @@ describe.skipIf(!executable)(
           timeout_ms: 2_000,
         })
         expect(waited.isError).toBe(true)
-        expect(textOf(waited)).toContain(`waiting for its turn at ${host}`)
+        // Its turn is the address's site's, which is busy: nothing went.
+        expect(textOf(waited)).toContain(
+          `Paced: another action at ${host} is still running`,
+        )
       } finally {
         if ("release" in held) held.release()
       }

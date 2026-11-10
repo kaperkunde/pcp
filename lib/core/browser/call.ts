@@ -1135,6 +1135,15 @@ function tabSite(tab: Tab): string | null {
   }
 }
 
+/** The site of an address an assistant gave, or null when it is none. */
+function addressSite(raw: string): string | null {
+  try {
+    return siteKey(pageUrl(raw))
+  } catch {
+    return null
+  }
+}
+
 /** A turn that holds nothing back: an action with no site to pace. */
 const NO_TURN: Turn = { release: () => {} }
 
@@ -1702,12 +1711,18 @@ async function onTab(
   scope: BrowserScope,
   tabId: string,
   spec: BrowserToolSpec,
-  run: (tab: Tab, vault: VaultBrowser) => Promise<CallToolResult>,
+  run: (tab: Tab, vault: VaultBrowser, turn: Turn) => Promise<CallToolResult>,
   {
     pacing = browserPacingClass(spec.name),
+    site,
   }: {
     /** How the call is paced, when not as its tool is (download by url). */
     pacing?: BrowserPacingClass | null
+    /**
+     * The site whose turn it takes, when not the tab's: the address a
+     * download by its address opens.
+     */
+    site?: string | null
   } = {},
 ): Promise<CallToolResult> {
   const vault = runningBrowser(scope.ctx.vaultId)
@@ -1759,14 +1774,19 @@ async function onTab(
         return dialogOpen(picked, spec.name)
       }
 
-      const turn = await pacedTurn(scope, picked, tabSite(picked), pacing)
+      const turn = await pacedTurn(
+        scope,
+        picked,
+        site === undefined ? tabSite(picked) : site,
+        pacing,
+      )
 
       if (!isTurn(turn)) {
         return turn
       }
 
       try {
-        return await acting(picked)
+        return await acting(picked, turn)
       } finally {
         turn.release()
       }
@@ -1776,7 +1796,7 @@ async function onTab(
   return withLead(answer, note)
 
   /** The tool's own work, its turn taken. */
-  async function acting(tab: Tab): Promise<CallToolResult> {
+  async function acting(tab: Tab, turn: Turn): Promise<CallToolResult> {
     atStep(
       scope.clock,
       `running ${spec.name} on tab ${tab.id}`,
@@ -1785,7 +1805,7 @@ async function onTab(
     let result: CallToolResult
 
     try {
-      result = await run(tab, vault!)
+      result = await run(tab, vault!, turn)
     } catch (error) {
       if (error instanceof PcpError || error instanceof OwnerNeeded) {
         throw error
@@ -2149,6 +2169,7 @@ async function downloadFile(
   tab: Tab,
   args: { ref?: string; url?: string },
   keepBytes: BytesKeeper | undefined,
+  turn: Turn = NO_TURN,
 ): Promise<CallToolResult> {
   if (!keepBytes) {
     return text(
@@ -2216,7 +2237,15 @@ async function downloadFile(
         : mayOpen(vault, tab, address)
           ? "take"
           : "refuse",
-    start,
+    // The site's turn is the click's or the page's opening, not the file
+    // coming in: the site's other tabs go on meanwhile.
+    start: async () => {
+      try {
+        return await start()
+      } finally {
+        turn.release()
+      }
+    },
     maxBytes: fileBytes,
   })
   const failedWith = async (lead: string) =>
@@ -3190,15 +3219,22 @@ async function runTool(
         scope,
         tab,
         spec,
-        (current, vault) =>
+        (current, vault, turn) =>
           downloadFile(
             scope,
             vault,
             current,
             args as { ref?: string; url?: string },
             keepBytes,
+            turn,
           ),
-        { pacing: browserPacingClass("download", args) },
+        {
+          pacing: browserPacingClass("download", args),
+          // By its address: the turn at the site it opens.
+          ...(typeof args.url === "string"
+            ? { site: addressSite(args.url) }
+            : {}),
+        },
       )
     case "scroll":
       return onTab(scope, tab, spec, async (current) => {
