@@ -403,6 +403,12 @@ const DECISION_LABELS: Record<PermissionKind, Record<string, string>> = {
     block: "Block scripts at this site",
     decline: "Not now",
   },
+  // An assistant's pace for one tab outside the bounds you set: it applies
+  // to that tab only, while it is open.
+  tab_pace: {
+    allow_once: "Use this pace in the tab",
+    decline: "Not now",
+  },
   // A secret the owner types in for the browser, and how its uses go: the
   // next one only, every one for an hour, or every one.
   secret_request: {

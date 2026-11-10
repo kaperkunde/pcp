@@ -115,7 +115,7 @@ import {
 } from "./openapi/address"
 import { makeRedactor } from "./openapi/redact"
 import { paceEmbeddings, paceServerCall, pacedResult } from "./pacing"
-import { PACING_DEADLINE_MARGIN_MS } from "./pacing/limits"
+import { PACING_DEADLINE_MARGIN_MS, type PaceRange } from "./pacing/limits"
 import { pacingNow } from "./pacing/pace"
 import { VOYAGE_EMBEDDINGS_URL } from "./constants"
 import { embeddingsUrl, type EmbeddingsConfig } from "./embeddings/config"
@@ -2174,6 +2174,12 @@ export type CallOptions = {
    * request. Without it a call waits PACING_MAX_WAIT_MS at most.
    */
   deadline?: number
+  /**
+   * A browser call's pace, chosen by the wrapper whose run made it
+   * (wrappers/run.ts): the browser paces the call by it, unless its tab has
+   * a pace of its own (lib/core/pacing/). Nothing else looks at it.
+   */
+  pace?: PaceRange
 }
 
 /**
@@ -2356,6 +2362,7 @@ async function callBrowser(
       signal: options.signal,
       deadline: options.deadline,
       runId: options.runId,
+      ...(options.pace ? { pace: options.pace } : {}),
       secret,
     })
 
@@ -2502,6 +2509,7 @@ async function dispatchKind(
     signal,
     deadline,
     runId,
+    pace,
   }: CallOptions,
   placed: string[],
 ): Promise<CallToolResult> {
@@ -2529,6 +2537,7 @@ async function dispatchKind(
       signal,
       deadline,
       runId,
+      ...(pace ? { pace } : {}),
     })
   }
 

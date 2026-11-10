@@ -180,11 +180,15 @@ const POST_MESSAGE = {
   calls: ["browser/tabs", "browser/find", "browser/type", "browser/click"],
 }
 
-async function approvedFlow() {
+async function approvedFlow(
+  tool: typeof POST_MESSAGE = POST_MESSAGE,
+  extra: Record<string, unknown> = {},
+) {
   const asked = await call("create_wrapper", {
     name: "Chat",
     description: "The chat thread, one call at a time.",
-    tools: [POST_MESSAGE],
+    tools: [tool],
+    ...extra,
   })
   expect(asked.text).toContain("Not done yet")
   const row = await db().permissionRequest.findFirstOrThrow({
@@ -265,6 +269,47 @@ describe.skipIf(!executable)("a browser flow", { timeout: 90_000 }, () => {
     // after the page opened, the click, and the second call's opening (it
     // only reads after that).
     expect(waits).toEqual([3_000, 3_000, 3_000])
+  })
+
+  it("goes at its own pace, its program picking within it per call", async () => {
+    vi.stubEnv("PCP_PACING", "on")
+    waits = []
+    let now = 1_000_000
+    setPacingClock({
+      now: () => now,
+      sleep: async (ms) => {
+        waits.push(ms)
+        now += ms
+      },
+      random: () => 0,
+    })
+    await approvedFlow(
+      {
+        ...POST_MESSAGE,
+        program: POST_MESSAGE.program.replace(
+          'target: { role: "button", name: "Send" } })',
+          'target: { role: "button", name: "Send" } }, { pace: { min_ms: 120, max_ms: 140 } })',
+        ),
+      },
+      {
+        pace: {
+          actions: { min_ms: 100, max_ms: 500 },
+          tools: [{ tool: "click", min_ms: 100, max_ms: 150 }],
+        },
+      },
+    )
+
+    const result = await call("call_tool_destructive", {
+      server: "chat",
+      tool: "post_message",
+      arguments: { url: `${api.origin}/thread`, text: "at its own pace" },
+    })
+
+    expect(result.isError, result.text).toBe(false)
+    expect(messages).toEqual(["at its own pace"])
+    // The typing at the flow's pace for actions, the click at the program's
+    // pick within the flow's pace for clicks; not the owner's default.
+    expect(waits).toEqual([100, 120])
   })
 
   it("names the step that failed, on a page it did not expect", async () => {

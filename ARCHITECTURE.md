@@ -3473,8 +3473,13 @@ above):
   server. call_tool_<tier>, run_code_<tier>'s `pcp.call`, a
   wrapper's calls and a call the owner allowed all end there. The browser's
   actions go through it too, and are paced in `browser/call.ts` by the tab's
-  site (for a navigation, the site it opens), before the call queues on its
-  tab: a wait for the site holds no lane and counts toward no deadline. A
+  site (for a navigation, the site it opens) as a turn taken on the tab's
+  lane right before the action (`pacedTurn`, `pacing/index.ts
+paceBrowserTurn`), held until the action is done: no two actions at a
+  site, from any tab or caller, follow closer than the pause, counted from
+  the previous one's end. A paced call holds its tab `PACED_TURN_WAIT_MS`
+  longer before the tab counts as not responding, and waits at most
+  `PACING_MAX_WAIT_MS` for its turn there (`browserTurnDeadline`). A
   wrapper's own tool is not paced; the calls its program makes are.
 - Web fetch's request path: `fetch/fetch.ts` paces each request it sends,
   every redirect it follows on the site included, and `web-fetch.ts`
@@ -3484,21 +3489,33 @@ above):
 Nothing at the gateway paces on its own: a new way in that reaches a server
 or a site goes through one of these, and so is paced.
 
-**Classes and defaults** (`pacing/limits.ts`, with why each is what it is).
-`browser_act` (navigate, back, click, type, press_key, select_option,
-upload_file, download, handle_dialog, scroll): 1.5 seconds between actions
-on a site and up to 2.5 more at random. `web_fetch`: a second and up to 0.75
-more. `server_change` (a tool its server does not mark read-only,
+**Classes and defaults** (`pacing/limits.ts`, with why each is what it is;
+`browserPacingClass` sorts the browser's tools, `entry-points.test.ts`
+pins it). `browser_act` (click, drag, type, press_key, select_option,
+upload_file, download by a click, handle_dialog, evaluate, scroll): 150 ms
+after the previous action on the site ended and up to 450 more at random,
+as a person moves from one field to the next; `type` fills a field in one
+go, with no pause per key. `browser_navigate` (navigate, back, tabs open,
+download by its address): the page the tab shows settles first (`settle`:
+loaded, a site's check passed), then 400 ms and up to 800 more.
+`web_fetch`: a second and up to 0.75 more. `server_change` (a tool its server does not mark read-only,
 `read-only.ts markedReadOnly`): no pause, at most 30 a minute per server.
 `server_read`: at most 300 a minute. The browser's reading tools (snapshot,
-find, read_page, screenshot, wait_for, tabs, hand_over) are never paced:
-they send the site nothing. Nothing names a site or a vendor.
+find, read_page, screenshot, print_pdf, wait_for, tabs but open,
+hand_over) are never paced: they send the site nothing. Nothing names a
+site or a vendor.
 
 **How a call waits** (`pacing/pace.ts`). State is in memory, per vault and
 destination (`server:<id>` or `site:<host>`; web fetch and the browser share
-a site's), on `globalThis`. A caller is given its slot the moment it asks,
-in order (the last slot, the pause, and a random extra wait; then the burst
-cap), so two callers never share one, and waits for it.
+a site's), on `globalThis`. A server's or web fetch's caller is given its
+slot the moment it asks, in order (the last slot, the pause, and a random
+extra wait; then the burst cap), so two callers never share one, and waits
+for it (`waitForSlot`). A browser action takes a turn instead (`takeTurn`):
+one at a time per site, each after the one before it released its turn,
+which sets the site's last action to when it ended, so a call that queued
+behind a long one still waits its pause after it. Waiting for the previous
+turn counts against the caller's budget as the pause does; one that gives
+up passes its place on once the one before it is done.
 
 How long a call may wait is its caller's: a `deadline` (epoch milliseconds,
 `CallOptions.deadline` in `upstream.ts`, `BrowserScope.deadline` for the
@@ -3533,7 +3550,30 @@ pace or "unpaced". A call follows the most specific: the site's, then the
 server's, then the class's, then PCP's default; bounds are checked in core
 (`PACING_BOUNDS`), and a stored value that does not read as one counts as
 none. Settings → Upkeep → Pacing shows the classes, a reset to PCP's
-defaults, and the sites, folded.
+defaults, the sites, and what assistants may set, folded.
+
+**A tab's or a wrapper's own pace.** An assistant may give a browser
+action a pace of its own, a range (`PaceRange`: a wait between `minMs` and
+`maxMs`) per browser class: a tab's, with `tabs` action `pace`
+(`browser/tab-pace.ts`, a WeakMap on the tab in memory, never stored or
+exported, gone with the tab; `tabs` list shows it), or a wrapper's, in its
+definition (`pace`: per class and per browser tool, approved with the rest
+on its `wrapper_change` page), which a program narrows per call with
+`pcp.call(…, { pace })` within it (`wrappers/run.ts callPace`; the bridge
+refuses the option outside a wrapper's program, `RunOptions.takesPace`),
+carried as `CallRun.pace` → `CallOptions.pace` → `BrowserScope.pace`. What
+an action follows (`resolveBrowserPolicy`): its tab's, else its wrapper's,
+before the server's and the class's, but never below the owner's own pace
+for the site, which stays a floor. What an assistant may set without
+asking is the vault setting's `assistant` bounds per class
+(`ASSISTANT_PACE_BOUNDS` where the owner set none; `MAX_ASSISTANT_PACE_MS`
+the most any goes to). A tab's pace outside them is a `tab_pace` request
+(the tab, the pace, the bounds then); the owner's yes sets it on that tab
+alone (`applyTabPace`) and never writes the vault's setting. A wrapper's
+outside them is flagged on its `wrapper_change` page (`paceOutside`, and
+the warning), and only the owner's yes there makes it. A wrapper's pace is
+not in a linked repository's document yet: a document applied keeps the
+wrapper's own.
 
 `PCP_PACING=off` turns it off for a process: the unit and end-to-end suites
 set it (`vitest.config.mts`, `playwright.config.ts`), and the tests that

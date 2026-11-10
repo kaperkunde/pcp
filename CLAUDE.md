@@ -203,14 +203,22 @@ so in the summary; the bump itself waits for the request.
   vault's `toolTiers` setting for PCP's own tools; a wrapper tool's choice
   below what its calls came to since goes to the bell (`tierNotices`).
 - Pacing (`lib/core/pacing/`) applies only in `upstream.ts callServerTool`
-  (the browser by the tab's site, in `browser/call.ts`) and web fetch's
+  (the browser by the tab's site, in `browser/call.ts`, as a turn taken on
+  the tab's lane and held until the action ends, so actions at a site never
+  follow closer than the pause, whatever the callers) and web fetch's
   request path (`fetch/fetch.ts`, `web-fetch.ts runFetch`), so every way in
   is paced: call_tool_<tier>, run_code_<tier>, wrappers and flows,
   owner-approved calls, each as a read or a change by its tier; and to
   search's embeddings requests, as a read (`paceEmbeddings`).
   New defaults and bounds go in `pacing/limits.ts`, by class of action;
   nothing names a site or vendor. The owner's overrides are the vault's
-  `pacing` setting, never a host setting.
+  `pacing` setting, never a host setting. An assistant's own pace for a
+  browser action is a tab's (`tabs` action `pace`, in memory with the tab,
+  never stored) or a wrapper's (its definition's `pace`, narrowed per call
+  by `pcp.call`'s `pace` within it); either within the owner's bounds
+  (the setting's `assistant`) or as the owner allowed it (a `tab_pace`
+  request for that tab alone; the `wrapper_change` page), never below the
+  owner's own pace for the site, and never written into the setting.
 - Linked repositories (`lib/core/repos/`) share items, never secrets, and
   are never a backup. Their documents carry `pcp_format` and change only
   backward compatibly (add fields with defaults, never repurpose one).
@@ -713,7 +721,8 @@ embeddingProvider`, which hands `embeddings/provider.ts` the header;
   process: there Chromium has a window of its own kept off the screen,
   its pages opened in the background (`launch.ts`). A
   tool that needs the owner throws `OwnerNeeded`, which `runCall` turns into
-  a permission request (`browse`, `browser_handover`, `script_use`); a site is asked
+  a permission request (`browse`, `browser_handover`, `script_use`,
+  `tab_pace`); a site is asked
   about only for the address in the call's arguments, so a call the owner
   allowed opens it without a second ask. `navigate` waits for a check that
   passes on its own; one that does not is the owner's, through `hand_over`,

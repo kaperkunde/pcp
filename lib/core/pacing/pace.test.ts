@@ -16,8 +16,10 @@ import {
   pacingNow,
   resetPacing,
   setPacingClock,
+  takeTurn,
   waitBudget,
   waitForSlot,
+  type Turn,
 } from "./pace"
 
 // The pacing itself, on fake timers: the pause and its random extra wait,
@@ -388,5 +390,102 @@ describe("pacedResult", () => {
         isError: true,
       }),
     ).toBeNull()
+  })
+})
+
+describe("takeTurn", () => {
+  /** An action of `ms` (fake) milliseconds in its turn, with when it ran. */
+  async function act(
+    key: string,
+    policy: PacingPolicy | null,
+    ms: number,
+    ran: Array<{ start: number; end: number }>,
+  ) {
+    const turn = (await takeTurn(key, "a.test", policy)) as Turn
+    expect("release" in turn).toBe(true)
+    const begun = elapsed()
+    await new Promise((resolve) => setTimeout(resolve, ms))
+    ran.push({ start: begun, end: elapsed() })
+    turn.release()
+  }
+
+  it("spaces actions from the end of the one before, however many ask at once", async () => {
+    const ran: Array<{ start: number; end: number }> = []
+    const all = Promise.all(
+      Array.from({ length: 5 }, () => act("v\nsite:a.test", PAUSE, 700, ran)),
+    )
+    await vi.runAllTimersAsync()
+    await all
+
+    expect(ran).toHaveLength(5)
+
+    for (let i = 1; i < ran.length; i++) {
+      // Never two at once, and the pause counts from the previous end.
+      expect(ran[i]!.start - ran[i - 1]!.end).toBeGreaterThanOrEqual(1_000)
+    }
+  })
+
+  it("holds a site's actions one at a time across its tabs, and leaves other sites alone", async () => {
+    const ran: Array<{ start: number; end: number }> = []
+    const elsewhere: Array<{ start: number; end: number }> = []
+    const all = Promise.all([
+      act("v\nsite:a.test", PAUSE, 300, ran),
+      act("v\nsite:a.test", PAUSE, 300, ran),
+      act("v\nsite:b.test", PAUSE, 300, elsewhere),
+    ])
+    await vi.runAllTimersAsync()
+    await all
+
+    expect(ran[1]!.start - ran[0]!.end).toBeGreaterThanOrEqual(1_000)
+    expect(elsewhere[0]!.start).toBe(0)
+  })
+
+  it("serves an unpaced site one at a time, with no pause", async () => {
+    const ran: Array<{ start: number; end: number }> = []
+    const all = Promise.all([
+      act("v\nsite:a.test", null, 300, ran),
+      act("v\nsite:a.test", null, 300, ran),
+    ])
+    await vi.runAllTimersAsync()
+    await all
+
+    expect(ran[1]!.start).toBe(ran[0]!.end)
+  })
+
+  it("answers a turn further off than the caller can wait, takes none, and lets the next go", async () => {
+    const first = (await takeTurn("v\nsite:a.test", "a.test", PAUSE)) as Turn
+    const now = pacingNow()
+    const asking = takeTurn("v\nsite:a.test", "a.test", PAUSE, {
+      deadline: now + PACING_DEADLINE_MARGIN_MS + 500,
+    })
+    await vi.advanceTimersByTimeAsync(600)
+    const refused = await asking
+
+    expect(refused).toMatchObject({
+      message: expect.stringContaining("Paced: a.test"),
+    })
+    expect("release" in refused).toBe(false)
+
+    first.release()
+    const later = takeTurn("v\nsite:a.test", "a.test", PAUSE)
+    await vi.runAllTimersAsync()
+    expect("release" in (await later)).toBe(true)
+    // The pause from the first one's end: the refused call took no turn.
+    expect(elapsed()).toBe(1_600)
+  })
+
+  it("passes the turn on when its caller gives up while it waits", async () => {
+    const first = (await takeTurn("v\nsite:a.test", "a.test", PAUSE)) as Turn
+    const controller = new AbortController()
+    const gaveUp = takeTurn("v\nsite:a.test", "a.test", PAUSE, {
+      signal: controller.signal,
+    })
+    const next = takeTurn("v\nsite:a.test", "a.test", PAUSE)
+    controller.abort("gone")
+    await expect(gaveUp).rejects.toBe("gone")
+
+    first.release()
+    await vi.runAllTimersAsync()
+    expect("release" in (await next)).toBe(true)
   })
 })

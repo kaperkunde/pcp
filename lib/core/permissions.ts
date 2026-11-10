@@ -146,7 +146,7 @@ import {
   requestServes,
   type RequestFile,
 } from "./permission-files"
-import { finishHandover, performNavigate } from "./browser/call"
+import { applyTabPace, finishHandover, performNavigate } from "./browser/call"
 import { noteHandoverRequest } from "./browser/runtime"
 import { closePendingRequests } from "./permission-close"
 import { RUN_COMMAND, stdinAsText } from "./ssh/tools"
@@ -158,6 +158,7 @@ import {
   describeSecretSitesChangeAsk,
   describeSecretUseAsk,
   describeScriptUseAsk,
+  describeTabPaceAsk,
 } from "./browser/describe"
 import type { fetchThroughBrowser } from "./browser/solve"
 import {
@@ -166,6 +167,7 @@ import {
   type ExitUseAsk,
   type HandoverAsk,
   type ScriptUseAsk,
+  type TabPaceAsk,
   type SecretRequestAsk,
   type SecretSitesChangeAsk,
   type SecretUseAsk,
@@ -356,6 +358,7 @@ export type PermissionAsk =
   | { kind: "secret_sites_change"; input: SecretSitesChangeAsk }
   | { kind: "exit_use"; input: ExitUseAsk }
   | { kind: "script_use"; input: ScriptUseAsk }
+  | { kind: "tab_pace"; input: TabPaceAsk }
 
 /** The requests about a secret the browser types (browser-secrets.ts). */
 function isSecretKind(kind: string): kind is "secret_use" | "secret_request" {
@@ -756,6 +759,7 @@ export async function runCodeCall(
             signal: run.signal,
             deadline: run.deadline,
             ...(run.onRun ? { onRun: run.onRun } : {}),
+            ...(run.pace ? { pace: run.pace } : {}),
           }
         : {}),
     })
@@ -898,6 +902,11 @@ function describeAsk(ask: PermissionAsk): {
         target: `script_use:${ask.input.site}\n${ask.input.tabId}\n${scriptDigest(ask.input.script)}`,
         args: ask.input as Record<string, unknown>,
       }
+    case "tab_pace":
+      return {
+        target: `tab_pace:${ask.input.tabId}\n${JSON.stringify(ask.input.pace)}`,
+        args: ask.input as Record<string, unknown>,
+      }
     case "exit_use":
       return {
         target: `exit_use:${ask.input.exitId}\n${ask.input.via} ${ask.input.fetch ? `${ask.input.fetch.method} ${ask.input.fetch.url}` : (ask.input.browse?.url ?? "")}`,
@@ -945,6 +954,8 @@ function toolNameOf(ask: PermissionAsk): string {
       return ask.input.via === "web_fetch" ? "web_fetch" : "tabs"
     case "script_use":
       return "evaluate"
+    case "tab_pace":
+      return "tabs"
     // A skill is changed through the memory tool, as a memory is.
     case "skill_change":
     default:
@@ -1181,6 +1192,12 @@ async function summarizeRow(
 
   if (row.kind === "script_use") {
     const asked = describeScriptUseAsk(args as ScriptUseAsk)
+
+    return { ...asked, lines: [...asked.lines, asker] }
+  }
+
+  if (row.kind === "tab_pace") {
+    const asked = describeTabPaceAsk(args as TabPaceAsk)
 
     return { ...asked, lines: [...asked.lines, asker] }
   }
@@ -1699,7 +1716,8 @@ function browserTabOf(
     row.kind !== "browse" &&
     row.kind !== "browser_handover" &&
     row.kind !== "secret_use" &&
-    row.kind !== "script_use"
+    row.kind !== "script_use" &&
+    row.kind !== "tab_pace"
   ) {
     return null
   }
@@ -1961,7 +1979,8 @@ export async function withPermission(
                 ask.kind === "secret_use" ||
                 ask.kind === "secret_request" ||
                 ask.kind === "secret_sites_change" ||
-                ask.kind === "script_use"
+                ask.kind === "script_use" ||
+                ask.kind === "tab_pace"
               ? ask.input.serverId
               : ask.kind === "exit_use"
                 ? (ask.input.browse?.serverId ?? null)
@@ -2657,68 +2676,70 @@ export async function decidePermission(
                           ? await executeBrowse(ctx, row, publicUrl, executor)
                           : kind === "browser_handover"
                             ? await executeHandover(ctx, row)
-                            : kind === "secret_use"
-                              ? await executeSecretUse(
-                                  ctx,
-                                  row,
-                                  secretLevel(choice),
-                                  publicUrl,
-                                  executor,
-                                )
-                              : kind === "script_use"
-                                ? await executeScriptUse(
+                            : kind === "tab_pace"
+                              ? executeTabPace(ctx, row)
+                              : kind === "secret_use"
+                                ? await executeSecretUse(
                                     ctx,
                                     row,
-                                    choice,
+                                    secretLevel(choice),
                                     publicUrl,
                                     executor,
                                   )
-                                : kind === "exit_use"
-                                  ? await executeExitUse(
+                                : kind === "script_use"
+                                  ? await executeScriptUse(
                                       ctx,
                                       row,
+                                      choice,
                                       publicUrl,
                                       executor,
                                     )
-                                  : kind === "secret_request"
-                                    ? text(
-                                        await applySecretRequest(
-                                          ctx,
-                                          row.tokenId,
-                                          readArgs(
-                                            ctx,
-                                            row,
-                                          ) as SecretRequestAsk,
-                                          {
-                                            value: typedValue,
-                                            origins,
-                                            level: secretLevel(choice),
-                                            loginName,
-                                            generated:
-                                              typedValue !== secretValue,
-                                          },
-                                        ),
+                                  : kind === "exit_use"
+                                    ? await executeExitUse(
+                                        ctx,
+                                        row,
+                                        publicUrl,
+                                        executor,
                                       )
-                                    : kind === "secret_sites_change"
+                                    : kind === "secret_request"
                                       ? text(
-                                          await applySecretSitesChange(
+                                          await applySecretRequest(
                                             ctx,
+                                            row.tokenId,
                                             readArgs(
                                               ctx,
                                               row,
-                                            ) as SecretSitesChangeAsk,
-                                            sites ?? {},
+                                            ) as SecretRequestAsk,
+                                            {
+                                              value: typedValue,
+                                              origins,
+                                              level: secretLevel(choice),
+                                              loginName,
+                                              generated:
+                                                typedValue !== secretValue,
+                                            },
                                           ),
                                         )
-                                      : await executeRegister(
-                                          ctx,
-                                          row,
-                                          publicUrl,
-                                          executor,
-                                          secretValue,
-                                          allowPrivate === true,
-                                          chosenAccess,
-                                        )
+                                      : kind === "secret_sites_change"
+                                        ? text(
+                                            await applySecretSitesChange(
+                                              ctx,
+                                              readArgs(
+                                                ctx,
+                                                row,
+                                              ) as SecretSitesChangeAsk,
+                                              sites ?? {},
+                                            ),
+                                          )
+                                        : await executeRegister(
+                                            ctx,
+                                            row,
+                                            publicUrl,
+                                            executor,
+                                            secretValue,
+                                            allowPrivate === true,
+                                            chosenAccess,
+                                          )
   } catch (error) {
     if (!isPcpError(error)) {
       console.error("[permissions] running an allowed request failed", {
@@ -3003,6 +3024,23 @@ async function executeScriptUse(
   } finally {
     dropScriptOnce(once)
   }
+}
+
+/**
+ * A tab's pace the owner allowed: set on that tab, as asked, while it is
+ * open (browser/tab-pace.ts); the vault's pacing settings stay as they are.
+ */
+function executeTabPace(ctx: VaultContext, row: Row): CallToolResult {
+  const asked = readArgs(ctx, row) as TabPaceAsk
+
+  return applyTabPace(ctx, row.tokenId, asked.tabId, asked.pace)
+    ? text(
+        `The owner allowed it: tab ${asked.tabId} follows that pace now, while it is open.`,
+      )
+    : text(
+        `Tab ${asked.tabId} is gone (it was closed, or the browser has closed since), so its pace was not set. Open the page again, then set its pace.`,
+        true,
+      )
 }
 
 /** The owner is done in a tab an assistant handed them. */

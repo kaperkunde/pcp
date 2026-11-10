@@ -1,4 +1,5 @@
 import { BROWSER_VIEWPORT, MAX_SIGN_IN_IMPORT_BYTES } from "../constants"
+import { PACING_MAX_WAIT_MS } from "../pacing/limits"
 
 /**
  * Bounds on what the browser makes PCP do. Addresses, text to type and
@@ -223,6 +224,17 @@ export const DOWNLOAD_TIMEOUT_MS = 120_000
  */
 export const TAB_DEADLINE_MS =
   2 * NAVIGATION_TIMEOUT_MS + CHALLENGE_WAIT_MS + 2 * ACTION_TIMEOUT_MS
+/** How long settle waits for what an action started to load. */
+export const SETTLE_MS = 5_000
+/**
+ * The most a call waits on its tab for its turn at the site under pacing
+ * (lib/core/pacing/, pacing's own PACING_MAX_WAIT_MS), with the time a page
+ * opened first takes to settle: a paced call holds its tab this much
+ * longer before the tab counts as not responding.
+ */
+export const PACED_TURN_WAIT_MS = PACING_MAX_WAIT_MS + SETTLE_MS
+/** TAB_DEADLINE_MS for a paced call. */
+export const PACED_TAB_DEADLINE_MS = TAB_DEADLINE_MS + PACED_TURN_WAIT_MS
 /**
  * timeout_ms (call.ts): how long a browser call waits, in all, before it is
  * answered with a `timeout` tool error naming the step it was at. tabs

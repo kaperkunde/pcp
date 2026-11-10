@@ -187,7 +187,11 @@ export default async function ServerPage({
           description: wrapper.description,
           callLevels: wrapper.callLevels,
           definition: JSON.stringify(
-            { tools: wrapper.tools, secrets: wrapper.secrets },
+            {
+              tools: wrapper.tools,
+              secrets: wrapper.secrets,
+              ...(wrapper.pace ? { pace: wrapper.pace } : {}),
+            },
             null,
             2,
           ),
@@ -413,7 +417,16 @@ async function pacingDefaults(
   const { classes } = await pacingOverview(ctx)
 
   return browser
-    ? [{ label: "per site,", pace: classes.browser_act.pace }]
+    ? [
+        {
+          label: "actions in a page, per site:",
+          pace: classes.browser_act.pace,
+        },
+        {
+          label: "opening a page, per site:",
+          pace: classes.browser_navigate.pace,
+        },
+      ]
     : [
         {
           label: "calls that change things:",

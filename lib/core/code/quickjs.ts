@@ -416,6 +416,7 @@ const PRELUDE = `(() => {
         fields: options?.fields,
         decode: options?.decode,
         keep: options?.keep,
+        pace: options?.pace,
         step: currentStep ?? undefined,
       }),
     step,

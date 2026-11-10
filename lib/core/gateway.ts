@@ -6,6 +6,7 @@ import {
   type Icon,
   type ServerContext,
 } from "@modelcontextprotocol/server"
+import { wrapperPaceInput, type WrapperPaceInput } from "./pacing/input"
 import { z } from "zod"
 
 import type { McpServer as McpServerRow } from "@/lib/generated/prisma/client"
@@ -5024,6 +5025,7 @@ export function buildGatewayServer(
           `How it is written there, with ${SECRET_PLACEHOLDER} where the value goes ("Bearer ${SECRET_PLACEHOLDER}"); the value alone by default.`,
         ),
     })
+    const wrapperPaceArg = wrapperPaceInput.optional()
     type WrapperToolArg = z.output<typeof wrapperTool>
     /** A tool as the assistant wrote it, as wrappers/ reads one. */
     const wrapperToolInput = ({
@@ -5063,6 +5065,7 @@ export function buildGatewayServer(
         slug: z.string(),
         call_levels: z.enum(["approved", "token"]),
         tools: z.array(z.looseObject({ name: z.string() })),
+        pace: z.looseObject({}).optional(),
       }),
       annotations: READS,
       log: serverNamed("wrapper"),
@@ -5137,6 +5140,7 @@ export function buildGatewayServer(
             'Every place a secret goes in a call its tools make, where a program\'s {"$secret": name} is allowed.',
           ),
         call_levels: callLevelsArg,
+        pace: wrapperPaceArg,
         definition: z
           .string()
           .max(100)
@@ -5156,6 +5160,7 @@ export function buildGatewayServer(
         tools?: WrapperToolArg[]
         secrets?: Parameters<typeof proposeWrapper>[1]["secrets"]
         call_levels?: "approved" | "token"
+        pace?: WrapperPaceInput
         definition?: string
         note?: string
         tool_access?: ToolAccessArg
@@ -5178,6 +5183,7 @@ export function buildGatewayServer(
             : {}),
           ...(args.secrets !== undefined ? { secrets: args.secrets } : {}),
           ...(callLevels !== undefined ? { callLevels } : {}),
+          ...(args.pace !== undefined ? { pace: args.pace } : {}),
         }
 
         if (definition !== undefined) {
@@ -5185,10 +5191,11 @@ export function buildGatewayServer(
             tools !== undefined ||
             args.secrets !== undefined ||
             callLevels !== undefined ||
+            args.pace !== undefined ||
             args.description !== undefined
           ) {
             return failure(
-              "With definition, the programs, secrets, call_levels and description are that wrapper's: pass only name, and note if you like.",
+              "With definition, the programs, secrets, call_levels, pace and description are that wrapper's: pass only name, and note if you like.",
             )
           }
 
@@ -5275,6 +5282,12 @@ export function buildGatewayServer(
             "Every place a secret goes, replacing the ones it has; [] takes them all out.",
           ),
         call_levels: callLevelsArg,
+        pace: wrapperPaceInput
+          .nullable()
+          .optional()
+          .describe(
+            "Its own pace for the browser calls its tools make, replacing the one it has; null takes it out, so they follow the owner's. A random wait between min_ms and max_ms after the previous action at the site ended, per kind of action and per browser tool; a program picks within it per call with pcp.call(…, { pace: { min_ms, max_ms } }).",
+          ),
         note: noteChangeArg,
         detach: detachArg,
         tool_access: TOOL_ACCESS_ARG,
@@ -5291,6 +5304,7 @@ export function buildGatewayServer(
         remove_tools?: string[]
         secrets?: Parameters<typeof proposeWrapperChange>[2]["secrets"]
         call_levels?: "approved" | "token"
+        pace?: WrapperPaceInput | null
         note?: string
         detach?: boolean
         tool_access?: ToolAccessArg
@@ -5380,6 +5394,7 @@ export function buildGatewayServer(
                 removeTools: args.remove_tools,
                 secrets: args.secrets,
                 callLevels: args.call_levels,
+                ...(args.pace !== undefined ? { pace: args.pace } : {}),
               },
               servers,
             ),

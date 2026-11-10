@@ -18,7 +18,34 @@ import { resolvePrivateAccess, siteKey } from "../fetch/rules"
 import { bareType, fileMediaType } from "../media-types"
 import { markdownLink } from "../owner-link"
 import { hiddenCharacter, withoutPresentation } from "../memories"
-import { browserToolPaced, pacedResult, paceSite } from "../pacing"
+import {
+  browserPacingClass,
+  browserTurnDeadline,
+  pacedResult,
+  paceBrowserTurn,
+  type BrowserPacingClass,
+  type Turn,
+} from "../pacing"
+import {
+  assistantBounds,
+  readPacingConfig,
+  resolveBrowserPolicy,
+  type PacingConfig,
+} from "../pacing/config"
+import {
+  BROWSER_CLASS_WORDS,
+  describeRange,
+  fromPaceInput,
+  outsideBounds,
+  type BrowserPaceInput,
+} from "../pacing/input"
+import {
+  BROWSER_PACING_CLASSES,
+  PACE_KEY_OF,
+  type BrowserPace,
+  type PaceRange,
+  type PacingPolicy,
+} from "../pacing/limits"
 import { PERMISSION_TTL_MS } from "../permission-rules"
 import { checkRateLimit } from "@kaperkunde/security"
 import { loadResourceLimits } from "../resources/state"
@@ -62,6 +89,9 @@ import {
   MAX_UPLOAD_BYTES,
   MAX_FULL_PAGE_HEIGHT,
   MAX_URL_LENGTH,
+  PACED_TAB_DEADLINE_MS,
+  PACED_TURN_WAIT_MS,
+  SETTLE_MS,
   MAX_WAIT_MS,
   MIN_READ_PAGE_TEXT_CHARS,
   NAVIGATION_TIMEOUT_MS,
@@ -70,6 +100,7 @@ import {
 } from "./limits"
 import { bounded, inLane, LaneBusy, LaneGaveUp, pause } from "./queue"
 import { ocrHint, ocrToolFor } from "./ocr"
+import { setTabPace, tabPace, tabPaceFor } from "./tab-pace"
 import { leftOutNote, readableMarkdown } from "./read-page"
 import { missingRefMessage, resolveTabRef, tabSnapshot } from "./refs"
 import {
@@ -188,6 +219,12 @@ export type BrowserScope = {
    * runs out.
    */
   clock?: CallClock
+  /**
+   * The pace the wrapper whose run made the call chose for it (its own,
+   * or the one its program picked within it): what the call follows unless
+   * its tab has a pace of its own (lib/core/pacing/ resolveBrowserPolicy).
+   */
+  pace?: PaceRange
   /**
    * The exits the token may name, and opening one for a tab
    * (exits/use.ts browserExits, built where the key is: upstream.ts and
@@ -379,7 +416,7 @@ async function tabLines(
 
   return open.map(
     ({ view, tab }) =>
-      `- ${view.id}: ${view.title || "(no title)"} · ${view.url}${view.control === "owner" ? " · the owner has it" : ""}${tab.unresponsive ? " · not responding" : ""}${tab.openedIn ? ` · opened by ${runName(tab.openedIn)}` : ""}${tab.run?.endedAt != null ? " · its run has ended" : ""} · ${tab.running ? "in use now" : `idle ${spanWords(now - tab.lastUsedAt)}`} · ${markdownLink(`Watch tab ${view.id}`, tabLink(scope.publicUrl, view.id))}`,
+      `- ${view.id}: ${view.title || "(no title)"} · ${view.url}${view.control === "owner" ? " · the owner has it" : ""}${tab.unresponsive ? " · not responding" : ""}${tab.openedIn ? ` · opened by ${runName(tab.openedIn)}` : ""}${tab.run?.endedAt != null ? " · its run has ended" : ""} · ${tab.running ? "in use now" : `idle ${spanWords(now - tab.lastUsedAt)}`}${tabPaceText(tab) ? ` · ${tabPaceText(tab)}` : ""} · ${markdownLink(`Watch tab ${view.id}`, tabLink(scope.publicUrl, view.id))}`,
   )
 }
 
@@ -710,11 +747,11 @@ export function fileShownWords(
 }
 
 /** Waits briefly for what an action started to load, and for its check. */
-async function settle(tab: Tab): Promise<void> {
+async function settle(tab: Tab, clock?: CallClock): Promise<void> {
   await tab.page
-    .waitForLoadState("domcontentloaded", { timeout: 5_000 })
+    .waitForLoadState("domcontentloaded", { timeout: SETTLE_MS })
     .catch(() => {})
-  await passCheck(tab)
+  await passCheck(tab, clock)
 }
 
 /** Why a page could not be opened, in words. */
@@ -1097,26 +1134,50 @@ function tabSite(tab: Tab): string | null {
   }
 }
 
+/** A turn that holds nothing back: an action with no site to pace. */
+const NO_TURN: Turn = { release: () => {} }
+
+function isTurn(value: Turn | CallToolResult): value is Turn {
+  return "release" in value
+}
+
 /**
- * Waits for the site's turn under pacing (lib/core/pacing/), before the
- * call queues on its tab, up to the caller's deadline; the tool error to
- * answer with when that turn is further off.
+ * The action's turn at its site under pacing (lib/core/pacing/), taken on
+ * the tab's lane right before the action and held until it is done, so no
+ * two actions at a site, whatever tab or caller they come from, follow
+ * closer than its pause (pacing/pace.ts takeTurn). A page opened first
+ * waits for the one the tab shows to settle. The pace is the tab's own
+ * (tab-pace.ts), else the one its wrapper chose for the call
+ * (`scope.pace`), else the owner's; the tool error to answer with when the
+ * turn is further off than the call can wait.
  */
-async function paceAction(
+async function pacedTurn(
   scope: BrowserScope,
+  tab: Tab,
   site: string | null,
-): Promise<CallToolResult | null> {
-  if (!site) {
-    return null
+  pacingClass: BrowserPacingClass | null,
+): Promise<Turn | CallToolResult> {
+  if (!site || !pacingClass) {
+    return NO_TURN
   }
 
-  const paced = await paceSite(scope.ctx.vaultId, site, "browser_act", {
+  if (pacingClass === "browser_navigate") {
+    atStep(scope.clock, `waiting for tab ${tab.id}'s page to settle`)
+    await settle(tab, scope.clock)
+  }
+
+  atStep(scope.clock, `waiting for its turn at ${site} under pacing`)
+  const signals = [scope.signal, scope.clock?.expired].filter(
+    (signal): signal is AbortSignal => signal !== undefined,
+  )
+  const turn = await paceBrowserTurn(scope.ctx.vaultId, site, pacingClass, {
     serverId: scope.serverId,
-    signal: scope.signal,
-    deadline: scope.deadline,
+    own: tabPaceFor(tab, pacingClass) ?? scope.pace ?? null,
+    signal: signals.length > 0 ? AbortSignal.any(signals) : undefined,
+    deadline: browserTurnDeadline(scope.deadline),
   })
 
-  return paced ? pacedResult(paced) : null
+  return "release" in turn ? turn : pacedResult(turn)
 }
 
 /**
@@ -1149,11 +1210,6 @@ export async function performNavigate(
   }
 
   const note = tab ? holderNote(scope, tab) : null
-  const paced = await paceAction(scope, siteKey(url))
-
-  if (paced) {
-    return withLead(paced, note)
-  }
 
   if (tab && vault.tabs.get(tab.id) !== tab) {
     tab = null
@@ -1224,13 +1280,40 @@ export async function performNavigate(
 
   const current = tab
 
-  const answer = onLane(scope, vault, current, TAB_DEADLINE_MS, async () => {
-    await driveAs(vault, current, scope)
+  const answer = onLane(
+    scope,
+    vault,
+    current,
+    PACED_TAB_DEADLINE_MS,
+    async () => {
+      await driveAs(vault, current, scope)
 
-    if (current.dialog) {
-      return dialogOpen(current, "navigate")
-    }
+      if (current.dialog) {
+        return dialogOpen(current, "navigate")
+      }
 
+      const turn = await pacedTurn(
+        scope,
+        current,
+        siteKey(url),
+        "browser_navigate",
+      )
+
+      if (!isTurn(turn)) {
+        return turn
+      }
+
+      try {
+        return await openIn(current)
+      } finally {
+        turn.release()
+      }
+    },
+  )
+
+  return withLead(await answer, note)
+
+  async function openIn(current: Tab): Promise<CallToolResult> {
     if (allowedByOwner) {
       current.allowedHosts.add(siteKey(url))
     }
@@ -1279,9 +1362,7 @@ export async function performNavigate(
     await passCheck(current, scope.clock)
     await saveVaultProfile(scope.ctx, vault, { force: true })
     return report(scope, current, { first, signIns: true, unseen: true })
-  })
-
-  return withLead(await answer, note)
+  }
 }
 
 /** tabs open and navigate: decided per site before anything opens. */
@@ -1365,7 +1446,13 @@ async function openSite(
 
 async function tabs(
   scope: BrowserScope,
-  args: { action: string; url?: string; tab?: string; exit?: string },
+  args: {
+    action: string
+    url?: string
+    tab?: string
+    exit?: string
+    pace?: BrowserPaceInput
+  },
 ): Promise<CallToolResult> {
   const vault = runningBrowser(scope.ctx.vaultId)
 
@@ -1382,6 +1469,7 @@ async function tabs(
         : [
             `This token's open tabs (${tabUsage(vault, scope.tokenId)}):`,
             ...lines,
+            await ownerPaceLine(scope),
           ].join("\n"),
     )
   }
@@ -1394,6 +1482,10 @@ async function tabs(
 
   if (ownerHas(picked)) {
     return ownerHolds(picked)
+  }
+
+  if (args.action === "pace") {
+    return paceTab(scope, picked, args.pace)
   }
 
   // Neither waits behind a call that hangs on the tab: that call ends with
@@ -1416,6 +1508,152 @@ async function tabs(
     ),
     `${upper(tabUsage(vault, scope.tokenId))}.`,
   )
+}
+
+/** A pace per class, in words: "actions in a page 0.05 to 0.15 s". */
+function paceWords(paces: Partial<Record<BrowserPacingClass, string>>): string {
+  return BROWSER_PACING_CLASSES.flatMap((pacingClass) =>
+    paces[pacingClass]
+      ? [`before ${BROWSER_CLASS_WORDS[pacingClass]} ${paces[pacingClass]}`]
+      : [],
+  ).join(", ")
+}
+
+/** A policy in words, or "no wait" for none. */
+function policyWords(policy: PacingPolicy | null): string {
+  return policy
+    ? describeRange({
+        minMs: policy.minIntervalMs,
+        maxMs: policy.minIntervalMs + policy.jitterMs,
+      })
+    : "no wait"
+}
+
+/** What tabs without a pace of their own follow, as tabs list ends. */
+async function ownerPaceLine(scope: BrowserScope): Promise<string> {
+  const config = await readPacingConfig(scope.ctx.vaultId)
+  const paces: Partial<Record<BrowserPacingClass, string>> = {}
+
+  for (const pacingClass of BROWSER_PACING_CLASSES) {
+    paces[pacingClass] = policyWords(
+      resolveBrowserPolicy(config, pacingClass, { serverId: scope.serverId }),
+    )
+  }
+
+  return `A tab without a pace of its own waits, after the previous action at its site, ${paceWords(paces)} (the owner's pace; a site of theirs may have its own). tabs with action pace gives one tab a pace of its own.`
+}
+
+/** A tab's own pace, as tabs list shows it; null when it has none. */
+function tabPaceText(tab: Tab): string | null {
+  const own = tabPace(tab)
+
+  if (!own) return null
+
+  const paces: Partial<Record<BrowserPacingClass, string>> = {}
+
+  for (const pacingClass of BROWSER_PACING_CLASSES) {
+    const range = own[PACE_KEY_OF[pacingClass]]
+    if (range) paces[pacingClass] = describeRange(range)
+  }
+
+  return `its own pace: ${paceWords(paces)}`
+}
+
+/**
+ * tabs' action pace: the tab's own pace (tab-pace.ts), in memory with the
+ * tab. Within the owner's bounds it applies at once; outside them the
+ * owner is asked (a tab_pace request), and nothing changes until they say
+ * yes. Without pace, the tab follows the owner's again.
+ */
+async function paceTab(
+  scope: BrowserScope,
+  tab: Tab,
+  input: BrowserPaceInput | undefined,
+): Promise<CallToolResult> {
+  let pace: BrowserPace
+
+  try {
+    pace = fromPaceInput(input ?? {})
+  } catch (error) {
+    if (error instanceof PcpError) return text(error.message, true)
+    throw error
+  }
+
+  const config = await readPacingConfig(scope.ctx.vaultId)
+  const bounds = assistantBounds(config)
+  const outside = outsideBounds(pace, bounds)
+
+  if (outside.length > 0) {
+    const view = await tabView(tab)
+
+    throw new OwnerNeeded({
+      kind: "tab_pace",
+      input: {
+        serverId: scope.serverId,
+        tabId: tab.id,
+        url: view.url,
+        title: view.title,
+        pace,
+        outside,
+        bounds,
+      },
+    })
+  }
+
+  setTabPace(tab, pace)
+  return text(await tabPaceAnswer(scope, tab, config))
+}
+
+/** What a tab follows now, per class, as tabs' pace answers. */
+async function tabPaceAnswer(
+  scope: BrowserScope,
+  tab: Tab,
+  config?: PacingConfig,
+): Promise<string> {
+  const read = config ?? (await readPacingConfig(scope.ctx.vaultId))
+  const site = tabSite(tab) ?? undefined
+  const paces: Partial<Record<BrowserPacingClass, string>> = {}
+
+  for (const pacingClass of BROWSER_PACING_CLASSES) {
+    const own = tabPaceFor(tab, pacingClass)
+    paces[pacingClass] = `${policyWords(
+      resolveBrowserPolicy(read, pacingClass, {
+        serverId: scope.serverId,
+        site,
+        own,
+      }),
+    )} (${own ? "its own" : "the owner's"})`
+  }
+
+  const bounds = assistantBounds(read)
+
+  return [
+    `Tab ${tab.id} waits, after the previous action at its site ended, ${paceWords(paces)}${site ? ` at ${site}` : ""}. For this tab only, while it is open; a site the owner paced themselves never goes faster than they set.`,
+    `Assistants may set ${paceWords({
+      browser_act: describeRange(bounds.browser_act),
+      browser_navigate: describeRange(bounds.browser_navigate),
+    })} without asking; anything else asks the owner.`,
+  ].join("\n")
+}
+
+/**
+ * A tab's pace the owner allowed on a tab_pace request: set on that tab,
+ * still the token's and open, whatever the bounds. False when it is gone.
+ */
+export function applyTabPace(
+  ctx: Pick<VaultContext, "vaultId">,
+  tokenId: string,
+  tabId: string,
+  pace: BrowserPace,
+): boolean {
+  const tab = runningBrowser(ctx.vaultId)?.tabs.get(tabId)
+
+  if (!tab || tab.tokenId !== tokenId) {
+    return false
+  }
+
+  setTabPace(tab, pace)
+  return true
 }
 
 function upper(line: string): string {
@@ -1460,6 +1698,12 @@ async function onTab(
   tabId: string,
   spec: BrowserToolSpec,
   run: (tab: Tab, vault: VaultBrowser) => Promise<CallToolResult>,
+  {
+    pacing = browserPacingClass(spec.name),
+  }: {
+    /** How the call is paced, when not as its tool is (download by url). */
+    pacing?: BrowserPacingClass | null
+  } = {},
 ): Promise<CallToolResult> {
   const vault = runningBrowser(scope.ctx.vaultId)
   const picked = await pickTab(scope, vault, tabId)
@@ -1492,19 +1736,12 @@ async function onTab(
     )
   }
 
-  if (browserToolPaced(spec.name)) {
-    const paced = await paceAction(scope, tabSite(picked))
-
-    if (paced) {
-      return withLead(paced, note)
-    }
-  }
-
   const answer = await onLane(
     scope,
     vault!,
     picked,
-    spec.name === "download" ? DOWNLOAD_DEADLINE_MS : TAB_DEADLINE_MS,
+    (spec.name === "download" ? DOWNLOAD_DEADLINE_MS : TAB_DEADLINE_MS) +
+      (pacing ? PACED_TURN_WAIT_MS : 0),
     async () => {
       await driveAs(vault!, picked, scope)
       const refused = offLimits(vault!, picked)
@@ -1517,37 +1754,52 @@ async function onTab(
         return dialogOpen(picked, spec.name)
       }
 
-      atStep(
-        scope.clock,
-        `running ${spec.name} on tab ${picked.id}`,
-        !spec.annotations.readOnlyHint,
-      )
-      let result: CallToolResult
+      const turn = await pacedTurn(scope, picked, tabSite(picked), pacing)
+
+      if (!isTurn(turn)) {
+        return turn
+      }
 
       try {
-        result = await run(picked, vault!)
-      } catch (error) {
-        if (error instanceof PcpError || error instanceof OwnerNeeded) {
-          throw error
-        }
-
-        // A dialog the action opened is why it stopped.
-        const dialog = dialogNote(picked)
-        result = text(
-          dialog ? `${failureReason(error)}\n${dialog}` : failureReason(error),
-          true,
-        )
+        return await acting(picked)
+      } finally {
+        turn.release()
       }
-
-      if (spec.changes) {
-        await saveVaultProfile(scope.ctx, vault!, { force: true })
-      }
-
-      return result
     },
   )
 
   return withLead(answer, note)
+
+  /** The tool's own work, its turn taken. */
+  async function acting(tab: Tab): Promise<CallToolResult> {
+    atStep(
+      scope.clock,
+      `running ${spec.name} on tab ${tab.id}`,
+      !spec.annotations.readOnlyHint,
+    )
+    let result: CallToolResult
+
+    try {
+      result = await run(tab, vault!)
+    } catch (error) {
+      if (error instanceof PcpError || error instanceof OwnerNeeded) {
+        throw error
+      }
+
+      // A dialog the action opened is why it stopped.
+      const dialog = dialogNote(tab)
+      result = text(
+        dialog ? `${failureReason(error)}\n${dialog}` : failureReason(error),
+        true,
+      )
+    }
+
+    if (spec.changes) {
+      await saveVaultProfile(scope.ctx, vault!, { force: true })
+    }
+
+    return result
+  }
 }
 
 /**
@@ -2526,6 +2778,7 @@ async function runBrowserTool(
     runId,
     secret,
     exits,
+    pace,
   }: {
     tokenId: string
     publicUrl: string
@@ -2555,6 +2808,8 @@ async function runBrowserTool(
      * another call that arrives while it has the tab is told so.
      */
     runId?: string
+    /** The pace a wrapper's run chose for the call (BrowserScope.pace). */
+    pace?: PaceRange
     /**
      * The secret a type call carries as {"$secret": name}, from upstream.ts:
      * the only way one reaches a page.
@@ -2580,6 +2835,7 @@ async function runBrowserTool(
     signal,
     deadline,
     ...(exits ? { exits } : {}),
+    ...(pace ? { pace } : {}),
     runId,
   }
   const listsOrOpens =
@@ -2752,10 +3008,7 @@ async function runTool(
 
   switch (spec.name) {
     case "tabs":
-      return tabs(
-        scope,
-        args as { action: string; url?: string; tab?: string; exit?: string },
-      )
+      return tabs(scope, args as Parameters<typeof tabs>[1])
     case "navigate":
       return openSite(scope, tab, args.url as string, "navigate")
     case "back":
@@ -2928,14 +3181,19 @@ async function runTool(
       })
     }
     case "download":
-      return onTab(scope, tab, spec, (current, vault) =>
-        downloadFile(
-          scope,
-          vault,
-          current,
-          args as { ref?: string; url?: string },
-          keepBytes,
-        ),
+      return onTab(
+        scope,
+        tab,
+        spec,
+        (current, vault) =>
+          downloadFile(
+            scope,
+            vault,
+            current,
+            args as { ref?: string; url?: string },
+            keepBytes,
+          ),
+        { pacing: browserPacingClass("download", args) },
       )
     case "scroll":
       return onTab(scope, tab, spec, async (current) => {

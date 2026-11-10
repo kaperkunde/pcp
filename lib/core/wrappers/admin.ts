@@ -6,6 +6,13 @@ import { db } from "../db"
 import { invalid, notFound, PcpError } from "../errors"
 import type { GatewayServer } from "../gateway-servers"
 import { newId } from "../ids"
+import { assistantBounds, readPacingConfig } from "../pacing/config"
+import {
+  toWrapperPaceInput,
+  wrapperPaceOutside,
+  wrapperPaceWords,
+  type WrapperPaceInput,
+} from "../pacing/input"
 import { canonicalJson } from "../permission-rules"
 import { createSecretNamedAfter, findTextSecretByName } from "../secrets"
 import { tierOfCalls } from "../tool-tiers"
@@ -118,6 +125,12 @@ export type WrapperShown = {
   flow?: boolean
   tools: WrapperShownTool[]
   secrets: WrapperShownSecret[]
+  /**
+   * The ranges of its pace outside what you let assistants set, in words:
+   * only your yes on this request allows them. Absent from a request made
+   * before wrappers had a pace.
+   */
+  paceOutside?: string[]
 }
 
 export type WrapperChangeAsk = {
@@ -168,6 +181,8 @@ export type WrapperView = {
     }
   >
   secrets: Array<SecretBindingInput & { template: string }>
+  /** The pace of its browser calls, when it has one of its own. */
+  pace?: WrapperPaceInput
 }
 
 function basisOf(
@@ -195,7 +210,7 @@ async function slugsById(
 async function toInput(
   ctx: VaultContext,
   definition: WrapperDefinition,
-): Promise<Pick<WrapperView, "tools" | "secrets">> {
+): Promise<Pick<WrapperView, "tools" | "secrets" | "pace">> {
   const servers = await slugsById(ctx, [
     ...definition.tools.flatMap((tool) =>
       [...tool.calls, ...tool.replaces].map((ref) => ref.serverId),
@@ -223,6 +238,7 @@ async function toInput(
       argument: binding.argument,
       template: binding.template,
     })),
+    ...(definition.pace ? { pace: toWrapperPaceInput(definition.pace) } : {}),
   }
 }
 
@@ -389,6 +405,30 @@ async function describe(
         ? `Delete the wrapper ${previousName ?? name}?`
         : `Change the wrapper ${previousName ?? name}?`
 
+  const paceBefore = before?.pace ? wrapperPaceWords(before.pace) : []
+  const paceAfter = after?.pace ? wrapperPaceWords(after.pace) : []
+  const paceChanged =
+    canonicalJson(before?.pace ?? null) !== canonicalJson(after?.pace ?? null)
+  const paceOutside =
+    action !== "delete" && after?.pace && paceChanged
+      ? wrapperPaceOutside(
+          after.pace,
+          assistantBounds(await readPacingConfig(ctx.vaultId)),
+        )
+      : []
+  const paceLines =
+    action === "delete"
+      ? []
+      : paceAfter.length > 0
+        ? [
+            `${action === "update" && paceChanged ? (paceBefore.length > 0 ? "New pace" : "Its own pace") : "Its own pace"} for the browser calls its tools make, in place of yours (a site you paced yourself never goes faster): ${paceAfter.join("; ")}${action === "update" && paceChanged && paceBefore.length > 0 ? ` (was: ${paceBefore.join("; ")})` : ""}`,
+          ]
+        : action === "update" && paceBefore.length > 0
+          ? [
+              `Its own pace goes (was: ${paceBefore.join("; ")}): its browser calls follow yours.`,
+            ]
+          : []
+
   const lines = [
     ...(action === "delete"
       ? [
@@ -421,6 +461,7 @@ async function describe(
                 `The calls inside its tools now follow ${after?.callLevels === "approved" ? "your approval of the wrapper (they were at each token's own levels)" : "each token's own levels (they followed your approval of the wrapper)"}.`,
               ]
             : []),
+          ...paceLines,
           ...(flow
             ? [
                 `A browser flow: its tools drive PCP's browser as the token that calls them, on the sites that token may open.${action === "create" ? " Like every new tool, each asks you first for every token until you allow it." : ""}`,
@@ -459,6 +500,9 @@ async function describe(
         ? `Any token you let use these tools can make these calls through them, whatever its own levels for ${approvedCalls.join(", ")} are.`
         : null,
       secretWarning,
+      paceOutside.length > 0
+        ? `Its pace goes past what you let assistants set without asking: ${paceOutside.join("; ")}. Making this change allows it for this wrapper.`
+        : null,
     ]
       .filter((part) => part !== null)
       .join(" ") || null
@@ -471,6 +515,7 @@ async function describe(
     flow,
     tools,
     secrets,
+    ...(paceOutside.length > 0 ? { paceOutside } : {}),
   }
 }
 
@@ -681,6 +726,8 @@ export type WrapperChanges = {
   secrets?: SecretBindingInput[]
   /** Whose levels the calls inside its tools follow; kept when left out. */
   callLevels?: CallLevels
+  /** The pace of its browser calls; kept when left out, null for none. */
+  pace?: WrapperPaceInput | null
 }
 
 export async function proposeWrapperChange(
@@ -716,6 +763,7 @@ export async function proposeWrapperChange(
       tools,
       secrets: changes.secrets ?? current.secrets,
       callLevels: changes.callLevels ?? definition.callLevels ?? "token",
+      pace: changes.pace === undefined ? (current.pace ?? null) : changes.pace,
     },
     {
       reach: reachOf(servers),

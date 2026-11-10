@@ -6,15 +6,22 @@ import { invalid, notFound } from "../errors"
 import { normalizeSite } from "../fetch/rules"
 import { getVaultSetting, setSetting } from "../settings"
 import {
+  ASSISTANT_PACE_BOUNDS,
+  BROWSER_PACING_CLASSES,
+  MAX_ASSISTANT_PACE_MS,
   MAX_PACED_SERVERS,
   MAX_PACED_SITES,
   PACING_BOUNDS,
   PACING_CLASSES,
   PACING_DEFAULTS,
+  rangePolicy,
+  type BrowserPacingClass,
+  type PaceRange,
   type PacingClass,
   type PacingOverride,
   type PacingPolicy,
 } from "./limits"
+import { checkPaceRange } from "./input"
 
 /**
  * The owner's own pace (Settings → Pacing, a server's Advanced), kept as
@@ -27,6 +34,14 @@ import {
  * What a call follows, most specific first: the site's override (the host
  * itself, or a parent the owner marked as covering its subdomains), then
  * the server's, then the class's, then PCP's default for the class.
+ *
+ * A browser action may also carry a pace of its own (resolveBrowserPolicy):
+ * its tab's, which an assistant set (browser/tab-pace.ts), or else the one
+ * the wrapper whose run made it declared. That comes before the server's
+ * and the class's, but never below the owner's own pace for the site,
+ * which stays a floor. What an assistant may set without asking is held
+ * to the owner's bounds (`assistant`, by class; ASSISTANT_PACE_BOUNDS where
+ * they set none).
  */
 
 export const SETTING_PACING = "pacing"
@@ -44,12 +59,18 @@ export type PacingConfig = {
   /** By server id. */
   servers: Record<string, PacingOverride>
   sites: PacedSite[]
+  /**
+   * What an assistant may give a tab or a wrapper without asking, by the
+   * browser's classes: the owner's own bounds, where they set them.
+   */
+  assistant: Partial<Record<BrowserPacingClass, PaceRange>>
 }
 
 export const EMPTY_PACING: PacingConfig = {
   classes: {},
   servers: {},
   sites: [],
+  assistant: {},
 }
 
 const bounded = (bound: { min: number; max: number }) =>
@@ -68,8 +89,17 @@ const PolicySchema = z.strictObject({
 
 const OverrideSchema = z.union([z.literal("unpaced"), PolicySchema])
 
+const RangeSchema = z
+  .strictObject({
+    minMs: z.number().int().min(0).max(MAX_ASSISTANT_PACE_MS),
+    maxMs: z.number().int().min(0).max(MAX_ASSISTANT_PACE_MS),
+  })
+  .refine((range) => range.minMs <= range.maxMs)
+
 const ConfigSchema = z.strictObject({
-  classes: z.partialRecord(z.enum(PACING_CLASSES), OverrideSchema),
+  // By any name, so a class a newer PCP added (an export restored here)
+  // does not cost the rest: readPacingConfig keeps the ones this PCP has.
+  classes: z.record(z.string().min(1).max(64), OverrideSchema),
   servers: z.record(z.string().min(1).max(100), OverrideSchema),
   sites: z
     .array(
@@ -80,7 +110,27 @@ const ConfigSchema = z.strictObject({
       }),
     )
     .max(MAX_PACED_SITES),
+  // Left out by a PCP from before assistants could set a pace.
+  assistant: z
+    .partialRecord(z.enum(BROWSER_PACING_CLASSES), RangeSchema)
+    .optional(),
 })
+
+function known(parsed: z.infer<typeof ConfigSchema>): PacingConfig {
+  const classes: PacingConfig["classes"] = {}
+
+  for (const name of PACING_CLASSES) {
+    const override = parsed.classes[name]
+    if (override !== undefined) classes[name] = override
+  }
+
+  return {
+    classes,
+    servers: parsed.servers,
+    sites: parsed.sites,
+    assistant: parsed.assistant ?? {},
+  }
+}
 
 /**
  * The vault's pacing settings. Read on every paced call, without the vault
@@ -96,7 +146,7 @@ export async function readPacingConfig(vaultId: string): Promise<PacingConfig> {
 
   try {
     const parsed = ConfigSchema.safeParse(JSON.parse(raw))
-    return parsed.success ? parsed.data : EMPTY_PACING
+    return parsed.success ? known(parsed.data) : EMPTY_PACING
   } catch {
     return EMPTY_PACING
   }
@@ -109,7 +159,8 @@ async function writePacingConfig(
   const empty =
     Object.keys(config.classes).length === 0 &&
     Object.keys(config.servers).length === 0 &&
-    config.sites.length === 0
+    config.sites.length === 0 &&
+    Object.keys(config.assistant).length === 0
 
   await setSetting(
     ctx,
@@ -358,6 +409,104 @@ export function siteOverride(
   return best
 }
 
+/**
+ * What an assistant may give a tab or a wrapper without asking, by class:
+ * the owner's bounds, else PCP's.
+ */
+export function assistantBounds(
+  config: Pick<PacingConfig, "assistant">,
+): Record<BrowserPacingClass, PaceRange> {
+  return {
+    browser_act:
+      config.assistant.browser_act ?? ASSISTANT_PACE_BOUNDS.browser_act,
+    browser_navigate:
+      config.assistant.browser_navigate ??
+      ASSISTANT_PACE_BOUNDS.browser_navigate,
+  }
+}
+
+/**
+ * The owner's bounds for what assistants may set, by class, each checked;
+ * null puts a class back to PCP's. One the same as PCP's is stored as none.
+ */
+export async function setAssistantPaceBounds(
+  ctx: VaultContext,
+  values: Partial<Record<BrowserPacingClass, PaceRange | null>>,
+): Promise<void> {
+  const config = await readPacingConfig(ctx.vaultId)
+  const assistant = { ...config.assistant }
+
+  for (const [name, value] of Object.entries(values)) {
+    const pacingClass = name as BrowserPacingClass
+
+    if (!BROWSER_PACING_CLASSES.includes(pacingClass)) {
+      throw invalid("There is no such kind of browser action.")
+    }
+
+    if (value == null) {
+      delete assistant[pacingClass]
+      continue
+    }
+
+    const checked = checkPaceRange(
+      value,
+      pacingClass === "browser_act"
+        ? "what assistants may set for actions in a page"
+        : "what assistants may set for opening a page",
+    )
+
+    if (
+      checked.minMs === ASSISTANT_PACE_BOUNDS[pacingClass].minMs &&
+      checked.maxMs === ASSISTANT_PACE_BOUNDS[pacingClass].maxMs
+    ) {
+      delete assistant[pacingClass]
+    } else {
+      assistant[pacingClass] = checked
+    }
+  }
+
+  await writePacingConfig(ctx, { ...config, assistant })
+}
+
+/**
+ * `pace` held up to `floor`: neither its shortest nor its longest wait
+ * below the floor's, and the floor's burst cap kept.
+ */
+function atLeast(pace: PacingPolicy, floor: PacingPolicy): PacingPolicy {
+  const minIntervalMs = Math.max(pace.minIntervalMs, floor.minIntervalMs)
+  const longest = Math.max(
+    pace.minIntervalMs + pace.jitterMs,
+    floor.minIntervalMs + floor.jitterMs,
+  )
+
+  return {
+    minIntervalMs,
+    jitterMs: longest - minIntervalMs,
+    burst: floor.burst ?? pace.burst,
+  }
+}
+
+/**
+ * What a browser action follows. `own` is the action's own pace, when it
+ * has one (its tab's, else its wrapper's): it comes before the server's and
+ * the class's, but the owner's pace for the site stays a floor under it.
+ * Without one, as resolvePolicy.
+ */
+export function resolveBrowserPolicy(
+  config: PacingConfig,
+  pacingClass: BrowserPacingClass,
+  where: { serverId?: string; site?: string; own?: PaceRange | null },
+): PacingPolicy | null {
+  if (!where.own) {
+    return resolvePolicy(config, pacingClass, where)
+  }
+
+  const policy = rangePolicy(where.own)
+  const site = where.site ? siteOverride(config.sites, where.site) : null
+
+  return site && site.pace !== "unpaced" ? atLeast(policy, site.pace) : policy
+}
+
 /** What a call follows; null when it is not paced. */
 export function resolvePolicy(
   config: PacingConfig,
@@ -381,6 +530,11 @@ export type PacingOverview = {
   classes: Record<PacingClass, { pace: PacingOverride; own: boolean }>
   sites: PacedSite[]
   bounds: typeof PACING_BOUNDS
+  /** What assistants may set for a tab or a wrapper without asking. */
+  assistant: Record<BrowserPacingClass, { range: PaceRange; own: boolean }>
+  assistantDefaults: Record<BrowserPacingClass, PaceRange>
+  /** The longest wait any of those ranges may go to. */
+  assistantMaxMs: number
 }
 
 export async function pacingOverview(
@@ -394,11 +548,25 @@ export async function pacingOverview(
     classes[name] = { pace: own ?? PACING_DEFAULTS[name], own: own != null }
   }
 
+  const bounds = assistantBounds(config)
+
   return {
     defaults: PACING_DEFAULTS,
     classes,
     sites: config.sites,
     bounds: PACING_BOUNDS,
+    assistant: {
+      browser_act: {
+        range: bounds.browser_act,
+        own: config.assistant.browser_act != null,
+      },
+      browser_navigate: {
+        range: bounds.browser_navigate,
+        own: config.assistant.browser_navigate != null,
+      },
+    },
+    assistantDefaults: ASSISTANT_PACE_BOUNDS,
+    assistantMaxMs: MAX_ASSISTANT_PACE_MS,
   }
 }
 

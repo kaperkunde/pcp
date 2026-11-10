@@ -46,6 +46,7 @@ import {
   TAB_IDLE_TTL_MS,
   VIEWPORT,
 } from "./limits"
+import { browserPaceInput } from "../pacing/input"
 import { REF_PATTERN } from "./snapshot"
 
 /**
@@ -301,12 +302,12 @@ const INPUTS: readonly BrowserToolInput[] = [
   {
     name: "tabs",
     title: "Browser tabs",
-    description: `Lists, opens, closes or resets this token's browser tabs (each assistant sees only the tabs it opened). open: a new tab at url, answered first with its id (every other tool needs it as tab) and then its snapshot. list: each with its id, title, address and the link where the owner can watch it. close: the tab, even while a call on it hangs. reset: closes the tab's page and opens it again at its address, for a page that stopped responding (what the page held is gone). The browser keeps at most ${MAX_TABS} tabs, shared by every assistant: every answer says how many are open ("5 of ${MAX_TABS} tabs open"), and list says which run or wrapper opened each tab and how long it has been idle. A tab nobody used for ${TAB_IDLE_TTL_MS / 60_000} minutes, or whose run (run_code's or a wrapper's) has ended, is closed. ${ASKS_FIRST}`,
+    description: `Lists, opens, closes, resets or paces this token's browser tabs (each assistant sees only the tabs it opened). open: a new tab at url, answered first with its id (every other tool needs it as tab) and then its snapshot. list: each with its id, title, address, its pace and the link where the owner can watch it. close: the tab, even while a call on it hangs. reset: closes the tab's page and opens it again at its address, for a page that stopped responding (what the page held is gone). pace: how long the tab waits before each action in its page and before it opens a page, a random wait between min_ms and max_ms after the previous action at the site ended (leave out pace to follow the owner's again); for this tab only, while it is open. Within what the owner lets assistants set it applies at once and the answer says what the tab follows; outside it answers "Not done yet" with a link for the owner. The browser keeps at most ${MAX_TABS} tabs, shared by every assistant: every answer says how many are open ("5 of ${MAX_TABS} tabs open"), and list says which run or wrapper opened each tab and how long it has been idle. A tab nobody used for ${TAB_IDLE_TTL_MS / 60_000} minutes, or whose run (run_code's or a wrapper's) has ended, is closed. ${ASKS_FIRST}`,
     input: z.strictObject({
       action: z
-        .enum(["list", "open", "close", "reset"])
+        .enum(["list", "open", "close", "reset", "pace"])
         .describe(
-          "What to do: list, open (with url), close or reset (with tab).",
+          "What to do: list, open (with url), close, reset or pace (with tab).",
         ),
       url: url.optional().describe("For open: the address to open."),
       tab: tabId.optional().describe("The tab's id, for close and reset."),
@@ -316,6 +317,11 @@ const INPUTS: readonly BrowserToolInput[] = [
         .optional()
         .describe(
           "For open: an exit's name, to open the tab somewhere else than PCP's own address (an SSH server of the owner's, or a VPN). The tab then has a context of its own, signed in to nothing and saved nowhere, and every page of it goes through that exit. Only exits the owner allowed for this token.",
+        ),
+      pace: browserPaceInput
+        .optional()
+        .describe(
+          "For pace: the tab's own pace, per kind of action; a kind left out follows the owner's pace. Leave out pace to put the tab back on the owner's.",
         ),
     }),
     rules: [
@@ -340,13 +346,23 @@ const INPUTS: readonly BrowserToolInput[] = [
         },
       },
       {
-        says: "close and reset need the tab's id.",
+        says: "close, reset and pace need the tab's id.",
         schema: {
           if: {
-            properties: { action: { enum: ["close", "reset"] } },
+            properties: { action: { enum: ["close", "reset", "pace"] } },
             required: ["action"],
           },
           then: { required: ["tab"] },
+        },
+      },
+      {
+        says: "pace (the argument) is only for the action pace.",
+        schema: {
+          if: { required: ["pace"] },
+          then: {
+            properties: { action: { const: "pace" } },
+            required: ["action"],
+          },
         },
       },
     ],

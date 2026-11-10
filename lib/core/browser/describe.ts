@@ -2,11 +2,14 @@ import type { SecretSitesShown } from "../browser-secrets"
 import { siteKey } from "../fetch/rules"
 import { describeRecipe } from "../generate-password"
 import { visible, type ShownText } from "../permission-rules"
+import { BROWSER_CLASS_WORDS, describeRange } from "../pacing/input"
+import { BROWSER_PACING_CLASSES, PACE_KEY_OF } from "../pacing/limits"
 import { EVALUATE_TIMEOUT_MS, SECRET_SIGN_IN_WINDOW_MS } from "./limits"
 import type {
   BrowseAsk,
   HandoverAsk,
   ScriptUseAsk,
+  TabPaceAsk,
   SecretRequestAsk,
   SecretSitesChangeAsk,
   SecretUseAsk,
@@ -202,5 +205,47 @@ export function describeScriptUseAsk(ask: ScriptUseAsk): {
     warning:
       "A script runs as the page's own do: signed in as you where you signed in to this site in the browser, it can read what the page and its scripts see (its storage, cookies a script may read) and act on the site as you. Read it whole before you let it run.",
     full: [{ label: "The script", text: visible(ask.script) }],
+  }
+}
+
+/**
+ * An assistant's pace for one tab, outside what you let assistants set:
+ * each kind of action it sets, with your bounds beside the ones outside.
+ */
+export function describeTabPaceAsk(ask: TabPaceAsk): {
+  title: string
+  lines: string[]
+  warning: string | null
+} {
+  const lines = BROWSER_PACING_CLASSES.flatMap((pacingClass) => {
+    const range = ask.pace[PACE_KEY_OF[pacingClass]]
+
+    if (!range) return []
+
+    const words = BROWSER_CLASS_WORDS[pacingClass]
+    const bounds = ask.bounds[pacingClass]
+
+    return [
+      ask.outside.includes(pacingClass)
+        ? `Before ${words}: ${describeRange(range)}, outside what assistants may set without asking you (${describeRange(bounds)})`
+        : `Before ${words}: ${describeRange(range)}`,
+    ]
+  })
+  const faster = ask.outside.some((pacingClass) => {
+    const range = ask.pace[PACE_KEY_OF[pacingClass]]!
+    return range.minMs < ask.bounds[pacingClass].minMs
+  })
+
+  return {
+    title: `Pace tab ${ask.tabId} as an assistant asks?`,
+    lines: [
+      ...lines,
+      `Tab: ${ask.title || "(no title)"}`,
+      `Address: ${ask.url}`,
+      "For this tab only, while it is open: your pacing settings do not change, and your own pace for a site stays the least it waits there.",
+    ],
+    warning: faster
+      ? "Faster than you let assistants go: a site that watches how quickly its visitors act may take the tab for a robot and flag your account."
+      : null,
   }
 }
