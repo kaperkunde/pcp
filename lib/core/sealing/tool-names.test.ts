@@ -168,4 +168,26 @@ describe("tool names", () => {
     expect(await onDisk("midway_marker")).toBe(false)
     expect((await findTool(ctx, id, "midway_marker"))?.id).toBe(tool.id)
   })
+
+  it("seals the name of a tool whose words are from before but whose schemas are not", async () => {
+    const id = await addServer("Halfway")
+    const tool = (await findTool(ctx, id, "lookup_marker_zeta"))!
+    await db().$executeRawUnsafe(
+      `UPDATE "mcp_tool" SET "name" = 'halfway_marker', "name_key" = NULL, "title" = NULL, "description" = 'HALFWAY-WORDS', "about" = NULL WHERE "id" = ?`,
+      tool.id,
+    )
+
+    expect(await findTool(ctx, id, "halfway_marker")).toMatchObject({
+      id: tool.id,
+      description: "HALFWAY-WORDS",
+    })
+    expect(await ensureSealed(ctx)).toBe(true)
+    expect(await onDisk("halfway_marker")).toBe(false)
+    expect(await onDisk("HALFWAY-WORDS")).toBe(false)
+    expect(await findTool(ctx, id, "halfway_marker")).toMatchObject({
+      id: tool.id,
+      description: "HALFWAY-WORDS",
+      inputSchema: JSON.stringify({ type: "object" }),
+    })
+  })
 })

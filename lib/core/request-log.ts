@@ -3,6 +3,7 @@ import { randomBytes } from "node:crypto"
 import {
   appendFile,
   mkdir,
+  open,
   readFile,
   readdir,
   rename,
@@ -75,6 +76,10 @@ export type RequestLogEntry = {
 }
 
 const FILE = /^mcp-(\d{4}-\d{2}-\d{2})\.jsonl$/
+/** A day's file being written again (sealRequestLogDay), before its rename. */
+const PART = /^mcp-\d{4}-\d{2}-\d{2}\.jsonl\.[0-9a-f]+\.part$/
+/** A part older than this is no rewrite's under way: a crash's. */
+const STALE_PART_MS = 5 * 60_000
 
 function fileFor(day: string): string {
   return path.join(logDir(), `mcp-${day}.jsonl`)
@@ -213,14 +218,40 @@ const SEALED_KEYS = [
   "exit",
 ] as const
 
-/** What binds a line's sealed names to it. */
-function lineAad(line: {
-  vaultId: string
-  id: string
-  ts: string
-  tokenId: string
-}): string {
-  return `request_log:${line.vaultId}:${line.id}:${line.ts}:${line.tokenId}`
+/** The way a line's sealed names are bound to it: what `v` says. */
+const LINE_VERSION = 2
+
+/**
+ * What binds a line's sealed names to it: its vault, id, time and token,
+ * and since version 2 its outcome too (ok, asked, the request, how long,
+ * a rerun), so none of them can be changed in the file without the names
+ * failing to open.
+ */
+function lineAad(
+  line: {
+    vaultId: string
+    id: string
+    ts: string
+    tokenId: string
+    ok?: unknown
+    asked?: unknown
+    request?: unknown
+    ms?: unknown
+    rerun?: unknown
+  },
+  version: number,
+): string {
+  const base = `request_log:${line.vaultId}:${line.id}:${line.ts}:${line.tokenId}`
+
+  return version >= 2
+    ? `${base}:${JSON.stringify([
+        line.ok === true,
+        line.asked === true,
+        typeof line.request === "string" ? line.request : null,
+        typeof line.ms === "number" ? line.ms : 0,
+        line.rerun === true,
+      ])}`
+    : base
 }
 
 /** A line as it is written: its names sealed, the rest as it is. */
@@ -244,12 +275,16 @@ function sealedLine(
     }
   }
 
-  const line = { ts: entry.ts, id, ...plain }
+  const line = { ts: entry.ts, id, v: LINE_VERSION, ...plain }
 
   return {
     ...line,
     sealed: Buffer.from(
-      encryptString(dek, JSON.stringify(names), lineAad({ ...entry, id })),
+      encryptString(
+        dek,
+        JSON.stringify(names),
+        lineAad({ ...entry, id }, LINE_VERSION),
+      ),
     ).toString("base64"),
   }
 }
@@ -465,12 +500,17 @@ function parseLine(line: string, reader: LogReader): RequestLogEntry | null {
         decryptString(
           reader.dek,
           Buffer.from(json.sealed, "base64"),
-          lineAad({
-            vaultId: json.vaultId,
-            id: json.id,
-            ts: json.ts,
-            tokenId: json.tokenId,
-          }),
+          lineAad(
+            {
+              ...json,
+              vaultId: json.vaultId,
+              id: json.id,
+              ts: json.ts,
+              tokenId: json.tokenId,
+            },
+            // A line written before the outcome was bound has no `v`.
+            json.v === 2 ? 2 : 1,
+          ),
         ),
       ) as Record<string, unknown>
       entry = { ...json, ...names }
@@ -616,12 +656,22 @@ export async function readRequestLog(
 
 /**
  * The days whose file holds a line of the vault's from before its names
- * were sealed, oldest first.
+ * were sealed, oldest first. With `keep` (the cleanup's days), a day at or
+ * past the edge of what the cleanup keeps is left out: it is deleted soon
+ * enough, and a rewrite must not race the cleanup for it.
  */
-export async function unsealedLogDays(vaultId: string): Promise<string[]> {
+export async function unsealedLogDays(
+  vaultId: string,
+  keep?: { keepDays: number; now?: Date },
+): Promise<string[]> {
   const found: string[] = []
+  const edge = keep ? cutoffDay(keep.keepDays, keep.now ?? new Date()) : null
 
   for (const day of (await logDays()).reverse()) {
+    if (edge !== null && day <= edge) {
+      continue
+    }
+
     let content: string
 
     try {
@@ -648,14 +698,22 @@ export async function unsealedLogDays(vaultId: string): Promise<string[]> {
   return found
 }
 
+/** Lines a rewrite takes from another process's appends before it gives up. */
+const REWRITE_ROUNDS = 5
+
 /**
  * Writes a day's file again with the vault's lines from before sealed, each
  * where it was, so a line's place (the Log page's id and cursor) stays.
- * New lines wait while it is written. Answers whether a line was sealed.
+ * New lines of this process wait while it is written; lines another
+ * process appended meanwhile are carried over from the file's grown tail
+ * before the rename, and a day deleted meanwhile (the cleanup, a deleted
+ * vault) is not brought back. Answers whether a line was sealed.
  */
 export async function sealRequestLogDay(
   reader: LogReader,
   day: string,
+  /** Tests: what happens between writing the part and renaming it. */
+  hooks: { written?: () => Promise<void> } = {},
 ): Promise<boolean> {
   const state = writers()
 
@@ -668,60 +726,140 @@ export async function sealRequestLogDay(
     done = resolve
   })
 
+  const file = fileFor(day)
+  const part = `${file}.${randomBytes(6).toString("hex")}.part`
+
   try {
     await Promise.allSettled([...state.appending])
-    const file = fileFor(day)
-    let content: string
+    let content: Buffer
 
     try {
-      content = await readFile(file, "utf8")
+      content = await readFile(file)
     } catch {
       return false
     }
 
     let sealed = 0
-    const lines = content.split("\n").map((line) => {
-      const json = lineJson(line)
+    const lines = content
+      .toString("utf8")
+      .split("\n")
+      .map((line) => {
+        const json = lineJson(line)
 
-      if (
-        !json ||
-        json.vaultId !== reader.vaultId ||
-        typeof json.sealed === "string" ||
-        json.keyless === true
-      ) {
-        return line
-      }
+        if (
+          !json ||
+          json.vaultId !== reader.vaultId ||
+          typeof json.sealed === "string" ||
+          json.keyless === true
+        ) {
+          return line
+        }
 
-      const entry = parseLine(line, reader)
+        const entry = parseLine(line, reader)
 
-      if (!entry) {
-        return line
-      }
+        if (!entry) {
+          return line
+        }
 
-      sealed++
-      return JSON.stringify(
-        sealedLine(reader.dek, entry, randomBytes(8).toString("hex")),
-      )
-    })
+        sealed++
+        return JSON.stringify(
+          sealedLine(reader.dek, entry, randomBytes(8).toString("hex")),
+        )
+      })
 
     if (sealed === 0) {
       return false
     }
 
-    const part = `${file}.${randomBytes(6).toString("hex")}.part`
+    await writeFile(part, lines.join("\n"), { mode: 0o600 })
+    await hooks.written?.()
+    let copied = content.length
+
+    for (let round = 0; ; round++) {
+      let size: number
+
+      try {
+        size = (await stat(file)).size
+      } catch {
+        // Deleted meanwhile: it stays deleted.
+        return false
+      }
+
+      if (size === copied) {
+        break
+      }
+
+      if (size < copied || round >= REWRITE_ROUNDS) {
+        // Not a file that only grew, or one that keeps growing: left as it
+        // is, for a later request.
+        return false
+      }
+
+      const tail = Buffer.alloc(size - copied)
+      const handle = await open(file, "r")
+
+      try {
+        await handle.read(tail, 0, tail.length, copied)
+      } finally {
+        await handle.close()
+      }
+
+      await appendFile(part, tail)
+      copied = size
+    }
 
     try {
-      await writeFile(part, lines.join("\n"), { mode: 0o600 })
       await rename(part, file)
     } catch (error) {
-      await unlink(part).catch(() => {})
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+        return false
+      }
+
       throw error
     }
 
     return true
   } finally {
+    await unlink(part).catch(() => {})
     state.rewriting = null
     done()
+  }
+}
+
+/**
+ * Removes the parts a rewrite left behind when its process stopped between
+ * writing and renaming: plain lines of every vault, which would otherwise
+ * outlive the cleanup and a deleted vault. One of a rewrite of this
+ * process's under way stays, unless `all`.
+ */
+async function removeStaleParts(now = Date.now(), all = false): Promise<void> {
+  let names: string[]
+
+  try {
+    names = await readdir(logDir())
+  } catch {
+    return
+  }
+
+  const rewriting = writers().rewriting !== null
+
+  for (const name of names.filter((entry) => PART.test(entry))) {
+    const full = path.join(logDir(), name)
+
+    if (!all && rewriting) {
+      const modified = await stat(full).then(
+        (info) => info.mtimeMs,
+        () => null,
+      )
+
+      if (modified === null || now - modified < STALE_PART_MS) {
+        continue
+      }
+    }
+
+    await unlink(full).catch((error: NodeJS.ErrnoException) => {
+      if (error.code !== "ENOENT") throw error
+    })
   }
 }
 
@@ -733,6 +871,7 @@ export async function logUsage(): Promise<{
   bytes: number
   oldest: string | null
 }> {
+  await removeStaleParts()
   const days = await logDays()
   let bytes = 0
 
@@ -746,6 +885,11 @@ export async function logUsage(): Promise<{
   return { days: days.length, bytes, oldest: days.at(-1) ?? null }
 }
 
+/** The oldest day the cleanup keeps, keeping `keepDays` (today counts as one). */
+function cutoffDay(keepDays: number, now: Date): string {
+  return dayOf(new Date(now.getTime() - (keepDays - 1) * 86_400_000))
+}
+
 /**
  * Deletes the days older than `keepDays` (today counts as one), only files
  * the log itself names: nothing else in the folder is touched.
@@ -754,8 +898,10 @@ export async function pruneRequestLog(
   keepDays: number,
   now = new Date(),
 ): Promise<number> {
-  const cutoff = dayOf(new Date(now.getTime() - (keepDays - 1) * 86_400_000))
+  const cutoff = cutoffDay(keepDays, now)
   let removed = 0
+
+  await removeStaleParts(now.getTime())
 
   for (const day of await logDays()) {
     if (day >= cutoff) {
@@ -777,6 +923,9 @@ export async function pruneRequestLog(
 
 /** Deletes every day of the log: for the vault being deleted. */
 export async function deleteRequestLog(): Promise<void> {
+  // A rewrite under way finds its day gone and leaves it so.
+  await removeStaleParts(Date.now(), true)
+
   for (const day of await logDays()) {
     try {
       await unlink(fileFor(day))

@@ -147,4 +147,44 @@ describe("short names", () => {
     expect(await onDisk("mid-slug")).toBe(false)
     expect((await getServerBySlug(ctx, "mid-slug"))?.id).toBe(id)
   })
+
+  it("gives a definition whose short name another took meanwhile the next free one", async () => {
+    const first = await addServer("Docs")
+    const second = await addServer("Notes")
+    const taken = (await definitionOf(ctx, first))!
+    const clashing = (await definitionOf(ctx, second))!
+    // As a restore with no key leaves it: the plain short name the other,
+    // sealed, definition has.
+    await db().$executeRawUnsafe(
+      `UPDATE "server_definition" SET "name" = 'Notes', "slug" = 'docs', "slug_key" = NULL, "description" = '', "meta" = NULL WHERE "id" = ?`,
+      clashing.id,
+    )
+
+    expect(await ensureSealed(ctx)).toBe(true)
+    expect((await definitionOf(ctx, first))?.slug).toBe(taken.slug)
+    expect((await definitionOf(ctx, second))?.slug).toBe("docs-2")
+  })
+
+  it("seals the rest of a table when one row of it cannot be", async () => {
+    const sealed: string[] = []
+    const row =
+      (name: string, fails = false) =>
+      async () => {
+        if (fails) throw new Error(`${name} does not read`)
+        sealed.push(name)
+        return true
+      }
+
+    expect(
+      await ensureSealed(ctx, {
+        converters: [
+          {
+            table: "test",
+            read: async () => [row("first", true), row("second"), row("third")],
+          },
+        ],
+      }),
+    ).toBe(false)
+    expect(sealed).toEqual(["second", "third"])
+  })
 })

@@ -1,4 +1,12 @@
-import { mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs"
+import {
+  appendFileSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs"
 import path from "node:path"
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
@@ -10,6 +18,8 @@ import { LOG_SCAN_LINES } from "./log-limits"
 import {
   appendKeylessLog,
   appendRequestLog,
+  deleteRequestLog,
+  logUsage,
   noteExitUsed,
   noteOwnerAsked,
   pruneRequestLog,
@@ -394,5 +404,122 @@ describe("a line's names", () => {
 
     expect(await pruneRequestLog(7)).toBe(1)
     expect((await readRequestLog(reader)).entries).toHaveLength(1)
+  })
+})
+
+describe("a line's outcome", () => {
+  it("is bound to its sealed names: one changed in the file reads as no line", async () => {
+    await appendRequestLog({
+      vaultId: "v",
+      dek: reader.dek,
+      tokenId: "t",
+      tool: "execute_write",
+      ok: false,
+      ms: 4,
+      asked: true,
+      request: "req-1",
+    })
+    const [name] = readdirSync(logDir())
+    const file = path.join(logDir(), name!)
+    const written = JSON.parse(readFileSync(file, "utf8")) as Record<
+      string,
+      unknown
+    >
+
+    for (const changed of [
+      { ok: true },
+      { asked: undefined },
+      { request: "req-2" },
+      { ms: 1 },
+      { rerun: true },
+      { v: undefined },
+    ]) {
+      writeFileSync(file, `${JSON.stringify({ ...written, ...changed })}\n`)
+      expect((await readRequestLog(reader)).entries).toEqual([])
+    }
+
+    writeFileSync(file, `${JSON.stringify(written)}\n`)
+    expect((await readRequestLog(reader)).entries).toMatchObject([
+      { tool: "execute_write", outcome: "asked", request: "req-1", ms: 4 },
+    ])
+  })
+})
+
+describe("writing a day again", () => {
+  it("carries over lines another process appended meanwhile", async () => {
+    day("2026-10-01", [line({ tool: "describe", server: "OLD-MARKER" })])
+    const appended = line({ tool: "search", tokenId: "other-process" })
+
+    expect(
+      await sealRequestLogDay(reader, "2026-10-01", {
+        written: async () => {
+          appendFileSync(
+            path.join(logDir(), "mcp-2026-10-01.jsonl"),
+            `${appended}\n`,
+          )
+        },
+      }),
+    ).toBe(true)
+
+    const raw = readFileSync(
+      path.join(logDir(), "mcp-2026-10-01.jsonl"),
+      "utf8",
+    )
+    expect(raw).not.toContain("OLD-MARKER")
+    expect(raw).toContain("other-process")
+    expect(
+      (await readRequestLog(reader)).entries.map((entry) => entry.tool),
+    ).toEqual(["search", "describe"])
+    expect(readdirSync(logDir()).filter((n) => n.endsWith(".part"))).toEqual([])
+  })
+
+  it("does not bring back a day deleted meanwhile", async () => {
+    day("2026-10-01", [line({ tool: "describe" })])
+
+    expect(
+      await sealRequestLogDay(reader, "2026-10-01", {
+        written: async () => {
+          rmSync(path.join(logDir(), "mcp-2026-10-01.jsonl"))
+        },
+      }),
+    ).toBe(false)
+    expect(readdirSync(logDir())).toEqual([])
+  })
+
+  it("leaves out the days the cleanup is about to delete", async () => {
+    day("2026-10-01", [line({ tool: "describe" })])
+    day("2026-10-05", [line({ tool: "describe" })])
+    day("2026-10-06", [line({ tool: "describe" })])
+
+    expect(
+      await unsealedLogDays("v", {
+        keepDays: 2,
+        now: new Date("2026-10-06T10:00:00Z"),
+      }),
+    ).toEqual(["2026-10-06"])
+    expect(await unsealedLogDays("v")).toEqual([
+      "2026-10-01",
+      "2026-10-05",
+      "2026-10-06",
+    ])
+  })
+
+  it("leaves no part a crash left behind past the cleanup or a deleted vault", async () => {
+    day("2026-10-06", [line({})])
+    const part = (hex: string) =>
+      path.join(logDir(), `mcp-2026-10-06.jsonl.${hex}.part`)
+
+    writeFileSync(part("a1b2c3"), line({ server: "PLAIN-MARKER" }))
+    await pruneRequestLog(7, new Date("2026-10-06T10:00:00Z"))
+    expect(existsSync(part("a1b2c3"))).toBe(false)
+
+    writeFileSync(part("d4e5f6"), line({}))
+    await logUsage()
+    expect(existsSync(part("d4e5f6"))).toBe(false)
+
+    writeFileSync(part("0a0b0c"), line({}))
+    writeFileSync(path.join(logDir(), "mine.part"), "not the log's")
+    await deleteRequestLog()
+    expect(readdirSync(logDir())).toEqual(["mine.part"])
   })
 })

@@ -313,6 +313,26 @@ export function sealedToolAbout(
   >
 }
 
+/** What a tool row stores for its schemas, call plan and outline alone. */
+export function sealedToolSchema(
+  ctx: VaultContext,
+  id: string,
+  values: ToolSchema,
+): Pick<
+  Prisma.McpToolUncheckedUpdateManyInput,
+  "schema" | PlainKey<keyof ToolSchema>
+> {
+  return sealFields(ctx.dek, TOOL_SCHEMA, id, {
+    inputSchema: values.inputSchema,
+    outputSchema: values.outputSchema,
+    operation: values.operation,
+    output: values.output,
+  }) as Pick<
+    Prisma.McpToolUncheckedUpdateManyInput,
+    "schema" | PlainKey<keyof ToolSchema>
+  >
+}
+
 /** What a tool row stores for the owner's wording. */
 export function sealedToolOverride(
   ctx: VaultContext,

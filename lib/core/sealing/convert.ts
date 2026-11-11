@@ -1,4 +1,5 @@
 import { scrubFreedPages } from "../cleanup/runtime"
+import { getCleanupConfig } from "../cleanup/state"
 import type { VaultContext } from "../context"
 import { db } from "../db"
 import { sealedSiteAllowance } from "../allowances"
@@ -12,11 +13,13 @@ import {
   readServerMeta,
   sealedServerMeta,
   SERVER_META_SELECT,
+  serverSlugTaken,
 } from "../server-meta"
 import {
   DEFINITION_META_SELECT,
   definitionMeta,
   sealedDefinitionMeta,
+  uniqueDefinitionSlug,
 } from "../definition-rows"
 import {
   canonicalOf,
@@ -29,7 +32,7 @@ import {
   plainToolValues,
   readToolAbout,
   sealedToolAbout,
-  sealedToolContent,
+  sealedToolSchema,
   sealedToolOverride,
   splitAnnotations,
 } from "../tool-rows"
@@ -289,6 +292,15 @@ export const SEAL_CONVERTERS: Converter[] = [
     write: async (ctx, row) => {
       // Every write of these values since seals the whole row with the
       // short name's hash, so a row still without one is as it was read.
+      const meta = readServerMeta(ctx, row)
+      // A short name another server has by now (a restore with no key
+      // compared only the plain ones) takes the next free one.
+      let slug = meta.slug
+
+      for (let n = 2; await serverSlugTaken(ctx, slug, row.id); n++) {
+        slug = `${meta.slug}-${n}`
+      }
+
       const { count } = await db().mcpServer.updateMany({
         where: {
           id: row.id,
@@ -296,7 +308,7 @@ export const SEAL_CONVERTERS: Converter[] = [
           meta: row.meta === null ? null : { equals: row.meta },
         },
         data: {
-          ...sealedServerMeta(ctx, row.id, readServerMeta(ctx, row)),
+          ...sealedServerMeta(ctx, row.id, { ...meta, slug }),
           updatedAt: row.updatedAt,
         },
       })
@@ -312,6 +324,16 @@ export const SEAL_CONVERTERS: Converter[] = [
         take: limit,
       }),
     write: async (ctx, row) => {
+      const meta = definitionMeta(ctx, row)
+      // A short name another definition has by now (a restore with no key
+      // compared only the plain ones) takes the next free one.
+      const slug = await uniqueDefinitionSlug(
+        db(),
+        ctx,
+        ctx.vaultId,
+        meta.slug,
+        row.id,
+      )
       const { count } = await db().serverDefinition.updateMany({
         where: {
           id: row.id,
@@ -322,7 +344,7 @@ export const SEAL_CONVERTERS: Converter[] = [
           plainDescription: row.plainDescription,
         },
         data: {
-          ...sealedDefinitionMeta(ctx, row.id, definitionMeta(ctx, row)),
+          ...sealedDefinitionMeta(ctx, row.id, { ...meta, slug }),
           updatedAt: row.updatedAt,
         },
       })
@@ -349,8 +371,9 @@ export const SEAL_CONVERTERS: Converter[] = [
       let sealed = false
 
       // Each part only while it is still from before: a read of the tools
-      // since seals what it wrote, and the owner's wording is theirs.
-      if (row.about === null || row.schema === null) {
+      // since seals what it wrote, and the owner's wording is theirs. Each
+      // part on its own, so one sealed already leaves the other to do.
+      if (row.about === null) {
         // The annotations' title is words: sealed with the description.
         let annotations = splitAnnotations(null)
 
@@ -363,18 +386,26 @@ export const SEAL_CONVERTERS: Converter[] = [
         }
 
         const { count } = await db().mcpTool.updateMany({
-          where: {
-            id: row.id,
-            about: null,
-            schema: null,
-            annotations: row.annotations,
-          },
+          where: { id: row.id, about: null, annotations: row.annotations },
           data: {
-            ...sealedToolContent(ctx, row.id, row.serverId, {
-              ...values,
+            ...sealedToolAbout(ctx, row.id, row.serverId, {
+              name: values.name,
+              title: values.title,
+              description: values.description,
               annotationsTitle: annotations.annotationsTitle,
             }),
             annotations: annotations.annotations,
+            updatedAt: row.updatedAt,
+          },
+        })
+        sealed ||= count === 1
+      }
+
+      if (row.schema === null) {
+        const { count } = await db().mcpTool.updateMany({
+          where: { id: row.id, schema: null },
+          data: {
+            ...sealedToolSchema(ctx, row.id, values),
             updatedAt: row.updatedAt,
           },
         })
@@ -545,7 +576,11 @@ export const SEAL_CONVERTERS: Converter[] = [
 const REQUEST_LOG_CONVERTER: Converter = {
   table: "request_log",
   read: async (ctx, limit) =>
-    (await unsealedLogDays(ctx.vaultId))
+    (
+      await unsealedLogDays(ctx.vaultId, {
+        keepDays: (await getCleanupConfig()).logDays,
+      })
+    )
       .slice(0, limit)
       .map((day) => async () => {
         await sealRequestLogDay(ctx, day)
@@ -604,8 +639,15 @@ async function sealBatch(
       let count = 0
 
       for (const write of writes) {
-        if (await write()) {
-          count++
+        // One row that fails (a value that does not read, a clash) keeps
+        // the rest of its table from nothing: it is tried again later.
+        try {
+          if (await write()) {
+            count++
+          }
+        } catch {
+          console.error(`[sealing] could not seal a row of ${converter.table}`)
+          failed = true
         }
       }
 
