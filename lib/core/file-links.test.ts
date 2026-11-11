@@ -33,6 +33,7 @@ import {
   openResult,
 } from "./tool-results"
 import { setupVault } from "./vault"
+import { entryCall, listEveryTool } from "./test-handles"
 
 // Links that move a file between PCP and an assistant's own computer: what
 // a download serves and how often, what an upload becomes and for whom, and
@@ -388,7 +389,7 @@ describe("through the gateway", () => {
 
   it("offers the tools only to a token the owner let move files, and says how", async () => {
     const plain = await connect(false)
-    const plainTools = (await plain.client.listTools()).tools.map(
+    const plainTools = (await listEveryTool(plain.client)).tools.map(
       (tool) => tool.name,
     )
     expect(plainTools).not.toContain("share_result")
@@ -396,7 +397,7 @@ describe("through the gateway", () => {
     expect(plain.client.getInstructions()).not.toContain("receive_file")
 
     const mover = await connect(true)
-    const tools = (await mover.client.listTools()).tools.map(
+    const tools = (await listEveryTool(mover.client)).tools.map(
       (tool) => tool.name,
     )
     expect(tools).toEqual(
@@ -412,10 +413,7 @@ describe("through the gateway", () => {
     const { client, scope } = await connect(true)
 
     const received = json(
-      await client.callTool({
-        name: "receive_file",
-        arguments: { name: "my scan.pdf" },
-      }),
+      await client.callTool(entryCall("receive_file", { name: "my scan.pdf" })),
     )
     const handle = received.result as { $result: string }
     expect(received.curl).toBe(`curl -fsS -T 'my scan.pdf' ${received.url}`)
@@ -423,10 +421,7 @@ describe("through the gateway", () => {
     await uploadByLink(secretOf(received.url as string), body(PDF), NO_HEADERS)
 
     const shared = json(
-      await client.callTool({
-        name: "share_result",
-        arguments: { id: handle.$result },
-      }),
+      await client.callTool(entryCall("share_result", { id: handle.$result })),
     )
     expect(shared).toMatchObject({
       name: "my scan.pdf",
@@ -446,10 +441,9 @@ describe("through the gateway", () => {
       }),
     ).not.toBeNull()
 
-    const missing = await client.callTool({
-      name: "share_result",
-      arguments: { id: "nope" },
-    })
+    const missing = await client.callTool(
+      entryCall("share_result", { id: "nope" }),
+    )
     expect(missing.isError).toBe(true)
 
     await client.close()

@@ -22,7 +22,7 @@ import { localItem } from "../repos/local"
 import { reviewInVault } from "../repos/found-review"
 import { createSecret, updateSecret } from "../secrets"
 import { scratchDatabase } from "../test-db"
-import { withCallHandle } from "../test-handles"
+import { entryCall, withCallHandle } from "../test-handles"
 import { writeToolAccess } from "../tool-access"
 import { setupVault } from "../vault"
 import { saveWrapperByOwner } from "./admin"
@@ -148,12 +148,12 @@ async function call(name: string, args: Record<string, unknown>) {
   )
   client = new Client({ name: "test", version: "1.0.0" })
   await client.connect(clientSide)
-  const result = await client.callTool({
-    name,
-    arguments: name.startsWith("call_tool_")
-      ? await withCallHandle(client, args)
-      : args,
-  })
+  const result = await client.callTool(
+    entryCall(
+      name,
+      name.startsWith("execute_") ? await withCallHandle(client, args) : args,
+    ),
+  )
 
   return {
     isError: result.isError === true,
@@ -293,7 +293,7 @@ describe("a secret a flow types into pages by name", () => {
     const secretId = await digidSecret()
     await proposeAndApprove()
 
-    const first = await call("call_tool_destructive", {
+    const first = await call("execute_destructive", {
       server: "digid",
       tool: "sign_in",
       arguments: {},
@@ -311,7 +311,7 @@ describe("a secret a flow types into pages by name", () => {
       origin: SITE,
       level: "always",
     })
-    const second = await call("call_tool_destructive", {
+    const second = await call("execute_destructive", {
       server: "digid",
       tool: "sign_in",
       arguments: {},
@@ -330,7 +330,7 @@ describe("a secret a flow types into pages by name", () => {
     expect((await definitionOf(wrapper.id)).secrets).toEqual([])
     await digidSecret()
 
-    const refused = await call("call_tool_destructive", {
+    const refused = await call("execute_destructive", {
       server: "digid",
       tool: "sign_in",
       arguments: {},
@@ -382,7 +382,7 @@ describe("a secret a flow types into pages by name", () => {
     ])
     expect((await definitionOf(wrapper.id)).secrets).toEqual([])
 
-    const refused = await call("call_tool_destructive", {
+    const refused = await call("execute_destructive", {
       server: "digid",
       tool: "sign_in",
       arguments: {},
@@ -547,7 +547,7 @@ describe("a secret a flow types into pages by name", () => {
       }),
     ])
 
-    const refused = await call("call_tool_destructive", {
+    const refused = await call("execute_destructive", {
       server: "digid",
       tool: "sign_in",
       arguments: {},

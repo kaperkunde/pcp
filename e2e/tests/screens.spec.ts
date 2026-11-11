@@ -109,7 +109,7 @@ test("adds what the pages show", async ({ page, baseURL }) => {
   const token = await createToken(page, TOKEN_NAME)
 
   // A tool nobody decided on asks first: one request waits for the owner.
-  const asked = await callTool(baseURL!, token, "call_tool_destructive", {
+  const asked = await callTool(baseURL!, token, "execute_destructive", {
     server: SLUG,
     tool: "add_numbers",
     arguments: { a: 19, b: 23 },

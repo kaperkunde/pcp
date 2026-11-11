@@ -94,7 +94,7 @@ describe("a call's run, as tabs keep it", () => {
 
   it("is named for the list of tabs", () => {
     expect(runName({ id: "r1", label: null })).toBe("run r1")
-    expect(runName({ id: "r1", label: "run_code" })).toBe("run_code run r1")
+    expect(runName({ id: "r1", label: "run_code" })).toBe("run r1")
     expect(runName({ id: "r1", label: "shop/order" })).toBe(
       "run r1 (wrapper shop/order)",
     )

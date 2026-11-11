@@ -169,7 +169,7 @@ or a quarter of it), it rewrites the file without it.
 How much of the machine PCP may use for what assistants hand it follows the
 machine: its memory (a container's limit, where it has one), its processors
 and the free disk where PCP keeps its data. **Settings → Resources** shows
-what PCP picked and lets you set each yourself: a `run_code` program's memory
+what PCP picked and lets you set each yourself: a `run` program's memory
 (a sixteenth of the machine's, 128 MB to 1 GB), how many programs run at once
 (no more than the processors, and half the memory together), the largest file
 PCP keeps for an assistant and so what a program reads of one (an eighth of a

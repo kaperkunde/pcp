@@ -55,7 +55,7 @@ export type Bridge = (call: {
   server: string
   tool: string
   args: Record<string, unknown>
-  /** Only these parts of a JSON answer (call_tool's fields). */
+  /** Only these parts of a JSON answer (execute's fields). */
   fields?: string[]
 }) => Promise<BridgeOutcome>
 

@@ -13,7 +13,7 @@ import { resolvePointer } from "./refs"
  * before it calls: `{data: [{id: string, amount: number, …}], meta: {…}}`.
  * Text the API sends base64-encoded is `string (base64)`.
  * describe shows it, so the assistant knows the field names to look
- * for, and to pick with call_tool's fields, without a first call to find out.
+ * for, and to pick with execute's fields, without a first call to find out.
  *
  * Read from the schema's own description of the answer, which is untrusted
  * like the rest of it: only local references are followed, a reference back
@@ -136,7 +136,7 @@ function typeWord(schema: JsonObject): string {
       ? type
       : ""
 
-  // Text the API encodes, so an assistant knows to decode it (call_tool's
+  // Text the API encodes, so an assistant knows to decode it (execute's
   // decode) or to leave it out.
   if (
     named === "string" &&

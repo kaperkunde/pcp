@@ -25,7 +25,7 @@ import { ERROR_META_KEY } from "./tools/outcome"
  *   short) with a note on how to ask for less, rather than JSON cut off
  *   mid-string.
  * - JSON is passed on compact, once: structuredContent that repeats the text
- *   is dropped, since the gateway's call_tool declares no output schema and
+ *   is dropped, since the gateway's execute declares no output schema and
  *   a client that shows both would count it twice.
  *
  * Text that is not JSON is cut at MAX_ANSWER_CHARS, as before.
@@ -69,7 +69,7 @@ const MAX_PARSE_CHARS = 5_000_000
 /** How deep into an answer decode looks. */
 const MAX_DECODE_DEPTH = 64
 
-/** How the assistant asked for an answer to be shaped (call_tool's options). */
+/** How the assistant asked for an answer to be shaped (execute's options). */
 export type AnswerShape = {
   /** The parts to keep. */
   fields?: string[]
@@ -81,7 +81,7 @@ export type AnswerShape = {
 
 const CUT = "\n… (truncated by PCP)"
 
-/** call_tool's fields, checked: a list of dotted paths. */
+/** execute's fields, checked: a list of dotted paths. */
 export function readFields(
   value: unknown,
   name = "fields",
@@ -1249,7 +1249,7 @@ export function errorCodeOf(
 /**
  * A tool's answer as a program run by run_code gets it (lib/core/code/):
  * the value itself rather than text to read, so the program can filter it.
- * `fields` and `decode` shape it as for call_tool, and `keep` makes handles
+ * `fields` and `decode` shape it as for execute, and `keep` makes handles
  * of the parts it names; files (base64 that decodes to one, and image,
  * audio and file blocks) become handles on sight, so their bytes never
  * enter the program. Nothing is cut to a preview: an answer up to `max`

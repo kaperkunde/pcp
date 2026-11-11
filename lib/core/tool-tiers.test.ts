@@ -15,6 +15,7 @@ import {
   mergeToolTiers,
   readOwnToolTiers,
   runEntryFor,
+  SETTING_OWN_TOOL_TIERS,
   setToolTier,
   tierAllows,
   tierAnnotations,
@@ -23,6 +24,7 @@ import {
   toolTier,
   toolTierInfo,
 } from "./tool-tiers"
+import { getSetting, setSetting } from "./settings"
 import { setupVault } from "./vault"
 
 // One truth for how much a tool can do: the owner's choice, else a
@@ -72,8 +74,8 @@ describe("a tier from annotations", () => {
     expect(tierAllows("write", "write")).toBe(true)
     expect(tierAllows("write", "destructive")).toBe(false)
     expect(tierAllows("read", "write")).toBe(false)
-    expect(callEntryFor("write")).toBe("call_tool_write")
-    expect(runEntryFor("read")).toBe("run_code_read")
+    expect(callEntryFor("write")).toBe("execute_write")
+    expect(runEntryFor("read")).toBe("run_read")
   })
 
   it("says a tier as the hints PCP advertises, keeping the other two", () => {
@@ -230,34 +232,46 @@ describe("the owner's tiers", () => {
     const own = await listOwnToolTiers(ctx)
     const names = own.map((tool) => tool.name)
     expect(names).toEqual(
-      expect.arrayContaining([
-        "call_tool_read",
-        "call_tool_write",
-        "call_tool_destructive",
-        "run_code_read",
-        "run_code_write",
-        "run_code_destructive",
-        "search",
-      ]),
+      expect.arrayContaining(["memory", "web_fetch", "check_permission"]),
     )
-    expect(own.find((tool) => tool.name === "call_tool_destructive")).toEqual(
+    // The entries' tiers are their names (#113): not the owner's to choose.
+    for (const entry of ["search", "execute_destructive", "run_read"]) {
+      expect(names).not.toContain(entry)
+    }
+    expect(own.find((tool) => tool.name === "memory")).toEqual(
       expect.objectContaining({ derived: "destructive", override: null }),
     )
 
-    await chooseOwnToolTier(ctx, "call_tool_destructive", "write")
-    expect(await readOwnToolTiers(ctx)).toEqual({
-      call_tool_destructive: "write",
-    })
+    await chooseOwnToolTier(ctx, "memory", "write")
+    expect(await readOwnToolTiers(ctx)).toEqual({ memory: "write" })
     expect(
-      (await listOwnToolTiers(ctx)).find(
-        (tool) => tool.name === "call_tool_destructive",
-      ),
+      (await listOwnToolTiers(ctx)).find((tool) => tool.name === "memory"),
     ).toMatchObject({ derived: "destructive", override: "write" })
 
-    await expect(chooseOwnToolTier(ctx, "call_tool", "read")).rejects.toThrow(
-      /no tool called call_tool/,
-    )
-    await chooseOwnToolTier(ctx, "call_tool_destructive", null)
+    await expect(
+      chooseOwnToolTier(ctx, "execute_destructive", "read"),
+    ).rejects.toThrow(/no tool called execute_destructive/)
+    await chooseOwnToolTier(ctx, "memory", null)
     expect(await readOwnToolTiers(ctx)).toEqual({})
+  })
+
+  it("ignores a choice saved for an entry or an old entry's name, and drops it on the next save (#113)", async () => {
+    await setSetting(
+      ctx,
+      SETTING_OWN_TOOL_TIERS,
+      JSON.stringify({
+        call_tool_destructive: "write",
+        run_code_read: "write",
+        execute_read: "destructive",
+        search: "write",
+        memory: "write",
+      }),
+    )
+    expect(await readOwnToolTiers(ctx)).toEqual({ memory: "write" })
+
+    await chooseOwnToolTier(ctx, "web_fetch", "write")
+    expect(
+      JSON.parse((await getSetting(ctx, SETTING_OWN_TOOL_TIERS))!),
+    ).toEqual({ memory: "write", web_fetch: "write" })
   })
 })

@@ -217,7 +217,7 @@ from one endpoint could be built on it. What that would take:
 An API with an OpenAPI schema is added like a server and reached the same way.
 It is an `mcp_server` row with `kind = "openapi"`; its `url` is the API's base
 URL, and each operation in the schema is an `mcp_tool` row. Because it is a
-server row, token scoping, `search`, `describe`, description
+server row, token scoping, `search` (with a query or a ref), description
 overrides, the "used by" list on a secret and the request log all work on it
 unchanged. Two functions in `lib/core/upstream.ts` branch on the kind:
 `syncServerTools` re-reads the schema, `callServerTool` makes the request.
@@ -288,8 +288,8 @@ any other type, a PDF or an image, or of a type the operation declares with a
 schema of `format: binary`, which the plan keeps as `fileAnswers`) is kept
 whole as the token's result (`keepBytes`) and answered as its handle,
 `{file: {"$result", type, size, name}, note}`, the name from
-`Content-Disposition` without a path, so call_tool, a program's `pcp.call`
-and a wrapper pass it on without reading it; describe's `returns` says so.
+`Content-Disposition` without a path, so execute, a program's `pcp.call`
+and a wrapper pass it on without reading it; search's `returns` for its ref says so.
 It is read up to its own cap, the smaller of `MAX_FILE_RESPONSE_BYTES`
 (`openapi/limits.ts`) and the largest file PCP keeps (`resourceLimits()`),
 and a larger one is refused, never cut (a `Content-Length` past it is refused
@@ -444,7 +444,7 @@ change an endpoint decides where PCP sends requests:
   answer. A change to an endpoint that other assistants can see (its words,
   schema or address, or read-only turned off) disables it until the owner
   enables it. Text an assistant writes reaches every other assistant through
-  `search`, the gateway's instructions and `describe`, so it is the
+  `search` (with a query or a ref) and the gateway's instructions, so it is the
   owner's to approve. Names cannot hold line breaks, which would otherwise
   start a line of their own in those instructions.
 - **No credential changes, ever.** A secret only comes with a registration
@@ -661,7 +661,7 @@ SKILL.md. Assistants that see the server or skill read it as the owner's
 note, after the description: the instructions' server and skill lines
 (`… (N tools) Owner's note: …`, cut to 120 characters), a line per server
 or skill under `search` results (it counts toward
-finding the server, too), the head of `list_tools`, `describe`
+finding the server, too), the head of `list_tools`, `search`'s ref
 (`ownerNote`, beside `serverName` and `serverDescription`; a skill's under
 its frame) and `check_server`. The owner wrote it, so it may stand in the
 instructions as the descriptions do.
@@ -1087,7 +1087,7 @@ until it is made plain or emptied: its files go with its keys.
 `/mcp` (`gateway.ts`), taking the family's arguments and `store` (a store's
 short name; without it, PCP's own). They are the default way in, not a second
 implementation: the tool named is the store server's own, run through the
-same path as `call_tool_<tier>` (`callResolved`: the token's level for that
+same path as `execute_<tier>` (`callResolved`: the token's level for that
 server's tool, blocked refused, ask a permission request, the arguments
 checked by the one validator, the tier at most the top-level tool's own),
 and logged under the store's server and tool.
@@ -1100,7 +1100,7 @@ deleted, when the folder says so and PCP no longer reaches it), the folder's
 absolute path, whose files the owner wants these to be (`write_as`) and the
 umask for what PCP makes (`umask`, 002 by default, so a Samba share's group
 sees ordinary files). Being a server, it has levels, tiers, read-only,
-pacing, search and describe as any other; it has no definition, and it is
+pacing and search as any other; it has no definition, and it is
 never an item in a linked repository. Only the owner adds one, from the SSH
 server's page, and changes it on its own; `register_server` has no kind for
 it, as for the SSH server itself. Its rows are exported and wiped with the
@@ -1607,10 +1607,12 @@ owner turns it on) gets one more tool, `memory`, with the commands of Claude's
 memory tool (view, create, str_replace, insert, delete, rename, over files
 under `/memories`) plus search and every, a second one, `read_memory`, with
 only every, view and search, and a paragraph in the instructions saying when
-to use them. `read_memory` and `call_tool_read` (the entry for a tool in
-the Read tier, below) are marked read-only, so a
-client that holds back other tools, as Claude Code's plan mode does, lets
-them through; the token's levels apply to them as to the rest. The rules are in `lib/core/memories.ts`. Like endpoint
+to use them. Both run through `execute_<tier>` by name (#113); `search`
+with no arguments gives what `read_memory every` does, and `search` and
+`execute_read` (the entry for a tool in the Read tier, below) are marked
+read-only, so a client that holds back other tools, as Claude Code's plan
+mode does, lets them through; the token's levels apply to them as to the
+rest. The rules are in `lib/core/memories.ts`. Like endpoint
 management, they are drawn around the fact that what one assistant writes
 another one reads:
 
@@ -1741,7 +1743,7 @@ the owner's or one they read:
   memories and name each visible one with its description while they fit in
   `SKILL_INSTRUCTIONS_CHARS`, past it by name alone, and past
   `MAX_INSTRUCTION_SKILLS` not at all ("search finds the rest"). `search`
-  ranks them beside tools and memories; `describe` with `skill:<name>`
+  ranks them beside tools and memories; `search` with the ref `skill:<name>`
   answers with one framing line ("A procedure the owner approved: follow it
   when the task matches."), the whole SKILL.md, its files by ref
   (`skill:<name>/<file>` reads one) and, for each tool it names that the
@@ -1776,9 +1778,9 @@ the owner's or one they read:
   at `/skills/mine/<name>/SKILL.md` and `/skills/mine/<name>/<file>`
   (`skill.visibility` `private`, `skill.token_id` the token): create,
   str_replace, insert, delete and rename are made at once, no request. Only
-  that token sees them (`skillsFor` takes the token; search and describe
+  that token sees them (`skillsFor` takes the token; search, by query or ref,
   name one `skill:mine/<name>`, the instructions list it as "(Your own.)",
-  and describe frames it as the assistant's own, never as approved), and the
+  and search's ref frames it as the assistant's own, never as approved), and the
   owner, on the Skills page, marked with the token's name, where they read,
   edit, delete and share it (`shareSkill`: theirs from then on). An own
   skill's name is unique among that token's own (at most `MAX_OWN_SKILLS`,
@@ -2064,7 +2066,7 @@ items at once.
   due at the next request. Sync now runs one at once.
 - **Assistants helping**, only a token that may manage endpoints, through
   the tools it has: `search` lists waiting changes as kind `repo`
-  (`repo:<id>`), `describe` gives both sides' files, what differs and
+  (`repo:<id>`), `search`'s ref gives both sides' files, what differs and
   PCP's flags, and the memory tool writes drafts under `/repos/<id>/`.
   Writing `/repos/<id>/REVIEW.md`, the assistant's own safety review, makes
   the merged files and the review one `repo_change` request that shows the
@@ -2110,7 +2112,7 @@ version of PCP's suggested instructions they were copied or merged from.
   `MAX_INSTRUCTIONS_CHARS`), since clients cut instructions short. For a
   token that keeps memories, `read_memory every` opens with the same block.
   `search`'s description carries the one rule that matters most:
-  describe a tool before calling it and pass its call_handle; check before
+  look a tool up with search's ref before running it and pass its call_handle; check before
   retrying anything that may have happened.
 - **The owner's to change.** The token's Advanced page has the editor and,
   folded, exactly what the token is told at the start of a conversation
@@ -2257,8 +2259,8 @@ that `web_fetch` was called and not where to.
 ## Running code
 
 A token made with "run code" (`api_token.run_code`, off unless the owner
-turns it on) gets `run_code_read(code)`, `run_code_write(code)` and
-`run_code_destructive(code)`, one implementation with the tier as its
+turns it on) gets `run_read(code)`, `run_write(code)` and
+`run_destructive(code)`, one implementation with the tier as its
 parameter: a program's `pcp.call` reaches tools at or below the entry's
 tier only, and one above refuses with an error the program may catch
 (before its arguments are checked or the owner asked); the duplicate
@@ -2291,14 +2293,14 @@ three parts:
   the instance, which is then dropped untouched.
 - **The bridge** (`run.ts`) is everything the program can ask for, as an
   operation name and a JSON payload it checks as untrusted: `call` (a
-  server, a tool, its arguments, and call_tool's `fields`, `decode` and
+  server, a tool, its arguments, and execute's `fields`, `decode` and
   `keep`), `read` (one of the token's own kept results, as text or base64, whole
   or a part: `offset` and `length` count a file's bytes or a text's
   characters, so a program reads a large file a piece at a time within the
   same bound on one answer), `keep`
   (a text kept as a result of the token's, returning its handle), `tools`
   (the token's servers, or one's tools, as `list_tools` gives them),
-  `describe` (one of those tools as `describe` gives it, from the catalogue
+  `describe` (one of those tools as `search`'s ref gives it, from the catalogue
   and without a call_handle, since `call` takes names; a blocked or unknown
   tool is refused as a call to it would be, and no server is read),
   `media` (below), and the waits: `sleep` (`pcp.sleep(ms)`, at most
@@ -2325,8 +2327,8 @@ three parts:
   minutes.
 - **The caller** is the gateway's: `resolveCall` looks the tool up among
   the token's own and refuses a blocked one or a handle the token has no
-  result for, as for `call_tool_<tier>`. An "ask" tool leaves the same permission
-  request a `call_tool_<tier>` would and stops the run, which answers with what ran
+  result for, as for `execute_<tier>`. An "ask" tool leaves the same permission
+  request a `execute_<tier>` would and stops the run, which answers with what ran
   before it and the owner's link last; the owner's Allow once runs that one
   call for `check_permission`, and Always allow (or Allow for, while it
   lasts) lets the next run make it.
@@ -2393,7 +2395,7 @@ never sees one. Its state is kept on `globalThis`, like the browser's,
 because the boot code that listens and the gateway are bundled apart.
 
 Each call is in the request log under the entry the program came through
-(`run_code_read`, `run_code_write`, `run_code_destructive`), by server and
+(`run_read`, `run_write`, `run_destructive`), by server and
 tool; the
 program, what it printed and its errors are not logged or kept. What it
 printed (up to a million characters) and what it returned come back in the
@@ -2419,7 +2421,7 @@ run_code cannot learn in time that nobody is waiting. It does not try to:
   completed, with a warning to check them before running it again when
   there are any. A call that changes things and failed on its way (a
   `PcpError` "upstream": not reached, timed out) is marked as one that may
-  have gone through; `call_tool_<tier>` says the same in one line.
+  have gone through; `execute_<tier>` says the same in one line.
 - run_code answers at most `RUN_ANSWER_MS` (45 seconds) after it started.
   A program not done by then, or whose request's signal aborted, is not
   stopped: it goes on within `RUN_TIMEOUT_MS`, and the answer says it is
@@ -2487,7 +2489,7 @@ checkSyntax`), nothing has a character that does not show on screen
   the owner's approval: Levels, below); a call to anything else is an error
   the program sees. The arguments are checked against the tool's schema by
   the one validator (`tools/validate.ts`) first, and each call the program
-  makes is checked as call_tool's are (`call-arguments.ts`) before it runs:
+  makes is checked as execute's are (`call-arguments.ts`) before it runs:
   a call that uses an old argument name of a family's tool runs, and the
   wrapper's answer says what to change in which tool's program with
   `update_wrapper`; one that no longer fits is refused with what is wrong
@@ -2496,7 +2498,7 @@ checkSyntax`), nothing has a character that does not show on screen
   tool's is. When the tool has an `outputSchema`, the return is checked
   against it by the same validator, as strictly as arguments, and passed on
   as `structuredContent` with its JSON as the text; one that does not fit is
-  an error naming where, not passed on. `describe` shows the schema as
+  an error naming where, not passed on. `search`'s ref shows the schema as
   `outputSchema` (`mcp_tool.output_schema`), and the owner reads it in full
   on the request. A `$ref` is refused when it is saved, not followed. Gateway calls and the owner's allowed requests
   run with `withWrappers(executor)`, which sends a wrapper's tool to its
@@ -2591,7 +2593,7 @@ reviewInVault`, `secret_binding`, so even a change of text only waits
   tool's `calls`) is left out of `search`, `list_tools`, `pcp.tools`
   and the instructions' counts (`listedTools`) for a token while the
   wrapper's tool is not blocked for it; it can still be called and
-  described by name (`pcp.describe` too), and `describe` says what
+  described by name (`pcp.describe` too), and `search`'s ref says what
   replaced it. The owner
   shows it again from the server's page (`showReplacedTool`, which takes it
   out of every wrapper's lists).
@@ -3597,7 +3599,7 @@ above):
 
 - `callServerTool` (`upstream.ts`), for a server's tools: MCP servers, API
   endpoints, mail and calendar accounts and SSH servers, paced by the
-  server. call_tool_<tier>, run_code_<tier>'s `pcp.call`, a
+  server. execute_<tier>, run_<tier>'s `pcp.call`, a
   wrapper's calls and a call the owner allowed all end there. The browser's
   actions go through it too, and are paced in `browser/call.ts` by the tab's
   site (for a navigation, the site it opens) as a turn taken on the tab's
@@ -3657,7 +3659,7 @@ calls carry the run's end (`code/run.ts CallRun.deadline`: its start plus
 `RUN_TIMEOUT_MS`), and a wrapper's calls their run's (its own limit, or the
 calling run's end when that comes first), so a program waits for its turn
 instead of failing with work half done. A call straight from an assistant's
-request (call_tool_<tier>, web_fetch) or from the owner's
+request (execute_<tier>, web_fetch) or from the owner's
 answer to one carries `callDeadline()`: a wait up to
 `PACING_CALL_WAIT_MS`, 45 seconds, the same clock as `RUN_ANSWER_MS`. A
 caller that names none waits `PACING_MAX_WAIT_MS` at most.
@@ -4437,7 +4439,7 @@ connect, an upload link, or a capability to set up, as `structuredContent`
 `{kind: "needs_owner", reason, …}` with the link last in the text), or an answer made elsewhere passed on, in which a
 permission link is recognised and marked the same way.
 
-The families behind call_tool are written to the same interface
+The families behind execute are written to the same interface
 (`tools/family.ts`): `defineInnerTool` publishes a browser, mail,
 calendar, SSH or service tool's schema the same way, with its rules across
 arguments ("a ref or a target, one of them") as JSON Schema under the
@@ -4458,22 +4460,42 @@ server's status. A JSON-RPC error an MCP server answers with is a tool
 error in its words: the server is not marked down and the call is not said
 to have maybe gone through, which only a failure on the way says. An API
 endpoint's answer that is not an object is structuredContent as it is.
-An endpoint another PCP version built is built again when describe or a
+An endpoint another PCP version built is built again when search's ref or a
 call meets it; one whose schema no longer builds keeps its tools and says
 it needs migrating, with the edits `get_endpoint`'s `include_problems`
 proposes for `update_endpoint`.
 
 An MCP client that connects to `/mcp` receives an `instructions` string
 listing the servers its token can reach, each with the owner's one-line
-description and the number of tools it may see, and these tools (two more
-for a token with the right to manage endpoints, `memory` for a token that
-keeps memories, `web_fetch` for a token that fetches web pages, `run_code`
-for a token that runs code, and four for a token that proposes wrappers, all
-above). A request without a valid
-token is answered 401, and a token makes at most 240 requests a minute, one
-message each (`app/mcp/route.ts`). The tools:
+description and the number of tools it may see, and a list of seven tools at
+most (#113): `search`, `execute_read`, `execute_write` and
+`execute_destructive`, and for a token that runs code `run_read`,
+`run_write` and `run_destructive`. Every other tool of PCP's (below, and
+two more for a token with the right to manage endpoints, `memory` and
+`read_memory` for a token that keeps memories, `web_fetch` for a token that
+fetches web pages, `check_run` for a token that runs code, and four for a
+token that proposes wrappers, all above) is registered on the same server
+but left out of `tools/list` (`tools/serve.ts listOnly`): `search` finds it
+(kind `pcp`) and `execute_<tier>` runs it by name. A list of forty tools
+cost every conversation its definitions and every client's tool picker its
+room, and clients cut long descriptions short; seven entries with honest
+annotations keep what a client asks about to the tier a call can do, and
+the longer guidance travels in what `search` answers. A request without a
+valid token is answered 401, and a token makes at most 240 requests a
+minute, one message each (`app/mcp/route.ts`). The tools:
 
-- `search(query, server?, kind?, limit?)` ranks the catalogue, PCP's own
+- `search(query?, ref?, server?, kind?, limit?)` opens its description with
+  "Check first:", so a client that shows a deferred tool's first words
+  still says to call it before anything else. With neither `query` nor
+  `ref` (nor `server` or `kind`), it answers with the owner's standing
+  rules: what `read_memory every` gives for a token that keeps memories
+  (the owner's instructions, the memories chosen for every conversation,
+  the rest by path), or the owner's instructions alone, then the skills the
+  token sees as the instructions list them, then the instructions' key
+  rules under "How PCP works:" (`keyRules`); `limit` alone is refused, as
+  there is nothing to search by. The session has then read the
+  memories and has the key rules (clients/sessions.ts). With `ref`, it is
+  what `describe` was (`search(ref)`, below). With `query`, it ranks the catalogue, PCP's own
   tools the token has (as `buildGatewayServer` registered them), the skills
   the token sees and (for a token that keeps memories) the memories it reads
   together (`lib/core/search.ts searchEverything`: name, title, description
@@ -4485,8 +4507,8 @@ message each (`app/mcp/route.ts`). The tools:
   more than one further on; a skill scores as a tool named
   after it, a memory as one named by its path and described by its text),
   and returns `kind ref — line` lines: `tool server/tool`, `pcp <name>`
-  with its title, first sentence and that it is called directly (not
-  through `call_tool_<tier>`), `skill skill:<name>` with its description, `memory
+  with its title, first sentence, its tier and the `execute_<tier>` that
+  runs it by name (`pcpToolNote`), `skill skill:<name>` with its description, `memory
 /memories/…` with the line that says most of the query. A name the query
   gives exactly (the whole query, or a term in it that reads as a name;
   `server/name` too; case, `-`, `_`, `.` and spaces aside, and without an
@@ -4501,7 +4523,8 @@ message each (`app/mcp/route.ts`). The tools:
   and its title and lead then score as its name does; never by a word
   further on (which says how it works with the others), nor by a word the
   leads of a fifth of PCP's tools share ("owner", "tool"). With an empty
-  query it comes up only for kind `pcp`. `server` keeps to one server's
+  query it comes up only for kind `pcp`, and then every one of them is
+  listed unless `limit` says fewer. `server` keeps to one server's
   tools, `kind` to one kind (`tool`, `pcp`, `skill`, `memory`). With an
   embeddings provider (Search's embeddings, below), each item's nearness to
   the query is added to its keyword score.
@@ -4509,12 +4532,11 @@ message each (`app/mcp/route.ts`). The tools:
   server, by name, with its level (`allowed` or `ask`) and a summary,
   `LIST_PAGE_SIZE` at a time (`listTools` in `lib/core/search.ts`), so an
   access review does not depend on what a search happens to rank.
-- `describe(ref)` (or `describe(server, tool)`) reads what search
-  found: a skill (Skills, above), a memory as `read_memory view` gives it,
-  one of PCP's own tools (its name, also with an app's prefix or as
-  `pcp/<name>`: its title, description, input and output schema and
-  annotations, with no `call_handle`, since it is called directly), or a
-  tool. For a tool it returns the description (the owner's
+- `search(ref)` reads what a search found: a skill (Skills, above), a
+  memory as `read_memory view` gives it, one of PCP's own tools (its name,
+  also with an app's prefix or as `pcp/<name>`: its title, description,
+  input and output schema, annotations, tier and `run_with`, with no
+  `call_handle`, since `execute_<tier>` takes its name), or a tool. For a tool it returns the description (the owner's
   override when there is one), the JSON Schema exactly as the upstream
   published it, whether the tool runs at once or asks first, its
   `outputSchema` when it declares one (`mcp_tool.output_schema`), and for
@@ -4522,11 +4544,27 @@ message each (`app/mcp/route.ts`). The tools:
   from the schema (`openapi/outline.ts`, stored as `mcp_tool.output`); text
   the schema marks base64 (`format: byte`) shows as `string (base64)`.
   First in its answer is the tool's `call_handle` (below).
-- `call_tool_read`, `call_tool_write` and `call_tool_destructive`
-  (`call_handle, arguments, fields?, decode?, keep?`), one per tier (Tool
-  tiers, below), take no
-  server or tool name, only the handle `describe` gave, so a tool is
-  always described before it is called. It checks the arguments against
+- `execute_read`, `execute_write` and `execute_destructive`
+  (`call_handle, arguments, fields?, decode?, keep?`, or `tool, arguments`),
+  one per tier (Tool tiers, below), take no server name. One of the owner's
+  tools is named only by the handle `search` gave for its ref, so a tool is
+  always looked up before it is called; one of PCP's own tools is named by
+  `tool`, its bare name (`pcp/<name>` and an app's prefix read as it), with
+  its own `arguments` (and, on `execute_write` and `execute_destructive`,
+  `rerun` with a `reason`) and nothing else. That call is served as the
+  tool's own (`registerTool`'s `dispatch`): its own validator, its line in
+  the request log under its own name, the lead. A Write or Destructive one
+  goes through the duplicate guard as a server's tool does (`guardCall` on
+  the arguments as checked, under the server id `pcp`), except the stores'
+  tools (their own tool's call is the one guarded), the capabilities', those
+  that say a repeat does nothing more (`idempotentHint`: `withdraw_request`),
+  and `memory`'s and `web_fetch`'s calls that only read (view, search,
+  every; GET, HEAD). Its structuredContent is dropped when its text already
+  is that JSON (`withoutRepeatedStructure`: the entry declares no output
+  schema, so a client would show it twice), and kept for a needs_owner
+  answer or when the text says it in words. A tool above the entry's tier,
+  an entry's name or a name PCP does not have is refused by the entry
+  before anything is checked. For the owner's tool, the entry checks the arguments against
   the tool's stored inputSchema, then opens a connection
   to the upstream with the configured credential (header secret or OAuth
   token, refreshed by the SDK when needed), calls the tool, and passes the
@@ -4543,11 +4581,16 @@ message each (`app/mcp/route.ts`). The tools:
   Every tier's entry takes the same handle; a tool above the entry's tier
   is refused, naming the entry that runs it, before anything else.
 - `search_tools` and `describe_tool`, the old names, are gone after their
-  release (docs/breaking-changes.md).
+  release (docs/breaking-changes.md). For one release from #113, `describe`,
+  `call_tool_<tier>` and `run_code_<tier>` are still registered under their
+  old names, unlisted, and answer as the entry that took over
+  (`RETIRED_ENTRIES` in `tool-tiers.ts`), and each of PCP's own tools still
+  answers by its own name; every such answer opens with a line naming what
+  to call now (`retiredNote`, `ownNameNote`).
 - `check_permission(id? | ids?, mode?)` (several ids wait together, `any` or `all`, `checkPermissions`), `withdraw_request(id)`, `check_server(server)`,
   `register_server(...)` and `propose_tool_access(changes)` belong to the
   permission flow below.
-- `check_run(id)`, beside `run_code_<tier>` for a token that runs code, says how
+- `check_run(id)`, beside `run_<tier>` for a token that runs code, says how
   one of the token's runs went (Running code, above). It only reads.
 - `read_result(id, offset?, length?, find?)` reads a slice of an answer
   PCP shortened and kept whole, or of a kept value; a file that is not text
@@ -4558,11 +4601,15 @@ message each (`app/mcp/route.ts`). The tools:
 Some clients ask before every call to a tool annotated `destructiveHint:
 true` however the owner answered before (Claude's voice mode on iOS), and
 some let only read-only tools through (Claude Code's plan mode). So every
-tool has a tier, and every tier its own entry tools: `call_tool_read`,
-`call_tool_write` and `call_tool_destructive`, and `run_code_read`,
-`run_code_write` and `run_code_destructive`. Each runs tools at or below
-its own tier and advertises its tier in its annotations; the owner's
-levels apply in every tier, and a tier adds no right.
+tool has a tier, and every tier its own entry tools: `execute_read`,
+`execute_write` and `execute_destructive`, and `run_read`, `run_write` and
+`run_destructive`. Each runs tools at or below its own tier and advertises
+its tier in its annotations, which are what a client sees: an entry's tier
+is its name, never the owner's choice, and `search`, `execute_read` and
+`run_read` are the read-only ones. PCP's own tools behind them keep their
+own tiers (the owner's choice included), which decide the `execute_<tier>`
+that runs them by name. The owner's levels apply in every tier, and a tier
+adds no right.
 
 `lib/core/tool-tiers.ts` is the one place a tier comes from: the owner's
 choice, else for a wrapper's tool the highest tier of the tools it calls (a
@@ -4575,7 +4622,7 @@ PATCH Write, DELETE Destructive. Derived tiers are worked out when asked,
 never stored. Everything that asks whether a tool reads asks there: the
 entry gates in `gateway.ts` (`callUpstream`, run_code's `pcp.call`),
 `read-only.ts markedReadOnly` (pacing's read or change, a run's trace),
-the permission page's warning, the wrapper review's badges, describe
+the permission page's warning, the wrapper review's badges, search's ref
 (`tier`, `run_with`), list_tools, search and pcp.tools, and
 `loadGatewayServers`, which puts each tool's tier on the request's view.
 
@@ -4628,7 +4675,7 @@ owner may set (`CALL_RECORD_KEEP_MS`).
 
 The guard sits where a call is resolved, after its arguments are checked
 and before it asks or runs: `gateway.ts callResolved` for
-`call_tool_write` and `call_tool_destructive`, `forwardCall` for
+`execute_write` and `execute_destructive`, `forwardCall` for
 run_code's `pcp.call`, and `wrappers/run.ts innerCall` for a wrapper's
 calls; never in `upstream.ts`, so a call the owner allowed on PCP's page
 (and a wrapper's calls in a run the owner allowed) is not guarded. Not
@@ -4643,8 +4690,8 @@ allowed run failed, the next identical call is held back rather than
 asking the owner again unaware.
 
 An assistant repeats a call on purpose with `rerun: true` and a `reason`
-(required with it, under `allOf`) on `call_tool_write` and
-`call_tool_destructive`, or `{ rerun: true, reason }` in `pcp.call`'s
+(required with it, under `allOf`) on `execute_write` and
+`execute_destructive`, or `{ rerun: true, reason }` in `pcp.call`'s
 options (`--rerun REASON` and `rerun=True, reason=…` in the sandbox). The
 request log notes `rerun` on the call's line; the reason is the assistant's
 own words and stays out, as arguments do. A wrapper's tool repeated so
@@ -4671,7 +4718,7 @@ server, tool name, row id and the first bytes of the schema's hash), those
 bytes, and a 128-bit call MAC over the same with the whole hash of the
 tool's canonical inputSchema (`canonicalJson`). So a handle cannot be made
 without the vault's key, works for its own token only, and goes stale when
-the schema changes. `call_tool_<tier>` resolves it against the catalogue as it is
+the schema changes. `execute_<tier>` resolves it against the catalogue as it is
 and answers, as a tool error and with nothing run or asked:
 
 - a genuine handle for an older schema: "The tool changed since you
@@ -5006,7 +5053,7 @@ which comes back to the page), then "Launch <item>" to the repository's
 import page at the common repository's head commit, read on the page's load
 (where the owner reads the item whole, picks the SSH server and its secrets),
 or a link to the service they have. Search adds a "not installed" line for a
-capability its query names (`capabilitiesNamed`) with no provider, describe
+capability its query names (`capabilitiesNamed`) with no provider, search's ref
 of a capability tool lists its providers or says there is none, and
 read_result's answer for a picture or a PDF names the tool that reads it.
 
@@ -5053,16 +5100,17 @@ Sessions are kept in memory too (`clients/sessions.ts`), as /mcp is
 stateless and no request carries a session id: a session is a token and its
 client, begun again by an `initialize` and forgotten after half an hour
 without a request; two conversations at once share one, which is accepted.
-In it, PCP says three things once. `search` and `describe` add a line of
-their own, after their answer, while `read_memory` `every` has not run
-("Owner's rules: call read_memory with command "every" first."), for a token
-that keeps memories. For a profile that mirrors, the instructions' key
-rules (how to find and call a tool, the owner's link, check_permission,
-read_result) follow `read_memory` `every`'s answer, or else the first
-`search` or `describe` answer, as a text of its own so a JSON answer stays
-JSON; with the owner's own instructions when the token keeps no memories,
-since `read_memory` `every` gives them otherwise. And every answer of
-PCP's own tools (`call_tool_*` and `run_code_*` among them) starts with a
+In it, PCP says three things once. `search` adds a line of its own, after
+its answer, while neither its standing rules (no arguments) nor
+`read_memory` `every` have been read ("Owner's rules: call search with no
+arguments first."), for a token that keeps memories. For a profile that
+mirrors, the instructions' key rules (how to find and call a tool, the
+owner's link, check_permission, read_result) are in the standing rules
+(for every profile), follow `read_memory` `every`'s answer, or else the
+first `search` answer, as a text of its own so a JSON answer stays JSON;
+with the owner's own instructions when the token keeps no memories, since
+the standing rules give them otherwise. And every answer of PCP's own tools
+(`execute_*` and `run_*` among them) starts with a
 text naming the token's requests the owner answered that the session has
 not heard of, each once (`answeredLead` in the gateway, through
 `ServeHooks.lead`, `withLeadText`): in front, so an answer that asks the
@@ -5083,8 +5131,8 @@ Every token has a level per tool (`api_token_tool_access`,
 `lib/core/tool-access.ts`): **allowed**, **blocked**, or, when there is no
 row, **ask**. Rows are keyed by the tool's name, so a tool that drops out of
 a refresh and comes back keeps its level. Blocked tools are left out of the
-instructions, `search`, `list_tools` and `describe`, and
-`call_tool_<tier>` and `run_code_<tier>` refuse them. The gateway loads the levels by
+instructions, `search` and `list_tools`, and
+`execute_<tier>` and `run_<tier>` refuse them. The gateway loads the levels by
 token id. A wrapper's tool comes out at the strictest of its own level and
 those of the tools it calls (Wrappers, above).
 
@@ -5158,7 +5206,7 @@ own.
 no level: it leaves an allowance (`lib/core/allowances.ts`,
 `api_token_tool_allowance` and `api_token_site_allowance`), the token, the
 tool or site, and when it ends. It is read only where the levels come out
-at "ask" (`loadGatewayServers` for tools, which `call_tool_<tier>` and run_code
+at "ask" (`loadGatewayServers` for tools, which `execute_<tier>` and run_code
 both go through; `resolveFetchAccess` for sites, which web fetch and the
 browser's page gate both go through) and lifts that to "allowed" until it
 ends. It never lifts a block, and when it ends the levels decide as they

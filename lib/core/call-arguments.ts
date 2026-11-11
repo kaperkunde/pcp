@@ -22,8 +22,8 @@ import { validate } from "./tools/validate"
 
 /**
  * The one check of a call's arguments before anything runs or the owner is
- * asked, for every way a call reaches a tool: call_tool_<tier>,
- * run_code_<tier>'s pcp.call, a wrapper's program and a
+ * asked, for every way a call reaches a tool: execute_<tier>,
+ * run_<tier>'s pcp.call, a wrapper's program and a
  * browser flow (wrappers/run.ts). A tool of PCP's own families (the
  * browser, mail and calendar accounts, SSH servers, services, storage
  * roots) is checked by

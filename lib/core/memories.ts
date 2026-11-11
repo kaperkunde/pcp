@@ -180,7 +180,7 @@ export const MEMORY_MIGRATION_STEPS = [
   "1. Look for what this client keeps for the owner outside PCP: its own memory or saved preferences, a memory snapshot in your context, the owner's personal instruction files (a user-level CLAUDE.md or the like), skills of their own. Leave what belongs to a project, such as a repository's CLAUDE.md or skills, where it is. If you can see none, call migration_done and stop here.",
   "2. Tell the owner briefly what you found and ask whether to move it into PCP. Move nothing until they say yes; if they say no, call migration_done.",
   `3. Move each with the memory tool, keeping its structure: a memory per file or topic under ${MEMORY_ROOT}/…, what every assistant should read under ${MEMORY_ROOT}/${SHARED}/… (which asks the owner), a skill as /skills/<name>/SKILL.md (which asks the owner). Never a secret or a password.`,
-  "4. Read each one back with read_memory and check it says what the original did.",
+  "4. Read each one back (search with its path as ref) and check it says what the original did.",
   "5. Ask the owner again before deleting the originals, and delete nothing without that second yes.",
   "6. Then delete the client's copies if this client lets you; if it does not, tell the owner exactly what to remove, and where.",
   `7. Call memory with command "migration_done": it turns this off for this token, and only the owner can turn it on again.`,

@@ -79,7 +79,7 @@ test("an OAuth server added from the Add menu is connected through the browser, 
   // The gateway calls the upstream with the token PCP got.
   const token = await createToken(page, `OAuth assistant ${RUN}`)
   await allowAllTools(page, `OAuth assistant ${RUN}`, slug)
-  const echoed = await callTool(baseURL!, token, "call_tool_destructive", {
+  const echoed = await callTool(baseURL!, token, "execute_destructive", {
     server: slug,
     tool: "echo_auth",
     arguments: {},

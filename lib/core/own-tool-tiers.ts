@@ -9,8 +9,10 @@ import {
 } from "./tool-tiers"
 
 /**
- * PCP's own tools at /mcp (search, describe, the call_tool and run_code
- * entries, memory, web_fetch…) with their tiers, for the owner's Settings:
+ * PCP's own tools at /mcp that execute_<tier> runs by name (memory,
+ * web_fetch, check_permission…; not the entries search, execute_<tier> and
+ * run_<tier>, whose tiers are their names) with their tiers, for the
+ * owner's Settings:
  * the tier each one's annotations give, and the owner's choice, which
  * becomes what it advertises (gateway.ts ownTiers).
  */

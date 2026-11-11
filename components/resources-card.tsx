@@ -38,7 +38,7 @@ const ROWS: Array<{
     field: "programMemoryMb",
     label: "A program's memory (MB)",
     unit: "MB",
-    hint: "What one program an assistant runs with run_code may hold.",
+    hint: "What one program an assistant runs (run_read, run_write, run_destructive) may hold.",
   },
   {
     field: "programsAtOnce",

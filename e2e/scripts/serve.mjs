@@ -25,6 +25,7 @@ for (const [from, to] of [
   ["public", "public"],
   ["prisma/migrations", "prisma/migrations"],
   ["docker/start.cjs", "start.cjs"],
+  ["docker/peer-stamp.cjs", "peer-stamp.cjs"],
 ]) {
   const target = path.join(standalone, to)
   rmSync(target, { recursive: true, force: true })

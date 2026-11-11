@@ -130,7 +130,7 @@ test("an assistant saves a file once the owner allows it, inside the folder only
     arguments: { path: "2026/from-assistant.txt", text: "saved" },
   }
 
-  const asked = await callTool(baseURL!, token, "call_tool_write", args)
+  const asked = await callTool(baseURL!, token, "execute_write", args)
   const id = toolText(asked).match(/\/permissions\/([\w-]+)/)?.[1]
   expect(id, toolText(asked)).toBeTruthy()
   expect(fs.existsSync(path.join(top, "2026", "from-assistant.txt"))).toBe(
@@ -144,7 +144,7 @@ test("an assistant saves a file once the owner allows it, inside the folder only
     fs.readFileSync(path.join(top, "2026", "from-assistant.txt"), "utf8"),
   ).toBe("saved")
 
-  const escaped = await callTool(baseURL!, token, "call_tool_write", {
+  const escaped = await callTool(baseURL!, token, "execute_write", {
     ...args,
     arguments: { path: "escape/stolen.txt", text: "x" },
   })

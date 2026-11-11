@@ -54,7 +54,7 @@ export const TOKEN_OPTIONS: Record<
       "Short programs inside PCP, using only its own tools at their levels.",
     ask: "Let an assistant with this token run code that calls its tools",
     detail:
-      "It gets the run_code tools (Read, Write and Destructive, each calling tools up to its tier): a short JavaScript program, run inside PCP, that calls this token's tools and filters or passes on what they answer, so large answers never have to pass through the assistant. Every call follows the token's levels: a tool that asks you first stops the program until you answer, and a blocked tool stays blocked. The program reaches nothing else: no network, no files, and never your secrets.",
+      "It gets run_read, run_write and run_destructive (each calling tools up to its tier): a short JavaScript program, run inside PCP, that calls this token's tools and filters or passes on what they answer, so large answers never have to pass through the assistant. Every call follows the token's levels: a tool that asks you first stops the program until you answer, and a blocked tool stays blocked. The program reaches nothing else: no network, no files, and never your secrets.",
   },
   shareFiles: {
     label: "Move files by link",

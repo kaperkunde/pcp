@@ -76,7 +76,7 @@ test("an assistant reads, files and sends mail through the gateway", async ({
   await allowAllTools(page, TOKEN_NAME, SLUG)
 
   const boxes = json(
-    await callTool(baseURL!, token, "call_tool_destructive", {
+    await callTool(baseURL!, token, "execute_destructive", {
       server: SLUG,
       tool: "list_mailboxes",
     }),
@@ -86,7 +86,7 @@ test("an assistant reads, files and sends mail through the gateway", async ({
   )
 
   const unread = json(
-    await callTool(baseURL!, token, "call_tool_destructive", {
+    await callTool(baseURL!, token, "execute_destructive", {
       server: SLUG,
       tool: "search_emails",
       arguments: { unread: true },
@@ -99,7 +99,7 @@ test("an assistant reads, files and sends mail through the gateway", async ({
 
   // A file is not shown: it is kept, and its handle stands for it.
   const png = json(
-    await callTool(baseURL!, token, "call_tool_destructive", {
+    await callTool(baseURL!, token, "execute_destructive", {
       server: SLUG,
       tool: "get_attachment",
       arguments: { id: "e1", attachment: "blob-png" },
@@ -112,7 +112,7 @@ test("an assistant reads, files and sends mail through the gateway", async ({
   expect(png).not.toHaveProperty("text")
 
   const sent = json(
-    await callTool(baseURL!, token, "call_tool_destructive", {
+    await callTool(baseURL!, token, "execute_destructive", {
       server: SLUG,
       tool: "send_email",
       arguments: {
@@ -130,7 +130,7 @@ test("an assistant reads, files and sends mail through the gateway", async ({
 
   // The picture read above goes out as an attachment, by its handle.
   const forwarded = json(
-    await callTool(baseURL!, token, "call_tool_destructive", {
+    await callTool(baseURL!, token, "execute_destructive", {
       server: SLUG,
       tool: "send_email",
       arguments: {
@@ -156,14 +156,14 @@ test("an assistant reads, files and sends mail through the gateway", async ({
 
   // Nothing deletes mail for good: delete moves it to the Trash.
   json(
-    await callTool(baseURL!, token, "call_tool_destructive", {
+    await callTool(baseURL!, token, "execute_destructive", {
       server: SLUG,
       tool: "move_email",
       arguments: { id: "e2", mailbox: "archive" },
     }),
   )
   json(
-    await callTool(baseURL!, token, "call_tool_destructive", {
+    await callTool(baseURL!, token, "execute_destructive", {
       server: SLUG,
       tool: "delete_email",
       arguments: { id: "e1" },
@@ -176,7 +176,7 @@ test("an assistant reads, files and sends mail through the gateway", async ({
 
   // A bad argument never reaches the server.
   const before = upstream.jmap.requests.length
-  const bad = await callTool(baseURL!, token, "call_tool_destructive", {
+  const bad = await callTool(baseURL!, token, "execute_destructive", {
     server: SLUG,
     tool: "send_email",
     arguments: {
@@ -213,7 +213,7 @@ test("a read-only account cannot send", async ({ page, baseURL }) => {
 
   await allowAllTools(page, TOKEN_NAME, READ_ONLY_SLUG)
   const sentBefore = upstream.jmap.sent.length
-  const refused = await callTool(baseURL!, token, "call_tool_destructive", {
+  const refused = await callTool(baseURL!, token, "execute_destructive", {
     server: READ_ONLY_SLUG,
     tool: "send_email",
     arguments: { to: ["charles@example.com"], subject: "x", text: "y" },
@@ -223,7 +223,7 @@ test("a read-only account cannot send", async ({ page, baseURL }) => {
 
   // Reading still works.
   json(
-    await callTool(baseURL!, token, "call_tool_destructive", {
+    await callTool(baseURL!, token, "execute_destructive", {
       server: READ_ONLY_SLUG,
       tool: "list_mailboxes",
     }),
@@ -287,7 +287,7 @@ test("an assistant proposes a JMAP account; the owner types the app password in 
   // Its tools ask first, like any server's; allowed, they work.
   await allowAllTools(page, TOKEN_NAME, slug)
   const boxes = json(
-    await callTool(baseURL!, token, "call_tool_destructive", {
+    await callTool(baseURL!, token, "execute_destructive", {
       server: slug,
       tool: "list_mailboxes",
     }),

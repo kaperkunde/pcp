@@ -133,7 +133,7 @@ so in the summary; the bump itself waits for the request.
 - Skills (`lib/core/skills.ts`) are procedures the owner approved, kept as
   SKILL.md (frontmatter with a `version`, other tools' keys kept as they
   are), encrypted under `skill:<id>`. An assistant reads the ones its token
-  sees through `search` and `describe`, and proposes a change only through
+  sees through `search` (by query, then its ref), and proposes a change only through
   the `memory` tool's `/skills/…` paths: a `skill_change` request that shows
   the whole skill and its diff and writes only that, while the skill is
   still at the version the owner was shown. The exception is a token's own
@@ -149,7 +149,7 @@ so in the summary; the bump itself waits for the request.
 - Every tool PCP exposes is defined through `lib/core/tools/` (PCP's
   layer over `@kaperkunde/mcp`: its meta keys, error codes, placeholders,
   owner reasons and permission links): PCP's own
-  at `/mcp` with `defineTool`, the families behind call_tool (browser, mail,
+  at `/mcp` with `defineTool`, the families behind execute (browser, mail,
   calendar, SSH, services, storage folders) with `defineInnerTool`
   (`tools/family.ts`); a
   strict zod input published as JSON Schema 2020-12 (objects closed, every
@@ -157,7 +157,7 @@ so in the summary; the bump itself waits for the request.
   `allOf`, all four annotations, an `output` when every answer is one
   shape. One validator (`tools/validate.ts`) checks every call's
   arguments before anything runs, connects or asks the owner, on every
-  path (`lib/core/call-arguments.ts`: call_tool_<tier>, run_code_<tier>'s
+  path (`lib/core/call-arguments.ts`: execute_<tier>, run_<tier>'s
   `pcp.call`, a wrapper's or flow's calls; the family again before it runs); zod adds
   only what JSON Schema cannot say. An answer is one of the outcome kinds
   (`tools/outcome.ts`: `ok`, `toolError` with its code in
@@ -178,11 +178,26 @@ so in the summary; the bump itself waits for the request.
   token winning): whether the instructions' key rules are repeated, once a
   session, and link style. The client last seen is `api_token.client_seen`
   (its own name, version, profile, time), never the request log.
-- `call_tool_read`, `call_tool_write` and `call_tool_destructive` take only
-  a `call_handle` from `describe` (`lib/core/call-handles.ts`: an HMAC under
-  the vault key over the token, the tool and its schema's hash, the same for
-  every tier), and check the arguments with that validator before anything
-  runs or asks the owner. run_code_<tier>'s `pcp.call` keeps names.
+- A client lists PCP's entries only (#113, `tools/serve.ts listOnly`):
+  `search` (a query; a `ref`, which is what `describe` was; neither, the
+  owner's standing rules), `execute_read`, `execute_write`,
+  `execute_destructive` and, for a token that runs code, `run_read`,
+  `run_write`, `run_destructive`. Every other tool of PCP's is registered
+  unlisted, found by `search` (kind `pcp`) and run by name through the
+  `execute_<tier>` of its own tier (`tool`, with only `arguments` beside
+  it), served as its own call (its validator, its log line, the lead); an
+  entry's tier is its name, never the owner's choice. A new tool of PCP's
+  is one of those behind them, not a new entry. The old names (`describe`,
+  `call_tool_<tier>`, `run_code_<tier>`, and each of PCP's own tools by
+  its name) still answer for one release with a line naming the new entry
+  (`RETIRED_ENTRIES`, `retiredNote`, `ownNameNote`), then are `retired`:
+  refused as unknown, and its own tools answer only through execute.
+- `execute_read`, `execute_write` and `execute_destructive` take one of
+  the owner's tools only as a `call_handle` from `search`'s ref
+  (`lib/core/call-handles.ts`: an HMAC under the vault key over the token,
+  the tool and its schema's hash, the same for every tier), and check the
+  arguments with that validator before anything runs or asks the owner.
+  run_<tier>'s `pcp.call` keeps names.
 - Tool tiers (`lib/core/tool-tiers.ts`): every tool is Read, Write or
   Destructive, and `effectiveTier` is the one truth: the owner's choice,
   else for a wrapper's tool the highest tier of its calls (an unknown call
@@ -192,8 +207,8 @@ so in the summary; the bump itself waits for the request.
   Destructive). Everything that asks whether a tool reads or destroys asks
   there, never the raw annotations: the entry gates, `markedReadOnly`
   (pacing, a run's trace), the duplicate guard, the permission page's warning, the wrapper
-  review's badges, describe, list_tools, search, pcp.tools, and what PCP's
-  own tools advertise. Each `call_tool_<tier>` and `run_code_<tier>` runs
+  review's badges, search's ref, list_tools, search, pcp.tools, and what PCP's
+  own tools advertise. Each `execute_<tier>` and `run_<tier>` runs
   tools at or below its tier only and refuses one above, naming the entry
   that runs it, before its arguments are checked or the owner asked (in a
   program, an error it may catch); the run's duplicate key holds the tier.
@@ -207,7 +222,7 @@ so in the summary; the bump itself waits for the request.
   the tab's lane and held until the action ends, so actions at a site never
   follow closer than the pause, whatever the callers) and web fetch's
   request path (`fetch/fetch.ts`, `web-fetch.ts runFetch`), so every way in
-  is paced: call_tool_<tier>, run_code_<tier>, wrappers and flows,
+  is paced: execute_<tier>, run_<tier>, wrappers and flows,
   owner-approved calls, each as a read or a change by its tier; and to
   search's embeddings requests, as a read (`paceEmbeddings`).
   New defaults and bounds go in `pacing/limits.ts`, by class of action;
@@ -259,7 +274,7 @@ so in the summary; the bump itself waits for the request.
   `basis` holds. Nothing syncs without a
   request's key: `runDueSyncs` runs only through `after()` from `/mcp` and
   the owner's pages; never a timer, a webhook or a stored key. An assistant
-  (manage-endpoints only) helps through `search`, `describe` and
+  (manage-endpoints only) helps through `search` (and its ref) and
   `/repos/<id>/` in the memory tool, as one `repo_change` request, and
   proposes one item it sees for a push through `/repos/share/…`
   (`repos/assist-share.ts`): a `repo_share` request whose only yes is
@@ -374,7 +389,7 @@ so in the summary; the bump itself waits for the request.
   `make_folder`, `move` and `delete` take `store` (a short name; without
   it, PCP's own) and run that store's own tool through `gateway.ts
 callResolved`, the same path, levels, tier gate and validator as
-  call_tool; the family stays the one implementation. The local store's
+  execute_<tier>; the family stays the one implementation. The local store's
   size is `resourceLimits().storeBytes`. An export carries store rows, keys
   and the index, never a file. Storage folders' files travel over SFTP on
   the SSH server's pooled connection (`ssh/client.ts openSftp`): a pinned
@@ -610,8 +625,11 @@ embeddingProvider`, which hands `embeddings/provider.ts` the header;
   `duplicateCalls` setting, Settings → Repeated calls) is not run but
   answered `duplicate_call` with how the first went, unless the assistant
   passes `rerun` with a `reason`. It sits after the arguments are checked
-  in `callResolved` (call_tool_write/destructive), `forwardCall` (a
-  program's `pcp.call`) and a wrapper's `innerCall`, never in `upstream.ts`.
+  in `callResolved` (execute_write/destructive), `forwardCall` (a
+  program's `pcp.call`), a wrapper's `innerCall` and execute's dispatch of
+  PCP's own tools by name (`guardedOwnTool`, server id `pcp`: not the
+  stores' or capabilities' tools, an idempotent one, nor memory's or
+  web_fetch's reading calls; no note about a call with other arguments), never in `upstream.ts`.
   Never guarded: the browser, SSH and storage kinds, a capability's calls
   to its provider, a wrapper's calls in a run the owner approved, and
   executions from the owner's page. The lookup and the record are one
@@ -635,7 +653,7 @@ embeddingProvider`, which hands `embeddings/provider.ts` the header;
   starts from none of the vault's sign-ins and is saved nowhere, the same site
   only, the token's lines deciding as before. The sign-ins (`browser_profile`)
   are never used for a web_fetch.
-- run_code (`lib/core/code/`) runs an assistant's program in QuickJS
+- run_<tier> (`lib/core/code/`, run_code before #113) runs an assistant's program in QuickJS
   compiled to WebAssembly, a fresh instance per run, never in Node itself
   (not `vm`, not Node's permission model, not Pyodide in Node: none of
   those is a boundary). The program's only way out is the bridge
