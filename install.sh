@@ -751,9 +751,13 @@ cosign_verify() {
   done
   ref=$1
   shift
-  "$RUNTIME" run --rm "$@" "$COSIGN_IMAGE" verify \
-    --certificate-identity-regexp "$IMAGE_SIGNER" \
-    --certificate-oidc-issuer "$IMAGE_ISSUER" "$ref" 2>&1 >/dev/null
+  # cosign's words (its standard error) become this function's output, and
+  # its standard output is dropped.
+  {
+    "$RUNTIME" run --rm "$@" "$COSIGN_IMAGE" verify \
+      --certificate-identity-regexp "$IMAGE_SIGNER" \
+      --certificate-oidc-issuer "$IMAGE_ISSUER" "$ref" >/dev/null
+  } 2>&1
 }
 
 # `verify-image <repository>@sha256:<digest>`: that check alone, for the
