@@ -2,11 +2,31 @@ import { scrubFreedPages } from "../cleanup/runtime"
 import type { VaultContext } from "../context"
 import { db } from "../db"
 import { sealedSiteAllowance } from "../allowances"
-import { sealedOrigin } from "../browser-secrets"
+import { sealedAllowanceOrigin, sealedOrigin } from "../browser-secrets"
 import { isSealedKind, sealedRuleKey } from "../fetch-rule-keys"
 import { sealedSecretMeta } from "../secret-meta"
 import { isSealedText } from "../sealed"
 import { sealedTokenName } from "../token-names"
+import { sealedResultName } from "../tool-results"
+import {
+  plainServerMeta,
+  sealedServerMeta,
+  SERVER_META_SELECT,
+} from "../server-meta"
+import { sealedDefinitionMeta } from "../definition-rows"
+import {
+  canonicalOf,
+  sealedServiceDefinition,
+  sealedSpecPatches,
+  sealedSpecText,
+  sealedWrapperDefinition,
+} from "../spec-rows"
+import {
+  plainToolValues,
+  sealedToolContent,
+  sealedToolOverride,
+  splitAnnotations,
+} from "../tool-rows"
 import { PLAIN_SETTINGS, storedSetting } from "../settings"
 import { sealingState } from "./state"
 
@@ -188,6 +208,274 @@ export const SEAL_CONVERTERS: Converter[] = [
         })
         return true
       })
+    },
+  }),
+  converter({
+    table: "api_token_secret_allowance",
+    read: (ctx, limit) =>
+      db().apiTokenSecretAllowance.findMany({
+        where: { token: { vaultId: ctx.vaultId }, sealed: null },
+        take: limit,
+      }),
+    write: async (ctx, row) => {
+      const sealed = sealedAllowanceOrigin(
+        ctx,
+        row.tokenId,
+        row.secretId,
+        row.origin,
+      )
+      return db().$transaction(async (tx) => {
+        const { count } = await tx.apiTokenSecretAllowance.deleteMany({
+          where: {
+            tokenId: row.tokenId,
+            secretId: row.secretId,
+            origin: row.origin,
+            sealed: null,
+          },
+        })
+
+        if (count === 0) {
+          return false
+        }
+
+        await tx.apiTokenSecretAllowance.upsert({
+          where: {
+            tokenId_secretId_origin: {
+              tokenId: row.tokenId,
+              secretId: row.secretId,
+              origin: sealed.origin,
+            },
+          },
+          create: { ...row, ...sealed },
+          update: {},
+        })
+        return true
+      })
+    },
+  }),
+  converter({
+    table: "tool_result",
+    read: (ctx, limit) =>
+      db().toolResult.findMany({
+        where: { vaultId: ctx.vaultId, plainName: { not: null } },
+        select: { id: true, plainName: true },
+        take: limit,
+      }),
+    write: async (ctx, row) => {
+      const { count } = await db().toolResult.updateMany({
+        where: { id: row.id, plainName: row.plainName },
+        data: sealedResultName(ctx, row.id, row.plainName),
+      })
+      return count === 1
+    },
+  }),
+  converter({
+    table: "mcp_server",
+    read: (ctx, limit) =>
+      db().mcpServer.findMany({
+        where: { vaultId: ctx.vaultId, meta: null },
+        select: { ...SERVER_META_SELECT, updatedAt: true },
+        take: limit,
+      }),
+    write: async (ctx, row) => {
+      // Every write of these values since seals the whole row, so a row
+      // still without meta is still as it was read.
+      const { count } = await db().mcpServer.updateMany({
+        where: { id: row.id, meta: null },
+        data: {
+          ...sealedServerMeta(ctx, row.id, plainServerMeta(row)),
+          updatedAt: row.updatedAt,
+        },
+      })
+      return count === 1
+    },
+  }),
+  converter({
+    table: "server_definition",
+    read: (ctx, limit) =>
+      db().serverDefinition.findMany({
+        where: { vaultId: ctx.vaultId, meta: null },
+        select: {
+          id: true,
+          plainName: true,
+          plainDescription: true,
+          updatedAt: true,
+        },
+        take: limit,
+      }),
+    write: async (ctx, row) => {
+      const { count } = await db().serverDefinition.updateMany({
+        where: {
+          id: row.id,
+          meta: null,
+          plainName: row.plainName,
+          plainDescription: row.plainDescription,
+        },
+        data: {
+          ...sealedDefinitionMeta(ctx, row.id, {
+            name: row.plainName,
+            description: row.plainDescription,
+          }),
+          updatedAt: row.updatedAt,
+        },
+      })
+      return count === 1
+    },
+  }),
+  converter({
+    table: "mcp_tool",
+    read: (ctx, limit) =>
+      db().mcpTool.findMany({
+        where: {
+          server: { vaultId: ctx.vaultId },
+          OR: [{ about: null }, { schema: null }, { override: null }],
+        },
+        take: limit,
+      }),
+    write: async (ctx, row) => {
+      const values = plainToolValues(row)
+      let sealed = false
+
+      // Each part only while it is still from before: a read of the tools
+      // since seals what it wrote, and the owner's wording is theirs.
+      if (row.about === null || row.schema === null) {
+        // The annotations' title is words: sealed with the description.
+        let annotations = splitAnnotations(null)
+
+        try {
+          annotations = splitAnnotations(
+            row.annotations ? JSON.parse(row.annotations) : null,
+          )
+        } catch {
+          annotations = { annotations: row.annotations, annotationsTitle: null }
+        }
+
+        const { count } = await db().mcpTool.updateMany({
+          where: {
+            id: row.id,
+            about: null,
+            schema: null,
+            annotations: row.annotations,
+          },
+          data: {
+            ...sealedToolContent(ctx, row.id, {
+              ...values,
+              annotationsTitle: annotations.annotationsTitle,
+            }),
+            annotations: annotations.annotations,
+            updatedAt: row.updatedAt,
+          },
+        })
+        sealed ||= count === 1
+      }
+
+      if (row.override === null) {
+        const { count } = await db().mcpTool.updateMany({
+          where: {
+            id: row.id,
+            override: null,
+            plainDescriptionOverride: row.plainDescriptionOverride,
+          },
+          data: {
+            ...sealedToolOverride(ctx, row.id, values.descriptionOverride),
+            updatedAt: row.updatedAt,
+          },
+        })
+        sealed ||= count === 1
+      }
+
+      return sealed
+    },
+  }),
+  converter({
+    table: "openapi_spec",
+    read: (ctx, limit) =>
+      db().openApiSpec.findMany({
+        where: {
+          server: { vaultId: ctx.vaultId },
+          OR: [{ sealedText: null }, { sealedPatches: null }],
+        },
+        take: limit,
+      }),
+    write: async (ctx, row) => {
+      let sealed = false
+
+      // Each only while it is still as it was read.
+      if (row.sealedText === null) {
+        const { count } = await db().openApiSpec.updateMany({
+          where: { serverId: row.serverId, sealedText: null, hash: row.hash },
+          data: sealedSpecText(ctx, row.serverId, row.plainText),
+        })
+        sealed ||= count === 1
+      }
+
+      if (row.sealedPatches === null) {
+        const { count } = await db().openApiSpec.updateMany({
+          where: {
+            serverId: row.serverId,
+            sealedPatches: null,
+            plainPatches: row.plainPatches,
+          },
+          data: sealedSpecPatches(ctx, row.serverId, row.plainPatches),
+        })
+        sealed ||= count === 1
+      }
+
+      return sealed
+    },
+  }),
+  converter({
+    table: "wrapper_spec",
+    read: (ctx, limit) =>
+      db().wrapperSpec.findMany({
+        where: { server: { vaultId: ctx.vaultId }, sealedDefinition: null },
+        take: limit,
+      }),
+    write: async (ctx, row) => {
+      const { count } = await db().wrapperSpec.updateMany({
+        where: {
+          serverId: row.serverId,
+          sealedDefinition: null,
+          hash: row.hash,
+        },
+        data: {
+          ...sealedWrapperDefinition(
+            ctx,
+            row.serverId,
+            row.plainDefinition,
+            canonicalOf(row.plainDefinition),
+          ),
+          updatedAt: row.updatedAt,
+        },
+      })
+      return count === 1
+    },
+  }),
+  converter({
+    table: "service_spec",
+    read: (ctx, limit) =>
+      db().serviceSpec.findMany({
+        where: { server: { vaultId: ctx.vaultId }, sealedDefinition: null },
+        take: limit,
+      }),
+    write: async (ctx, row) => {
+      const { count } = await db().serviceSpec.updateMany({
+        where: {
+          serverId: row.serverId,
+          sealedDefinition: null,
+          plainDefinition: row.plainDefinition,
+        },
+        data: {
+          ...sealedServiceDefinition(
+            ctx,
+            row.serverId,
+            row.plainDefinition,
+            canonicalOf(row.plainDefinition),
+          ),
+          updatedAt: row.updatedAt,
+        },
+      })
+      return count === 1
     },
   }),
   converter({

@@ -4,7 +4,7 @@ import { MergeReview } from "@/components/merge-review"
 import { PageColumn } from "@kaperkunde/ui/page"
 import { PageHeader } from "@kaperkunde/ui/page"
 import { Card } from "@kaperkunde/ui/card"
-import { db } from "@/lib/core/db"
+import { findServers } from "@/lib/core/server-meta"
 import { identicalDefinitions } from "@/lib/core/definitions"
 import { requireContext } from "@/lib/server/session"
 
@@ -40,13 +40,10 @@ export default async function MergePage({
   }
 
   // Where each definition reads its schema from, as its first server has it.
-  const sources = await db().mcpServer.findMany({
-    where: {
-      id: {
-        in: group.definitions.map((definition) => definition.instances[0]!.id),
-      },
+  const sources = await findServers(ctx, {
+    id: {
+      in: group.definitions.map((definition) => definition.instances[0]!.id),
     },
-    select: { definitionId: true, specSource: true, specUrl: true },
   })
   const schemaOf = new Map(
     sources.map((row) => [

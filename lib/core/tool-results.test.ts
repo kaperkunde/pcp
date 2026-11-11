@@ -19,6 +19,7 @@ import {
   RESULT_TTL_MS,
   resultKeeper,
   resultNotices,
+  resultName,
 } from "./tool-results"
 import { scratchDatabase } from "./test-db"
 import {
@@ -369,7 +370,8 @@ describe("keeping a file", () => {
       where: { id: kept.id },
     })
 
-    expect(row).toMatchObject({ kind: "bytes", name: "dot.png" })
+    expect(row).toMatchObject({ kind: "bytes", plainName: null })
+    expect(resultName(ctx, row)).toBe("dot.png")
     expect(Buffer.from(row.ciphertext).includes(PNG)).toBe(false)
 
     const opened = await openResult(ctx, { tokenId, id: kept.id })

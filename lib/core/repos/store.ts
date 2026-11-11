@@ -3,6 +3,7 @@ import type { Repo, RepoItem } from "@/lib/generated/prisma/client"
 import type { VaultContext } from "../context"
 import { asBytes, decryptString, encryptString } from "../crypto"
 import { db } from "../db"
+import { SERVER_META_SELECT, serverName } from "../server-meta"
 import { invalid, notFound, PcpError } from "../errors"
 import { newId } from "../ids"
 import { ensureDefinition } from "../definition-rows"
@@ -616,11 +617,11 @@ export async function linkedItemNames(
           .map((item) => item.itemId),
       },
     },
-    select: { id: true, name: true },
+    select: SERVER_META_SELECT,
   })
 
   for (const server of servers) {
-    names.set(server.id, server.name)
+    names.set(server.id, serverName(ctx, server))
   }
 
   return names
@@ -660,7 +661,7 @@ async function exclusionTarget(
     where: { id: itemId, vaultId: ctx.vaultId },
     select: { id: true },
   })
-  const definitionId = server ? await ensureDefinition(server.id) : null
+  const definitionId = server ? await ensureDefinition(ctx, server.id) : null
 
   if (!definitionId) {
     throw notFound("That server")

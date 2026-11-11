@@ -1,12 +1,12 @@
 import { isIP } from "node:net"
 
-import type { McpServer, McpTool } from "@/lib/generated/prisma/client"
-
 import type { ResolvedToken } from "./api-tokens"
 import type { SyncResult } from "./catalogue"
 import { MAX_SPEC_BYTES } from "./constants"
 import type { VaultContext } from "./context"
 import { db } from "./db"
+import { contentHashMatches } from "./spec-rows"
+import { openTools, type OpenTool } from "./tool-rows"
 import {
   contentInstance,
   disableOtherInstances,
@@ -42,6 +42,13 @@ import {
   type ExtraAuthHeaderInput,
   type ServerStatus,
 } from "./servers"
+import {
+  findServer,
+  openServer,
+  openServers,
+  type OpenServer,
+  SERVER_META_SELECT,
+} from "./server-meta"
 
 /**
  * What an assistant may do to API endpoints through the gateway: register
@@ -177,10 +184,12 @@ export type EndpointDetails = {
  * owner's: what that instance shares (description, schema, edits, tool
  * descriptions) is then theirs too, so the assistant can only ask.
  */
-type Owned = McpServer & { sharesWithOwner?: boolean }
-type EndpointRow = Owned & { tools: McpTool[] }
+type Owned = OpenServer & { sharesWithOwner?: boolean }
+type EndpointRow = Owned & { tools: OpenTool[] }
 
-function ownersAlone(server: McpServer): boolean {
+function ownersAlone(
+  server: Pick<OpenServer, "publicOnly" | "authType">,
+): boolean {
   return !(server.publicOnly && server.authType === "none")
 }
 
@@ -189,9 +198,9 @@ function belongsTo(server: Owned): "assistant" | "owner" {
 }
 
 /** Marks the rows that share their definition with an endpoint of the owner's. */
-async function withSharers<T extends McpServer>(
-  rows: T[],
-): Promise<Array<T & { sharesWithOwner: boolean }>> {
+async function withSharers<
+  T extends Pick<OpenServer, "definitionId" | "publicOnly" | "authType">,
+>(rows: T[]): Promise<Array<T & { sharesWithOwner: boolean }>> {
   const definitionIds = [
     ...new Set(rows.map((row) => row.definitionId).filter((id) => id !== null)),
   ]
@@ -200,6 +209,7 @@ async function withSharers<T extends McpServer>(
   if (definitionIds.length > 0) {
     const instances = await db().mcpServer.findMany({
       where: { definitionId: { in: definitionIds } },
+      select: { definitionId: true, publicOnly: true, authType: true },
     })
 
     for (const instance of instances) {
@@ -237,14 +247,17 @@ function withoutQuery(address: string | null): string | null {
 
 async function visibleEndpoints(scope: EndpointScope) {
   const rows = await withSharers(
-    await db().mcpServer.findMany({
-      where: {
-        vaultId: scope.ctx.vaultId,
-        kind: "openapi",
-        ...(scope.serverIds ? { id: { in: scope.serverIds } } : {}),
-      },
-      orderBy: { slug: "asc" },
-    }),
+    openServers(
+      scope.ctx,
+      await db().mcpServer.findMany({
+        where: {
+          vaultId: scope.ctx.vaultId,
+          kind: "openapi",
+          ...(scope.serverIds ? { id: { in: scope.serverIds } } : {}),
+        },
+        orderBy: { slug: "asc" },
+      }),
+    ),
   )
 
   // An endpoint the owner configured and then disabled is theirs alone: the
@@ -260,7 +273,14 @@ async function findEndpoint(
     where: { vaultId_slug: { vaultId: scope.ctx.vaultId, slug } },
     include: { tools: { orderBy: { name: "asc" } } },
   })
-  const [row] = found ? await withSharers([found]) : [null]
+  const [row] = found
+    ? await withSharers([
+        {
+          ...openServer(scope.ctx, found),
+          tools: openTools(scope.ctx, found.tools),
+        },
+      ])
+    : [null]
 
   if (
     !row ||
@@ -296,7 +316,7 @@ export function argumentName(key: string): string {
 }
 
 /** What a token may change on this endpoint, in words for the assistant. */
-function describeChanges(server: McpServer): Record<string, string> {
+function describeChanges(server: OpenServer): Record<string, string> {
   if (belongsTo(server) === "owner") {
     const theirs =
       "no: the owner configured this endpoint (it sends a secret, or reaches private addresses they allowed)"
@@ -369,6 +389,7 @@ export type ReadOptions = {
 }
 
 async function detailsOf(
+  ctx: VaultContext,
   server: EndpointRow,
   {
     includeSpec = false,
@@ -383,7 +404,7 @@ async function detailsOf(
       where: { serverId: server.id },
       select: { fetchedAt: true },
     }),
-    storedSpec(server.id),
+    storedSpec(ctx, server.id),
     authHeaderNames(server),
   ])
 
@@ -576,7 +597,7 @@ export async function getEndpoint(
   slug: string,
   options: ReadOptions = {},
 ): Promise<EndpointDetails> {
-  return detailsOf(await findEndpoint(scope, slug), options)
+  return detailsOf(scope.ctx, await findEndpoint(scope, slug), options)
 }
 
 /** What an assistant asked to register, as the owner is asked about it. */
@@ -763,8 +784,8 @@ export async function prepareInstanceRegistration(
     | "oauth"
   >,
 ): Promise<{ url: string; registration: EndpointRegistration }> {
-  const source = await contentInstance(definitionId)
-  const stored = source ? await storedSpec(source.id) : null
+  const source = await contentInstance(ctx, definitionId)
+  const stored = source ? await storedSpec(ctx, source.id) : null
 
   if (!source || source.kind !== "openapi" || !stored) {
     throw invalid(
@@ -957,7 +978,7 @@ export async function updateEndpointDetails(
     )
   }
 
-  const stored = await storedSpec(server.id)
+  const stored = await storedSpec(scope.ctx, server.id)
   const patches =
     changes.patches !== undefined
       ? readPatches(changes.patches)
@@ -979,7 +1000,7 @@ export async function updateEndpointDetails(
     patches !== undefined &&
     JSON.stringify(patches) !== JSON.stringify(stored?.patches ?? [])
   const newDocument =
-    fetched !== undefined && specHash(fetched.text) !== stored?.hash
+    fetched !== undefined && specHash(scope.ctx, fetched.text) !== stored?.hash
 
   // A change other assistants would see, or that widens what the endpoint
   // does, waits for the owner. Turning read-only on only narrows it.
@@ -1042,12 +1063,12 @@ export async function updateEndpointDetails(
 
     // Tool descriptions are shared: every instance now shows them.
     if (disables) {
-      await disableOtherInstances(server.id)
+      await disableOtherInstances(scope.ctx, server.id)
     }
   }
 
   const fresh = await findEndpoint(scope, slug)
-  const details = await detailsOf(fresh)
+  const details = await detailsOf(scope.ctx, fresh)
   const unchanged =
     fetched !== undefined && !newDocument
       ? " The document at the schema's URL has not changed."
@@ -1111,10 +1132,12 @@ export type EndpointChangeAsk = {
 
 /** What a change is made against: the schema, its edits and the words. */
 function basisOf(
-  server: McpServer,
+  ctx: VaultContext,
+  server: OpenServer,
   stored: { hash: string; patches: PatchOperation[] } | null,
 ): string {
   return specHash(
+    ctx,
     JSON.stringify([
       stored?.hash ?? null,
       stored?.patches ?? [],
@@ -1175,7 +1198,7 @@ async function proposeChange(
 ): Promise<
   (EndpointDetails & { updated: string }) | { ask: EndpointChangeAsk }
 > {
-  const stored = await storedSpec(server.id)
+  const stored = await storedSpec(scope.ctx, server.id)
 
   if (!stored) {
     throw invalid("PCP has no copy of this schema to change.")
@@ -1231,7 +1254,7 @@ async function proposeChange(
   const downloaded =
     changes.refreshSpec === true ? await downloadSpec(server) : undefined
   const fetched =
-    downloaded && specHash(downloaded.text) !== stored.hash
+    downloaded && specHash(scope.ctx, downloaded.text) !== stored.hash
       ? downloaded
       : undefined
   const readOnly =
@@ -1255,7 +1278,7 @@ async function proposeChange(
     toolEdits.length === 0
   ) {
     return {
-      ...(await detailsOf(server)),
+      ...(await detailsOf(scope.ctx, server)),
       updated: `Nothing to change: ${server.name} already has what you asked for.${downloaded ? " The document at the schema's URL has not changed." : ""}`,
     }
   }
@@ -1301,7 +1324,7 @@ async function proposeChange(
   // The words, schema and edits are its definition's: say who else shows them.
   const others =
     description !== undefined || editsChange || fetched || toolEdits.length > 0
-      ? await siblingInstances(server.id)
+      ? await siblingInstances(scope.ctx, server.id)
       : []
   const lines = [
     `Endpoint: ${server.name} (${server.url})`,
@@ -1345,12 +1368,14 @@ async function proposeChange(
   return {
     ask: {
       serverId: server.id,
-      basis: basisOf(server, stored),
+      basis: basisOf(scope.ctx, server, stored),
       ...(name !== undefined ? { name } : {}),
       ...(description !== undefined ? { description } : {}),
       ...(readOnly ? { readOnly } : {}),
       ...(editsChange ? { patches } : {}),
-      ...(fetched ? { fetched: { hash: specHash(fetched.text) } } : {}),
+      ...(fetched
+        ? { fetched: { hash: specHash(scope.ctx, fetched.text) } }
+        : {}),
       ...(toolEdits.length > 0
         ? { toolDescriptions: Object.fromEntries(toolEdits) }
         : {}),
@@ -1374,9 +1399,10 @@ async function proposeChange(
 async function findNoteTarget(
   scope: EndpointScope,
   slug: string,
-): Promise<McpServer> {
-  const row = await db().mcpServer.findUnique({
-    where: { vaultId_slug: { vaultId: scope.ctx.vaultId, slug } },
+): Promise<OpenServer> {
+  const row = await findServer(scope.ctx, {
+    vaultId: scope.ctx.vaultId,
+    slug,
   })
 
   if (row?.kind === "mcp" && row.enabled && inScope(scope, row.id)) {
@@ -1421,8 +1447,8 @@ export async function proposeEndpointDetach(
   slug: string,
 ): Promise<EndpointChangeAsk> {
   const server = await findNoteTarget(scope, slug)
-  const definitionId = await ensureDefinition(server.id)
-  const others = await siblingInstances(server.id)
+  const definitionId = await ensureDefinition(scope.ctx, server.id)
+  const others = await siblingInstances(scope.ctx, server.id)
 
   if (!definitionId || others.length === 0) {
     throw invalid(
@@ -1438,8 +1464,9 @@ export async function proposeEndpointDetach(
   return {
     serverId: server.id,
     basis: basisOf(
+      scope.ctx,
       server,
-      server.kind === "openapi" ? await storedSpec(server.id) : null,
+      server.kind === "openapi" ? await storedSpec(scope.ctx, server.id) : null,
     ),
     detach: { definitionId },
     shown: {
@@ -1463,13 +1490,11 @@ export async function applyEndpointChange(
   ctx: VaultContext,
   ask: EndpointChangeAsk,
 ): Promise<string> {
-  const server = await db().mcpServer.findFirst({
-    where: {
-      id: ask.serverId,
-      vaultId: ctx.vaultId,
-      // An MCP server only to detach it.
-      kind: ask.detach ? { in: ["openapi", "mcp"] } : "openapi",
-    },
+  const server = await findServer(ctx, {
+    id: ask.serverId,
+    vaultId: ctx.vaultId,
+    // An MCP server only to detach it.
+    kind: ask.detach ? { in: ["openapi", "mcp"] } : "openapi",
   })
 
   if (!server) {
@@ -1480,7 +1505,7 @@ export async function applyEndpointChange(
   }
 
   if (
-    basisOf(server, await storedSpec(server.id)) !== ask.basis ||
+    basisOf(ctx, server, await storedSpec(ctx, server.id)) !== ask.basis ||
     (ask.detach && server.definitionId !== ask.detach.definitionId)
   ) {
     throw new PcpError(
@@ -1499,7 +1524,9 @@ export async function applyEndpointChange(
   if (ask.fetched) {
     fetched = await downloadSpec(server)
 
-    if (specHash(fetched.text) !== ask.fetched.hash) {
+    // A request asked before the vault's rows were sealed holds the plain
+    // SHA-256: it still counts.
+    if (!contentHashMatches(ctx, "openapi", fetched.text, ask.fetched.hash)) {
       throw new PcpError(
         "state",
         "The schema at its URL has changed again since this was asked, so nothing changed. The assistant can ask again.",
@@ -1525,10 +1552,13 @@ export async function applyEndpointChange(
     }
   }
 
-  const fresh = await db().mcpServer.findUniqueOrThrow({
-    where: { id: server.id },
-    select: { name: true },
-  })
+  const fresh = openServer(
+    ctx,
+    await db().mcpServer.findUniqueOrThrow({
+      where: { id: server.id },
+      select: SERVER_META_SELECT,
+    }),
+  )
 
   return `Changed ${fresh.name}: ${sync.toolCount} tool${sync.toolCount === 1 ? "" : "s"}.${sync.message ? ` ${sync.message}` : ""}`
 }

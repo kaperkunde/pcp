@@ -1,4 +1,5 @@
 import type { CallToolResult } from "@modelcontextprotocol/server"
+import { openServer, type OpenServer } from "../server-meta"
 import {
   afterAll,
   afterEach,
@@ -8,8 +9,6 @@ import {
   it,
   vi,
 } from "vitest"
-
-import type { McpServer } from "@/lib/generated/prisma/client"
 
 import { createApiToken, resolveApiToken } from "../api-tokens"
 import type { VaultContext } from "../context"
@@ -65,7 +64,7 @@ let api: TestApi
 let other: TestApi
 let ctx: VaultContext
 let tokenId: string
-let server: McpServer
+let server: OpenServer
 
 beforeEach(async () => {
   vi.stubEnv("PCP_PACING", "")
@@ -80,9 +79,12 @@ beforeEach(async () => {
     allowAllServers: true,
   })
   tokenId = (await resolveApiToken(token))!.tokenId
-  server = await db().mcpServer.findUniqueOrThrow({
-    where: { id: (await createBrowserServer(ctx)).id },
-  })
+  server = openServer(
+    ctx,
+    await db().mcpServer.findUniqueOrThrow({
+      where: { id: (await createBrowserServer(ctx)).id },
+    }),
+  )
   const slowFile: Parameters<typeof startTestApi>[0] = (_, res) => {
     res.setHeader("content-type", "application/octet-stream")
     res.setHeader("content-disposition", 'attachment; filename="slow.bin"')

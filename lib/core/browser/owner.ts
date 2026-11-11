@@ -35,7 +35,8 @@ import {
   type BrowserStatus,
   type Tab,
 } from "./runtime"
-import { findBrowserServer, syncAllBrowserTools } from "./server"
+import { findBrowserServer } from "./server"
+import { noteBrowserChanged } from "../vault-upkeep"
 import type { TabView } from "./types"
 import { TOKEN_NAME_SELECT, tokenName } from "../token-names"
 
@@ -276,7 +277,9 @@ export async function startChromiumInstall(): Promise<void> {
   void installChromium({ dataDir: dataDir() })
     .then(async (state) => {
       if (state.stage === "done") {
-        await syncAllBrowserTools()
+        // Each vault's browser is checked on its next request, which holds
+        // the key its status is sealed under.
+        noteBrowserChanged()
       } else {
         console.error("[browser] could not install Chromium", {
           message: state.error,

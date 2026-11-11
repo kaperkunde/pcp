@@ -10,6 +10,7 @@ import { newId } from "./ids"
 import { MAX_LISTED_SECRETS, secretUses } from "./secret-uses"
 import { createSecret, writeManagedSecret } from "./secrets"
 import { createServer } from "./servers"
+import { serverCreateData } from "./server-meta"
 import { scratchDatabase } from "./test-db"
 import { setupVault } from "./vault"
 import { entryCall, listEveryTool } from "./test-handles"
@@ -87,7 +88,7 @@ async function wrapperBinding(secretId: string, serverId: string) {
   }
 
   await db().mcpServer.create({
-    data: {
+    data: serverCreateData(ctx, {
       id,
       vaultId: ctx.vaultId,
       kind: "wrapper",
@@ -95,9 +96,9 @@ async function wrapperBinding(secretId: string, serverId: string) {
       slug: "linear-lookup",
       url: "pcp:wrapper",
       wrapperSpec: {
-        create: { definition: JSON.stringify(definition), hash: "x" },
+        create: { plainDefinition: JSON.stringify(definition), hash: "x" },
       },
-    },
+    }),
   })
 }
 

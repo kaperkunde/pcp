@@ -344,82 +344,116 @@ const SecretBrowserOriginRow = z.strictObject({
   createdAt: date,
 })
 
-const McpServerRow = z.strictObject({
-  id,
-  vaultId: id,
-  name: str,
-  slug: str,
-  description: str,
-  url: str,
-  enabled: z.boolean(),
-  authType: str,
-  authHeaderName: str.nullable(),
-  authValueTemplate: str.nullable(),
-  authSecretId: id.nullable(),
-  oauthClientId: str.nullable(),
-  oauthClientSecretId: id.nullable(),
-  oauthScope: str.nullable(),
-  oauthAuthorizeParams: str.nullable(),
-  oauthTokensId: id.nullable(),
-  oauthConnectedAt: dateOrNull,
-  oauthAuthorizationUrl: str.nullable(),
-  oauthTokenUrl: str.nullable(),
-  status: str,
-  statusMessage: str,
-  lastSyncedAt: dateOrNull,
-  createdAt: date,
-  updatedAt: date,
-  kind: str,
-  specSource: str.nullable(),
-  specUrl: str.nullable(),
-  readOnly: z.boolean(),
-  publicOnly: z.boolean(),
-  specUrlFromAssistant: z.boolean(),
-  // Mail accounts (kinds jmap and imap), added in 0.2: absent from older
-  // exports, which hold none.
-  authUsername: str.nullable().default(null),
-  mailApiUrl: str.nullable().default(null),
-  mailDownloadUrl: str.nullable().default(null),
-  mailUploadUrl: str.nullable().default(null),
-  mailAccountId: str.nullable().default(null),
-  mailSubmission: z.boolean().default(false),
-  smtpUrl: str.nullable().default(null),
-  mailFrom: str.nullable().default(null),
-  // Whether an IMAP account's sent email gets a copy in Sent from PCP, and
-  // what PCP learned of its server, added after 0.4.3: absent from older
-  // exports, whose accounts take the defaults.
-  mailSaveSent: str.default("auto"),
-  mailServerFilesSent: z.boolean().nullable().default(null),
-  // SSH servers, added in 0.3: absent from older exports, which hold none.
-  sshPublicKey: str.nullable().default(null),
-  sshHostKey: str.nullable().default(null),
-  // Calendar accounts (kind caldav), added in 0.4: absent from older
-  // exports, which hold none.
-  davHomeUrl: str.nullable().default(null),
-  // The version of its document in a linked repository, added with them:
-  // absent from older exports, which never synced one.
-  syncVersion: z.number().int().nullable().default(null),
-  // Definitions and the owner's note, added together: absent from older
-  // exports, whose servers each get a definition of their own on restore.
-  definitionId: id.nullable().default(null),
-  personalNote: bytesOrNull.default(null),
-  // Levels the owner saved with an approval, waiting for the server's first
-  // read of its tools: absent from older exports, which had none.
-  pendingAccess: str.nullable().default(null),
-})
+// A server's name, address and the rest of what it is were sealed into
+// meta (#96): an older file names their plain columns by their old names.
+const McpServerRow = renamedFrom(
+  {
+    name: "plainName",
+    description: "plainDescription",
+    url: "plainUrl",
+    statusMessage: "plainStatusMessage",
+    authUsername: "plainAuthUsername",
+    oauthClientId: "plainOauthClientId",
+    oauthScope: "plainOauthScope",
+    oauthAuthorizeParams: "plainOauthAuthorizeParams",
+    oauthAuthorizationUrl: "plainOauthAuthorizationUrl",
+    oauthTokenUrl: "plainOauthTokenUrl",
+    specUrl: "plainSpecUrl",
+    mailApiUrl: "plainMailApiUrl",
+    mailDownloadUrl: "plainMailDownloadUrl",
+    mailUploadUrl: "plainMailUploadUrl",
+    mailAccountId: "plainMailAccountId",
+    smtpUrl: "plainSmtpUrl",
+    mailFrom: "plainMailFrom",
+    sshPublicKey: "plainSshPublicKey",
+    sshHostKey: "plainSshHostKey",
+    davHomeUrl: "plainDavHomeUrl",
+  },
+  z.strictObject({
+    id,
+    vaultId: id,
+    plainName: str,
+    slug: str,
+    plainDescription: str,
+    plainUrl: str,
+    enabled: z.boolean(),
+    authType: str,
+    authHeaderName: str.nullable(),
+    authValueTemplate: str.nullable(),
+    authSecretId: id.nullable(),
+    plainOauthClientId: str.nullable(),
+    oauthClientSecretId: id.nullable(),
+    plainOauthScope: str.nullable(),
+    plainOauthAuthorizeParams: str.nullable(),
+    oauthTokensId: id.nullable(),
+    oauthConnectedAt: dateOrNull,
+    plainOauthAuthorizationUrl: str.nullable(),
+    plainOauthTokenUrl: str.nullable(),
+    status: str,
+    plainStatusMessage: str,
+    lastSyncedAt: dateOrNull,
+    createdAt: date,
+    updatedAt: date,
+    kind: str,
+    specSource: str.nullable(),
+    plainSpecUrl: str.nullable(),
+    readOnly: z.boolean(),
+    publicOnly: z.boolean(),
+    specUrlFromAssistant: z.boolean(),
+    // Mail accounts (kinds jmap and imap), added in 0.2: absent from older
+    // exports, which hold none.
+    plainAuthUsername: str.nullable().default(null),
+    plainMailApiUrl: str.nullable().default(null),
+    plainMailDownloadUrl: str.nullable().default(null),
+    plainMailUploadUrl: str.nullable().default(null),
+    plainMailAccountId: str.nullable().default(null),
+    mailSubmission: z.boolean().default(false),
+    plainSmtpUrl: str.nullable().default(null),
+    plainMailFrom: str.nullable().default(null),
+    // Whether an IMAP account's sent email gets a copy in Sent from PCP, and
+    // what PCP learned of its server, added after 0.4.3: absent from older
+    // exports, whose accounts take the defaults.
+    mailSaveSent: str.default("auto"),
+    mailServerFilesSent: z.boolean().nullable().default(null),
+    // SSH servers, added in 0.3: absent from older exports, which hold none.
+    plainSshPublicKey: str.nullable().default(null),
+    plainSshHostKey: str.nullable().default(null),
+    // Calendar accounts (kind caldav), added in 0.4: absent from older
+    // exports, which hold none.
+    plainDavHomeUrl: str.nullable().default(null),
+    // The version of its document in a linked repository, added with them:
+    // absent from older exports, which never synced one.
+    syncVersion: z.number().int().nullable().default(null),
+    // Definitions and the owner's note, added together: absent from older
+    // exports, whose servers each get a definition of their own on restore.
+    definitionId: id.nullable().default(null),
+    personalNote: bytesOrNull.default(null),
+    // Levels the owner saved with an approval, waiting for the server's first
+    // read of its tools: absent from older exports, which had none.
+    pendingAccess: str.nullable().default(null),
+    // The sealed values: absent from older files, whose servers hold them in
+    // the plain columns until the vault's rows are sealed.
+    meta: bytesOrNull.default(null),
+  }),
+)
 
 // Definitions, added with the owner's notes: absent from older exports.
-const ServerDefinitionRow = z.strictObject({
-  id,
-  vaultId: id,
-  kind: str,
-  slug: str,
-  name: str,
-  description: str,
-  formatVersion: z.number().int(),
-  createdAt: date,
-  updatedAt: date,
-})
+const ServerDefinitionRow = renamedFrom(
+  { name: "plainName", description: "plainDescription" },
+  z.strictObject({
+    id,
+    vaultId: id,
+    kind: str,
+    slug: str,
+    plainName: str,
+    plainDescription: str,
+    // Sealed since (#96): absent from older files.
+    meta: bytesOrNull.default(null),
+    formatVersion: z.number().int(),
+    createdAt: date,
+    updatedAt: date,
+  }),
+)
 
 const ServerAuthHeaderRow = z.strictObject({
   id,
@@ -430,63 +464,97 @@ const ServerAuthHeaderRow = z.strictObject({
   secretId: id.nullable(),
 })
 
-const McpToolRow = z.strictObject({
-  id,
-  serverId: id,
-  name: str,
-  title: str.nullable(),
-  description: str,
-  descriptionOverride: str.nullable(),
-  inputSchema: str,
-  annotations: str.nullable(),
-  operation: str.nullable(),
-  output: str.nullable(),
-  // Added after the rest: a tool from an older file declares none until
-  // its server is read again.
-  outputSchema: str.nullable().default(null),
-  icons: str.nullable().default(null),
-  createdAt: date,
-  updatedAt: date,
-})
+// A tool's words and shapes were sealed (#96): an older file names their
+// plain columns by their old names.
+const McpToolRow = renamedFrom(
+  {
+    title: "plainTitle",
+    description: "plainDescription",
+    descriptionOverride: "plainDescriptionOverride",
+    inputSchema: "plainInputSchema",
+    operation: "plainOperation",
+    output: "plainOutput",
+    outputSchema: "plainOutputSchema",
+  },
+  z.strictObject({
+    id,
+    serverId: id,
+    name: str,
+    plainTitle: str.nullable(),
+    plainDescription: str,
+    plainDescriptionOverride: str.nullable(),
+    plainInputSchema: str,
+    annotations: str.nullable(),
+    plainOperation: str.nullable(),
+    plainOutput: str.nullable(),
+    // Added after the rest: a tool from an older file declares none until
+    // its server is read again.
+    plainOutputSchema: str.nullable().default(null),
+    icons: str.nullable().default(null),
+    // The sealed values: absent from older files.
+    about: bytesOrNull.default(null),
+    schema: bytesOrNull.default(null),
+    override: bytesOrNull.default(null),
+    createdAt: date,
+    updatedAt: date,
+  }),
+)
 
-const OpenApiSpecRow = z.strictObject({
-  serverId: id,
-  text: str,
-  patches: str,
-  hash: str,
-  fetchedAt: date,
-  builtWith: str.nullable(),
-})
+// The schema and its edits were sealed (#96): an older file names their
+// plain columns by their old names.
+const OpenApiSpecRow = renamedFrom(
+  { text: "plainText", patches: "plainPatches" },
+  z.strictObject({
+    serverId: id,
+    plainText: str,
+    plainPatches: str,
+    sealedText: bytesOrNull.default(null),
+    sealedPatches: bytesOrNull.default(null),
+    hash: str,
+    fetchedAt: date,
+    builtWith: str.nullable(),
+  }),
+)
 
 // Wrappers, added in 0.4: absent from older files.
-const WrapperSpecRow = z.strictObject({
-  serverId: id,
-  definition: str,
-  hash: str,
-  updatedAt: date,
-})
+const WrapperSpecRow = renamedFrom(
+  { definition: "plainDefinition" },
+  z.strictObject({
+    serverId: id,
+    plainDefinition: str,
+    // Sealed since (#96): absent from older files.
+    sealedDefinition: bytesOrNull.default(null),
+    hash: str,
+    updatedAt: date,
+  }),
+)
 
 // Services, added with the service kind: absent from older files.
-const ServiceSpecRow = z.strictObject({
-  serverId: id,
-  definition: str,
-  hash: str,
-  hostId: id.nullable(),
-  engine: str,
-  engineVersion: str.default(""),
-  containerName: str,
-  publish: str.default("{}"),
-  env: str.default("{}"),
-  // Added with exits' VPN services: absent from older files.
-  plainValues: str.default("{}"),
-  registeredId: id.nullable(),
-  // Added with services reached through the SSH connection and started on
-  // demand: absent from older files, whose services are reached directly.
-  reach: str.default("direct"),
-  intendedState: str.default("running"),
-  createdAt: date,
-  updatedAt: date,
-})
+const ServiceSpecRow = renamedFrom(
+  { definition: "plainDefinition" },
+  z.strictObject({
+    serverId: id,
+    plainDefinition: str,
+    // Sealed since (#96): absent from older files.
+    sealedDefinition: bytesOrNull.default(null),
+    hash: str,
+    hostId: id.nullable(),
+    engine: str,
+    engineVersion: str.default(""),
+    containerName: str,
+    publish: str.default("{}"),
+    env: str.default("{}"),
+    // Added with exits' VPN services: absent from older files.
+    plainValues: str.default("{}"),
+    registeredId: id.nullable(),
+    // Added with services reached through the SSH connection and started on
+    // demand: absent from older files, whose services are reached directly.
+    reach: str.default("direct"),
+    intendedState: str.default("running"),
+    createdAt: date,
+    updatedAt: date,
+  }),
+)
 
 /** A text column that holds one of a few words. */
 const oneOf = (words: string[]) =>

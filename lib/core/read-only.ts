@@ -1,3 +1,4 @@
+import type { VaultContext } from "./context"
 import { toolTier } from "./tool-tiers"
 
 /**
@@ -6,8 +7,9 @@ import { toolTier } from "./tool-tiers"
  * a run's trace (what may have taken effect) ask this.
  */
 export async function markedReadOnly(
+  ctx: VaultContext,
   serverId: string,
   name: string,
 ): Promise<boolean> {
-  return (await toolTier(serverId, name)) === "read"
+  return (await toolTier(ctx, serverId, name)) === "read"
 }

@@ -1,6 +1,8 @@
 import { Client, InMemoryTransport } from "@modelcontextprotocol/client"
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
 
+import { serverNamed } from "./test-servers"
+
 import { createApiToken, resolveApiToken } from "./api-tokens"
 import type { VaultContext } from "./context"
 import { decryptString } from "./crypto"
@@ -29,6 +31,8 @@ import {
   type ServiceLaunchInput,
 } from "./services/services"
 import { createSshServer } from "./ssh/hosts"
+import { serverCreateData } from "./server-meta"
+import { writeServer } from "./server-meta"
 import { scratchDatabase } from "./test-db"
 import { setupVault } from "./vault"
 import { secretNameWhere } from "./secret-meta"
@@ -1034,10 +1038,7 @@ describe("another server of a definition", () => {
     const done = await approve()
 
     expect(done.isError).not.toBe(true)
-    const made = await db().mcpServer.findFirstOrThrow({
-      where: { name: "Coolify plek" },
-      include: { tools: true },
-    })
+    const made = await serverNamed(ctx, "Coolify plek")
     expect(made).toMatchObject({
       definitionId: source.definitionId,
       description: "Coolify's API.",
@@ -1047,8 +1048,8 @@ describe("another server of a definition", () => {
       authSecretId: null,
     })
     const [mine, theirs] = await Promise.all([
-      storedSpec(made.id),
-      storedSpec(source.id),
+      storedSpec(ctx, made.id),
+      storedSpec(ctx, source.id),
     ])
     expect(mine!.hash).toBe(theirs!.hash)
     expect(mine!.patches).toEqual(theirs!.patches)
@@ -1102,9 +1103,7 @@ describe("another server of a definition", () => {
       ]),
     )
     await approve()
-    const made = await db().mcpServer.findFirstOrThrow({
-      where: { name: "Linear staging" },
-    })
+    const made = await serverNamed(ctx, "Linear staging")
     expect(made).toMatchObject({
       definitionId: source.definitionId,
       description: "Issues and projects.",
@@ -1283,9 +1282,8 @@ describe("proposing a service", () => {
     })
 
     if (pinned) {
-      await db().mcpServer.update({
-        where: { id },
-        data: { sshHostKey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFake" },
+      await writeServer(ctx, id, {
+        sshHostKey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFake",
       })
     }
 
@@ -1329,7 +1327,7 @@ describe("proposing a service", () => {
         : parseServiceDefinition(input.definition)
 
       await db().mcpServer.create({
-        data: {
+        data: serverCreateData(ctx, {
           id,
           vaultId: launchCtx.vaultId,
           kind: "service",
@@ -1340,17 +1338,17 @@ describe("proposing a service", () => {
           definitionId: input.definitionId ?? null,
           serviceSpec: {
             create: {
-              definition: JSON.stringify(definition),
-              hash: serviceDefinitionHash(definition),
+              plainDefinition: JSON.stringify(definition),
+              hash: serviceDefinitionHash(ctx, definition),
               hostId: input.hostId,
               engine: "docker",
               containerName: `pcp-${id}`,
               env: JSON.stringify(input.env),
             },
           },
-        },
+        }),
       })
-      await ensureDefinition(id)
+      await ensureDefinition(ctx, id)
 
       return {
         id,
@@ -1724,7 +1722,7 @@ describe("proposing a service", () => {
       publish_ports: [{ container: 5001, host: 5003 }],
       env_secrets: [{ name: "DOCLING_SERVE_API_KEY", secret: "Docling key" }],
     })
-    await writeServiceDefinition(first.id, {
+    await writeServiceDefinition(ctx, first.id, {
       ...parseServiceDefinition(DEFINITION),
       image: `ghcr.io/docling-project/docling-serve-cpu@sha256:${"d".repeat(64)}`,
     })

@@ -1,8 +1,6 @@
 import type { CallToolResult } from "@modelcontextprotocol/server"
 import type { Locator, Page } from "patchright-core"
 
-import type { McpServer } from "@/lib/generated/prisma/client"
-
 import {
   checkSecretRequest,
   checkSecretSitesChange,
@@ -171,6 +169,7 @@ import {
   type SecretTyper,
 } from "./types"
 import { TOKEN_NAME_SELECT, tokenName } from "../token-names"
+import type { OpenServer } from "../server-meta"
 
 /**
  * Running a browser tool for an assistant: which tab, whether the site may
@@ -3030,7 +3029,7 @@ type BrowserCallOptions = Parameters<typeof runBrowserTool>[4]
  */
 export async function callBrowserTool(
   ctx: VaultContext,
-  server: Pick<McpServer, "id" | "name"> & { slug?: string },
+  server: Pick<OpenServer, "id" | "name"> & { slug?: string },
   toolName: string,
   rawArgs: Record<string, unknown>,
   options: BrowserCallOptions,
@@ -3043,7 +3042,7 @@ export async function callBrowserTool(
 
 async function runBrowserTool(
   ctx: VaultContext,
-  server: Pick<McpServer, "id" | "name"> & { slug?: string },
+  server: Pick<OpenServer, "id" | "name"> & { slug?: string },
   toolName: string,
   rawArgs: Record<string, unknown>,
   {
@@ -3215,7 +3214,7 @@ function clockFor(
  */
 async function runCheckedTool(
   scope: BrowserScope,
-  server: Pick<McpServer, "id" | "name">,
+  server: Pick<OpenServer, "id" | "name">,
   spec: BrowserToolSpec,
   args: Record<string, unknown>,
   extras: ToolExtras,
@@ -3269,7 +3268,7 @@ async function runCheckedTool(
 /** One browser tool, its time limit (if any) on the scope. */
 async function runTool(
   scope: BrowserScope,
-  server: Pick<McpServer, "id" | "name">,
+  server: Pick<OpenServer, "id" | "name">,
   spec: BrowserToolSpec,
   args: Record<string, unknown>,
   { open, keep, keepBytes, secret }: ToolExtras,

@@ -228,7 +228,9 @@ describe("cloneServer", () => {
     expect(readServerNote(ctx, original)).toBeNull()
 
     expect(await toolNames(id)).toEqual(await toolNames(source))
-    expect((await storedSpec(id))!.hash).toBe((await storedSpec(source))!.hash)
+    expect((await storedSpec(ctx, id))!.hash).toBe(
+      (await storedSpec(ctx, source))!.hash,
+    )
     expect(
       clone.tools.find((tool) => tool.name === "listServers")
         ?.descriptionOverride,
@@ -322,7 +324,7 @@ describe("a change to the definition", () => {
     ])
     // Its own read-only setting still applies to the shared schema.
     expect(await toolNames(plekde)).toEqual(["listApplications"])
-    expect((await storedSpec(plekde))!.patches).toEqual([
+    expect((await storedSpec(ctx, plekde))!.patches).toEqual([
       { op: "remove", path: "/paths/~1servers" },
     ])
     expect((await getServer(ctx, plekde)).description).toBe("Coolify's API.")

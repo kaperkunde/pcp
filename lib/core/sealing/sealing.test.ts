@@ -11,7 +11,14 @@ import { allowSiteFor, loadSiteAllowances } from "../allowances"
 import { createApiToken, listApiTokens, resolveApiToken } from "../api-tokens"
 import { exportVault, readExport, restoreExport } from "../backup"
 import { previewOf } from "../backup-format"
-import { bindOrigin, isBoundOrigin, sitesOf } from "../browser-secrets"
+import {
+  bindOrigin,
+  grantSecretUse,
+  isBoundOrigin,
+  listSecretAllowances,
+  sitesOf,
+  takeSecretUse,
+} from "../browser-secrets"
 import {
   createSecret,
   findOwnerSecretByName,
@@ -26,7 +33,7 @@ import {
 } from "../settings"
 import { scratchDatabase } from "../test-db"
 import { downloadByLink, shareResult } from "../file-links"
-import { keepResult } from "../tool-results"
+import { describeResults, keepResult, openResult } from "../tool-results"
 import { createUploadLink, uploadPageView } from "../upload-links"
 import { setupVault } from "../vault"
 import { deleteVault } from "../vault-reset"
@@ -250,6 +257,67 @@ describe("sites", () => {
     ).toEqual(["added-marker.example", "fetched-marker.example"])
   })
 
+  it("keeps a token's allowance for a secret at a site as a hash", async () => {
+    const tokenId = await token()
+    const { id: secretId } = await createSecret(ctx, { name: "S", value: "v" })
+    await grantSecretUse(ctx, {
+      tokenId,
+      secretId,
+      origin: "https://allowance-marker.example",
+      level: "hour",
+    })
+
+    expect(await onDisk("allowance-marker")).toBe(false)
+    expect(await listSecretAllowances(ctx)).toMatchObject([
+      { tokenId, secretId, origin: "https://allowance-marker.example" },
+    ])
+    expect(
+      await takeSecretUse(ctx, {
+        tokenId,
+        secretId,
+        origin: "https://allowance-marker.example",
+      }),
+    ).toBe(true)
+    expect(
+      await takeSecretUse(ctx, {
+        tokenId,
+        secretId,
+        origin: "https://other.example",
+      }),
+    ).toBe(false)
+  })
+
+  it("reads a secret's allowance from before, and seals it on a request", async () => {
+    const tokenId = await token()
+    const { id: secretId } = await createSecret(ctx, { name: "S", value: "v" })
+    await db().apiTokenSecretAllowance.create({
+      data: {
+        tokenId,
+        secretId,
+        origin: "https://old-allowance.example",
+        until: new Date(Date.now() + 60_000),
+        once: true,
+      },
+    })
+
+    expect(await listSecretAllowances(ctx)).toMatchObject([
+      { origin: "https://old-allowance.example", once: true },
+    ])
+    expect(await ensureSealed(ctx)).toBe(true)
+    expect(await onDisk("old-allowance")).toBe(false)
+    expect(await listSecretAllowances(ctx)).toMatchObject([
+      { origin: "https://old-allowance.example", once: true },
+    ])
+    // The once allowance is still used up once.
+    const target = {
+      tokenId,
+      secretId,
+      origin: "https://old-allowance.example",
+    }
+    expect(await takeSecretUse(ctx, target)).toBe(true)
+    expect(await takeSecretUse(ctx, target)).toBe(false)
+  })
+
   it("reads sites from before, and seals them on a request", async () => {
     const tokenId = await token()
     const { id: secretId } = await createSecret(ctx, { name: "S", value: "v" })
@@ -349,14 +417,51 @@ describe("names", () => {
       publicUrl: "https://pcp.example",
     })
 
-    // The kept result's own name is phase 2 of #96; the link's is sealed.
+    // The kept result's own name is sealed under the vault's key, the
+    // link's under the link's.
     expect(
       await db().$queryRawUnsafe(`SELECT "name" FROM "file_link"`),
     ).toEqual([{ name: null }])
+    expect(
+      await db().$queryRawUnsafe(`SELECT "name" FROM "tool_result"`),
+    ).toEqual([{ name: null }])
+    expect(await onDisk("FILE-NAME-MARKER")).toBe(false)
+    expect((await openResult(ctx, { tokenId, id: kept.id }))?.name).toBe(
+      "FILE-NAME-MARKER.txt",
+    )
+    expect((await describeResults(ctx, tokenId, [kept.id]))[0]).toMatchObject({
+      found: true,
+      name: "FILE-NAME-MARKER.txt",
+    })
     expect(await downloadByLink(link.url.split("/").pop()!)).toMatchObject({
       ok: true,
       name: "FILE-NAME-MARKER.txt",
     })
+  })
+
+  it("reads a kept file's name from before, and seals it on a request", async () => {
+    const { id: tokenId } = await claude()
+    const kept = await keepResult(ctx, {
+      tokenId,
+      serverId: null,
+      toolName: "read",
+      text: "hello",
+      mediaType: "text/plain",
+      name: "x.txt",
+    })
+    await db().$executeRawUnsafe(
+      `UPDATE "tool_result" SET "name" = 'OLD-RESULT-NAME.txt', "sealed_name" = NULL WHERE "id" = ?`,
+      kept.id,
+    )
+
+    expect((await openResult(ctx, { tokenId, id: kept.id }))?.name).toBe(
+      "OLD-RESULT-NAME.txt",
+    )
+    expect(await ensureSealed(ctx)).toBe(true)
+    expect(await onDisk("OLD-RESULT-NAME")).toBe(false)
+    expect((await openResult(ctx, { tokenId, id: kept.id }))?.name).toBe(
+      "OLD-RESULT-NAME.txt",
+    )
   })
 
   it("shows the asking token's name on an upload page with the link alone", async () => {

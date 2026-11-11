@@ -1,5 +1,3 @@
-import type { McpServer } from "@/lib/generated/prisma/client"
-
 import { tabHint, tabProblem } from "./browser/call"
 import { browserToolSpec } from "./browser/tools"
 import { calendarToolSpec } from "./caldav/tools"
@@ -19,6 +17,7 @@ import { applyAliases } from "./tools/define"
 import type { InnerTool, Rename } from "./tools/family"
 import { answerHint } from "./tools/answer-hint"
 import { validate } from "./tools/validate"
+import type { OpenServer } from "./server-meta"
 
 /**
  * The one check of a call's arguments before anything runs or the owner is
@@ -53,7 +52,7 @@ export type CallArgumentCheck =
 
 /** A family's tool by its server's kind and its name; undefined for others. */
 export function familyTool(
-  server: Pick<McpServer, "kind">,
+  server: Pick<OpenServer, "kind">,
   toolName: string,
 ): InnerTool | undefined {
   if (server.kind === "browser") {
@@ -84,7 +83,7 @@ export function familyTool(
 }
 
 export async function checkCallArguments(
-  server: Pick<McpServer, "kind">,
+  server: Pick<OpenServer, "kind">,
   toolName: string,
   /** The catalogue row's inputSchema, as JSON text. */
   storedSchema: string | null | undefined,

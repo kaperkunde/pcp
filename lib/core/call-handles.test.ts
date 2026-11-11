@@ -1,4 +1,5 @@
 import { randomBytes, randomUUID } from "node:crypto"
+import { editTools } from "./test-servers"
 import { Client, InMemoryTransport } from "@modelcontextprotocol/client"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
@@ -132,8 +133,8 @@ beforeEach(async () => {
         id: randomUUID(),
         serverId,
         name: tool.name,
-        description: `${tool.name} does one thing.`,
-        inputSchema: JSON.stringify(tool.schema),
+        plainDescription: `${tool.name} does one thing.`,
+        plainInputSchema: JSON.stringify(tool.schema),
         annotations: tool.annotations ? JSON.stringify(tool.annotations) : null,
       },
     })
@@ -277,16 +278,17 @@ describe("call_tool with a call handle", () => {
   it("answers a stale handle with the schema as it is now and a fresh handle", async () => {
     const client = await connect()
     const old = await describedHandle(client, "postcards", "send_postcard")
-    await db().mcpTool.update({
-      where: { serverId_name: { serverId, name: "send_postcard" } },
-      data: {
+    await editTools(
+      ctx,
+      { serverId: serverId, name: "send_postcard" },
+      {
         inputSchema: JSON.stringify({
           ...SEND_SCHEMA,
           properties: { ...SEND_SCHEMA.properties, from: { type: "string" } },
           required: ["to", "from"],
         }),
       },
-    })
+    )
 
     const later = await connect()
     const stale = await call(later, "execute_destructive", {
@@ -458,9 +460,10 @@ describe("call_tool with a call handle", () => {
   })
 
   it("checks lengths, patterns and formats too, before the owner is asked", async () => {
-    await db().mcpTool.updateMany({
-      where: { name: "ask_postcard" },
-      data: {
+    await editTools(
+      ctx,
+      { name: "ask_postcard" },
+      {
         inputSchema: JSON.stringify({
           type: "object",
           properties: {
@@ -472,7 +475,7 @@ describe("call_tool with a call handle", () => {
           additionalProperties: false,
         }),
       },
-    })
+    )
     const client = await connect()
     const handle = await describedHandle(client, "postcards", "ask_postcard")
 

@@ -7,6 +7,8 @@ import {
 } from "./constants"
 import type { VaultContext } from "./context"
 import { db } from "./db"
+import { byServerName, openServer } from "./server-meta"
+import { openTools, TOOL_ABOUT_SELECT } from "./tool-rows"
 import { invalid, notFound } from "./errors"
 import { newId } from "./ids"
 import { getServer } from "./servers"
@@ -361,28 +363,36 @@ export async function listTokenToolAccess(
         : { id: { in: token.servers.map((link) => link.serverId) } }),
     },
     include: {
-      tools: { select: { name: true, title: true }, orderBy: { name: "asc" } },
+      tools: {
+        select: { ...TOOL_ABOUT_SELECT, name: true },
+        orderBy: { name: "asc" },
+      },
     },
-    orderBy: { name: "asc" },
   })
   const stored = await loadToolAccess(ctx.vaultId, tokenId)
 
-  return servers.map((server) => ({
-    id: server.id,
-    name: server.name,
-    slug: server.slug,
-    enabled: server.enabled,
-    refreshable: canRereadTools(server),
-    tools: server.tools.map((tool) => {
-      const key = accessKey(server.id, tool.name)
+  return servers
+    .map((row) => ({
+      ...openServer(ctx, row),
+      tools: openTools(ctx, row.tools),
+    }))
+    .sort(byServerName)
+    .map((server) => ({
+      id: server.id,
+      name: server.name,
+      slug: server.slug,
+      enabled: server.enabled,
+      refreshable: canRereadTools(server),
+      tools: server.tools.map((tool) => {
+        const key = accessKey(server.id, tool.name)
 
-      return {
-        name: tool.name,
-        title: tool.title,
-        access: effectiveAccess(stored, server.id, tool.name),
-        own: stored.own.get(key) ?? null,
-        shared: stored.shared.get(key) ?? null,
-      }
-    }),
-  }))
+        return {
+          name: tool.name,
+          title: tool.title,
+          access: effectiveAccess(stored, server.id, tool.name),
+          own: stored.own.get(key) ?? null,
+          shared: stored.shared.get(key) ?? null,
+        }
+      }),
+    }))
 }

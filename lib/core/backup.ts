@@ -39,6 +39,7 @@ import {
 import { withBrowserClosed } from "./browser/runtime"
 import { scrubFreedPages } from "./cleanup/runtime"
 import { forgetSealedVault } from "./sealing/state"
+import { forgetVaultUpkeep } from "./vault-upkeep"
 import { db } from "./db"
 import { backfillDefinitions } from "./definition-rows"
 import { invalid, isPcpError, PcpError } from "./errors"
@@ -474,6 +475,7 @@ export async function restoreExport(
     await writeExport(payload, target, options)
     // What this process knew of the vault's sealing was of rows now gone.
     forgetSealedVault(payload.vault.id)
+    forgetVaultUpkeep(payload.vault.id)
     return
   }
 
@@ -486,6 +488,8 @@ export async function restoreExport(
   // What this process knew of the vault's sealing was of the rows replaced.
   forgetSealedVault(target.ctx.vaultId)
   forgetSealedVault(payload.vault.id)
+  forgetVaultUpkeep(target.ctx.vaultId)
+  forgetVaultUpkeep(payload.vault.id)
   // The replaced vault's rows were zeroed as they went; the log's older
   // pages and anything freed before secure_delete go with a rebuild.
   await scrubFreedPages({ rebuild: true }).catch((error) =>
@@ -589,8 +593,17 @@ async function writeExport(
         await inChunks(tables.servers, (data) =>
           tx.mcpServer.createMany({ data }),
         )
-        // A file from before definitions: each server its own.
-        await backfillDefinitions(tx, vault.id)
+        // A file from before definitions: each server its own. A sealed row
+        // is opened only with the vault's own key (the same vault's file);
+        // otherwise it gets one on its first use.
+        await backfillDefinitions(
+          tx,
+          vault.id,
+          // The same vault's own file is under the key the owner holds.
+          target.into === "vault" && target.ctx.vaultId === vault.id
+            ? target.ctx
+            : null,
+        )
         await inChunks(tables.serverAuthHeaders, (data) =>
           tx.serverAuthHeader.createMany({ data }),
         )

@@ -1,12 +1,12 @@
 import type { CallToolResult } from "@modelcontextprotocol/server"
 
-import type { McpServer } from "@/lib/generated/prisma/client"
-
 import { isConnectResult } from "../connect"
 import type { VaultContext } from "../context"
 import { runProgram } from "../code/run"
 import type { Executor } from "../code/types"
 import { db } from "../db"
+import { openWrapperSpec } from "../spec-rows"
+import { openTool, TOOL_SCHEMA_SELECT } from "../tool-rows"
 import { notFound, PcpError } from "../errors"
 import { loadGatewayServers, type GatewayServer } from "../gateway-servers"
 import {
@@ -78,6 +78,7 @@ import {
   type Rename,
 } from "../tools/family"
 import { argumentsRefusal, validate } from "../tools/validate"
+import { findServer, type OpenServer } from "../server-meta"
 
 /**
  * A call to a wrapper's tool: its program, run as run_code's are (one
@@ -188,7 +189,7 @@ export function wrapperRunTimeout(flow: boolean): number {
 async function callWrapperTool(
   env: WrapperEnv,
   base: PermissionExecutor,
-  server: McpServer,
+  server: OpenServer,
   toolName: string,
   args: Record<string, unknown>,
   {
@@ -205,7 +206,7 @@ async function callWrapperTool(
     throw new PcpError("state", `${server.name} has no definition.`)
   }
 
-  const definition = readDefinition(spec.definition)
+  const definition = readDefinition(openWrapperSpec(env.ctx, spec).definition)
   const tool = definition.tools.find((entry) => entry.name === toolName)
 
   if (!tool) {
@@ -472,10 +473,9 @@ async function innerCall(
   // On the owner's approval the calls are the wrapper's own: any enabled
   // server of the vault, whether or not this token reaches it.
   const onApproval = definition.callLevels === "approved"
-  const target: McpServer | undefined = onApproval
-    ? ((await db().mcpServer.findFirst({
-        where: { vaultId: env.ctx.vaultId, slug },
-      })) ?? undefined)
+  const target: OpenServer | undefined = onApproval
+    ? ((await findServer(env.ctx, { vaultId: env.ctx.vaultId, slug })) ??
+      undefined)
     : servers.find((entry) => entry.slug === slug)
   const declared =
     target &&
@@ -542,10 +542,12 @@ async function innerCall(
   // program that uses an old argument name is told how to change it, in
   // the wrapper's answer while the name still works, and in the refusal
   // once it does not.
-  const row = await db().mcpTool.findUnique({
-    where: { serverId_name: { serverId: target.id, name } },
-    select: { inputSchema: true },
-  })
+  const row = await db()
+    .mcpTool.findUnique({
+      where: { serverId_name: { serverId: target.id, name } },
+      select: TOOL_SCHEMA_SELECT,
+    })
+    .then((found) => found && openTool(env.ctx, found))
   const checked = await checkCallArguments(
     target,
     name,
@@ -606,7 +608,7 @@ async function innerCall(
     }
   }
 
-  lookedUp?.(await markedReadOnly(target.id, name))
+  lookedUp?.(await markedReadOnly(env.ctx, target.id, name))
   const sent =
     target.kind === "browser" && name === "tabs"
       ? clampTabPace(checked.args, definition.pace)
@@ -619,7 +621,11 @@ async function innerCall(
     ? { ticket: null, warning: null }
     : await guardCall(
         env,
-        { server: target, tool: name, tier: await toolTier(target.id, name) },
+        {
+          server: target,
+          tool: name,
+          tier: await toolTier(env.ctx, target.id, name),
+        },
         sent,
         { rerun: rerun === true, again: RERUN_IN_CODE },
       )
@@ -673,7 +679,7 @@ async function innerCall(
  * action.
  */
 export function callPace(
-  target: Pick<McpServer, "kind">,
+  target: Pick<OpenServer, "kind">,
   toolName: string,
   args: Record<string, unknown>,
   declared: WrapperPace | undefined,

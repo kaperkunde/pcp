@@ -8,6 +8,7 @@ import {
 } from "./constants"
 import type { VaultContext } from "./context"
 import { db } from "./db"
+import { openServers, SERVER_META_SELECT } from "./server-meta"
 import { invalid } from "./errors"
 import {
   isToolTier,
@@ -788,7 +789,7 @@ export async function accessReview(
   const kept = proposed.filter((level) =>
     reachable.has(accessKey(level.serverId, level.tool)),
   )
-  const loaded = await loadToolTiers(ctx.vaultId, servers)
+  const loaded = await loadToolTiers(ctx, servers)
   const tiers: Record<string, ShownTierNow> = {}
 
   for (const [key, info] of loaded) {
@@ -848,10 +849,12 @@ async function sharedInstances(
   ctx: VaultContext,
   serverIds: string[],
 ): Promise<Record<string, string[]>> {
-  const rows = await db().mcpServer.findMany({
-    where: { vaultId: ctx.vaultId, definitionId: { not: null } },
-    select: { id: true, name: true, definitionId: true },
-  })
+  const rows = await db()
+    .mcpServer.findMany({
+      where: { vaultId: ctx.vaultId, definitionId: { not: null } },
+      select: { ...SERVER_META_SELECT, definitionId: true },
+    })
+    .then((found) => openServers(ctx, found))
   const found: Record<string, string[]> = {}
 
   for (const id of serverIds) {

@@ -54,7 +54,7 @@ beforeEach(async () => {
         id: `${name}-id`,
         serverId,
         name,
-        inputSchema: JSON.stringify({ type: "object" }),
+        plainInputSchema: JSON.stringify({ type: "object" }),
         ...(annotations ? { annotations: JSON.stringify(annotations) } : {}),
       },
     })

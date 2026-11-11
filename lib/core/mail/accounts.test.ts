@@ -10,6 +10,7 @@ import { startTestApi, type TestApi } from "../openapi/test-api"
 import { runCall } from "../permissions"
 import { createSecret, deleteSecret, listSecrets } from "../secrets"
 import { getServer, listServers, updateServer } from "../servers"
+import { writeServer } from "../server-meta"
 import { scratchDatabase } from "../test-db"
 import {
   keepBytes,
@@ -241,15 +242,12 @@ describe("adding an account", () => {
         ciphertext: Buffer.from("x"),
       },
     })
-    await db().mcpServer.update({
-      where: { id },
-      data: {
-        oauthTokensId: tokens.id,
-        oauthConnectedAt: new Date(),
-        mailApiUrl: "x",
-        mailUploadUrl: "z",
-        mailAccountId: "y",
-      },
+    await writeServer(ctx, id, {
+      oauthTokensId: tokens.id,
+      oauthConnectedAt: new Date(),
+      mailApiUrl: "x",
+      mailUploadUrl: "z",
+      mailAccountId: "y",
     })
 
     expect(
@@ -400,6 +398,7 @@ describe("an IMAP account's copy in Sent", () => {
 
     const result = await later.run(() =>
       callMailTool(
+        ctx,
         row,
         "send_email",
         { to: ["charles@example.com"], subject: "Hello", text: "Thursday?" },

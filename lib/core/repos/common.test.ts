@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
 
+import { openServiceSpec } from "../spec-rows"
 import type { VaultContext } from "../context"
 import { db } from "../db"
 import {
@@ -141,9 +142,10 @@ describe("PCP's common items", () => {
     expect(synced.message).toMatch(/waits for you/)
     const spec = () =>
       db().serviceSpec.findUniqueOrThrow({ where: { serverId: added!.id! } })
-    expect(readServiceDefinition((await spec()).definition).image).toBe(
-      DOCLING.image,
-    )
+    expect(
+      readServiceDefinition(openServiceSpec(ctx, await spec()).definition)
+        .image,
+    ).toBe(DOCLING.image)
 
     const pending = (await getRepoItem(ctx, link!.id)).data.pending!
     const before = await spec()
@@ -152,7 +154,9 @@ describe("PCP's common items", () => {
       hash: pending.hash,
     })
     const after = await spec()
-    expect(readServiceDefinition(after.definition).image).toBe(newer)
+    expect(
+      readServiceDefinition(openServiceSpec(ctx, after).definition).image,
+    ).toBe(newer)
     expect(after).toMatchObject({
       hostId: before.hostId,
       publish: before.publish,

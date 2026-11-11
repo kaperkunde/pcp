@@ -1,4 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
+import { openTool, TOOL_ABOUT, TOOL_OVERRIDE, TOOL_SCHEMA } from "./tool-rows"
+import type { SealedGroup } from "./sealed-fields"
 import { gunzipSync } from "node:zlib"
 
 import {
@@ -48,7 +50,16 @@ import {
   revealSecret,
   updateSecret,
 } from "./secrets"
-import { createServer } from "./servers"
+import { createServer, getServer } from "./servers"
+import {
+  byServerName,
+  openServer,
+  SERVER_META,
+  writeServer,
+} from "./server-meta"
+import { readFields } from "./sealed-fields"
+import { openDefinition } from "./definition-rows"
+import type { VaultContext } from "./context"
 import {
   createSkill,
   deleteSkill,
@@ -128,7 +139,7 @@ async function populate() {
     authValueTemplate: "Bearer {{secret}}",
     authSecretId: secret.id,
   })
-  await storeTools(server.id, [
+  await storeTools(ctx, server.id, [
     { name: "alpha", description: "First", inputSchema: { type: "object" } },
     { name: "beta", description: "Second", inputSchema: { type: "object" } },
   ])
@@ -319,15 +330,12 @@ describe("restoring", { timeout: 60_000 }, () => {
       authSecretId: secretId,
     })
     // What the session document said, as a check writes it.
-    await db().mcpServer.update({
-      where: { id: jmap.id },
-      data: {
-        mailApiUrl: "https://mail.example/jmap/",
-        mailDownloadUrl:
-          "https://mail.example/jmap/download/{accountId}/{blobId}/{name}",
-        mailAccountId: "a1",
-        mailSubmission: true,
-      },
+    await writeServer(ctx, jmap.id, {
+      mailApiUrl: "https://mail.example/jmap/",
+      mailDownloadUrl:
+        "https://mail.example/jmap/download/{accountId}/{blobId}/{name}",
+      mailAccountId: "a1",
+      mailSubmission: true,
     })
     const tokenId = (await db().apiToken.findFirstOrThrow()).id
     const kept = await keepResult(ctx, {
@@ -342,7 +350,7 @@ describe("restoring", { timeout: 60_000 }, () => {
     )
     const mail = await db().mcpServer.findMany({
       where: { id: { in: [imap.id, jmap.id] } },
-      orderBy: { name: "asc" },
+      orderBy: { id: "asc" },
     })
 
     const file = await exportVault(ctx, EXPORT_PASSWORD)
@@ -365,7 +373,7 @@ describe("restoring", { timeout: 60_000 }, () => {
     expect(
       await db().mcpServer.findMany({
         where: { id: { in: [imap.id, jmap.id] } },
-        orderBy: { name: "asc" },
+        orderBy: { id: "asc" },
       }),
     ).toEqual(mail)
     await expect(
@@ -447,6 +455,7 @@ describe("restoring", { timeout: 60_000 }, () => {
     )
     const older = structuredClone(payload)
     for (const row of older.tables.servers as Record<string, unknown>[]) {
+      asBeforeSealing(ctx, row)
       for (const column of [
         "authUsername",
         "mailApiUrl",
@@ -472,9 +481,7 @@ describe("restoring", { timeout: 60_000 }, () => {
       { restoreHostSettings: false },
     )
 
-    expect(
-      await db().mcpServer.findUniqueOrThrow({ where: { id: serverId } }),
-    ).toMatchObject({
+    expect(await getServer(ctx, serverId)).toMatchObject({
       kind: "mcp",
       authUsername: null,
       mailApiUrl: null,
@@ -696,7 +703,7 @@ describe("restoring", { timeout: 60_000 }, () => {
       properties: { total: { type: "integer" } },
     }
     const icons = [{ src: "https://upstream.example/alpha.png" }]
-    await storeTools(serverId, [
+    await storeTools(ctx, serverId, [
       {
         name: "alpha",
         description: "First",
@@ -713,14 +720,16 @@ describe("restoring", { timeout: 60_000 }, () => {
       { into: "vault", ctx },
       { restoreHostSettings: false },
     )
-    const tool = await db().mcpTool.findFirstOrThrow({
-      where: { name: "alpha" },
-    })
+    const tool = openTool(
+      ctx,
+      await db().mcpTool.findFirstOrThrow({ where: { name: "alpha" } }),
+    )
     expect(JSON.parse(tool.outputSchema!)).toEqual(outputSchema)
     expect(JSON.parse(tool.icons!)).toEqual(icons)
 
     const older = structuredClone(await openRaw(file, EXPORT_PASSWORD))
     for (const row of older.tables.tools as Record<string, unknown>[]) {
+      unsealed(ctx, row, [TOOL_ABOUT, TOOL_SCHEMA, TOOL_OVERRIDE] as never)
       delete row.outputSchema
       delete row.icons
     }
@@ -734,7 +743,10 @@ describe("restoring", { timeout: 60_000 }, () => {
       { restoreHostSettings: false },
     )
     expect(
-      await db().mcpTool.findFirstOrThrow({ where: { name: "alpha" } }),
+      openTool(
+        ctx,
+        await db().mcpTool.findFirstOrThrow({ where: { name: "alpha" } }),
+      ),
     ).toMatchObject({ outputSchema: null, icons: null })
   })
 
@@ -777,6 +789,7 @@ describe("restoring", { timeout: 60_000 }, () => {
     for (const row of older.tables.servers as Record<string, unknown>[]) {
       delete row.definitionId
       delete row.personalNote
+      asBeforeSealing(ctx, row)
     }
     for (const row of older.tables.skills as Record<string, unknown>[]) {
       delete row.personalNote
@@ -790,12 +803,15 @@ describe("restoring", { timeout: 60_000 }, () => {
       { into: "vault", ctx },
       { restoreHostSettings: false },
     )
-    const servers = await db().mcpServer.findMany({ orderBy: { name: "asc" } })
+    const servers = (await db().mcpServer.findMany())
+      .map((row) => openServer(ctx, row))
+      .sort(byServerName)
     expect(servers.map((row) => row.definitionId)).toEqual([serverId, cloneId])
     expect(
-      (await db().serverDefinition.findMany({ orderBy: { name: "asc" } })).map(
-        (row) => [row.id, row.slug, row.kind],
-      ),
+      (await db().serverDefinition.findMany())
+        .map((row) => openDefinition(ctx, row))
+        .sort(byServerName)
+        .map((row) => [row.id, row.slug, row.kind]),
     ).toEqual([
       [serverId, "upstream", "mcp"],
       [cloneId, "upstream-staging", "mcp"],
@@ -923,7 +939,7 @@ describe("restoring", { timeout: 60_000 }, () => {
       { restoreHostSettings: false },
     )
     expect(await db().toolTier.findMany()).toEqual(before)
-    expect(await toolTier(serverId, "alpha")).toBe("read")
+    expect(await toolTier(ctx, serverId, "alpha")).toBe("read")
     expect(await readOwnToolTiers(ctx)).toEqual({ memory: "write" })
 
     const older = structuredClone(await openRaw(file, EXPORT_PASSWORD))
@@ -938,7 +954,7 @@ describe("restoring", { timeout: 60_000 }, () => {
       { restoreHostSettings: false },
     )
     expect(await db().toolTier.count()).toBe(0)
-    expect(await toolTier(serverId, "alpha")).toBe("destructive")
+    expect(await toolTier(ctx, serverId, "alpha")).toBe("destructive")
   })
 
   it("carries a store's key and index but never its files, and restores a file from before stores", async () => {
@@ -1642,6 +1658,7 @@ describe("restoring", { timeout: 60_000 }, () => {
   it("writes a large catalogue in chunks", async () => {
     const { ctx, serverId } = await populate()
     await storeTools(
+      ctx,
       serverId,
       Array.from({ length: 1200 }, (_, index) => ({
         name: `tool_${index}`,
@@ -1785,3 +1802,40 @@ describe("refusing a file", { timeout: 60_000 }, () => {
     ).rejects.toThrow(/another vault/)
   })
 })
+
+/**
+ * A row of a file as a PCP from before #96 wrote it: each group's sealed
+ * values in their plain columns, by their old names, and nothing sealed.
+ */
+function unsealed(
+  ctx: VaultContext,
+  row: Record<string, unknown>,
+  groups: Array<SealedGroup<Record<string, unknown>, string, string>>,
+) {
+  for (const group of groups) {
+    const sealed = row[group.column]
+
+    if (typeof sealed === "string") {
+      const values = readFields(ctx.dek, group, {
+        ...row,
+        [group.column]: Buffer.from(sealed, "base64"),
+      } as never)
+
+      for (const [key, value] of Object.entries(values)) {
+        if (group.sealedOnly?.includes(key)) {
+          continue
+        }
+
+        delete row[`plain${key.charAt(0).toUpperCase()}${key.slice(1)}`]
+        row[key] = value
+      }
+    }
+
+    delete row[group.column]
+  }
+}
+
+/** A server row of a file from before #96. */
+function asBeforeSealing(ctx: VaultContext, row: Record<string, unknown>) {
+  unsealed(ctx, row, [SERVER_META as never])
+}

@@ -1,7 +1,5 @@
 import type { CallToolResult } from "@modelcontextprotocol/server"
 
-import type { McpServer } from "@/lib/generated/prisma/client"
-
 import { storeTools, type SyncResult } from "../catalogue"
 import type { VaultContext } from "../context"
 import { db } from "../db"
@@ -91,6 +89,7 @@ import {
   wallToInstant,
   type Zone,
 } from "./zones"
+import { type OpenServer, serverCreateData, writeServer } from "../server-meta"
 
 /**
  * Calendar accounts: servers of kind "caldav". The owner adds one in PCP
@@ -201,14 +200,14 @@ export async function createCalendarAccount(
 
   await withNewSecret(ctx, newSecret, async (secretId) => {
     await db().mcpServer.create({
-      data: {
+      data: serverCreateData(ctx, {
         id,
         vaultId: ctx.vaultId,
         kind: "caldav",
         slug,
         ...data,
         ...secretColumns(data, secretId),
-      },
+      }),
     })
   })
 
@@ -252,17 +251,14 @@ export async function updateCalendarAccount(
     CONNECTION_FIELDS.some((key) => data[key] !== existing[key])
 
   await withNewSecret(ctx, newSecret, (secretId) =>
-    db().mcpServer.update({
-      where: { id },
-      data: {
-        ...data,
-        ...secretColumns(data, secretId),
-        // The home the server named belongs to the old address or sign-in.
-        ...(reconnect ? { davHomeUrl: null } : {}),
-        ...(dropTokens
-          ? { oauthTokensId: null, oauthConnectedAt: null, status: "unknown" }
-          : {}),
-      },
+    writeServer(ctx, id, {
+      ...data,
+      ...secretColumns(data, secretId),
+      // The home the server named belongs to the old address or sign-in.
+      ...(reconnect ? { davHomeUrl: null } : {}),
+      ...(dropTokens
+        ? { oauthTokensId: null, oauthConnectedAt: null, status: "unknown" }
+        : {}),
     }),
   )
 
@@ -275,7 +271,8 @@ export async function updateCalendarAccount(
 
 /** The account's status and what the gateway is told, from a failure. */
 async function fail(
-  server: McpServer,
+  ctx: VaultContext,
+  server: OpenServer,
   error: unknown,
   credential: DavCredential,
 ): Promise<{ status: "auth_required" | "error"; message: string }> {
@@ -286,7 +283,7 @@ async function fail(
       server.authType === "oauth"
         ? `${server.name} needs to be connected: open it in PCP and choose Connect.`
         : `${server.name} refused the credentials PCP sent: ${scrub.text(error.message)}${server.url.includes("icloud.com") ? " iCloud takes an app-specific password (appleid.apple.com, Sign-In and Security), not your Apple ID password." : ""}`
-    await setServerStatus(server.id, "auth_required", message)
+    await setServerStatus(ctx, server.id, "auth_required", message)
     return { status: "auth_required", message }
   }
 
@@ -297,13 +294,14 @@ async function fail(
         : `${server.name} could not be reached.`,
     )
     .slice(0, 500)
-  await setServerStatus(server.id, "error", message)
+  await setServerStatus(ctx, server.id, "error", message)
   return { status: "error", message }
 }
 
 /** The calendar home: as last found, or found now and kept. */
 async function homeOf(
-  server: McpServer,
+  ctx: VaultContext,
+  server: OpenServer,
   client: DavClient,
   { fresh = false }: { fresh?: boolean } = {},
 ): Promise<string> {
@@ -312,28 +310,28 @@ async function homeOf(
   }
 
   const home = await client.discoverHome()
-  await db().mcpServer.update({
-    where: { id: server.id },
-    data: { davHomeUrl: home },
-  })
+  await writeServer(ctx, server.id, { davHomeUrl: home })
   server.davHomeUrl = home
   return home
 }
 
 /** The calendars, finding the home again once if it has moved. */
 async function calendarsOf(
-  server: McpServer,
+  ctx: VaultContext,
+  server: OpenServer,
   client: DavClient,
 ): Promise<CalendarInfo[]> {
   try {
-    return await client.listCalendars(await homeOf(server, client))
+    return await client.listCalendars(await homeOf(ctx, server, client))
   } catch (error) {
     if (
       error instanceof DavRequestError &&
       (error.cause === 404 || error.cause === 403) &&
       server.davHomeUrl
     ) {
-      return client.listCalendars(await homeOf(server, client, { fresh: true }))
+      return client.listCalendars(
+        await homeOf(ctx, server, client, { fresh: true }),
+      )
     }
 
     throw error
@@ -345,12 +343,13 @@ async function calendarsOf(
  * catalogue. A failure keeps the tools it had.
  */
 export async function syncCalendarTools(
-  server: McpServer,
+  ctx: VaultContext,
+  server: OpenServer,
   credential: DavCredential,
 ): Promise<SyncResult> {
   try {
     const client = new DavClient(server.url, credential)
-    const home = await homeOf(server, client, { fresh: true })
+    const home = await homeOf(ctx, server, client, { fresh: true })
     const calendars = await client.listCalendars(home)
 
     if (calendars.length === 0) {
@@ -360,19 +359,22 @@ export async function syncCalendarTools(
     }
 
     const toolCount = await storeTools(
+      ctx,
       server.id,
       calendarTools({ readOnly: server.readOnly }),
     )
-    await setServerStatus(server.id, "ok", "", { lastSyncedAt: new Date() })
+    await setServerStatus(ctx, server.id, "ok", "", {
+      lastSyncedAt: new Date(),
+    })
 
     return { status: "ok", message: "", toolCount }
   } catch (error) {
     if (isPcpError(error)) {
-      await setServerStatus(server.id, "error", error.message)
+      await setServerStatus(ctx, server.id, "error", error.message)
       return { status: "error", message: error.message, toolCount: 0 }
     }
 
-    return { ...(await fail(server, error, credential)), toolCount: 0 }
+    return { ...(await fail(ctx, server, error, credential)), toolCount: 0 }
   }
 }
 
@@ -663,7 +665,8 @@ function calendarView(calendar: CalendarInfo) {
 // The tools
 
 type Session = {
-  server: McpServer
+  ctx: VaultContext
+  server: OpenServer
   client: DavClient
   calendars: CalendarInfo[]
 }
@@ -813,7 +816,7 @@ async function runTool(
   toolName: string,
   args: Record<string, unknown>,
 ): Promise<unknown> {
-  const { client, calendars, server } = session
+  const { ctx, client, calendars, server } = session
 
   switch (toolName) {
     case "list_calendars":
@@ -1504,7 +1507,7 @@ async function runTool(
     }
 
     case "create_calendar": {
-      const home = await homeOf(server, client)
+      const home = await homeOf(ctx, server, client)
       const href = await client.makeCalendar(home, newUid(), {
         name: String(args.name),
         component: args.holds === "reminders" ? "VTODO" : "VEVENT",
@@ -1601,7 +1604,8 @@ function calendarArgumentProblems(args: Record<string, unknown>): string[] {
 
 /** Runs one calendar tool for an assistant. */
 export async function callCalendarTool(
-  server: McpServer,
+  ctx: VaultContext,
+  server: OpenServer,
   toolName: string,
   rawArgs: Record<string, unknown>,
   { credential }: { credential: DavCredential },
@@ -1640,8 +1644,12 @@ export async function callCalendarTool(
 
   try {
     const client = new DavClient(server.url, credential)
-    const calendars = await calendarsOf(server, client)
-    const value = await runTool({ server, client, calendars }, toolName, args)
+    const calendars = await calendarsOf(ctx, server, client)
+    const value = await runTool(
+      { ctx, server, client, calendars },
+      toolName,
+      args,
+    )
 
     return withNotes(
       jsonToolResult(value, { redact: credential.redact }),
@@ -1662,7 +1670,7 @@ export async function callCalendarTool(
       throw error
     }
 
-    const failure = await fail(server, error, credential)
+    const failure = await fail(ctx, server, error, credential)
     throw new PcpError(
       failure.status === "auth_required" ? "unauthorized" : "upstream",
       failure.message,

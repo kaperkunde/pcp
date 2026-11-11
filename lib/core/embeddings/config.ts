@@ -7,6 +7,7 @@ import {
 } from "../constants"
 import type { VaultContext } from "../context"
 import { db } from "../db"
+import { byServerName, SERVER_META_SELECT, serverName } from "../server-meta"
 import { invalid } from "../errors"
 import { getSetting, setSetting } from "../settings"
 import { EMBED_MAX_MODEL_CHARS, EMBED_MAX_URL_CHARS } from "./limits"
@@ -251,11 +252,16 @@ export async function embeddingsOverview(
           .map((row) => ({ id: row.id, name: secretName(ctx, row) }))
           .sort(byName),
       ),
-    db().mcpServer.findMany({
-      where: { vaultId: ctx.vaultId, kind: "openapi" },
-      select: { id: true, name: true },
-      orderBy: { name: "asc" },
-    }),
+    db()
+      .mcpServer.findMany({
+        where: { vaultId: ctx.vaultId, kind: "openapi" },
+        select: SERVER_META_SELECT,
+      })
+      .then((rows) =>
+        rows
+          .map((row) => ({ id: row.id, name: serverName(ctx, row) }))
+          .sort(byServerName),
+      ),
     db().serviceSpec.findMany({
       where: { server: { vaultId: ctx.vaultId }, registeredId: { not: null } },
       select: { registeredId: true },

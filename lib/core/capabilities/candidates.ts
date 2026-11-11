@@ -1,5 +1,7 @@
 import type { VaultContext } from "../context"
 import { db } from "../db"
+import { openServiceSpec, SERVICE_SPEC_SELECT } from "../spec-rows"
+import { inputSchemasOf } from "../tool-rows"
 import { visibleTools, type GatewayServer } from "../gateway-servers"
 import { readServiceDefinition } from "../services/definition"
 import { itemOfImage, type CapabilityId } from "./list"
@@ -24,6 +26,7 @@ const WORTH_READING =
   /ocr|optical|tesseract|convert|export|markdown|text|form|flatten|merge|combine|sign|pdf|document|image|scan|read|extract|file|render|page/i
 
 export async function candidateTools(
+  ctx: VaultContext,
   servers: GatewayServer[],
 ): Promise<CandidateTool[]> {
   const listed = servers
@@ -43,13 +46,9 @@ export async function candidateTools(
     return []
   }
 
-  const schemas = new Map(
-    (
-      await db().mcpTool.findMany({
-        where: { id: { in: listed.map(({ tool }) => tool.id) } },
-        select: { id: true, inputSchema: true },
-      })
-    ).map((row) => [row.id, row.inputSchema]),
+  const schemas = await inputSchemasOf(
+    ctx,
+    listed.map(({ tool }) => tool.id),
   )
 
   return listed.map(({ server, tool }) => {
@@ -97,7 +96,7 @@ export async function serverOrigins(
       registeredId: { in: serverIds },
       server: { vaultId: ctx.vaultId },
     },
-    select: { serverId: true, registeredId: true, definition: true },
+    select: { ...SERVICE_SPEC_SELECT, registeredId: true },
   })
 
   for (const spec of specs) {
@@ -106,7 +105,9 @@ export async function serverOrigins(
     }
 
     try {
-      const definition = readServiceDefinition(spec.definition)
+      const definition = readServiceDefinition(
+        openServiceSpec(ctx, spec).definition,
+      )
       const item = itemOfImage(
         `${definition.image ?? ""} ${definition.source ?? ""}`,
       )
@@ -132,7 +133,7 @@ export async function capabilityProviders(
   servers: GatewayServer[],
   id: CapabilityId,
 ): Promise<Partial<Record<OperationId, Provider[]>>> {
-  const tools = await candidateTools(servers)
+  const tools = await candidateTools(ctx, servers)
 
   if (tools.length === 0) {
     return {}

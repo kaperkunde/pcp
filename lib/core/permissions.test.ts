@@ -1,7 +1,11 @@
 import { createHash, randomUUID } from "node:crypto"
 
+import { openTools } from "./tool-rows"
+import { firstServer } from "./test-servers"
 import type { CallToolResult } from "@modelcontextprotocol/server"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
+
+import { serverNamed } from "./test-servers"
 
 import { listTokenAllowances } from "./allowances"
 import { createApiToken, resolveApiToken, revokeApiToken } from "./api-tokens"
@@ -123,8 +127,8 @@ async function setup(options: { allowAllServers?: boolean } = {}): Promise<{
         id: randomUUID(),
         serverId,
         name,
-        description: `${name} does one thing.`,
-        inputSchema: JSON.stringify({ type: "object" }),
+        plainDescription: `${name} does one thing.`,
+        plainInputSchema: JSON.stringify({ type: "object" }),
         annotations: JSON.stringify(annotations),
       },
     })
@@ -496,8 +500,8 @@ describe("asking the owner", () => {
         id: randomUUID(),
         serverId,
         name: "run_command",
-        description: "Runs one command.",
-        inputSchema: JSON.stringify({ type: "object" }),
+        plainDescription: "Runs one command.",
+        plainInputSchema: JSON.stringify({ type: "object" }),
         annotations: JSON.stringify({ destructiveHint: true }),
       },
     })
@@ -676,7 +680,7 @@ describe("kept results in a call", () => {
       syncTools: async () => ({ status: "ok", message: "", toolCount: 3 }),
     }
 
-    const row = await db().mcpServer.findFirstOrThrow()
+    const row = await firstServer(ctx)
     await runCall(
       ctx,
       row,
@@ -743,7 +747,7 @@ describe("a site the browser asks about", () => {
         return { content: [{ type: "text", text: "opened" }] }
       },
     }
-    const row = await db().mcpServer.findFirstOrThrow()
+    const row = await firstServer(ctx)
 
     await runCall(ctx, row, "navigate", args, {
       publicUrl: PUBLIC_URL,
@@ -1324,9 +1328,7 @@ describe("adding a server", () => {
       { publicUrl: PUBLIC_URL },
       executor,
     )
-    const linear = await db().mcpServer.findFirstOrThrow({
-      where: { name: "Linear" },
-    })
+    const linear = await serverNamed(ctx, "Linear")
 
     expect(added.structuredContent).toMatchObject({
       kind: "needs_owner",
@@ -1418,9 +1420,10 @@ describe("adding a server", () => {
       executor,
     )
     expect(textOf(added)).toMatch(/Added Weather as "weather" with 3 tools/)
-    expect(
-      await db().mcpServer.findFirstOrThrow({ where: { name: "Weather" } }),
-    ).toMatchObject({ authType: "header", authSecretId: secret.id })
+    expect(await serverNamed(ctx, "Weather")).toMatchObject({
+      authType: "header",
+      authSecretId: secret.id,
+    })
   })
 
   it("names every secret when the credential has several headers, and adds them all", async () => {
@@ -1491,10 +1494,7 @@ describe("adding a server", () => {
       { publicUrl: PUBLIC_URL },
       executor,
     )
-    const added = await db().mcpServer.findFirstOrThrow({
-      where: { name: "Domains" },
-      include: { authHeaders: true },
-    })
+    const added = await serverNamed(ctx, "Domains")
     expect(added.authHeaders).toMatchObject([
       {
         position: 1,
@@ -1636,10 +1636,7 @@ describe("adding an API from OpenAPI text", () => {
     )
     expect(textOf(added)).toMatch(/Added Pets as "pets" with 3 tools/)
 
-    const pets = await db().mcpServer.findFirstOrThrow({
-      where: { name: "Pets" },
-      include: { tools: true },
-    })
+    const pets = await serverNamed(ctx, "Pets")
     expect(pets).toMatchObject({
       kind: "openapi",
       url: "https://api.example.com/v1",
@@ -1716,9 +1713,7 @@ describe("adding an API from OpenAPI text", () => {
       { publicUrl: PUBLIC_URL },
       executor,
     )
-    expect(
-      await db().mcpServer.findFirstOrThrow({ where: { name: "Pets" } }),
-    ).toMatchObject({
+    expect(await serverNamed(ctx, "Pets")).toMatchObject({
       authType: "header",
       authSecretId: secret.id,
       readOnly: true,
@@ -1811,10 +1806,13 @@ describe("a change to an API endpoint of the owner's", () => {
     })
     expect(textOf(done)).toBe("Changed Pets: 2 tools.")
 
-    const tools = await db().mcpTool.findMany({
-      where: { serverId: id },
-      orderBy: { name: "asc" },
-    })
+    const tools = openTools(
+      ctx,
+      await db().mcpTool.findMany({
+        where: { serverId: id },
+        orderBy: { name: "asc" },
+      }),
+    )
     expect(tools.map((tool) => [tool.name, tool.descriptionOverride])).toEqual([
       ["createPet", null],
       ["listPets", "Every pet in the shop."],
@@ -1958,9 +1956,7 @@ describe("a new secret the owner types in", () => {
     expect(openSecretMeta(ctx, secret).description).toBe(
       "Sent to Pets in the X-API-Key header.",
     )
-    expect(
-      await db().mcpServer.findFirstOrThrow({ where: { name: "Pets" } }),
-    ).toMatchObject({
+    expect(await serverNamed(ctx, "Pets")).toMatchObject({
       authType: "header",
       authSecretId: secret.id,
       authHeaderName: "X-API-Key",
@@ -1994,9 +1990,9 @@ describe("a new secret the owner types in", () => {
     ).toMatchObject({ name: "Pets API key", exists: true })
 
     await decidePermission(ctx, first, "allow_once", web, executor)
-    expect(
-      await db().mcpServer.findFirstOrThrow({ where: { name: "Pets" } }),
-    ).toMatchObject({ authSecretId: added.id })
+    expect(await serverNamed(ctx, "Pets")).toMatchObject({
+      authSecretId: added.id,
+    })
 
     await withPermission(scope, {
       kind: "register",
@@ -2139,9 +2135,7 @@ describe("an API that signs in with OAuth", () => {
 
     expect(textOf(added)).toMatch(/Added Mail as "mail"/)
     expect(textOf(added)).not.toContain("client-s3cret")
-    const server = await db().mcpServer.findFirstOrThrow({
-      where: { name: "Mail" },
-    })
+    const server = await serverNamed(ctx, "Mail")
     expect(server).toMatchObject({
       kind: "openapi",
       authType: "oauth",
@@ -2173,9 +2167,7 @@ describe("an API that signs in with OAuth", () => {
     )
 
     expect(added.isError ?? false).toBe(false)
-    expect(
-      await db().mcpServer.findFirstOrThrow({ where: { name: "Mail" } }),
-    ).toMatchObject({
+    expect(await serverNamed(ctx, "Mail")).toMatchObject({
       oauthClientId: "owner-client",
       oauthClientSecretId: null,
     })
@@ -2952,9 +2944,7 @@ describe("an API with a user name and password", () => {
     expect(openSecretMeta(ctx, secret).description).toBe(
       "The password for ada at Pets.",
     )
-    expect(
-      await db().mcpServer.findFirstOrThrow({ where: { name: "Pets" } }),
-    ).toMatchObject({
+    expect(await serverNamed(ctx, "Pets")).toMatchObject({
       kind: "openapi",
       authType: "basic",
       authUsername: "ada",
@@ -3011,9 +3001,7 @@ describe("a calendar account an assistant proposes", () => {
 
       expect(textOf(added)).toMatch(/Added iCloud as "icloud" with 13 tools/)
       expect(textOf(added)).not.toContain(PASSWORD)
-      const account = await db().mcpServer.findFirstOrThrow({
-        where: { name: "iCloud" },
-      })
+      const account = await serverNamed(ctx, "iCloud")
       expect(account).toMatchObject({
         kind: "caldav",
         authUsername: "ada@icloud.com",
@@ -3144,9 +3132,7 @@ describe("a mail account an assistant proposes", () => {
     expect(openSecretMeta(ctx, secret).description).toBe(
       "The password for ada@example.com at Mail.",
     )
-    const account = await db().mcpServer.findFirstOrThrow({
-      where: { name: "Mail" },
-    })
+    const account = await serverNamed(ctx, "Mail")
     expect(account).toMatchObject({
       kind: "jmap",
       authType: "basic",
@@ -3253,9 +3239,7 @@ describe("a mail account an assistant proposes", () => {
     )
     expect(textOf(added)).toMatch(/Added Mail as "mail" with 7 tools/)
     expect(fake.requests[0]!.authorization).toBe("Bearer token-1")
-    expect(
-      await db().mcpServer.findFirstOrThrow({ where: { name: "Mail" } }),
-    ).toMatchObject({
+    expect(await serverNamed(ctx, "Mail")).toMatchObject({
       kind: "jmap",
       authType: "header",
       readOnly: true,
@@ -3295,9 +3279,7 @@ describe("a mail account an assistant proposes", () => {
       kind: "needs_owner",
       reason: "connect",
     })
-    expect(
-      await db().mcpServer.findFirstOrThrow({ where: { name: "Mail" } }),
-    ).toMatchObject({
+    expect(await serverNamed(ctx, "Mail")).toMatchObject({
       kind: "jmap",
       authType: "oauth",
       oauthConnectedAt: null,
@@ -3342,9 +3324,10 @@ describe("a mail account an assistant proposes", () => {
     expect(textOf(added)).toMatch(
       /Added Mail as "mail", but its tools could not be read yet/,
     )
-    expect(
-      await db().mcpServer.findFirstOrThrow({ where: { name: "Mail" } }),
-    ).toMatchObject({ kind: "imap", status: "error" })
+    expect(await serverNamed(ctx, "Mail")).toMatchObject({
+      kind: "imap",
+      status: "error",
+    })
   })
 
   it("notes a private address that PCP did not look at, for the owner to weigh", async () => {

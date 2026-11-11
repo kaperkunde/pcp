@@ -9,8 +9,6 @@ import {
   vi,
 } from "vitest"
 
-import type { McpServer } from "@/lib/generated/prisma/client"
-
 import { createApiToken, resolveApiToken } from "../api-tokens"
 import { labelRun } from "../code/runs"
 import { ERROR_META_KEY } from "../tools/outcome"
@@ -25,6 +23,8 @@ import { callBrowserTool } from "./call"
 import { chromiumExecutable } from "./executable"
 import { closeAllBrowsers, runningBrowser } from "./runtime"
 import { createBrowserServer } from "./server"
+import type { OpenServer } from "../server-meta"
+import { openServer } from "../server-meta"
 
 // Calls on a tab wait in that tab's lane, against a real headless Chromium
 // (skipped where there is none, as call.test.ts is): one tab's slow call
@@ -47,7 +47,7 @@ let cleanup: () => Promise<void>
 let api: TestApi
 let ctx: VaultContext
 let tokenId: string
-let server: McpServer
+let server: OpenServer
 
 beforeEach(async () => {
   ;({ cleanup } = await scratchDatabase())
@@ -60,9 +60,12 @@ beforeEach(async () => {
     allowAllServers: true,
   })
   tokenId = (await resolveApiToken(token))!.tokenId
-  server = await db().mcpServer.findUniqueOrThrow({
-    where: { id: (await createBrowserServer(ctx)).id },
-  })
+  server = openServer(
+    ctx,
+    await db().mcpServer.findUniqueOrThrow({
+      where: { id: (await createBrowserServer(ctx)).id },
+    }),
+  )
   api = await startTestApi((request, res) => {
     res.setHeader("content-type", "text/html; charset=utf-8")
     const page = `<title>Page ${request.url}</title><h1>Page ${request.url}</h1>`

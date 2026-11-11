@@ -141,7 +141,7 @@ describe("the owner's tiers", () => {
       await db().mcpServer.update({ where: { id }, data: { definitionId } })
     }
 
-    await storeTools(id, [
+    await storeTools(ctx, id, [
       {
         name: "list",
         description: "Lists.",
@@ -164,9 +164,9 @@ describe("the owner's tiers", () => {
     const second = await server("Second", await definitionOf(first))
 
     await setToolTier(ctx, second, "burn", "write")
-    expect(await toolTier(first, "burn")).toBe("write")
-    expect(await toolTier(second, "burn")).toBe("write")
-    expect(await toolTierInfo(first, "burn")).toEqual({
+    expect(await toolTier(ctx, first, "burn")).toBe("write")
+    expect(await toolTier(ctx, second, "burn")).toBe("write")
+    expect(await toolTierInfo(ctx, first, "burn")).toEqual({
       tier: "write",
       derived: "destructive",
       override: "write",
@@ -174,16 +174,16 @@ describe("the owner's tiers", () => {
     })
 
     // The tool drops out of a refresh and comes back: the choice stays.
-    await storeTools(first, [
+    await storeTools(ctx, first, [
       { name: "list", description: "Lists.", inputSchema: { type: "object" } },
     ])
     expect(await db().toolTier.count()).toBe(1)
-    await storeTools(first, [
+    await storeTools(ctx, first, [
       { name: "burn", description: "Burns.", inputSchema: { type: "object" } },
     ])
-    expect(await toolTier(first, "burn")).toBe("write")
+    expect(await toolTier(ctx, first, "burn")).toBe("write")
 
-    const tiers = await loadToolTiers(ctx.vaultId, [
+    const tiers = await loadToolTiers(ctx, [
       { id: first, tools: [{ name: "burn" }, { name: "gone" }] },
     ])
     expect(tiers.get(`${first}/burn`)?.tier).toBe("write")
@@ -191,7 +191,7 @@ describe("the owner's tiers", () => {
     expect(tiers.get(`${first}/gone`)?.tier).toBe("destructive")
 
     await setToolTier(ctx, first, "burn", null)
-    expect(await toolTier(second, "burn")).toBe("destructive")
+    expect(await toolTier(ctx, second, "burn")).toBe("destructive")
   })
 
   it("stays with a server that gets a definition of its own, and merges with the kept one's winning", async () => {
@@ -200,10 +200,10 @@ describe("the owner's tiers", () => {
     await setToolTier(ctx, first, "burn", "write")
 
     await detachServer(ctx, second)
-    expect(await toolTier(second, "burn")).toBe("write")
+    expect(await toolTier(ctx, second, "burn")).toBe("write")
     await setToolTier(ctx, second, "burn", "read")
     await setToolTier(ctx, second, "list", "write")
-    expect(await toolTier(first, "burn")).toBe("write")
+    expect(await toolTier(ctx, first, "burn")).toBe("write")
 
     await mergeToolTiers(ctx.vaultId, await definitionOf(first), [
       await definitionOf(second),

@@ -78,7 +78,39 @@ associated data (a ciphertext cannot be moved to another row):
   the sites a secret is typed at, a token's sites allowed for a while and
   web fetch's site and script lines (each kept as a keyed hash of the site,
   the site sealed beside it: `secret_browser_origin:<secret id>:<hash>`,
-  `api_token_site_allowance:<token id>:<hash>`, `web_fetch_rule:<id>:key`).
+  `api_token_site_allowance:<token id>:<hash>`,
+  `api_token_secret_allowance:<token id>:<secret id>:<hash>`,
+  `web_fetch_rule:<id>:key`); and what a server is and where it is: its
+  name, description, address, logins and accounts, OAuth client, scope
+  and addresses, schema address, what PCP found out of it (mail, SMTP and
+  calendar addresses, SSH host and public keys) and its status message,
+  as one JSON (`mcp_server.meta`, `mcp_server:<id>:meta`,
+  `lib/core/server-meta.ts`), a definition's name and description
+  (`server_definition.meta`), a tool's title and description, the title
+  its annotations carried (`mcp_tool.about`), its schemas, call plan and
+  outline (`mcp_tool.schema`) and the owner's wording
+  (`mcp_tool.override`, each `mcp_tool:<id>:<column>`,
+  `lib/core/tool-rows.ts`), an endpoint's schema text and edits
+  (`openapi_spec.sealed_text`, `sealed_patches`), a wrapper's and a
+  service's definition (`wrapper_spec`/`service_spec.sealed_definition`,
+  each `<table>:<server id>:<column>`, `lib/core/spec-rows.ts`; their
+  `hash` a keyed hash, so equal copies are still found equal), and a kept
+  file's name (`tool_result.sealed_name`, `tool_result:<id>:name`). Several
+  values sealed together are one JSON, written only through a helper that
+  reads it and writes it back over what it read
+  (`lib/core/sealed-fields.ts`, `server-meta.ts writeServer`), so a write
+  that came between is read again, never lost. Short names (`slug`), tool
+  names, kinds, flags and the status word stay plain. Whatever read these
+  at boot with no key (rebuilding the tools of endpoints another version
+  built, the browser's tools) runs on each vault's first request in a
+  process instead (`lib/core/vault-upkeep.ts`, beside `ensureSealed`), so
+  after an upgrade or a restore the first answer from `/mcp` can still list
+  an endpoint's or the browser's tools as the older version left them; a
+  catch-up that fails is tried again by a later request, at most once a
+  minute. A status message is written only by a request that holds the
+  key, in one transaction with the read of the server's other sealed
+  values, and never in place of the outcome it follows (a failed status
+  write is logged and passed over).
   What is found by its value is found by a keyed hash (`keyedHash` in
   `crypto.ts`: HMAC-SHA256 under a key HKDF derives from the DEK per
   label), a secret's name in `secret.name_key`, unique in the vault. A
@@ -92,10 +124,10 @@ associated data (a ciphertext cannot be moved to another row):
   then rebuilds the database file once (see "Data on disk"); every reader
   takes either form meanwhile, and an older export restores in the plain
   form and is sealed the same way. The vault's own name (`vault.name`) stays
-  plain on purpose: the sign-in page shows it before anything is unlocked.
-  Still plain, for later: a server's name, address, description and
-  sign-in details, its tools and schemas, slugs and tool names, a kept
-  result's name,
+  plain on purpose: the sign-in page shows it before anything is unlocked;
+  slugs and tool names stay plain for now (they are what assistants name),
+  and an upload page, which holds only its link, names a file the
+  assistant took already as "A file",
 - a store's key (`storage_root.store_key`, `storage_store:<server id>`),
   which in turn wraps each file's key in an encrypted store, and the
   store's index of names, sizes and times (`storage_entry.meta`,

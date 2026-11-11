@@ -1,5 +1,11 @@
 import { Client, InMemoryTransport } from "@modelcontextprotocol/client"
+import { openWrapperSpec } from "../spec-rows"
+import { writeDefinition } from "../definition-rows"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
+
+import { openServer } from "../server-meta"
+
+import { serverNamed } from "../test-servers"
 
 import { createApiToken, resolveApiToken } from "../api-tokens"
 import { createBrowserServer } from "../browser/server"
@@ -29,6 +35,7 @@ import { createMailAccount } from "../mail/accounts"
 import { getServer } from "../servers"
 import { syncServerTools } from "../upstream"
 import { createFakeJmap } from "../mail/fake-jmap"
+import { writeServer } from "../server-meta"
 import { scratchDatabase } from "../test-db"
 import {
   catalogueHandle,
@@ -237,7 +244,10 @@ async function approvedWrapper(
   })
   expect(result.isError).not.toBe(true)
 
-  return db().mcpServer.findFirstOrThrow({ where: { kind: "wrapper" } })
+  return openServer(
+    ctx,
+    await db().mcpServer.findFirstOrThrow({ where: { kind: "wrapper" } }),
+  )
 }
 
 describe("proposing a wrapper", () => {
@@ -629,10 +639,11 @@ describe("changing a wrapper", () => {
     expect(view!.secretToEnter).toBeNull()
 
     // A change the owner makes in between wins: the request no longer applies.
-    await db().mcpServer.updateMany({
+    for (const { id } of await db().mcpServer.findMany({
       where: { kind: "wrapper" },
-      data: { description: "Changed by the owner." },
-    })
+    })) {
+      await writeServer(ctx, id, { description: "Changed by the owner." })
+    }
     const stale = await decidePermission(ctx, row.id, "allow_once", {
       publicUrl: PUBLIC_URL,
     })
@@ -689,9 +700,7 @@ describe("another wrapper of a definition, a definition of its own, and the owne
     const first = await approvedWrapper()
     await call("create_wrapper", { name: "Lookup two", definition: "lookup" })
     expect((await approveNewest()).isError).not.toBe(true)
-    const second = await db().mcpServer.findFirstOrThrow({
-      where: { name: "Lookup two" },
-    })
+    const second = await serverNamed(ctx, "Lookup two")
     return { first, second }
   }
 
@@ -730,16 +739,19 @@ describe("another wrapper of a definition, a definition of its own, and the owne
     expect(view.secretToEnter).toBeNull()
 
     expect((await approveNewest()).isError).not.toBe(true)
-    const second = await db().mcpServer.findFirstOrThrow({
-      where: { name: "Lookup two" },
-      include: { wrapperSpec: true },
-    })
+    const second = await serverNamed(ctx, "Lookup two")
     const firstSpec = await db().wrapperSpec.findUniqueOrThrow({
       where: { serverId: first.id },
     })
     expect(second.definitionId).toBe(first.definitionId)
     expect(second.description).toBe("Things, simpler.")
-    expect(second.wrapperSpec!.hash).toBe(firstSpec.hash)
+    expect(
+      (
+        await db().wrapperSpec.findUniqueOrThrow({
+          where: { serverId: second.id },
+        })
+      ).hash,
+    ).toBe(firstSpec.hash)
     expect(readServerNote(ctx, second)).toBe("For the second account.")
     expect(
       await db().apiTokenToolAccess.count({ where: { serverId: second.id } }),
@@ -773,13 +785,14 @@ describe("another wrapper of a definition, a definition of its own, and the owne
     )
 
     await call("create_wrapper", { name: "Lookup two", definition: "lookup" })
-    await db().mcpServer.updateMany({
+    for (const { id } of await db().mcpServer.findMany({
       where: { kind: "wrapper" },
-      data: { description: "Changed by the owner." },
-    })
-    await db().serverDefinition.updateMany({
-      data: { description: "Changed by the owner." },
-    })
+    })) {
+      await writeServer(ctx, id, { description: "Changed by the owner." })
+    }
+    for (const { id } of await db().serverDefinition.findMany()) {
+      await writeDefinition(ctx, id, { description: "Changed by the owner." })
+    }
     const stale = await approveNewest()
     expect(JSON.stringify(stale)).toMatch(/has changed since this was asked/)
     expect(await db().mcpServer.count({ where: { kind: "wrapper" } })).toBe(1)
@@ -801,18 +814,25 @@ describe("another wrapper of a definition, a definition of its own, and the owne
     expect(view.title).toBe("Detach the wrapper Lookup two?")
     expect(view.lines).toContain("Shares its definition with: lookup")
     expect(
-      (await db().mcpServer.findUniqueOrThrow({ where: { id: second.id } }))
-        .definitionId,
+      openServer(
+        ctx,
+        await db().mcpServer.findUniqueOrThrow({ where: { id: second.id } }),
+      ).definitionId,
     ).toBe(first.definitionId)
 
     expect((await approveNewest()).isError).not.toBe(true)
-    const detached = await db().mcpServer.findUniqueOrThrow({
-      where: { id: second.id },
-    })
+    const detached = openServer(
+      ctx,
+      await db().mcpServer.findUniqueOrThrow({
+        where: { id: second.id },
+      }),
+    )
     expect(detached.definitionId).not.toBe(first.definitionId)
     expect(
-      (await db().mcpServer.findUniqueOrThrow({ where: { id: first.id } }))
-        .definitionId,
+      openServer(
+        ctx,
+        await db().mcpServer.findUniqueOrThrow({ where: { id: first.id } }),
+      ).definitionId,
     ).toBe(first.definitionId)
 
     // The same detach again is held back as a repeat (it was done);
@@ -846,10 +866,7 @@ describe("another wrapper of a definition, a definition of its own, and the owne
   it("detaches nothing when the wrapper changed after the owner was asked", async () => {
     const { second } = await twoOfOne()
     await call("update_wrapper", { wrapper: second.slug, detach: true })
-    await db().mcpServer.update({
-      where: { id: second.id },
-      data: { name: "Renamed by the owner" },
-    })
+    await writeServer(ctx, second.id, { name: "Renamed by the owner" })
 
     const stale = await approveNewest()
 
@@ -898,7 +915,10 @@ describe("another wrapper of a definition, a definition of its own, and the owne
     expect(
       readServerNote(
         ctx,
-        await db().mcpServer.findUniqueOrThrow({ where: { id: wrapper.id } }),
+        openServer(
+          ctx,
+          await db().mcpServer.findUniqueOrThrow({ where: { id: wrapper.id } }),
+        ),
       ),
     ).toBeNull()
 
@@ -906,7 +926,10 @@ describe("another wrapper of a definition, a definition of its own, and the owne
     expect(
       readServerNote(
         ctx,
-        await db().mcpServer.findUniqueOrThrow({ where: { id: wrapper.id } }),
+        openServer(
+          ctx,
+          await db().mcpServer.findUniqueOrThrow({ where: { id: wrapper.id } }),
+        ),
       ),
     ).toBe("The SECRET-ACCOUNT one.")
     const { document } = await localItem(ctx, "wrapper", wrapper.id)
@@ -926,7 +949,10 @@ describe("another wrapper of a definition, a definition of its own, and the owne
     expect(
       readServerNote(
         ctx,
-        await db().mcpServer.findUniqueOrThrow({ where: { id: wrapper.id } }),
+        openServer(
+          ctx,
+          await db().mcpServer.findUniqueOrThrow({ where: { id: wrapper.id } }),
+        ),
       ),
     ).toBe("The owner's own.")
   })
@@ -977,10 +1003,13 @@ describe("what an assistant can set", () => {
     await decidePermission(ctx, row.id, "allow_once", {
       publicUrl: PUBLIC_URL,
     })
-    const server = await db().mcpServer.findFirstOrThrow({
-      where: { kind: "wrapper" },
-      include: { tools: true },
-    })
+    const server = openServer(
+      ctx,
+      await db().mcpServer.findFirstOrThrow({
+        where: { kind: "wrapper" },
+        include: { tools: true },
+      }),
+    )
     expect(server.name).toBe("Counter")
     expect(server.tools.map((tool) => tool.name)).toEqual(["count"])
 
@@ -1145,11 +1174,14 @@ describe("levels and tiers proposed with a wrapper (tool_access)", () => {
     })
 
     expect(result.isError).not.toBe(true)
-    const wrapper = await db().mcpServer.findFirstOrThrow({
-      where: { kind: "wrapper" },
-    })
+    const wrapper = openServer(
+      ctx,
+      await db().mcpServer.findFirstOrThrow({
+        where: { kind: "wrapper" },
+      }),
+    )
     expect(await levelsOf(wrapper.id)).toEqual([["how_many", "allowed"]])
-    expect(await toolTier(wrapper.id, "lookup")).toBe("write")
+    expect(await toolTier(ctx, wrapper.id, "lookup")).toBe("write")
     expect(JSON.stringify(result.content)).toContain(
       "The owner set this token's level for 1 tool",
     )
@@ -1205,9 +1237,12 @@ describe("levels and tiers proposed with a wrapper (tool_access)", () => {
       access: [{ pattern: "how_many", access: "allowed" }],
     })
     expect(result.isError).not.toBe(true)
-    const wrapper = await db().mcpServer.findFirstOrThrow({
-      where: { kind: "wrapper" },
-    })
+    const wrapper = openServer(
+      ctx,
+      await db().mcpServer.findFirstOrThrow({
+        where: { kind: "wrapper" },
+      }),
+    )
     expect(await levelsOf(wrapper.id)).toEqual([["how_many", "allowed"]])
   })
 })
@@ -1280,7 +1315,7 @@ describe("a wrapper's tool's tier", () => {
     // An API's GET only reads, so the wrapper's tool does too.
     const read = await call("execute_read", args)
     expect(read.isError, read.text).toBe(false)
-    expect(await toolTier(wrapper.id, "lookup")).toBe("read")
+    expect(await toolTier(ctx, wrapper.id, "lookup")).toBe("read")
 
     // Once the tool it calls is Write, so is the wrapper's: worked out
     // when asked, never stored.
@@ -1296,12 +1331,12 @@ describe("a wrapper's tool's tier", () => {
     const refused = await call("execute_read", args)
     expect(refused.isError).toBe(true)
     expect(refused.text).toContain("run it with execute_write")
-    expect(await toolTier(wrapper.id, "lookup")).toBe("write")
+    expect(await toolTier(ctx, wrapper.id, "lookup")).toBe("write")
   })
 
   it("takes the owner's choice, and the bell says when its calls come to more since", async () => {
     const wrapper = await approvedWrapper(ECHO_TOOL)
-    expect(await toolTierInfo(wrapper.id, "lookup")).toMatchObject({
+    expect(await toolTierInfo(ctx, wrapper.id, "lookup")).toMatchObject({
       tier: "read",
       derived: "read",
       override: null,
@@ -1315,7 +1350,7 @@ describe("a wrapper's tool's tier", () => {
       where: { serverId: endpointId, name: "echo" },
       data: { annotations: null },
     })
-    expect(await toolTierInfo(wrapper.id, "lookup")).toMatchObject({
+    expect(await toolTierInfo(ctx, wrapper.id, "lookup")).toMatchObject({
       tier: "read",
       derived: "destructive",
       override: "read",
@@ -1334,7 +1369,7 @@ describe("a wrapper's tool's tier", () => {
     expect(await tierNotices(ctx)).toEqual([])
     // Back to the default: what its calls come to.
     await setToolTier(ctx, wrapper.id, "lookup", null)
-    expect(await toolTier(wrapper.id, "lookup")).toBe("destructive")
+    expect(await toolTier(ctx, wrapper.id, "lookup")).toBe("destructive")
   })
 })
 
@@ -1364,9 +1399,12 @@ describe("a tool's output schema", () => {
       secretValue: KEY,
     })
 
-    const wrapper = await db().mcpServer.findFirstOrThrow({
-      where: { kind: "wrapper" },
-    })
+    const wrapper = openServer(
+      ctx,
+      await db().mcpServer.findFirstOrThrow({
+        where: { kind: "wrapper" },
+      }),
+    )
     await writeToolAccess(scope.tokenId, wrapper.id, "lookup", "allowed")
 
     const described = await call("describe", {
@@ -1495,7 +1533,7 @@ describe("a tool's output schema", () => {
   it("is stored only when a tool declares one, so older definitions read as they were", async () => {
     await approvedWrapper(ECHO_TOOL, { call_levels: "token" })
     const spec = await db().wrapperSpec.findFirstOrThrow()
-    const stored = JSON.parse(spec.definition) as {
+    const stored = JSON.parse(openWrapperSpec(ctx, spec).definition) as {
       tools: Array<Record<string, unknown>>
     } & Record<string, unknown>
 
@@ -1508,7 +1546,10 @@ describe("whose levels a wrapper's calls follow", () => {
   it("runs on the owner's approval by default, whatever the token's levels for its calls", async () => {
     const wrapper = await approvedWrapper()
     expect(
-      JSON.parse((await db().wrapperSpec.findFirstOrThrow()).definition),
+      JSON.parse(
+        openWrapperSpec(ctx, await db().wrapperSpec.findFirstOrThrow())
+          .definition,
+      ),
     ).toMatchObject({ callLevels: "approved" })
     await writeToolAccess(scope.tokenId, wrapper.id, "lookup", "allowed")
 
@@ -1707,9 +1748,12 @@ async function approved(
 
   return {
     view: view!,
-    wrapper: await db().mcpServer.findFirstOrThrow({
-      where: { kind: "wrapper" },
-    }),
+    wrapper: openServer(
+      ctx,
+      await db().mcpServer.findFirstOrThrow({
+        where: { kind: "wrapper" },
+      }),
+    ),
   }
 }
 
@@ -1721,7 +1765,8 @@ describe("a browser flow", () => {
   it("is a wrapper with a tool that calls the browser, told apart without being stored", async () => {
     const { view, wrapper } = await approved([FLOW_TOOL, PLAIN_TOOL])
     const definition = readDefinition(
-      (await db().wrapperSpec.findFirstOrThrow()).definition,
+      openWrapperSpec(ctx, await db().wrapperSpec.findFirstOrThrow())
+        .definition,
     )
     const browsers = await browserServerIds(ctx)
 
@@ -1812,7 +1857,8 @@ describe("a browser flow", () => {
       ],
     })
     const definition = readDefinition(
-      (await db().wrapperSpec.findFirstOrThrow()).definition,
+      openWrapperSpec(ctx, await db().wrapperSpec.findFirstOrThrow())
+        .definition,
     )
     expect(definition.secrets).toEqual([
       expect.objectContaining({
@@ -1826,9 +1872,12 @@ describe("a browser flow", () => {
   })
 
   it("takes a secret from an assistant only as the browser's type text", async () => {
-    const browser = await db().mcpServer.findFirstOrThrow({
-      where: { kind: "browser" },
-    })
+    const browser = openServer(
+      ctx,
+      await db().mcpServer.findFirstOrThrow({
+        where: { kind: "browser" },
+      }),
+    )
     await writeToolAccess(scope.tokenId, browser.id, "type", "allowed")
     await writeToolAccess(scope.tokenId, browser.id, "press_key", "allowed")
 
@@ -2257,7 +2306,8 @@ describe("a browser flow's own pace", () => {
   it("is part of the definition the owner approves, shown in full, and read back by get_wrapper", async () => {
     const { view } = await approved([FLOW_TOOL], { pace: PACE })
     const definition = readDefinition(
-      (await db().wrapperSpec.findFirstOrThrow()).definition,
+      openWrapperSpec(ctx, await db().wrapperSpec.findFirstOrThrow())
+        .definition,
     )
 
     expect(definition.pace).toEqual({
@@ -2291,8 +2341,10 @@ describe("a browser flow's own pace", () => {
     )
     // The owner said yes on that page: it is the wrapper's.
     expect(
-      readDefinition((await db().wrapperSpec.findFirstOrThrow()).definition)
-        .pace?.actions,
+      readDefinition(
+        openWrapperSpec(ctx, await db().wrapperSpec.findFirstOrThrow())
+          .definition,
+      ).pace?.actions,
     ).toEqual({ minMs: 100, maxMs: 300 })
   })
 
@@ -2340,7 +2392,10 @@ describe("a browser flow's own pace", () => {
   it("keeps the pace on a change that leaves it out, shows a new one, and takes it out with null", async () => {
     await approved([FLOW_TOOL], { pace: PACE })
     const definition = async () =>
-      readDefinition((await db().wrapperSpec.findFirstOrThrow()).definition)
+      readDefinition(
+        openWrapperSpec(ctx, await db().wrapperSpec.findFirstOrThrow())
+          .definition,
+      )
     const change = async (args: Record<string, unknown>) => {
       const asked = await call("update_wrapper", { wrapper: "chat", ...args })
       expect(asked.text, asked.text).toContain("Not done yet")

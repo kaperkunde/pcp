@@ -90,8 +90,8 @@ async function connect() {
         id: randomUUID(),
         serverId,
         name: tool.name,
-        description: `${tool.name} does one thing.`,
-        inputSchema: JSON.stringify({ type: "object" }),
+        plainDescription: `${tool.name} does one thing.`,
+        plainInputSchema: JSON.stringify({ type: "object" }),
         annotations: tool.annotations ? JSON.stringify(tool.annotations) : null,
       },
     })
@@ -415,8 +415,8 @@ describe("the execute entries", () => {
       "tool postcards/burn_cards [write: execute_write]",
     )
     // Pacing and a run's trace ask the same.
-    expect(await markedReadOnly(serverId, "list_cards")).toBe(false)
-    expect(await markedReadOnly(serverId, "peek_cards")).toBe(true)
+    expect(await markedReadOnly(ctx, serverId, "list_cards")).toBe(false)
+    expect(await markedReadOnly(ctx, serverId, "peek_cards")).toBe(true)
   })
 
   it("advertise the owner's tier for PCP's own tools, and run them by it; the entries keep theirs", async () => {

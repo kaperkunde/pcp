@@ -13,6 +13,7 @@ import {
   secretName,
   secretNameWhere,
 } from "./secret-meta"
+import { SERVER_META_SELECT, serverName, writeServer } from "./server-meta"
 import { readEnvBindings } from "./services/definition"
 import { parseTotpSeed, totpCode, totpSeedProblem } from "./totp"
 
@@ -218,12 +219,12 @@ export async function listSecrets(ctx: VaultContext): Promise<SecretSummary[]> {
   const rows = await db().secret.findMany({
     where: { vaultId: ctx.vaultId },
     include: {
-      authFor: { select: { id: true, name: true } },
+      authFor: { select: SERVER_META_SELECT },
       authHeaderFor: {
-        select: { server: { select: { id: true, name: true } } },
+        select: { server: { select: SERVER_META_SELECT } },
       },
-      oauthClientFor: { select: { id: true, name: true } },
-      oauthTokensFor: { select: { id: true, name: true } },
+      oauthClientFor: { select: SERVER_META_SELECT },
+      oauthTokensFor: { select: SERVER_META_SELECT },
       totpCompanion: { select: SECRET_META_SELECT },
     },
     orderBy: { kind: "asc" },
@@ -238,7 +239,7 @@ export async function listSecrets(ctx: VaultContext): Promise<SecretSummary[]> {
       ...row.oauthClientFor,
       ...row.oauthTokensFor,
     ]) {
-      usedBy.set(server.id, server)
+      usedBy.set(server.id, { id: server.id, name: serverName(ctx, server) })
     }
 
     return {
@@ -550,10 +551,10 @@ export async function deleteSecret(ctx: VaultContext, id: string) {
   const row = await db().secret.findFirst({
     where: { id, vaultId: ctx.vaultId },
     include: {
-      authFor: { select: { name: true } },
-      authHeaderFor: { select: { server: { select: { name: true } } } },
-      oauthClientFor: { select: { name: true } },
-      oauthTokensFor: { select: { name: true } },
+      authFor: { select: SERVER_META_SELECT },
+      authHeaderFor: { select: { server: { select: SERVER_META_SELECT } } },
+      oauthClientFor: { select: SERVER_META_SELECT },
+      oauthTokensFor: { select: SERVER_META_SELECT },
     },
   })
 
@@ -565,7 +566,7 @@ export async function deleteSecret(ctx: VaultContext, id: string) {
   const services = (
     await db().serviceSpec.findMany({
       where: { server: { vaultId: ctx.vaultId }, env: { contains: id } },
-      select: { env: true, server: { select: { name: true } } },
+      select: { env: true, server: { select: SERVER_META_SELECT } },
     })
   ).filter((spec) => Object.values(readEnvBindings(spec.env)).includes(id))
   const users = [
@@ -575,7 +576,7 @@ export async function deleteSecret(ctx: VaultContext, id: string) {
         ...row.authHeaderFor.map((header) => header.server),
         ...row.oauthClientFor,
         ...services.map((spec) => spec.server),
-      ].map((server) => server.name),
+      ].map((server) => serverName(ctx, server)),
     ),
   ]
 
@@ -588,10 +589,18 @@ export async function deleteSecret(ctx: VaultContext, id: string) {
 
   if (row.kind === "oauth") {
     // The server that held its tokens here is no longer connected.
-    await db().mcpServer.updateMany({
+    const connected = await db().mcpServer.findMany({
       where: { vaultId: ctx.vaultId, oauthTokensId: id },
-      data: { oauthConnectedAt: null, status: "unknown", statusMessage: "" },
+      select: { id: true },
     })
+
+    for (const server of connected) {
+      await writeServer(ctx, server.id, {
+        oauthConnectedAt: null,
+        status: "unknown",
+        statusMessage: "",
+      })
+    }
   }
 
   await db().secret.delete({ where: { id } })

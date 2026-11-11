@@ -334,8 +334,8 @@ describe("proposing tool levels", () => {
           id: randomUUID(),
           serverId: id,
           name: tool,
-          description: `${tool} does one thing.`,
-          inputSchema: JSON.stringify({ type: "object" }),
+          plainDescription: `${tool} does one thing.`,
+          plainInputSchema: JSON.stringify({ type: "object" }),
         },
       })
     }
@@ -591,7 +591,7 @@ describe("proposing tool levels", () => {
     const id = (await db().permissionRequest.findFirstOrThrow()).id
 
     // Nothing is written before the save.
-    expect(await toolTier(billing, "list_invoices")).toBe("destructive")
+    expect(await toolTier(ctx, billing, "list_invoices")).toBe("destructive")
     expect(await db().toolTier.count()).toBe(0)
     const proposal = await getAccessProposal(ctx, id)
     expect(proposal?.proposedTiers).toHaveLength(3)
@@ -619,9 +619,9 @@ describe("proposing tool levels", () => {
       },
     )
 
-    expect(await toolTier(billing, "list_invoices")).toBe("read")
-    expect(await toolTier(twin, "list_invoices")).toBe("read")
-    expect(await toolTier(billing, "list_clients")).toBe("destructive")
+    expect(await toolTier(ctx, billing, "list_invoices")).toBe("read")
+    expect(await toolTier(ctx, twin, "list_invoices")).toBe("read")
+    expect(await toolTier(ctx, billing, "list_clients")).toBe("destructive")
     expect(
       (await db().toolTier.findMany()).map((row) => row.definitionId),
     ).toEqual([definitionId, definitionId])

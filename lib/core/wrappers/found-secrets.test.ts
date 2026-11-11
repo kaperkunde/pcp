@@ -1,4 +1,5 @@
 import { Client, InMemoryTransport } from "@modelcontextprotocol/client"
+import { openWrapperSpec } from "../spec-rows"
 import type { CallToolResult } from "@modelcontextprotocol/server"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
@@ -171,8 +172,10 @@ async function newestRequest() {
 
 async function definitionOf(serverId: string) {
   return readDefinition(
-    (await db().wrapperSpec.findUniqueOrThrow({ where: { serverId } }))
-      .definition,
+    openWrapperSpec(
+      ctx,
+      await db().wrapperSpec.findUniqueOrThrow({ where: { serverId } }),
+    ).definition,
   )
 }
 

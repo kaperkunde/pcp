@@ -1,7 +1,13 @@
 import { randomUUID } from "node:crypto"
 
+import type { VaultContext } from "./context"
 import { db } from "./db"
 import { inheritedToolDescriptions } from "./definition-rows"
+import {
+  sealedToolContent,
+  sealedToolOverride,
+  splitAnnotations,
+} from "./tool-rows"
 
 /**
  * Writing a server's tool list into the catalogue (mcp_tool), whichever way
@@ -55,48 +61,65 @@ export function canRereadTools(server: {
 }
 
 export async function storeTools(
+  ctx: VaultContext,
   serverId: string,
   tools: CatalogueTool[],
 ): Promise<number> {
   const names = new Set<string>()
-  const inherited = await inheritedToolDescriptions(serverId)
+  const inherited = await inheritedToolDescriptions(ctx, serverId)
 
   // One transaction: a schema with hundreds of operations is one write,
   // not hundreds, and a failure leaves the previous list in place.
   await db().$transaction(
     async (tx) => {
+      // Each value is sealed under its row's id: an existing tool keeps its
+      // own.
+      const known = new Map(
+        (
+          await tx.mcpTool.findMany({
+            where: { serverId },
+            select: { id: true, name: true },
+          })
+        ).map((tool) => [tool.name, tool.id]),
+      )
+
       for (const tool of tools) {
         names.add(tool.name)
+        const id = known.get(tool.name) ?? randomUUID()
+        const annotations = splitAnnotations(tool.annotations)
         const fields = {
-          title: tool.title ?? null,
-          description: tool.description ?? "",
-          inputSchema: JSON.stringify(tool.inputSchema ?? { type: "object" }),
-          annotations: tool.annotations
-            ? JSON.stringify(tool.annotations)
-            : null,
-          operation: tool.operation ?? null,
-          output: tool.output ?? null,
-          outputSchema:
-            tool.outputSchema === undefined || tool.outputSchema === null
-              ? null
-              : JSON.stringify(tool.outputSchema),
+          ...sealedToolContent(ctx, id, {
+            title: tool.title ?? null,
+            description: tool.description ?? "",
+            annotationsTitle: annotations.annotationsTitle,
+            inputSchema: JSON.stringify(tool.inputSchema ?? { type: "object" }),
+            operation: tool.operation ?? null,
+            output: tool.output ?? null,
+            outputSchema:
+              tool.outputSchema === undefined || tool.outputSchema === null
+                ? null
+                : JSON.stringify(tool.outputSchema),
+          }),
+          annotations: annotations.annotations,
           icons:
             tool.icons === undefined || tool.icons === null
               ? null
               : JSON.stringify(tool.icons),
         }
 
-        await tx.mcpTool.upsert({
-          where: { serverId_name: { serverId, name: tool.name } },
-          create: {
-            id: randomUUID(),
-            serverId,
-            name: tool.name,
-            descriptionOverride: inherited.get(tool.name) ?? null,
-            ...fields,
-          },
-          update: fields,
-        })
+        if (known.has(tool.name)) {
+          await tx.mcpTool.update({ where: { id }, data: fields })
+        } else {
+          await tx.mcpTool.create({
+            data: {
+              id,
+              serverId,
+              name: tool.name,
+              ...sealedToolOverride(ctx, id, inherited.get(tool.name) ?? null),
+              ...fields,
+            },
+          })
+        }
       }
 
       // The names that are gone, in chunks: SQLite allows 999 variables in

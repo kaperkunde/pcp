@@ -1,5 +1,7 @@
 import type { VaultContext } from "../context"
 import { db } from "../db"
+import { findServers } from "../server-meta"
+import { openWrapperSpec } from "../spec-rows"
 import { assistantBounds, readPacingConfig } from "../pacing/config"
 import {
   newFoundPlaces,
@@ -75,9 +77,10 @@ async function foundPlaceFlags(
     return []
   }
 
-  const browsers = await db().mcpServer.findMany({
-    where: { vaultId: ctx.vaultId, kind: "browser", slug: { in: slugs } },
-    select: { id: true, slug: true, url: true },
+  const browsers = await findServers(ctx, {
+    vaultId: ctx.vaultId,
+    kind: "browser",
+    slug: { in: slugs },
   })
 
   if (browsers.length === 0) {
@@ -123,7 +126,9 @@ async function foundPlaceFlags(
   const spec = currentId
     ? await db().wrapperSpec.findUnique({ where: { serverId: currentId } })
     : null
-  const before = spec ? readDefinition(spec.definition) : null
+  const before = spec
+    ? readDefinition(openWrapperSpec(ctx, spec).definition)
+    : null
   const path = itemPath(
     { kind: incoming.kind, name: incoming.name },
     WRAPPER_YAML,

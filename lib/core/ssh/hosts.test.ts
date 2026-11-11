@@ -5,6 +5,7 @@ import type { VaultContext } from "../context"
 import { db } from "../db"
 import { listSecrets } from "../secrets"
 import { deleteServer, getServer } from "../servers"
+import { writeServer } from "../server-meta"
 import { scratchDatabase } from "../test-db"
 import { keepResult, resultOpener } from "../tool-results"
 import { callServerTool, syncServerTools } from "../upstream"
@@ -207,11 +208,8 @@ describe("the host key", () => {
     const id = await readyServer()
     await syncServerTools(ctx, await getServer(ctx, id), OWNER)
     // As if the server had been swapped for another since.
-    await db().mcpServer.update({
-      where: { id },
-      data: {
-        sshHostKey: `ssh-ed25519 ${Buffer.alloc(51).toString("base64")}`,
-      },
+    await writeServer(ctx, id, {
+      sshHostKey: `ssh-ed25519 ${Buffer.alloc(51).toString("base64")}`,
     })
     const logins = fake.logins.length
 

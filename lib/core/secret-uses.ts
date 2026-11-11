@@ -1,6 +1,8 @@
 import { openOrigin, siteLabel } from "./browser-secrets"
 import type { VaultContext } from "./context"
 import { db } from "./db"
+import { openWrapperSpec, WRAPPER_SPEC_SELECT } from "./spec-rows"
+import { SERVER_META_SELECT, serverName } from "./server-meta"
 import { openSecretDetails, type SecretKind } from "./secrets"
 import { readEnvBindings } from "./services/definition"
 import { readDefinition } from "./wrappers/definition"
@@ -45,7 +47,7 @@ function kindWords(kind: string): string {
   return KIND_WORDS[kind] ?? "server"
 }
 
-const SERVER = { id: true, name: true, slug: true, kind: true } as const
+const SERVER = { ...SERVER_META_SELECT, slug: true, kind: true } as const
 
 /**
  * Every server that sends one of these secrets or keeps its OAuth tokens or
@@ -74,12 +76,12 @@ export async function secretUses(
   )
   const add = (
     secretId: string,
-    server: { id: string; name: string; slug: string; kind: string },
+    row: Parameters<typeof serverName>[1] & { slug: string; kind: string },
   ) =>
-    uses.get(secretId)?.set(server.id, {
-      name: server.name,
-      slug: server.slug,
-      kind: kindWords(server.kind),
+    uses.get(secretId)?.set(row.id, {
+      name: serverName(ctx, row),
+      slug: row.slug,
+      kind: kindWords(row.kind),
     })
 
   for (const row of rows) {
@@ -95,7 +97,7 @@ export async function secretUses(
 
   const wrappers = await db().mcpServer.findMany({
     where: { vaultId: ctx.vaultId, kind: "wrapper" },
-    select: { ...SERVER, wrapperSpec: { select: { definition: true } } },
+    select: { ...SERVER, wrapperSpec: { select: WRAPPER_SPEC_SELECT } },
   })
 
   for (const wrapper of wrappers) {
@@ -106,9 +108,9 @@ export async function secretUses(
     let bound: Array<string | null>
 
     try {
-      bound = readDefinition(wrapper.wrapperSpec.definition).secrets.map(
-        (binding) => binding.secretId,
-      )
+      bound = readDefinition(
+        openWrapperSpec(ctx, wrapper.wrapperSpec).definition,
+      ).secrets.map((binding) => binding.secretId)
     } catch {
       // A definition that does not read is no use of anything.
       continue

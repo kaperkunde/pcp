@@ -1,11 +1,12 @@
-import { createHash } from "node:crypto"
-
 import { z } from "zod"
 
 import { checkSyntax } from "../code/quickjs"
 import type { VaultContext } from "../context"
 import { SECRET_PLACEHOLDER } from "../constants"
 import { db } from "../db"
+import { contentHash, openWrapperSpec, WRAPPER_SPEC_SELECT } from "../spec-rows"
+import { openTools, TOOL_SCHEMA_SELECT } from "../tool-rows"
+import { openServers, SERVER_NAME_SELECT } from "../server-meta"
 import { invalid } from "../errors"
 import { hiddenCharacter, withoutPresentation } from "../memories"
 import { outlineSchema } from "../openapi/outline"
@@ -235,8 +236,11 @@ export function readDefinition(json: string): WrapperDefinition {
 }
 
 /** What a request was asked against, and what the owner approves. */
-export function definitionHash(definition: WrapperDefinition): string {
-  return createHash("sha256").update(canonicalJson(definition)).digest("hex")
+export function definitionHash(
+  ctx: VaultContext,
+  definition: WrapperDefinition,
+): string {
+  return contentHash(ctx, "wrapper", canonicalJson(definition))
 }
 
 /** What a wrapper's tools are in the catalogue. */
@@ -323,19 +327,19 @@ export async function browserServerIds(
 }
 
 /** The vault's wrappers that are browser flows, by id. */
-export async function flowWrapperIds(
-  ctx: Pick<VaultContext, "vaultId">,
-): Promise<Set<string>> {
+export async function flowWrapperIds(ctx: VaultContext): Promise<Set<string>> {
   const browserIds = await browserServerIds(ctx)
 
   if (browserIds.size === 0) {
     return new Set()
   }
 
-  const specs = await db().wrapperSpec.findMany({
-    where: { server: { vaultId: ctx.vaultId } },
-    select: { serverId: true, definition: true },
-  })
+  const specs = (
+    await db().wrapperSpec.findMany({
+      where: { server: { vaultId: ctx.vaultId } },
+      select: WRAPPER_SPEC_SELECT,
+    })
+  ).map((row) => ({ serverId: row.serverId, ...openWrapperSpec(ctx, row) }))
 
   return new Set(
     specs.flatMap((spec) => {
@@ -478,15 +482,21 @@ export async function resolveDefinition(
     slugs.add(split.slug)
   }
 
-  const servers: KnownServer[] = await db().mcpServer.findMany({
-    where: { vaultId: ctx.vaultId, slug: { in: [...slugs] } },
-    select: { id: true, slug: true, name: true, kind: true, url: true },
-  })
+  const servers: KnownServer[] = openServers(
+    ctx,
+    await db().mcpServer.findMany({
+      where: { vaultId: ctx.vaultId, slug: { in: [...slugs] } },
+      select: SERVER_NAME_SELECT,
+    }),
+  ).map(({ id, slug, name, kind, url }) => ({ id, slug, name, kind, url }))
   const bySlug = new Map(servers.map((server) => [server.slug, server]))
-  const tools = await db().mcpTool.findMany({
-    where: { serverId: { in: servers.map((server) => server.id) } },
-    select: { serverId: true, name: true, inputSchema: true },
-  })
+  const tools = openTools(
+    ctx,
+    await db().mcpTool.findMany({
+      where: { serverId: { in: servers.map((server) => server.id) } },
+      select: { ...TOOL_SCHEMA_SELECT, serverId: true, name: true },
+    }),
+  )
   const toolKey = (serverId: string, tool: string) => `${serverId}\n${tool}`
   const schemas = new Map(
     tools.map((tool) => [toolKey(tool.serverId, tool.name), tool.inputSchema]),

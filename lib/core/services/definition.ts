@@ -2,9 +2,10 @@ import { isIP } from "node:net"
 
 import { z } from "zod"
 
-import { sha256Hex } from "../crypto"
+import type { VaultContext } from "../context"
 import { invalid } from "../errors"
 import { canonicalJson } from "../permission-rules"
+import { contentHash } from "../spec-rows"
 import {
   MAX_BUILD_ARGS,
   MAX_ENV_DESCRIPTION_CHARS,
@@ -576,8 +577,12 @@ export function readServiceDefinition(json: string): ServiceDefinition {
   return parseServiceDefinition(value)
 }
 
-export function serviceDefinitionHash(definition: ServiceDefinition): string {
-  return sha256Hex(canonicalJson(definition))
+/** A definition's keyed hash under the vault's key (spec-rows.ts). */
+export function serviceDefinitionHash(
+  ctx: VaultContext,
+  definition: ServiceDefinition,
+): string {
+  return contentHash(ctx, "service", canonicalJson(definition))
 }
 
 // ---- The instance's own part ------------------------------------------------

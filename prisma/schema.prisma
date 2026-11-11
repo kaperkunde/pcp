@@ -58,23 +58,23 @@ model Vault {
 /// cookie or a bearer token, and a `device` grant for the Mac app's Touch ID
 /// key. Deleting a grant revokes that credential.
 model KeyGrant {
-  id      String @id
-  vaultId String @map("vault_id")
-  vault   Vault  @relation(fields: [vaultId], references: [id], onDelete: Cascade)
+  id         String    @id
+  vaultId    String    @map("vault_id")
+  vault      Vault     @relation(fields: [vaultId], references: [id], onDelete: Cascade)
   /// password | recovery | session | api_token | device, and what PCP's
   /// authorization server hands an assistant: oauth_code | oauth_access |
   /// oauth_refresh
-  kind    String
+  kind       String
   /// SHA-256 of the credential, for grants looked up by it (everything but
   /// password, of which a vault has exactly one).
-  lookupHash String? @unique @map("lookup_hash")
+  lookupHash String?   @unique @map("lookup_hash")
   /// scrypt | hkdf
-  kdf       String
+  kdf        String
   /// JSON: the salt and, for scrypt, its cost parameters.
-  kdfParams String @map("kdf_params")
+  kdfParams  String    @map("kdf_params")
   /// nonce || ciphertext || tag of the wrapped data key.
-  wrappedDek Bytes    @map("wrapped_dek")
-  createdAt  DateTime @default(now()) @map("created_at")
+  wrappedDek Bytes     @map("wrapped_dek")
+  createdAt  DateTime  @default(now()) @map("created_at")
   lastUsedAt DateTime? @map("last_used_at")
 
   session         Session?
@@ -86,13 +86,13 @@ model KeyGrant {
 }
 
 model Session {
-  id        String   @id
-  vaultId   String   @map("vault_id")
-  vault     Vault    @relation(fields: [vaultId], references: [id], onDelete: Cascade)
-  grantId   String   @unique @map("grant_id")
-  grant     KeyGrant @relation(fields: [grantId], references: [id], onDelete: Cascade)
-  expiresAt DateTime @map("expires_at")
-  createdAt DateTime @default(now()) @map("created_at")
+  id         String   @id
+  vaultId    String   @map("vault_id")
+  vault      Vault    @relation(fields: [vaultId], references: [id], onDelete: Cascade)
+  grantId    String   @unique @map("grant_id")
+  grant      KeyGrant @relation(fields: [grantId], references: [id], onDelete: Cascade)
+  expiresAt  DateTime @map("expires_at")
+  createdAt  DateTime @default(now()) @map("created_at")
   lastSeenAt DateTime @default(now()) @map("last_seen_at")
 
   @@index([vaultId])
@@ -104,66 +104,66 @@ model Session {
 /// and sees the skills listed in ApiTokenSkill, or every one when allSkills
 /// is set.
 model ApiToken {
-  id              String    @id
-  vaultId         String    @map("vault_id")
-  vault           Vault     @relation(fields: [vaultId], references: [id], onDelete: Cascade)
-  grantId         String    @unique @map("grant_id")
-  grant           KeyGrant  @relation(fields: [grantId], references: [id], onDelete: Cascade)
+  id               String    @id
+  vaultId          String    @map("vault_id")
+  vault            Vault     @relation(fields: [vaultId], references: [id], onDelete: Cascade)
+  grantId          String    @unique @map("grant_id")
+  grant            KeyGrant  @relation(fields: [grantId], references: [id], onDelete: Cascade)
   /// The name from before it was sealed (#96): read only while sealedName
   /// is null, "" once the row is sealed.
-  plainName       String    @map("name")
+  plainName        String    @map("name")
   /// The name the owner gave it: AES-256-GCM under the vault's data key
   /// with "api_token:<id>:name" as associated data (lib/core/token-names.ts).
-  sealedName      Bytes?    @map("sealed_name")
+  sealedName       Bytes?    @map("sealed_name")
   /// The first characters of the token, so the owner can tell them apart.
-  prefix          String
-  allowAllServers Boolean   @default(true) @map("allow_all_servers")
+  prefix           String
+  allowAllServers  Boolean   @default(true) @map("allow_all_servers")
   /// Whether the assistant sees every skill of the vault (lib/core/skills.ts)
   /// or only those in ApiTokenSkill. On unless the owner chooses some.
-  allSkills       Boolean   @default(true) @map("all_skills")
+  allSkills        Boolean   @default(true) @map("all_skills")
   /// Whether the assistant may read and change the API endpoints it set up
   /// through the gateway (get_endpoint, update_endpoint). Registering one is
   /// register_server, which every token may ask for and the owner decides.
   /// Off unless the owner turns it on.
-  manageEndpoints Boolean   @default(false) @map("manage_endpoints")
+  manageEndpoints  Boolean   @default(false) @map("manage_endpoints")
   /// Whether the assistant may keep memories (the gateway's memory tool):
   /// its own, and the shared ones the owner agreed to. Sharing one always
   /// asks the owner. Off unless the owner turns it on.
-  keepMemories    Boolean   @default(false) @map("keep_memories")
+  keepMemories     Boolean   @default(false) @map("keep_memories")
   /// While on (and keepMemories is), the instructions ask the assistant to
   /// offer to move the memories and skills its client keeps elsewhere into
   /// PCP, asking the owner before it moves them and again before it deletes
   /// the originals. The assistant turns it off when it is done (the memory
   /// tool's migration_done); only the owner turns it on. On for a new token.
-  memoryMigration Boolean   @default(true) @map("memory_migration")
+  memoryMigration  Boolean   @default(true) @map("memory_migration")
   /// Whether the assistant may fetch web pages through the gateway
   /// (web_fetch), following the token's site and method levels
   /// (WebFetchRule). Off unless the owner turns it on.
-  webFetch        Boolean   @default(false) @map("web_fetch")
+  webFetch         Boolean   @default(false) @map("web_fetch")
   /// Whether the assistant may run programs that call its tools through
   /// the gateway (run_code), each call at the token's own levels. Off
   /// unless the owner turns it on.
-  runCode         Boolean   @default(false) @map("run_code")
+  runCode          Boolean   @default(false) @map("run_code")
   /// Whether the assistant may propose wrappers (create_wrapper and its
   /// kin, lib/core/wrappers/): servers whose tools are programs over the
   /// owner's other tools. Every change it proposes is the owner's to make.
   /// Off unless the owner turns it on.
-  manageWrappers  Boolean   @default(false) @map("manage_wrappers")
+  manageWrappers   Boolean   @default(false) @map("manage_wrappers")
   /// Whether the assistant may move files between PCP and its own computer
   /// by link (share_result, receive_file; lib/core/file-links.ts), so a
   /// file's bytes never pass through it. Off unless the owner turns it on.
-  shareFiles      Boolean   @default(false) @map("share_files")
-  expiresAt       DateTime? @map("expires_at")
-  revokedAt       DateTime? @map("revoked_at")
-  createdAt       DateTime  @default(now()) @map("created_at")
-  lastUsedAt      DateTime? @map("last_used_at")
+  shareFiles       Boolean   @default(false) @map("share_files")
+  expiresAt        DateTime? @map("expires_at")
+  revokedAt        DateTime? @map("revoked_at")
+  createdAt        DateTime  @default(now()) @map("created_at")
+  lastUsedAt       DateTime? @map("last_used_at")
   /// Set when the token was made by an assistant signing in with OAuth at
   /// PCP's own authorization server: the client_id it was issued to (a
   /// registered client's id, or the URL of its metadata document) and the
   /// name the client gave. Such a token has no pcp_ value: its grant is
   /// empty, and the key travels in its OAuth credentials.
-  oauthClientId   String?   @map("oauth_client_id")
-  oauthClientName String?   @map("oauth_client_name")
+  oauthClientId    String?   @map("oauth_client_id")
+  oauthClientName  String?   @map("oauth_client_name")
   /// The owner's instructions for this assistant, given at the start of
   /// every conversation (lib/core/instructions.ts): ciphertext under the
   /// vault's key with "api_token:<id>" as associated data. Null until the
@@ -171,16 +171,16 @@ model ApiToken {
   instructions     Bytes?
   /// The version of PCP's suggested instructions (instructions-defaults.ts)
   /// the text was copied or merged from. Null with no instructions.
-  instructionsBase Int?    @map("instructions_base")
+  instructionsBase Int?      @map("instructions_base")
   /// The owner's choice of client profile for this token
   /// (lib/core/clients/profiles.ts: what PCP repeats of its instructions in
   /// answers, and how it formats links), by id. Null: detected per request.
-  clientProfile    String?  @map("client_profile")
+  clientProfile    String?   @map("client_profile")
   /// The client PCP last saw use this token, as JSON: its name and version
   /// as the client gave them, the profile it was detected as, and when
   /// (lib/core/clients/detect.ts). Nothing of a request's content, never a
   /// header's value but the client's own label; not the request log.
-  clientSeen       String?  @map("client_seen")
+  clientSeen       String?   @map("client_seen")
 
   servers            ApiTokenServer[]
   skills             ApiTokenSkill[]
@@ -291,8 +291,15 @@ model ApiTokenSecretAllowance {
   token     ApiToken  @relation(fields: [tokenId], references: [id], onDelete: Cascade)
   secretId  String    @map("secret_id")
   secret    Secret    @relation(fields: [secretId], references: [id], onDelete: Cascade)
-  /// https://host[:port], as URL.origin writes it.
+  /// A keyed hash of the origin (https://host[:port], as URL.origin writes
+  /// it) under the vault's key, the origin sealed in `sealed`; a row from
+  /// before holds the origin itself and nothing sealed
+  /// (lib/core/browser-secrets.ts).
   origin    String
+  /// The origin, AES-256-GCM under the vault's data key with
+  /// "api_token_secret_allowance:<token id>:<secret id>:<origin>" as
+  /// associated data.
+  sealed    Bytes?
   /// Null: always, until the owner ends it.
   until     DateTime?
   /// The next use only: it goes once a use takes it.
@@ -394,66 +401,66 @@ model WebFetchRule {
 /// owner's answer (lib/core/permissions.ts). Answerable for a day; it runs at
 /// most once, whichever way the owner answers.
 model PermissionRequest {
-  id               String     @id
-  vaultId          String     @map("vault_id")
-  vault            Vault      @relation(fields: [vaultId], references: [id], onDelete: Cascade)
-  tokenId          String     @map("token_id")
-  token            ApiToken   @relation(fields: [tokenId], references: [id], onDelete: Cascade)
+  id                   String     @id
+  vaultId              String     @map("vault_id")
+  vault                Vault      @relation(fields: [vaultId], references: [id], onDelete: Cascade)
+  tokenId              String     @map("token_id")
+  token                ApiToken   @relation(fields: [tokenId], references: [id], onDelete: Cascade)
   /// call | register | memory_share | memory_change | access | endpoint_change
   /// | fetch | browse | browser_handover | wrapper_change | skill_change
   /// | repo_change | secret_use | secret_request | note_change | repo_share
-  kind             String
-  serverId         String?    @map("server_id")
-  server           McpServer? @relation(fields: [serverId], references: [id], onDelete: Cascade)
+  kind                 String
+  serverId             String?    @map("server_id")
+  server               McpServer? @relation(fields: [serverId], references: [id], onDelete: Cascade)
   /// The upstream tool for a call; "register_server" for a new server;
   /// "memory" for a memory to share or a shared one to change;
   /// "propose_tool_access" for tool levels an assistant proposes;
   /// "web_fetch" for a web request.
-  toolName         String     @map("tool_name")
+  toolName             String     @map("tool_name")
   /// The arguments (or the new server's settings) as JSON, AES-256-GCM under
   /// the vault's data key with "permission_request:<id>" as associated data.
-  argsCiphertext   Bytes      @map("args_ciphertext")
+  argsCiphertext       Bytes      @map("args_ciphertext")
   /// HMAC-SHA256 of the kind, the target and the canonical arguments under a
   /// key derived from the vault's data key, prefixed "h1:" (requestHash), so
   /// the same request asked twice finds the row it already has and the
   /// column confirms no guess without the key. Older rows hold a plain
   /// sha256 and match nothing.
-  argsHash         String     @map("args_hash")
+  argsHash             String     @map("args_hash")
   /// What the request is about (a skill, a shared memory, a note's item),
   /// as an HMAC under a key derived from the vault's data key, so the target
   /// is never stored in the clear: a second change from the same token to
   /// the same thing folds into the request still waiting, and another
   /// token's is shown as a conflict. Null on rows from before it existed.
-  targetKey        String?    @map("target_key")
+  targetKey            String?    @map("target_key")
   /// call: the parts of the answer the assistant asked for (call_tool's
   /// fields), as a JSON list of paths. Names, never values.
-  fields           String?
+  fields               String?
   /// call: where the assistant asked for base64 text in the answer to be
   /// decoded (call_tool's decode), as a JSON list of paths.
-  decode           String?
+  decode               String?
   /// call: the parts of the answer the assistant asked to be kept as results
   /// and handed back as handles (call_tool's keep), as a JSON list of paths.
-  keep             String?
+  keep                 String?
   /// pending | running | executed | failed | declined | withdrawn (the
   /// assistant took it back) | closed (a hand-over's tab closed first)
-  status           String     @default("pending")
+  status               String     @default("pending")
   /// Where the owner answered: app | form | url | web
-  via              String?
+  via                  String?
   /// The result text, clipped, encrypted with "permission_request:<id>:result".
-  resultCiphertext Bytes?     @map("result_ciphertext")
-  resultIsError    Boolean    @default(false) @map("result_is_error")
+  resultCiphertext     Bytes?     @map("result_ciphertext")
+  resultIsError        Boolean    @default(false) @map("result_is_error")
   /// call: the answer as a run_code program is handed it (answers.ts
   /// answerValue, files and long texts as handles), as JSON, encrypted with
   /// "permission_request:<id>:result_json". Kept only for a call the owner
   /// allowed once, and only when short enough (REUSE_VALUE_MAX_CHARS).
-  resultJsonCiphertext Bytes? @map("result_json_ciphertext")
+  resultJsonCiphertext Bytes?     @map("result_json_ciphertext")
   /// call allowed once that ran: until when the same token's identical call
   /// is answered with this run's answer instead of asking again. Cleared
   /// when that happens, so it answers one such call.
-  reuseUntil       DateTime?  @map("reuse_until")
-  createdAt        DateTime   @default(now()) @map("created_at")
-  expiresAt        DateTime   @map("expires_at")
-  decidedAt        DateTime?  @map("decided_at")
+  reuseUntil           DateTime?  @map("reuse_until")
+  createdAt            DateTime   @default(now()) @map("created_at")
+  expiresAt            DateTime   @map("expires_at")
+  decidedAt            DateTime?  @map("decided_at")
 
   @@index([tokenId, argsHash])
   /// The owner's answers to a token's requests since a time
@@ -501,37 +508,37 @@ model Memory {
 /// Written by the owner, or by an assistant through a request they agreed
 /// to; the tokens that see it are their allSkills and ApiTokenSkill.
 model Skill {
-  id         String   @id
-  vaultId    String   @map("vault_id")
-  vault      Vault    @relation(fields: [vaultId], references: [id], onDelete: Cascade)
+  id           String    @id
+  vaultId      String    @map("vault_id")
+  vault        Vault     @relation(fields: [vaultId], references: [id], onDelete: Cascade)
   /// owner | assistant: who wrote the text as it is now.
-  author     String   @default("owner")
+  author       String    @default("owner")
   /// shared | private. A shared skill is seen by the tokens the owner
   /// chooses (allSkills, ApiTokenSkill); a private one only by the token
   /// that keeps it (`tokenId`), which writes it without asking, and by the
   /// owner. A private one is never in a linked repository.
-  visibility String   @default("shared")
+  visibility   String    @default("shared")
   /// The token a private skill is kept by. Null for a shared skill, and for
   /// a private one once its token is deleted: it stays, the owner's alone,
   /// seen by no token.
-  tokenId    String?   @map("token_id")
-  token      ApiToken? @relation(fields: [tokenId], references: [id], onDelete: SetNull)
+  tokenId      String?   @map("token_id")
+  token        ApiToken? @relation(fields: [tokenId], references: [id], onDelete: SetNull)
   /// The name, description, version, body, tools and files as JSON,
   /// AES-256-GCM under the vault's data key with "skill:<id>" as associated
   /// data. Shared names are unique per vault, a private skill's per token,
   /// by checking, as memory paths are.
-  ciphertext Bytes
+  ciphertext   Bytes
   /// The owner's own note on the skill (its one instance), at most 300
   /// characters on one line: AES-256-GCM under the vault's data key with
   /// "skill:<id>:note" as associated data. Assistants that see the skill
   /// read it as the owner's note; it is never synced or shared
   /// (lib/core/definitions.ts).
-  personalNote Bytes? @map("personal_note")
-  createdAt  DateTime @default(now()) @map("created_at")
-  updatedAt  DateTime @updatedAt @map("updated_at")
+  personalNote Bytes?    @map("personal_note")
+  createdAt    DateTime  @default(now()) @map("created_at")
+  updatedAt    DateTime  @updatedAt @map("updated_at")
 
-  tokens    ApiTokenSkill[]
-  repoItems RepoItem[]
+  tokens         ApiTokenSkill[]
+  repoItems      RepoItem[]
   repoExclusions RepoExclusion[]
 
   @@index([vaultId])
@@ -544,50 +551,50 @@ model Skill {
 /// `oauth` secrets hold the token set (and registered client) PCP obtained
 /// for an MCP server and are managed by the server that owns them.
 model Secret {
-  id          String   @id
-  vaultId     String   @map("vault_id")
-  vault       Vault    @relation(fields: [vaultId], references: [id], onDelete: Cascade)
+  id               String    @id
+  vaultId          String    @map("vault_id")
+  vault            Vault     @relation(fields: [vaultId], references: [id], onDelete: Cascade)
   /// The name and description from before they were sealed (#96): read
   /// only while meta is null, "" once the row is sealed.
-  plainName        String   @map("name")
-  plainDescription String   @default("") @map("description")
+  plainName        String    @map("name")
+  plainDescription String    @default("") @map("description")
   /// The name and description, as JSON {"name", "description"}: AES-256-GCM
   /// under the vault's data key with "secret:<id>:meta" as associated data
   /// (lib/core/secret-meta.ts). Null on a row from before, until sealed.
-  meta        Bytes?
+  meta             Bytes?
   /// The name, found by: a keyed hash of it under the vault's key
   /// (keyedHash in lib/core/crypto.ts, label "pcp secret name"). Unique in
   /// the vault.
-  nameKey     String?  @map("name_key")
+  nameKey          String?   @map("name_key")
   /// text | totp | oauth | ssh_key (PCP's own private key for an SSH server)
-  kind        String   @default("text")
+  kind             String    @default("text")
   /// nonce || ciphertext || tag, AES-256-GCM under the vault's data key
   /// with the secret id as associated data.
-  ciphertext  Bytes
-  keyVersion  Int      @default(1) @map("key_version")
-  createdAt   DateTime @default(now()) @map("created_at")
-  updatedAt   DateTime @updatedAt @map("updated_at")
-  lastUsedAt  DateTime? @map("last_used_at")
+  ciphertext       Bytes
+  keyVersion       Int       @default(1) @map("key_version")
+  createdAt        DateTime  @default(now()) @map("created_at")
+  updatedAt        DateTime  @updatedAt @map("updated_at")
+  lastUsedAt       DateTime? @map("last_used_at")
   /// The owner's login name for the sign-in this secret is the password of
   /// (an email or a user name): not a secret, but theirs, so AES-256-GCM
   /// under the vault's data key with "secret:<id>:login" as associated
   /// data. Shown to assistants with the secret's name (list_secrets, and the
   /// browser's note of the sign-ins at a page's site). Owner's kinds only.
-  loginName   Bytes?   @map("login_name")
+  loginName        Bytes?    @map("login_name")
   /// The owner's one-line note on the secret, shown with it as the login
   /// name is; encrypted the same way, as "secret:<id>:note".
-  note        Bytes?
+  note             Bytes?
   /// The TOTP secret whose code goes with this one's sign-in, named with it
   /// wherever its login name is: a text secret's, naming a TOTP one of the
   /// same vault. Unset when that one is deleted.
-  totpCompanionId  String?  @map("totp_companion_id")
-  totpCompanion    Secret?  @relation("SecretTotpCompanion", fields: [totpCompanionId], references: [id], onDelete: SetNull)
-  totpCompanionFor Secret[] @relation("SecretTotpCompanion")
+  totpCompanionId  String?   @map("totp_companion_id")
+  totpCompanion    Secret?   @relation("SecretTotpCompanion", fields: [totpCompanionId], references: [id], onDelete: SetNull)
+  totpCompanionFor Secret[]  @relation("SecretTotpCompanion")
 
-  authFor       McpServer[] @relation("ServerAuthSecret")
-  authHeaderFor ServerAuthHeader[]
-  oauthClientFor McpServer[] @relation("ServerOAuthClientSecret")
-  oauthTokensFor McpServer[] @relation("ServerOAuthTokens")
+  authFor        McpServer[]               @relation("ServerAuthSecret")
+  authHeaderFor  ServerAuthHeader[]
+  oauthClientFor McpServer[]               @relation("ServerOAuthClientSecret")
+  oauthTokensFor McpServer[]               @relation("ServerOAuthTokens")
   repos          Repo[]
   browserOrigins SecretBrowserOrigin[]
   allowances     ApiTokenSecretAllowance[]
@@ -602,20 +609,20 @@ model Secret {
 /// where the owner allowed it on a request; an API endpoint's use of the
 /// secret never counts. Origins are not secret, and are exported.
 model SecretBrowserOrigin {
-  secretId  String   @map("secret_id")
-  secret    Secret   @relation(fields: [secretId], references: [id], onDelete: Cascade)
+  secretId          String   @map("secret_id")
+  secret            Secret   @relation(fields: [secretId], references: [id], onDelete: Cascade)
   /// https://host[:port], as URL.origin writes it: kept as a keyed hash of
   /// it under the vault's key, the origin itself in sealed (#96). A row
   /// from before holds the origin in plain text here and no sealed one.
-  origin    String
+  origin            String
   /// The origin, AES-256-GCM under the vault's data key with
   /// "secret_browser_origin:<secret id>:<origin hash>" as associated data.
-  sealed    Bytes?
+  sealed            Bytes?
   /// The site and its subdomains: an origin at the same scheme and port
   /// whose host ends in this one's, within the same registrable domain
   /// (the public suffix list, browser-secrets.ts). Never another domain.
-  includeSubdomains Boolean @default(false) @map("include_subdomains")
-  createdAt DateTime @default(now()) @map("created_at")
+  includeSubdomains Boolean  @default(false) @map("include_subdomains")
+  createdAt         DateTime @default(now()) @map("created_at")
 
   @@id([secretId, origin])
   @@map("secret_browser_origin")
@@ -625,17 +632,17 @@ model SecretBrowserOrigin {
 /// authenticate to it: a remote MCP server (Streamable HTTP), an API
 /// endpoint or a mail account (see kind).
 model McpServer {
-  id          String @id
-  vaultId     String @map("vault_id")
-  vault       Vault  @relation(fields: [vaultId], references: [id], onDelete: Cascade)
+  id               String  @id
+  vaultId          String  @map("vault_id")
+  vault            Vault   @relation(fields: [vaultId], references: [id], onDelete: Cascade)
   /// Shown to people.
-  name        String
+  plainName        String  @map("name")
   /// What an assistant uses to name the server in tool calls: lowercase,
   /// unique within the vault.
-  slug        String
+  slug             String
   /// What an assistant is told the server is for. Editable, because the
   /// upstream's own description is often missing or written for developers.
-  description String @default("")
+  plainDescription String  @default("") @map("description")
   /// mcp: the Streamable HTTP endpoint. openapi: the API's base URL, which
   /// every operation's path is appended to. jmap: the session URL. imap:
   /// imaps://host:port, or imap://host:port for STARTTLS. ssh:
@@ -644,12 +651,12 @@ model McpServer {
   /// ever sent to. wrapper: the fixed "pcp:wrapper", likewise. service: the
   /// fixed "pcp:service": where it runs is in service_spec. storage: the
   /// fixed "pcp:storage": where its files are is in storage_root.
-  url         String
-  enabled     Boolean @default(true)
+  plainUrl         String  @map("url")
+  enabled          Boolean @default(true)
 
   /// none | header | oauth | basic | key (ssh: PCP's own key, in a managed
   /// secret)
-  authType String @default("none") @map("auth_type")
+  authType          String  @default("none") @map("auth_type")
   /// header auth: the header to send and how the secret goes into it.
   authHeaderName    String? @map("auth_header_name")
   authValueTemplate String? @map("auth_value_template")
@@ -657,41 +664,41 @@ model McpServer {
   authSecret        Secret? @relation("ServerAuthSecret", fields: [authSecretId], references: [id], onDelete: SetNull)
   /// basic auth: the user name sent with the secret (a JMAP server's Basic
   /// authentication, an IMAP and SMTP login). key: the SSH login.
-  authUsername      String? @map("auth_username")
+  plainAuthUsername String? @map("auth_username")
 
   /// oauth (an MCP server, or a jmap account that signs in with OAuth): an
   /// optional pre-registered client. Without one PCP registers itself
   /// (dynamically, RFC 7591, or with its client metadata document) when the
   /// server allows it.
-  oauthClientId       String? @map("oauth_client_id")
-  oauthClientSecretId String? @map("oauth_client_secret_id")
-  oauthClientSecret   Secret? @relation("ServerOAuthClientSecret", fields: [oauthClientSecretId], references: [id], onDelete: SetNull)
-  oauthScope          String? @map("oauth_scope")
+  plainOauthClientId         String?   @map("oauth_client_id")
+  oauthClientSecretId        String?   @map("oauth_client_secret_id")
+  oauthClientSecret          Secret?   @relation("ServerOAuthClientSecret", fields: [oauthClientSecretId], references: [id], onDelete: SetNull)
+  plainOauthScope            String?   @map("oauth_scope")
   /// oauth: extra parameters for the sign-in address, as a query string
   /// (lib/core/oauth-client.ts), for providers that only hand out a refresh
   /// token, or anything else, when the sign-in asks for it.
-  oauthAuthorizeParams String? @map("oauth_authorize_params")
+  plainOauthAuthorizeParams  String?   @map("oauth_authorize_params")
   /// oauth: the managed secret holding PCP's registration with the server
   /// and, once connected, its token set.
-  oauthTokensId       String? @map("oauth_tokens_id")
-  oauthTokens         Secret? @relation("ServerOAuthTokens", fields: [oauthTokensId], references: [id], onDelete: SetNull)
+  oauthTokensId              String?   @map("oauth_tokens_id")
+  oauthTokens                Secret?   @relation("ServerOAuthTokens", fields: [oauthTokensId], references: [id], onDelete: SetNull)
   /// oauth: when the current token set was obtained; null until connected.
-  oauthConnectedAt    DateTime? @map("oauth_connected_at")
+  oauthConnectedAt           DateTime? @map("oauth_connected_at")
   /// openapi + oauth: where the owner signs in and where PCP exchanges the
   /// code and renews the token, from the schema's oauth2 flow as the owner
   /// approved it. MCP servers discover theirs instead.
-  oauthAuthorizationUrl String? @map("oauth_authorization_url")
-  oauthTokenUrl         String? @map("oauth_token_url")
+  plainOauthAuthorizationUrl String?   @map("oauth_authorization_url")
+  plainOauthTokenUrl         String?   @map("oauth_token_url")
 
   /// What the last contact with the server found: unknown | ok |
   /// auth_required | client_required (an OAuth server PCP cannot register
   /// with, waiting for the owner's client) | refused (it turned down the
   /// credentials PCP sent) | error.
-  status        String    @default("unknown")
-  statusMessage String    @default("") @map("status_message")
-  lastSyncedAt  DateTime? @map("last_synced_at")
-  createdAt     DateTime  @default(now()) @map("created_at")
-  updatedAt     DateTime  @updatedAt @map("updated_at")
+  status             String    @default("unknown")
+  plainStatusMessage String    @default("") @map("status_message")
+  lastSyncedAt       DateTime? @map("last_synced_at")
+  createdAt          DateTime  @default(now()) @map("created_at")
+  updatedAt          DateTime  @updatedAt @map("updated_at")
 
   /// mcp | openapi | jmap | imap | ssh | caldav | browser | wrapper |
   /// service | storage. An openapi
@@ -708,19 +715,19 @@ model McpServer {
   /// SSH servers (lib/core/services/), with tools to see and run it. A
   /// storage root is a folder on one of their SSH servers that assistants
   /// read and write files in over SFTP, confined to it (lib/core/storage/).
-  kind       String  @default("mcp")
+  kind                 String  @default("mcp")
   /// openapi: where the schema came from, url | upload.
-  specSource String? @map("spec_source")
+  specSource           String? @map("spec_source")
   /// openapi: the schema's address, when it came from one.
-  specUrl    String? @map("spec_url")
+  plainSpecUrl         String? @map("spec_url")
   /// openapi: offer GET operations only. jmap/imap: offer the tools that
   /// read mail only. caldav: the tools that read calendars and reminders.
   /// storage: the tools that read files only.
-  readOnly   Boolean @default(false) @map("read_only")
+  readOnly             Boolean @default(false) @map("read_only")
   /// openapi: refuse private, loopback and link-local addresses, for the
   /// schema download and for every call. Set on endpoints an assistant
   /// registers; only the owner can clear it.
-  publicOnly Boolean @default(false) @map("public_only")
+  publicOnly           Boolean @default(false) @map("public_only")
   /// openapi: an assistant proposed specUrl and the owner approved the
   /// schema it held then. A background re-read never takes a changed
   /// document from it: the owner re-reads it in PCP, or the assistant asks
@@ -730,49 +737,49 @@ model McpServer {
   /// jmap: what the session document said when it was last read. The API
   /// and download addresses are accepted only on the session URL's origin,
   /// so the credential goes nowhere the owner did not type.
-  mailApiUrl      String? @map("mail_api_url")
-  mailDownloadUrl String? @map("mail_download_url")
+  plainMailApiUrl      String?  @map("mail_api_url")
+  plainMailDownloadUrl String?  @map("mail_download_url")
   /// jmap: where attachments to send are uploaded, on the same origin.
-  mailUploadUrl   String? @map("mail_upload_url")
+  plainMailUploadUrl   String?  @map("mail_upload_url")
   /// jmap: the account the session names for mail.
-  mailAccountId   String? @map("mail_account_id")
+  plainMailAccountId   String?  @map("mail_account_id")
   /// jmap: whether the server lets this account send (submission).
-  mailSubmission  Boolean @default(false) @map("mail_submission")
+  mailSubmission       Boolean  @default(false) @map("mail_submission")
   /// imap: where mail is sent, smtps://host:port or smtp://host:port
   /// (STARTTLS), with the same login. Null: the account cannot send.
-  smtpUrl         String? @map("smtp_url")
+  plainSmtpUrl         String?  @map("smtp_url")
   /// jmap/imap: the From address when sending, when the user name is not one.
-  mailFrom        String? @map("mail_from")
+  plainMailFrom        String?  @map("mail_from")
   /// imap: whether PCP files a copy of what it sends in Sent: auto (only
   /// when the mail server did not file one itself), always or never. The
   /// owner's choice; jmap accounts file theirs as the server does.
-  mailSaveSent    String  @default("auto") @map("mail_save_sent")
+  mailSaveSent         String   @default("auto") @map("mail_save_sent")
   /// imap: what PCP found out by looking in Sent after a send: the mail
   /// server files its own copy of what it sends (true), it does not
   /// (false), or not known yet (null). Shapes how long the next look waits.
-  mailServerFilesSent Boolean? @map("mail_server_files_sent")
+  mailServerFilesSent  Boolean? @map("mail_server_files_sent")
 
   /// ssh: the public half of PCP's own key for this server, whose private
   /// half is the managed secret in authSecretId. The owner adds it to the
   /// login's authorized_keys.
-  sshPublicKey   String? @map("ssh_public_key")
+  plainSshPublicKey String? @map("ssh_public_key")
   /// ssh: the server's host key, "type base64", pinned the first time PCP
   /// completed a key exchange with it. Another key is refused until the
   /// owner forgets this one (lib/core/ssh/hosts.ts).
-  sshHostKey     String? @map("ssh_host_key")
+  plainSshHostKey   String? @map("ssh_host_key")
 
   /// caldav: the calendar home (RFC 4791 6.2.1) the server named when PCP
   /// last found it from url, where the calendars and reminder lists are.
   /// Taken only on url's origin, or over https:// on a host in the same
   /// domain (iCloud's p<n>-caldav.icloud.com); forgotten when the address
   /// or sign-in changes.
-  davHomeUrl     String? @map("dav_home_url")
+  plainDavHomeUrl String? @map("dav_home_url")
 
   /// mcp, openapi, wrapper: the version of this item's document in a linked
   /// repository (lib/core/repos/), as last read from or written to one; null
   /// reads as 1. PCP's own edits leave it alone: sync counts it on when it
   /// writes a changed document.
-  syncVersion    Int?    @map("sync_version")
+  syncVersion Int? @map("sync_version")
 
   /// mcp, openapi, wrapper, service: the definition this server is an instance of
   /// (lib/core/definitions.ts). Servers that share one share its
@@ -780,20 +787,29 @@ model McpServer {
   /// everything else on this row is the instance's own. Null for the other
   /// kinds, and for a row restored from an older export until it is given
   /// one.
-  definitionId   String?           @map("definition_id")
-  definition     ServerDefinition? @relation(fields: [definitionId], references: [id], onDelete: SetNull)
+  definitionId  String?           @map("definition_id")
+  definition    ServerDefinition? @relation(fields: [definitionId], references: [id], onDelete: SetNull)
   /// The owner's own note on this server, at most 300 characters on one
   /// line: AES-256-GCM under the vault's data key with "mcp_server:<id>" as
   /// associated data. Assistants read it as the owner's note beside the
   /// description; it is never synced or shared.
-  personalNote   Bytes?            @map("personal_note")
+  personalNote  Bytes?            @map("personal_note")
   /// Levels and tiers the owner saved with their approval of this server,
   /// as name patterns, for the tools PCP has not read yet (an MCP server
   /// by its address, an OAuth one not yet connected, a service's): JSON
   /// {"tokenId", "rules": [{"pattern", "access"?, "tier"?}]}, applied once
   /// to the tools its first read finds, then cleared
   /// (lib/core/proposed-access.ts). Null when there are none.
-  pendingAccess  String?           @map("pending_access")
+  pendingAccess String?           @map("pending_access")
+
+  /// What the server is and where it is, sealed (#96): the JSON of
+  /// lib/core/server-meta.ts ServerMeta (name, description, address,
+  /// logins, what PCP found out of it, its status message), AES-256-GCM
+  /// under the vault's data key with "mcp_server:<id>:meta" as associated
+  /// data. Null on a row from before, which holds them in the plain*
+  /// columns until the vault's rows are sealed; a sealed row's plain
+  /// columns are blank ("" or null).
+  meta Bytes?
 
   tools              McpTool[]
   tokens             ApiTokenServer[]
@@ -804,18 +820,18 @@ model McpServer {
   permissionRequests PermissionRequest[]
   spec               OpenApiSpec?
   wrapperSpec        WrapperSpec?
-  serviceSpec        ServiceSpec?        @relation("ServiceOwn")
-  servicesHosted     ServiceSpec[]       @relation("ServiceHost")
-  registeredBy       ServiceSpec?        @relation("ServiceRegistered")
-  storageRoot        StorageRoot?        @relation("StorageOwn")
-  storageHosted      StorageRoot[]       @relation("StorageHost")
+  serviceSpec        ServiceSpec?            @relation("ServiceOwn")
+  servicesHosted     ServiceSpec[]           @relation("ServiceHost")
+  registeredBy       ServiceSpec?            @relation("ServiceRegistered")
+  storageRoot        StorageRoot?            @relation("StorageOwn")
+  storageHosted      StorageRoot[]           @relation("StorageHost")
   storageEntries     StorageEntry[]
   storagePending     StoragePending[]
   authHeaders        ServerAuthHeader[]
   toolResults        ToolResult[]
   repoItems          RepoItem[]
-  exits              Exit[]              @relation("ExitHost")
-  exitServices       Exit[]              @relation("ExitService")
+  exits              Exit[]                  @relation("ExitHost")
+  exitServices       Exit[]                  @relation("ExitService")
   toolTiers          ToolTier[]
 
   @@unique([vaultId, slug])
@@ -831,22 +847,29 @@ model McpServer {
 /// which definitions.ts keeps the same on every one of them: a change to it
 /// through any instance is written to all, and each rebuilds its tools.
 model ServerDefinition {
-  id            String   @id
-  vaultId       String   @map("vault_id")
-  vault         Vault    @relation(fields: [vaultId], references: [id], onDelete: Cascade)
+  id               String   @id
+  vaultId          String   @map("vault_id")
+  vault            Vault    @relation(fields: [vaultId], references: [id], onDelete: Cascade)
   /// mcp | openapi | wrapper | service: the kind of every instance.
-  kind          String
+  kind             String
   /// The definition's own short name, unique in the vault: the first
   /// instance's when it was made. Instances keep their own slugs.
-  slug          String
-  name          String
-  /// The description every instance carries (mcp_server.description).
-  description   String   @default("")
+  slug             String
+  /// The name, from before names were sealed (#96): "" once sealed.
+  plainName        String   @map("name")
+  /// The description every instance carries (mcp_server.description), from
+  /// before: "" once sealed.
+  plainDescription String   @default("") @map("description")
+  /// The name and description, sealed: JSON {"name", "description"},
+  /// AES-256-GCM under the vault's data key with
+  /// "server_definition:<id>:meta" as associated data. Null on a row from
+  /// before, until the vault's rows are sealed.
+  meta             Bytes?
   /// The shape of the definition as shared; 1 until a change to it is not
   /// backward compatible.
-  formatVersion Int      @default(1) @map("format_version")
-  createdAt     DateTime @default(now()) @map("created_at")
-  updatedAt     DateTime @updatedAt @map("updated_at")
+  formatVersion    Int      @default(1) @map("format_version")
+  createdAt        DateTime @default(now()) @map("created_at")
+  updatedAt        DateTime @updatedAt @map("updated_at")
 
   instances      McpServer[]
   repoExclusions RepoExclusion[]
@@ -906,33 +929,48 @@ model ServerAuthHeader {
 /// The catalogue of one server's tools, as last read from it. search_tools
 /// runs over these rows, so an assistant never needs the full list.
 model McpTool {
-  id          String    @id
-  serverId    String    @map("server_id")
-  server      McpServer @relation(fields: [serverId], references: [id], onDelete: Cascade)
-  name        String
-  title       String?
-  description String    @default("")
+  id                       String    @id
+  serverId                 String    @map("server_id")
+  server                   McpServer @relation(fields: [serverId], references: [id], onDelete: Cascade)
+  /// The tool's name: plain, as its server's short name is.
+  name                     String
+  /// From before descriptions were sealed (#96): the title, the
+  /// description and the owner's wording, the schemas, the call plan and
+  /// the outline of an answer, each in its plain column. A sealed row holds
+  /// blanks there ("" or null) and its values in about, schema and
+  /// override (lib/core/tool-rows.ts).
+  plainTitle               String?   @map("title")
+  plainDescription         String    @default("") @map("description")
   /// The owner's wording, when the upstream description is not good enough.
-  descriptionOverride String? @map("description_override")
+  plainDescriptionOverride String?   @map("description_override")
   /// JSON Schema, as JSON text.
-  inputSchema String    @map("input_schema")
+  plainInputSchema         String    @map("input_schema")
   /// JSON, when the server sent annotations (readOnlyHint and friends).
-  annotations String?
+  annotations              String?
   /// openapi: the call plan (JSON) that turns the tool's arguments into an
   /// HTTP request. Null for MCP and mail tools.
-  operation   String?
+  plainOperation           String?   @map("operation")
   /// openapi: an outline of what a successful call answers, from the
   /// schema; describe_tool shows it. Null when the schema does not say.
-  output      String?
+  plainOutput              String?   @map("output")
   /// JSON Schema, as JSON text, of what a successful call answers as
   /// structuredContent, when the tool declares it: an MCP server's
   /// outputSchema, a family tool's (lib/core/tools/family.ts) or a wrapper
   /// tool's. describe shows it as outputSchema.
-  outputSchema String? @map("output_schema")
+  plainOutputSchema        String?   @map("output_schema")
+  /// The title and description, sealed: JSON, AES-256-GCM under the
+  /// vault's data key with "mcp_tool:<id>:about" as associated data. What
+  /// search and the catalogue read on every request.
+  about                    Bytes?
+  /// The input and output schemas, the call plan and the outline, sealed
+  /// as "mcp_tool:<id>:schema": read when a tool is described or called.
+  schema                   Bytes?
+  /// The owner's wording, sealed as "mcp_tool:<id>:override".
+  override                 Bytes?
   /// JSON: the icons an MCP server gave the tool (MCP's Icon objects).
-  icons       String?
-  createdAt   DateTime  @default(now()) @map("created_at")
-  updatedAt   DateTime  @updatedAt @map("updated_at")
+  icons                    String?
+  createdAt                DateTime  @default(now()) @map("created_at")
+  updatedAt                DateTime  @updatedAt @map("updated_at")
 
   @@unique([serverId, name])
   @@map("mcp_tool")
@@ -942,20 +980,29 @@ model McpTool {
 /// from the server row so listing servers and serving the gateway never
 /// load it. Refreshing an uploaded schema regenerates from this copy.
 model OpenApiSpec {
-  serverId  String    @id @map("server_id")
-  server    McpServer @relation(fields: [serverId], references: [id], onDelete: Cascade)
-  /// The JSON or YAML text as read.
-  text      String
+  serverId      String    @id @map("server_id")
+  server        McpServer @relation(fields: [serverId], references: [id], onDelete: Cascade)
+  /// The JSON or YAML text as read, from before schemas were sealed (#96):
+  /// "" once sealed in sealedText.
+  plainText     String    @map("text")
   /// Edits applied to it before tools are generated: a JSON Patch (RFC
-  /// 6902) as JSON (lib/core/openapi/patch.ts).
-  patches   String    @default("[]")
-  /// SHA-256 of text, hex.
-  hash      String
-  fetchedAt DateTime  @map("fetched_at")
+  /// 6902) as JSON (lib/core/openapi/patch.ts), from before: "" once
+  /// sealed in sealedPatches.
+  plainPatches  String    @default("[]") @map("patches")
+  /// The text, sealed: AES-256-GCM under the vault's data key with
+  /// "openapi_spec:<server id>:sealedText" as associated data
+  /// (lib/core/spec-rows.ts).
+  sealedText    Bytes?    @map("sealed_text")
+  /// The edits, sealed as "openapi_spec:<server id>:sealedPatches".
+  sealedPatches Bytes?    @map("sealed_patches")
+  /// A keyed hash of text under the vault's key, hex; a row from before
+  /// holds its plain SHA-256 until it is sealed.
+  hash          String
+  fetchedAt     DateTime  @map("fetched_at")
   /// The PCP_VERSION that built the endpoint's tools from it. A boot under
   /// another version rebuilds them from this copy (endpoints.ts
   /// rebuildOutdatedEndpoints). Null for tools built before it was kept.
-  builtWith String?   @map("built_with")
+  builtWith     String?   @map("built_with")
 
   @@map("openapi_spec")
 }
@@ -965,16 +1012,21 @@ model OpenApiSpec {
 /// (lib/core/wrappers/catalogue.ts), and nothing else changes it but the
 /// owner's own save or their answer to a request (lib/core/wrappers/admin.ts).
 model WrapperSpec {
-  serverId   String    @id @map("server_id")
-  server     McpServer @relation(fields: [serverId], references: [id], onDelete: Cascade)
+  serverId         String    @id @map("server_id")
+  server           McpServer @relation(fields: [serverId], references: [id], onDelete: Cascade)
   /// The definition as JSON: each tool's schema, program, the tools it calls
   /// and replaces, and where a secret may go (lib/core/wrappers/definition.ts).
-  /// Names a secret by its id, never by its value.
-  definition String
-  /// SHA-256 of the definition's canonical JSON, hex: what a request was
-  /// asked against.
-  hash       String
-  updatedAt  DateTime  @updatedAt @map("updated_at")
+  /// Names a secret by its id, never by its value. From before definitions
+  /// were sealed (#96): "" once sealed.
+  plainDefinition  String    @map("definition")
+  /// The definition, sealed: AES-256-GCM under the vault's data key with
+  /// "wrapper_spec:<server id>:sealedDefinition" as associated data.
+  sealedDefinition Bytes?    @map("sealed_definition")
+  /// A keyed hash of the definition's canonical JSON under the vault's key,
+  /// hex: what a request was asked against. A row from before holds its
+  /// plain SHA-256 until it is sealed.
+  hash             String
+  updatedAt        DateTime  @updatedAt @map("updated_at")
 
   @@map("wrapper_spec")
 }
@@ -986,51 +1038,56 @@ model WrapperSpec {
 /// or MCP server of its own (registeredId). Kept apart from the server row
 /// like a wrapper's program.
 model ServiceSpec {
-  serverId      String     @id @map("server_id")
-  server        McpServer  @relation("ServiceOwn", fields: [serverId], references: [id], onDelete: Cascade)
+  serverId         String     @id @map("server_id")
+  server           McpServer  @relation("ServiceOwn", fields: [serverId], references: [id], onDelete: Cascade)
   /// What the definition's instances share, as JSON
   /// (lib/core/services/definition.ts): the image by digest, its ports, the
   /// names of its environment variables, its named volumes, the health
-  /// check and what it registers. Names no secret and no address.
-  definition    String
-  /// SHA-256 of the definition's canonical JSON, hex.
-  hash          String
+  /// check and what it registers. Names no secret and no address. From
+  /// before definitions were sealed (#96): "" once sealed.
+  plainDefinition  String     @map("definition")
+  /// The definition, sealed: AES-256-GCM under the vault's data key with
+  /// "service_spec:<server id>:sealedDefinition" as associated data.
+  sealedDefinition Bytes?     @map("sealed_definition")
+  /// A keyed hash of the definition's canonical JSON under the vault's key,
+  /// hex; a row from before holds its plain SHA-256 until it is sealed.
+  hash             String
   /// The SSH server the container runs on. Null once that server is
   /// deleted: the container stays there, and PCP no longer reaches it.
-  hostId        String?    @map("host_id")
-  host          McpServer? @relation("ServiceHost", fields: [hostId], references: [id], onDelete: SetNull)
+  hostId           String?    @map("host_id")
+  host             McpServer? @relation("ServiceHost", fields: [hostId], references: [id], onDelete: SetNull)
   /// docker | podman: the engine PCP found on the host.
-  engine        String
+  engine           String
   /// The engine's version as it reported it, for the owner.
-  engineVersion String     @default("") @map("engine_version")
+  engineVersion    String     @default("") @map("engine_version")
   /// The container's name on the host: pcp-<name>.
-  containerName String     @map("container_name")
+  containerName    String     @map("container_name")
   /// Where the container's ports are published on the host, as JSON:
   /// {"address": "0.0.0.0", "ports": [{"container": 5001, "host": 5001}]}.
-  publish       String     @default("{}")
+  publish          String     @default("{}")
   /// Which secret each environment variable takes, as JSON
   /// {"NAME": "<secret id>"}: by id, never a value. The values reach the
   /// host over standard input only (upstream.ts builds them).
-  env           String     @default("{}")
+  env              String     @default("{}")
   /// What the owner typed for the definition's plain variables (a VPN
   /// provider's name, a country), as JSON {"NAME": "value"}: no secrets.
-  plainValues   String     @default("{}") @map("plain_values")
+  plainValues      String     @default("{}") @map("plain_values")
   /// The API endpoint or MCP server launching it registered; null when it
   /// registers nothing, or once that server is deleted.
-  registeredId  String?    @unique @map("registered_id")
-  registered    McpServer? @relation("ServiceRegistered", fields: [registeredId], references: [id], onDelete: SetNull)
+  registeredId     String?    @unique @map("registered_id")
+  registered       McpServer? @relation("ServiceRegistered", fields: [registeredId], references: [id], onDelete: SetNull)
   /// How PCP reaches what the container publishes: "tunnel", a direct-tcpip
   /// channel through the SSH connection to the address its ports are bound
   /// to on the SSH server (every service launched, updated or made again
   /// since), or "direct", from PCP's machine to the published address (a
   /// service launched before, until then).
-  reach         String     @default("direct")
+  reach            String     @default("direct")
   /// What the owner (or an assistant's stop tool) last asked of it:
   /// "running" or "stopped". A call that finds it down starts it again, and
   /// the reconcile pass brings it back up, only while it is "running".
-  intendedState String     @default("running") @map("intended_state")
-  createdAt     DateTime   @default(now()) @map("created_at")
-  updatedAt     DateTime   @updatedAt @map("updated_at")
+  intendedState    String     @default("running") @map("intended_state")
+  createdAt        DateTime   @default(now()) @map("created_at")
+  updatedAt        DateTime   @updatedAt @map("updated_at")
 
   @@index([hostId])
   @@map("service_spec")
@@ -1183,8 +1240,12 @@ model ToolResult {
   /// text | bytes: what was kept. A text answer, or a file's bytes (an
   /// attachment, a binary field of an answer).
   kind       String     @default("text")
-  /// A file's name, when it had one.
-  name       String?
+  /// A file's name, when it had one, from before names were sealed (#96):
+  /// null on a row written since, which keeps it in sealedName.
+  plainName  String?    @map("name")
+  /// A file's name, when it had one: AES-256-GCM under the vault's data key
+  /// with "tool_result:<id>:name" as associated data.
+  sealedName Bytes?     @map("sealed_name")
   /// Any media type, parameters allowed (text/plain, application/json,
   /// text/csv; charset=utf-8, image/png).
   mediaType  String     @map("media_type")
@@ -1274,45 +1335,45 @@ model EmbeddingVector {
 /// only its hash is stored, and the file is encrypted under a key derived
 /// from it, so neither the row nor the link opens anything else.
 model FileLink {
-  id         String    @id
-  vaultId    String    @map("vault_id")
-  vault      Vault     @relation(fields: [vaultId], references: [id], onDelete: Cascade)
-  tokenId    String    @map("token_id")
-  token      ApiToken  @relation(fields: [tokenId], references: [id], onDelete: Cascade)
+  id           String    @id
+  vaultId      String    @map("vault_id")
+  vault        Vault     @relation(fields: [vaultId], references: [id], onDelete: Cascade)
+  tokenId      String    @map("token_id")
+  token        ApiToken  @relation(fields: [tokenId], references: [id], onDelete: Cascade)
   /// download | upload | store
-  kind       String
+  kind         String
   /// SHA-256 of the link's secret, which a request is looked up by.
-  secretHash String    @unique @map("secret_hash")
+  secretHash   String    @unique @map("secret_hash")
   /// The kept result a download serves, or the id an upload is kept under.
-  resultId   String    @map("result_id")
+  resultId     String    @map("result_id")
   /// The file's name from before it was sealed (#96): null on a new row.
-  plainName  String?   @map("name")
+  plainName    String?   @map("name")
   /// The file's name, AES-256-GCM under the link's key with
   /// "file_link_name:<id>", so only the link (or the token, through an
   /// upload's wrapped key) shows it. Null for a file with no name.
-  sealedName Bytes?    @map("sealed_name")
-  mediaType  String    @map("media_type")
+  sealedName   Bytes?    @map("sealed_name")
+  mediaType    String    @map("media_type")
   /// The file's bytes; 0 for an upload that has not arrived.
-  length     Int       @default(0)
+  length       Int       @default(0)
   /// An upload's link key, wrapped under the vault's data key with
   /// "file_link_key:<id>": what turns the file into a kept result once the
   /// token, holding the vault's key, uses its handle.
-  wrappedKey Bytes?    @map("wrapped_key")
+  wrappedKey   Bytes?    @map("wrapped_key")
   /// The file, AES-256-GCM under the link's key with "file_link:<id>"; null
   /// for an upload that has not arrived.
-  ciphertext Bytes?
+  ciphertext   Bytes?
   /// Downloads served, or 1 once an upload arrived.
-  uses       Int       @default(0)
-  maxUses    Int       @map("max_uses")
-  createdAt  DateTime  @default(now()) @map("created_at")
+  uses         Int       @default(0)
+  maxUses      Int       @map("max_uses")
+  createdAt    DateTime  @default(now()) @map("created_at")
   /// The link works until then; an upload that arrived waits until then to
   /// become a kept result.
-  expiresAt  DateTime  @map("expires_at")
-  receivedAt DateTime? @map("received_at")
+  expiresAt    DateTime  @map("expires_at")
+  receivedAt   DateTime? @map("received_at")
   /// The upload page this is one file of (UploadLink), or null for a
   /// receive_file link. Not a relation: a file that arrived outlives its
   /// page until the token uses it, and the cleanup removes each by its date.
-  uploadLinkId String? @map("upload_link_id")
+  uploadLinkId String?   @map("upload_link_id")
   /// A "store" link (share_file): the store whose object it reads with the
   /// file's key alone (PCP's own store, encrypted), or null for a copy made
   /// when it was shared (file_links/ in the data folder). An upload: the
