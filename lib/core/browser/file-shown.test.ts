@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest"
 
 import { fileShownWords } from "./call"
 import { mediaTypeOf } from "./challenge"
+import { shownFileName } from "./downloads"
 
 // A tab that shows a PDF or a picture rather than a page: its main
 // document's Content-Type, as Chromium reported it, says so, and the answer
@@ -24,5 +25,32 @@ describe("a tab showing a file", () => {
     )
     expect(fileShownWords("t1", "text/html")).toBeNull()
     expect(fileShownWords("t1", null)).toBeNull()
+  })
+
+  it("names a file a page shows by its header, else its address, with its type's extension", () => {
+    const at = "https://example.test/files/Statement%20March"
+    expect(shownFileName(at, "application/pdf", undefined)).toBe(
+      "Statement March.pdf",
+    )
+    expect(
+      shownFileName(at, "application/pdf", 'inline; filename="invoice-7.pdf"'),
+    ).toBe("invoice-7.pdf")
+    expect(
+      shownFileName(
+        at,
+        "application/pdf",
+        "inline; filename*=UTF-8''r%C3%A9sum%C3%A9.pdf",
+      ),
+    ).toBe("résumé.pdf")
+    expect(
+      shownFileName("https://example.test/scan.png", "image/png", undefined),
+    ).toBe("scan.png")
+    // No name at all, and no path out of a name.
+    expect(
+      shownFileName("https://example.test/", "image/jpeg", undefined),
+    ).toBe("picture.jpg")
+    expect(
+      shownFileName(at, "application/pdf", 'inline; filename="../../x"'),
+    ).toBe(".._.._x.pdf")
   })
 })
