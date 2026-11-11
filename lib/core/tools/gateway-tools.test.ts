@@ -838,6 +838,27 @@ describe("execute_<tier> by name, and the names kept for one release (#113)", ()
     expect(meant.isError).toBe(false)
     expect(meant.structured).toMatchObject({ kind: "needs_owner" })
 
+    // A tool that says a repeat does nothing more (idempotentHint) answers
+    // a repeat itself.
+    const id = (meant.structured as { request: string }).request
+    await said("execute_write", { tool: "withdraw_request", arguments: { id } })
+    const withdrawn = await said("execute_write", {
+      tool: "withdraw_request",
+      arguments: { id },
+    })
+    expect(withdrawn.code).not.toBe("duplicate_call")
+    expect(withdrawn.texts.join("\n")).toContain("already withdrew")
+
+    // Another call of the same tool with other arguments is no repeat, and
+    // PCP's own answer says what it did: no note about the earlier one.
+    for (const path of ["/memories/a.md", "/memories/b.md"]) {
+      const saved = await said("execute_destructive", {
+        tool: "memory",
+        arguments: { command: "create", path, file_text: "Tea." },
+      })
+      expect(saved.texts).toEqual([`Saved ${path}.`])
+    }
+
     // What only reads is never held back, whatever the tool's tier.
     const view = {
       tool: "memory",
