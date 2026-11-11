@@ -1,6 +1,12 @@
 import type { VaultContext } from "../context"
 import { db } from "../db"
-import { openTools, TOOL_OVERRIDE_SELECT } from "../tool-rows"
+import {
+  openTools,
+  TOOL_OVERRIDE_SELECT,
+  TOOL_NAME_SELECT,
+  TOOL_ABOUT_SELECT,
+  toolName,
+} from "../tool-rows"
 import {
   shareDescription,
   uniqueDefinitionSlug,
@@ -230,9 +236,11 @@ async function wrapperProblems(
   const bySlug = new Map(servers.map((server) => [server.slug, server]))
   const tools = await db().mcpTool.findMany({
     where: { serverId: { in: servers.map((server) => server.id) } },
-    select: { serverId: true, name: true },
+    select: TOOL_NAME_SELECT,
   })
-  const has = new Set(tools.map((tool) => `${tool.serverId}\n${tool.name}`))
+  const has = new Set(
+    tools.map((tool) => `${tool.serverId}\n${toolName(ctx, tool)}`),
+  )
   const problems: string[] = []
 
   for (const ref of [...refs].sort()) {
@@ -630,7 +638,7 @@ async function setToolDescriptions(
     ctx,
     await db().mcpTool.findMany({
       where: { serverId: id },
-      select: { ...TOOL_OVERRIDE_SELECT, name: true },
+      select: { ...TOOL_OVERRIDE_SELECT, ...TOOL_ABOUT_SELECT },
     }),
   )
 

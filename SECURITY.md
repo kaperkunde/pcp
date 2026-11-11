@@ -27,14 +27,15 @@ sign-ins, kept results and your notes on servers and skills are in the vault
 too, encrypted the same way, and so are the names and descriptions of your
 secrets, your API tokens' names, the sites your secrets are typed at and the
 sites web fetch keeps levels for, your settings (but the public address),
-your servers' names, addresses, descriptions, logins and status, their
-tools' descriptions and schemas, API endpoints' schemas, wrappers' and
-services' definitions, and the names of kept files. What is compared
-without being read (a schema's or a definition's fingerprint, a secret's
-name) is a hash keyed under the vault's key, not a plain one. Some details
-are still in plain text: the vault's own name, which the sign-in page shows
-before you unlock, and, until a later release, servers' short names and
-tools' names. See
+your servers' names, short names, addresses, descriptions, logins and
+status, their tools' names, descriptions and schemas, API endpoints'
+schemas, wrappers' and services' definitions, the names of kept files, and
+the tools, servers, secrets and sites each line of the request log names.
+What is compared or looked up without being read (a schema's or a
+definition's fingerprint, a secret's name, a server's short name, a tool's
+name) is a hash keyed under the vault's key, not a plain one. The vault's
+own name is still in plain text: the sign-in page shows it before you
+unlock. See
 [ARCHITECTURE.md](ARCHITECTURE.md#encryption). In the Mac app, the window's
 session cookie and the Touch ID key do sit in the app's folder, but encrypted
 under a key in your login keychain, which a copy of the disk does not open.
@@ -529,9 +530,11 @@ Not defended against:
   data; that is the design.
 - The request log (`logs/*.jsonl` in the data directory) records which tools
   were called, by which token, and whether they worked, never their
-  arguments or results. The Log page shows it to the signed-in owner, and the
-  cleanup deletes the days older than the owner keeps (Settings → Cleanup, 90
-  by default).
+  arguments or results. The names on each line are encrypted under the
+  vault's key; the times, token ids and outcomes are not. The Log page shows
+  it to the signed-in owner, and the cleanup deletes the days older than the
+  owner keeps (Settings → Cleanup, 90 by default) by their dates, without
+  reading them.
 - An answer too long to pass on in one piece (a large API response, a long
   email), and a file or value handed back as a handle (an attachment, an
   image), is kept for a day: encrypted under the vault's key, readable and

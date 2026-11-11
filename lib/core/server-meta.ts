@@ -198,9 +198,20 @@ export function serverSlug(
   return readFields(ctx.dek, SERVER_META, row).slug
 }
 
-/** By name, as the owner reads a list; the order a query once gave. */
-export function byServerName<T extends { name: string }>(a: T, b: T): number {
-  return a.name < b.name ? -1 : a.name > b.name ? 1 : 0
+/**
+ * By name, as the owner reads a list, then by short name: the order a
+ * query once gave, whose index held the short names.
+ */
+export function byServerName<T extends { name: string; slug?: string }>(
+  a: T,
+  b: T,
+): number {
+  if (a.name !== b.name) {
+    return a.name < b.name ? -1 : 1
+  }
+
+  const [x, y] = [a.slug ?? "", b.slug ?? ""]
+  return x < y ? -1 : x > y ? 1 : 0
 }
 
 /** By short name: the order a query once gave, kept in memory now (#96). */

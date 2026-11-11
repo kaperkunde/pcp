@@ -42,6 +42,7 @@ import { setToolAccess } from "./tool-access"
 import { setupVault } from "./vault"
 import { entryCall } from "./test-handles"
 import { writeServer } from "./server-meta"
+import { toolsWhere } from "./test-servers"
 
 // Definitions and instances: servers that are the same thing share one
 // definition (description, schema, edits, tool descriptions), each with its
@@ -94,12 +95,7 @@ async function endpoint(
 }
 
 const toolNames = async (serverId: string) =>
-  (
-    await db().mcpTool.findMany({
-      where: { serverId },
-      orderBy: { name: "asc" },
-    })
-  ).map((tool) => tool.name)
+  (await toolsWhere(ctx, { serverId })).map((tool) => tool.name)
 
 describe("a new server", () => {
   it("is the one instance of a definition of its own, named after it", async () => {

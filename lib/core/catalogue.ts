@@ -4,6 +4,8 @@ import type { VaultContext } from "./context"
 import { db } from "./db"
 import { inheritedToolDescriptions } from "./definition-rows"
 import {
+  TOOL_ABOUT_SELECT,
+  toolName,
   sealedToolContent,
   sealedToolOverride,
   splitAnnotations,
@@ -78,9 +80,9 @@ export async function storeTools(
         (
           await tx.mcpTool.findMany({
             where: { serverId },
-            select: { id: true, name: true },
+            select: TOOL_ABOUT_SELECT,
           })
-        ).map((tool) => [tool.name, tool.id]),
+        ).map((tool) => [toolName(ctx, tool), tool.id]),
       )
 
       for (const tool of tools) {
@@ -88,7 +90,8 @@ export async function storeTools(
         const id = known.get(tool.name) ?? randomUUID()
         const annotations = splitAnnotations(tool.annotations)
         const fields = {
-          ...sealedToolContent(ctx, id, {
+          ...sealedToolContent(ctx, id, serverId, {
+            name: tool.name,
             title: tool.title ?? null,
             description: tool.description ?? "",
             annotationsTitle: annotations.annotationsTitle,
@@ -114,7 +117,6 @@ export async function storeTools(
             data: {
               id,
               serverId,
-              name: tool.name,
               ...sealedToolOverride(ctx, id, inherited.get(tool.name) ?? null),
               ...fields,
             },
@@ -122,20 +124,16 @@ export async function storeTools(
         }
       }
 
-      // The names that are gone, in chunks: SQLite allows 999 variables in
-      // a query, and "NOT IN (every current name)" is one per tool.
-      const gone = (
-        await tx.mcpTool.findMany({
-          where: { serverId },
-          select: { name: true },
-        })
-      )
-        .map((tool) => tool.name)
-        .filter((name) => !names.has(name))
+      // The tools that are gone, by id, in chunks: SQLite allows 999
+      // variables in a query. Their names are sealed, so known (read
+      // above, in this transaction) says which they are.
+      const gone = [...known]
+        .filter(([name]) => !names.has(name))
+        .map(([, id]) => id)
 
       for (let at = 0; at < gone.length; at += DELETE_CHUNK) {
         await tx.mcpTool.deleteMany({
-          where: { serverId, name: { in: gone.slice(at, at + DELETE_CHUNK) } },
+          where: { serverId, id: { in: gone.slice(at, at + DELETE_CHUNK) } },
         })
       }
     },

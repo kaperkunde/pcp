@@ -19,7 +19,7 @@ import {
   SERVER_META_SELECT,
   writeServer,
 } from "./server-meta"
-import { toolOverrides, writeToolOverride } from "./tool-rows"
+import { toolOverrides, writeToolOverride, toolNameWhere } from "./tool-rows"
 
 /**
  * The rows behind definitions and instances (lib/core/definitions.ts has the
@@ -429,7 +429,11 @@ export async function shareToolDescription(
 
   await writeToolOverride(
     ctx,
-    { serverId: { in: siblings.map((sibling) => sibling.id) }, name: toolName },
+    toolNameWhere(
+      ctx,
+      siblings.map((sibling) => sibling.id),
+      toolName,
+    ),
     override,
   )
 }

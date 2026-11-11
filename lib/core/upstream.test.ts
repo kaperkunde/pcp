@@ -30,6 +30,7 @@ import {
   syncServerTools,
 } from "./upstream"
 import { setupVault } from "./vault"
+import { toolNamed } from "./test-servers"
 
 // The bearer token PCP sends to a server it calls itself (a JMAP mail
 // account that signs in with OAuth): renewed before it runs out, renewed
@@ -619,12 +620,7 @@ describe("an MCP server as it describes and answers its tools", () => {
     expect(sync.status).toBe("ok")
     expect(sync.toolCount).toBe(2)
     expect(sync.message).toContain('"has space"')
-    const count = openTool(
-      ctx,
-      await db().mcpTool.findFirstOrThrow({
-        where: { serverId: id, name: "count" },
-      }),
-    )
+    const count = await toolNamed(ctx, "count", id)
     expect(count.title).toBe("Count things")
     expect(JSON.parse(count.outputSchema!)).toEqual({
       type: "object",

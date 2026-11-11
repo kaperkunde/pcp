@@ -1,10 +1,6 @@
 import type { CallToolResult } from "@modelcontextprotocol/server"
 
-import type {
-  McpTool,
-  PermissionRequest,
-  Prisma,
-} from "@/lib/generated/prisma/client"
+import type { PermissionRequest, Prisma } from "@/lib/generated/prisma/client"
 
 import {
   openServer,
@@ -42,7 +38,7 @@ import type {
 import type { VaultContext } from "./context"
 import { asBytes, decryptString, encryptString } from "./crypto"
 import { db } from "./db"
-import { openTool } from "./tool-rows"
+import { openTool, toolNameWhere } from "./tool-rows"
 import { definitionBasis } from "./definitions"
 import {
   applyNoteChange,
@@ -347,7 +343,7 @@ export type PermissionAsk =
       kind: "call"
       server: OpenServer
       /** Only the name is read: the gateway keeps a slimmer tool than the row. */
-      tool: Pick<McpTool, "name">
+      tool: { name: string }
       args: Record<string, unknown>
     } & AnswerShape)
   | { kind: "register"; input: RegisterArgs }
@@ -1510,10 +1506,8 @@ async function summarizeRow(
 
   const tool = row.serverId
     ? await db()
-        .mcpTool.findUnique({
-          where: {
-            serverId_name: { serverId: row.serverId, name: row.toolName },
-          },
+        .mcpTool.findFirst({
+          where: toolNameWhere(ctx, row.serverId, row.toolName),
         })
         .then((found) => found && openTool(ctx, found))
     : null

@@ -65,6 +65,7 @@ import {
   type ServiceLaunchInput,
 } from "./services"
 import { secretNameWhere } from "../secret-meta"
+import { toolsWhere } from "../test-servers"
 
 // Services end to end in the core: launched by the owner on an SSH server
 // (the test server on 127.0.0.1) whose login runs commands in a real sh,
@@ -1236,12 +1237,7 @@ describe("a running service", { timeout: 30_000 }, () => {
     }
 
     async function toolNames(serverId: string): Promise<string[]> {
-      return (
-        await db().mcpTool.findMany({
-          where: { serverId },
-          orderBy: { name: "asc" },
-        })
-      ).map((tool) => tool.name)
+      return (await toolsWhere(ctx, { serverId })).map((tool) => tool.name)
     }
 
     it("are read again at once when an update changes them", async () => {

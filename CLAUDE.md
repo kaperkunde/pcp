@@ -611,8 +611,11 @@ embeddingProvider`, which hands `embeddings/provider.ts` the header;
   tool, server, upstream tool, time, outcome, the permission request an
   ask made, whether it was a repeat the assistant confirmed (`rerun`, never
   its reason), and for a secret the browser typed, its name and the origin.
-  Never arguments, results, other sites or a secret's value; the Log page
-  (`lib/core/activity.ts`) reads only the vault's own lines. A new way a call
+  Never arguments, results, other sites or a secret's value. A line's names
+  are sealed under the vault's key with the line as associated data (#96),
+  so a new line is written only with the key (a link's use, which holds
+  none, logs PCP's own name for it, `appendKeylessLog`); the Log page
+  (`lib/core/activity.ts`) opens only the vault's own lines. A new way a call
   can ask the owner calls `noteOwnerAsked`. The cleanup
   (`lib/core/cleanup/`) deletes rows and log days by their dates, needs no
   credential and reads nothing it deletes; its schedule is refused if it

@@ -172,7 +172,7 @@ async function server(
       data: {
         id: randomUUID(),
         serverId: id,
-        name: tool.name,
+        plainName: tool.name,
         plainDescription: tool.description,
         plainInputSchema: JSON.stringify(tool.schema),
         annotations: tool.annotations ? JSON.stringify(tool.annotations) : null,

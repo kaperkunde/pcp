@@ -139,7 +139,7 @@ async function connect(
       data: {
         id: randomUUID(),
         serverId,
-        name,
+        plainName: name,
         plainDescription: `${name} does one thing.`,
         plainInputSchema: JSON.stringify({ type: "object" }),
         // list_cards only reads, as its server says; the others may not.
@@ -773,7 +773,7 @@ describe("a server the owner has to connect", () => {
       data: {
         id: randomUUID(),
         serverId,
-        name: "list_events",
+        plainName: "list_events",
         plainDescription: "Lists events.",
         plainInputSchema: JSON.stringify({ type: "object" }),
       },

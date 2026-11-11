@@ -472,6 +472,7 @@ const ServerAuthHeaderRow = z.strictObject({
 // plain columns by their old names.
 const McpToolRow = renamedFrom(
   {
+    name: "plainName",
     title: "plainTitle",
     description: "plainDescription",
     descriptionOverride: "plainDescriptionOverride",
@@ -483,7 +484,9 @@ const McpToolRow = renamedFrom(
   z.strictObject({
     id,
     serverId: id,
-    name: str,
+    // "" once sealed into about (#96), with its keyed hash in nameKey.
+    plainName: str,
+    nameKey: str.nullable().default(null),
     plainTitle: str.nullable(),
     plainDescription: str,
     plainDescriptionOverride: str.nullable(),

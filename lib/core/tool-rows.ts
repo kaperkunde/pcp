@@ -1,6 +1,7 @@
 import type { McpTool, Prisma } from "@/lib/generated/prisma/client"
 
 import type { VaultContext } from "./context"
+import { keyedHash } from "./crypto"
 import { db } from "./db"
 import {
   groupSelect,
@@ -13,12 +14,15 @@ import {
 } from "./sealed-fields"
 
 /**
- * A tool's words and shapes, sealed (#96): what it is called for people
- * and what it is for (`about`, which search and the catalogue read on
- * every request), its schemas, call plan and the outline of its answer
+ * A tool's words and shapes, sealed (#96): its name, what it is called for
+ * people and what it is for (`about`, which search and the catalogue read
+ * on every request), its schemas, call plan and the outline of its answer
  * (`schema`, read when it is described or called), and the owner's own
  * wording (`override`), each JSON under the vault's key as
- * "mcp_tool:<id>:<column>". The tool's name and its annotations stay plain.
+ * "mcp_tool:<id>:<column>". The name is found by a keyed hash of its
+ * server's id and the name (`nameKey`, unique per server): a lookup by name
+ * hashes the name it is given (toolNameWhere); a pattern or an order is
+ * worked out on the opened names. The annotations' hints stay plain.
  *
  * A row from before holds them in its plain columns (plainTitle,
  * plainInputSchema, …) and nothing sealed, until the vault's rows are
@@ -27,6 +31,7 @@ import {
  */
 
 export type ToolAbout = {
+  name: string
   title: string | null
   description: string
   /**
@@ -49,7 +54,7 @@ export const TOOL_ABOUT: SealedGroup<ToolAbout, "about"> = {
   column: "about",
   idKey: "id",
   aad: (id) => `mcp_tool:${id}:about`,
-  blank: { title: null, description: "", annotationsTitle: null },
+  blank: { name: "", title: null, description: "", annotationsTitle: null },
   sealedOnly: ["annotationsTitle"],
 }
 
@@ -67,8 +72,103 @@ export const TOOL_OVERRIDE: SealedGroup<ToolOverride, "override"> = {
   blank: { descriptionOverride: null },
 }
 
-/** The columns a reader selects for a tool's title and description. */
+/** The columns a reader selects for a tool's name, title and description. */
 export const TOOL_ABOUT_SELECT = groupSelect(TOOL_ABOUT)
+
+/** The columns a reader selects for a tool's name, with its server. */
+export const TOOL_NAME_SELECT = {
+  ...TOOL_ABOUT_SELECT,
+  serverId: true,
+} as const
+
+const NAME_LABEL = "pcp tool name"
+
+/**
+ * A tool's name's keyed hash under the vault's key, bound to its server:
+ * what nameKey holds. Two servers' tools of one name hash apart.
+ */
+export function toolNameKey(
+  ctx: VaultContext,
+  serverId: string,
+  name: string,
+): string {
+  return keyedHash(ctx.dek, NAME_LABEL, `${serverId}\n${name}`)
+}
+
+/**
+ * The tools named `name` on any of these servers: by their hash, or a row
+ * from before that holds the name in plain text.
+ */
+export function toolNameWhere(
+  ctx: VaultContext,
+  serverIds: string | readonly string[],
+  name: string,
+): Prisma.McpToolWhereInput {
+  const ids = typeof serverIds === "string" ? [serverIds] : [...serverIds]
+
+  return {
+    serverId: { in: ids },
+    AND: [
+      {
+        OR: [
+          {
+            nameKey: { in: ids.map((id) => toolNameKey(ctx, id, name)) },
+          },
+          { nameKey: null, plainName: name },
+        ],
+      },
+    ],
+  }
+}
+
+/** The tools of one server named any of `names`, as toolNameWhere. */
+export function toolNamesWhere(
+  ctx: VaultContext,
+  serverId: string,
+  names: readonly string[],
+): Prisma.McpToolWhereInput {
+  return {
+    serverId,
+    AND: [
+      {
+        OR: [
+          {
+            nameKey: {
+              in: names.map((name) => toolNameKey(ctx, serverId, name)),
+            },
+          },
+          { nameKey: null, plainName: { in: [...names] } },
+        ],
+      },
+    ],
+  }
+}
+
+/** A tool's name, from a row that selected TOOL_ABOUT_SELECT. */
+export function toolName(
+  ctx: VaultContext,
+  row: Parameters<typeof readFields<ToolAbout, "about", "id">>[2],
+): string {
+  return readFields(ctx.dek, TOOL_ABOUT, row).name
+}
+
+/** By name: the order a query once gave, kept in memory now (#96). */
+export function byToolName<T extends { name: string }>(a: T, b: T): number {
+  return a.name < b.name ? -1 : a.name > b.name ? 1 : 0
+}
+
+/** The tool of this server named `name`, opened whole. */
+export async function findTool(
+  ctx: VaultContext,
+  serverId: string,
+  name: string,
+  client: Prisma.TransactionClient | ReturnType<typeof db> = db(),
+): Promise<OpenTool | null> {
+  const row = await client.mcpTool.findFirst({
+    where: toolNameWhere(ctx, serverId, name),
+  })
+  return row ? openTool(ctx, row) : null
+}
 /** … for its schemas, call plan and outline. */
 export const TOOL_SCHEMA_SELECT = groupSelect(TOOL_SCHEMA)
 /** … for the owner's wording. */
@@ -145,17 +245,23 @@ export function openTools<T extends { id: string }>(
   return rows.map((row) => openTool(ctx, row))
 }
 
-/** What a tool row stores for its title, description and schemas. */
+/** What a tool row stores for its name, title, description and schemas. */
 export function sealedToolContent(
   ctx: VaultContext,
   id: string,
+  serverId: string,
   values: ToolAbout & ToolSchema,
 ): Pick<
   Prisma.McpToolUncheckedCreateInput,
-  "about" | "schema" | PlainKey<"title" | "description" | keyof ToolSchema>
+  | "about"
+  | "schema"
+  | "nameKey"
+  | PlainKey<"name" | "title" | "description" | keyof ToolSchema>
 > {
   return {
+    nameKey: toolNameKey(ctx, serverId, values.name),
     ...(sealFields(ctx.dek, TOOL_ABOUT, id, {
+      name: values.name,
       title: values.title,
       description: values.description,
       annotationsTitle: values.annotationsTitle ?? null,
@@ -168,7 +274,42 @@ export function sealedToolContent(
     }) as object),
   } as Pick<
     Prisma.McpToolUncheckedCreateInput,
-    "about" | "schema" | PlainKey<"title" | "description" | keyof ToolSchema>
+    | "about"
+    | "schema"
+    | "nameKey"
+    | PlainKey<"name" | "title" | "description" | keyof ToolSchema>
+  >
+}
+
+/** A tool's name, title and description, from a row that selected them. */
+export function readToolAbout(
+  ctx: VaultContext,
+  row: Parameters<typeof readFields<ToolAbout, "about", "id">>[2],
+): ToolAbout {
+  return readFields(ctx.dek, TOOL_ABOUT, row)
+}
+
+/** What a tool row stores for its name, title and description alone. */
+export function sealedToolAbout(
+  ctx: VaultContext,
+  id: string,
+  serverId: string,
+  about: ToolAbout,
+): Pick<
+  Prisma.McpToolUncheckedUpdateManyInput,
+  "about" | "nameKey" | PlainKey<"name" | "title" | "description">
+> {
+  return {
+    nameKey: toolNameKey(ctx, serverId, about.name),
+    ...(sealFields(ctx.dek, TOOL_ABOUT, id, {
+      name: about.name,
+      title: about.title,
+      description: about.description,
+      annotationsTitle: about.annotationsTitle ?? null,
+    }) as object),
+  } as Pick<
+    Prisma.McpToolUncheckedUpdateManyInput,
+    "about" | "nameKey" | PlainKey<"name" | "title" | "description">
   >
 }
 
@@ -195,6 +336,7 @@ export function toolOverride(
 export function plainToolValues(
   row: Pick<
     McpTool,
+    | "plainName"
     | "plainTitle"
     | "plainDescription"
     | "plainDescriptionOverride"
@@ -205,6 +347,7 @@ export function plainToolValues(
   >,
 ): ToolValues {
   return {
+    name: row.plainName,
     title: row.plainTitle,
     description: row.plainDescription,
     descriptionOverride: row.plainDescriptionOverride,
@@ -236,16 +379,23 @@ export async function toolOverrides(
         { plainDescriptionOverride: { not: null } },
       ],
     },
-    select: { ...TOOL_OVERRIDE_SELECT, serverId: true, name: true },
-    orderBy: { name: "asc" },
+    select: { ...TOOL_OVERRIDE_SELECT, ...TOOL_ABOUT_SELECT, serverId: true },
   })
 
-  return rows.flatMap((row) => {
-    const descriptionOverride = toolOverride(ctx, row)
-    return descriptionOverride === null
-      ? []
-      : [{ serverId: row.serverId, name: row.name, descriptionOverride }]
-  })
+  return rows
+    .flatMap((row) => {
+      const descriptionOverride = toolOverride(ctx, row)
+      return descriptionOverride === null
+        ? []
+        : [
+            {
+              serverId: row.serverId,
+              name: toolName(ctx, row),
+              descriptionOverride,
+            },
+          ]
+    })
+    .sort(byToolName)
 }
 
 /** Writes the owner's wording onto the tools `where` finds, each under its id. */

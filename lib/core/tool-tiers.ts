@@ -1,7 +1,15 @@
 import { TOOL_TIERS, type ToolTier } from "./constants"
 import type { VaultContext } from "./context"
 import { db } from "./db"
-import { openTools, TOOL_SCHEMA_SELECT } from "./tool-rows"
+import {
+  openTools,
+  TOOL_SCHEMA_SELECT,
+  TOOL_NAME_SELECT,
+  TOOL_ABOUT_SELECT,
+  toolNameWhere,
+  toolName,
+  byToolName,
+} from "./tool-rows"
 import { ensureDefinition } from "./definition-rows"
 import { invalid, notFound } from "./errors"
 import { newId } from "./ids"
@@ -251,8 +259,7 @@ function tierResolver(ctx: VaultContext, overrides: OverrideRow[]) {
         where: { serverId: { in: fresh } },
         select: {
           ...TOOL_SCHEMA_SELECT,
-          serverId: true,
-          name: true,
+          ...TOOL_NAME_SELECT,
           annotations: true,
         },
       }),
@@ -477,8 +484,8 @@ export async function setToolTier(
     return
   }
 
-  const tool = await db().mcpTool.findUnique({
-    where: { serverId_name: { serverId, name: toolName } },
+  const tool = await db().mcpTool.findFirst({
+    where: toolNameWhere(ctx, serverId, toolName),
     select: { id: true },
   })
 
@@ -666,7 +673,7 @@ export async function wrapperTiersBelowCalls(
       select: {
         ...SERVER_META_SELECT,
         definitionId: true,
-        tools: { select: { name: true } },
+        tools: { select: TOOL_ABOUT_SELECT },
       },
     }),
   ).sort(byServerSlug)
@@ -674,7 +681,9 @@ export async function wrapperTiersBelowCalls(
   const found: TierBelowCalls[] = []
 
   for (const wrapper of wrappers) {
-    for (const tool of wrapper.tools) {
+    for (const tool of wrapper.tools
+      .map((row) => ({ name: toolName(ctx, row) }))
+      .sort(byToolName)) {
       const info = await resolver.tierOf(wrapper.id, tool.name)
 
       if (tierBelowCalls(info)) {

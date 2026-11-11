@@ -6,7 +6,14 @@ import { MAX_SPEC_BYTES } from "./constants"
 import type { VaultContext } from "./context"
 import { db } from "./db"
 import { contentHashMatches } from "./spec-rows"
-import { openTools, type OpenTool } from "./tool-rows"
+import {
+  openTools,
+  type OpenTool,
+  TOOL_ABOUT_SELECT,
+  toolName,
+  byToolName,
+  toolNameWhere,
+} from "./tool-rows"
 import {
   contentInstance,
   disableOtherInstances,
@@ -273,13 +280,13 @@ async function findEndpoint(
 ): Promise<EndpointRow> {
   const found = await db().mcpServer.findFirst({
     where: serverSlugWhere(scope.ctx, slug),
-    include: { tools: { orderBy: { name: "asc" } } },
+    include: { tools: true },
   })
   const [row] = found
     ? await withSharers([
         {
           ...openServer(scope.ctx, found),
-          tools: openTools(scope.ctx, found.tools),
+          tools: openTools(scope.ctx, found.tools).sort(byToolName),
         },
       ])
     : [null]
@@ -1050,9 +1057,9 @@ export async function updateEndpointDetails(
       (
         await db().mcpTool.findMany({
           where: { serverId: server.id },
-          select: { name: true },
+          select: TOOL_ABOUT_SELECT,
         })
-      ).map((tool) => tool.name),
+      ).map((tool) => toolName(scope.ctx, tool)),
     )
 
     for (const [tool, description] of toolEdits) {
@@ -1543,7 +1550,7 @@ export async function applyEndpointChange(
 
   for (const [tool, text] of Object.entries(ask.toolDescriptions ?? {})) {
     const exists = await db().mcpTool.count({
-      where: { serverId: server.id, name: tool },
+      where: toolNameWhere(ctx, server.id, tool),
     })
 
     if (exists > 0) {

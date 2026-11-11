@@ -89,7 +89,7 @@ async function connect() {
       data: {
         id: randomUUID(),
         serverId,
-        name: tool.name,
+        plainName: tool.name,
         plainDescription: `${tool.name} does one thing.`,
         plainInputSchema: JSON.stringify({ type: "object" }),
         annotations: tool.annotations ? JSON.stringify(tool.annotations) : null,

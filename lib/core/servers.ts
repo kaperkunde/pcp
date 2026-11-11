@@ -29,7 +29,12 @@ import {
   updateServerRow,
   writeServer,
 } from "./server-meta"
-import { openTools, sealedToolOverride } from "./tool-rows"
+import {
+  openTools,
+  sealedToolOverride,
+  byToolName,
+  toolNameWhere,
+} from "./tool-rows"
 import {
   checkNewSecret,
   createSecret,
@@ -911,7 +916,7 @@ export async function getServer(ctx: VaultContext, id: string) {
   const row = await db().mcpServer.findFirst({
     where: { id, vaultId: ctx.vaultId },
     include: {
-      tools: { orderBy: { name: "asc" } },
+      tools: true,
       _count: { select: { tools: true } },
     },
   })
@@ -920,7 +925,10 @@ export async function getServer(ctx: VaultContext, id: string) {
     throw notFound("That server")
   }
 
-  return { ...openServer(ctx, row), tools: openTools(ctx, row.tools) }
+  return {
+    ...openServer(ctx, row),
+    tools: openTools(ctx, row.tools).sort(byToolName),
+  }
 }
 
 export async function getServerBySlug(
@@ -1327,8 +1335,8 @@ export async function setToolDescription(
   await getServer(ctx, serverId)
   const trimmed = override?.trim().slice(0, 2000) || null
 
-  const tool = await db().mcpTool.findUniqueOrThrow({
-    where: { serverId_name: { serverId, name: toolName } },
+  const tool = await db().mcpTool.findFirstOrThrow({
+    where: toolNameWhere(ctx, serverId, toolName),
     select: { id: true },
   })
   await db().mcpTool.update({

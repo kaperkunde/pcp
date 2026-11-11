@@ -279,7 +279,7 @@ describe("tools", () => {
     )
   }
 
-  it("seals a tool's words and schemas, keeps its name plain, and reads them back", async () => {
+  it("seals a tool's name, words and schemas, and reads them back", async () => {
     const id = await addServer()
     await addTools(id)
     await setToolDescription(ctx, id, "lookup", "OVERRIDE-MARKER")
@@ -311,7 +311,7 @@ describe("tools", () => {
       ),
     ).toEqual([
       {
-        name: "lookup",
+        name: "",
         description: "",
         input_schema: "",
         description_override: null,

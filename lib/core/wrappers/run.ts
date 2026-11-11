@@ -6,7 +6,7 @@ import { runProgram } from "../code/run"
 import type { Executor } from "../code/types"
 import { db } from "../db"
 import { openWrapperSpec } from "../spec-rows"
-import { openTool, TOOL_SCHEMA_SELECT } from "../tool-rows"
+import { openTool, TOOL_SCHEMA_SELECT, toolNameWhere } from "../tool-rows"
 import { notFound, PcpError } from "../errors"
 import { loadGatewayServers, type GatewayServer } from "../gateway-servers"
 import {
@@ -542,8 +542,8 @@ async function innerCall(
   // the wrapper's answer while the name still works, and in the refusal
   // once it does not.
   const row = await db()
-    .mcpTool.findUnique({
-      where: { serverId_name: { serverId: target.id, name } },
+    .mcpTool.findFirst({
+      where: toolNameWhere(env.ctx, target.id, name),
       select: TOOL_SCHEMA_SELECT,
     })
     .then((found) => found && openTool(env.ctx, found))

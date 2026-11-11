@@ -27,6 +27,8 @@ import {
 } from "../spec-rows"
 import {
   plainToolValues,
+  readToolAbout,
+  sealedToolAbout,
   sealedToolContent,
   sealedToolOverride,
   splitAnnotations,
@@ -333,7 +335,12 @@ export const SEAL_CONVERTERS: Converter[] = [
       db().mcpTool.findMany({
         where: {
           server: { vaultId: ctx.vaultId },
-          OR: [{ about: null }, { schema: null }, { override: null }],
+          OR: [
+            { about: null },
+            { schema: null },
+            { override: null },
+            { nameKey: null },
+          ],
         },
         take: limit,
       }),
@@ -363,11 +370,29 @@ export const SEAL_CONVERTERS: Converter[] = [
             annotations: row.annotations,
           },
           data: {
-            ...sealedToolContent(ctx, row.id, {
+            ...sealedToolContent(ctx, row.id, row.serverId, {
               ...values,
               annotationsTitle: annotations.annotationsTitle,
             }),
             annotations: annotations.annotations,
+            updatedAt: row.updatedAt,
+          },
+        })
+        sealed ||= count === 1
+      }
+
+      // A tool whose words were sealed before its name was: the name goes
+      // into about, found by its hash from then on.
+      if (row.about !== null && row.nameKey === null) {
+        const { count } = await db().mcpTool.updateMany({
+          where: { id: row.id, nameKey: null, about: { equals: row.about } },
+          data: {
+            ...sealedToolAbout(
+              ctx,
+              row.id,
+              row.serverId,
+              readToolAbout(ctx, row as never),
+            ),
             updatedAt: row.updatedAt,
           },
         })

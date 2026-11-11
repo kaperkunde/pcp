@@ -1,7 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest"
 
 import { openServiceSpec } from "../spec-rows"
-import { openTool } from "../tool-rows"
 import { openDefinition } from "../definition-rows"
 import { createBrowserServer } from "../browser/server"
 import type { VaultContext } from "../context"
@@ -36,6 +35,7 @@ import {
 import { readServiceDefinition } from "../services/definition"
 import type { ServiceLaunchInput } from "../services/services"
 import { openServer } from "../server-meta"
+import { toolNamed } from "../test-servers"
 
 // Applying what the owner approved: names resolved against this vault and
 // never guessed, a secret the vault lacks left out with a note, the owner's
@@ -360,14 +360,9 @@ describe("applying an item", () => {
         }),
       ),
     ).toMatchObject({ name: "Pet shop" })
-    expect(
-      openTool(
-        ctx,
-        await db().mcpTool.findFirstOrThrow({
-          where: { serverId: ids.pets, name: "list_pets" },
-        }),
-      ),
-    ).toMatchObject({ descriptionOverride: "Every pet." })
+    expect(await toolNamed(ctx, "list_pets", ids.pets)).toMatchObject({
+      descriptionOverride: "Every pet.",
+    })
   })
 
   it("reports a server or tool the vault does not have, and writes nothing", async () => {
@@ -525,14 +520,9 @@ describe("applying an item", () => {
       specUrl: "https://pets.example.com/openapi.json",
     })
     expect((await storedSpec(ctx, id))?.text).toBe(text)
-    expect(
-      openTool(
-        ctx,
-        await db().mcpTool.findFirstOrThrow({
-          where: { serverId: id, name: "add_pet" },
-        }),
-      ),
-    ).toMatchObject({ descriptionOverride: "Adds a pet." })
+    expect(await toolNamed(ctx, "add_pet", id)).toMatchObject({
+      descriptionOverride: "Adds a pet.",
+    })
   })
 
   it("gives resolveDefinition the wrapper as the owner's form would", async () => {

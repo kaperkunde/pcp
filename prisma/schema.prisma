@@ -942,8 +942,14 @@ model McpTool {
   id                       String    @id
   serverId                 String    @map("server_id")
   server                   McpServer @relation(fields: [serverId], references: [id], onDelete: Cascade)
-  /// The tool's name: plain, as its server's short name is.
-  name                     String
+  /// The tool's name, from before tool names were sealed (#96): "" once
+  /// sealed into about, with its keyed hash in nameKey.
+  plainName                String    @map("name")
+  /// The name, found by: a keyed hash of the server's id and the name under
+  /// the vault's key (keyedHash in lib/core/crypto.ts, label "pcp tool
+  /// name"). Unique per server; null on a row from before, until the
+  /// vault's rows are sealed.
+  nameKey                  String?   @map("name_key")
   /// From before descriptions were sealed (#96): the title, the
   /// description and the owner's wording, the schemas, the call plan and
   /// the outline of an answer, each in its plain column. A sealed row holds
@@ -968,7 +974,7 @@ model McpTool {
   /// outputSchema, a family tool's (lib/core/tools/family.ts) or a wrapper
   /// tool's. describe shows it as outputSchema.
   plainOutputSchema        String?   @map("output_schema")
-  /// The title and description, sealed: JSON, AES-256-GCM under the
+  /// The name, title and description, sealed: JSON, AES-256-GCM under the
   /// vault's data key with "mcp_tool:<id>:about" as associated data. What
   /// search and the catalogue read on every request.
   about                    Bytes?
@@ -982,7 +988,7 @@ model McpTool {
   createdAt                DateTime  @default(now()) @map("created_at")
   updatedAt                DateTime  @updatedAt @map("updated_at")
 
-  @@unique([serverId, name])
+  @@unique([serverId, nameKey])
   @@map("mcp_tool")
 }
 

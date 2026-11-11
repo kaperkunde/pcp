@@ -1,5 +1,5 @@
 import { randomBytes, randomUUID } from "node:crypto"
-import { editTools } from "./test-servers"
+import { editTools, toolNamed } from "./test-servers"
 import { Client, InMemoryTransport } from "@modelcontextprotocol/client"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
@@ -132,7 +132,7 @@ beforeEach(async () => {
       data: {
         id: randomUUID(),
         serverId,
-        name: tool.name,
+        plainName: tool.name,
         plainDescription: `${tool.name} does one thing.`,
         plainInputSchema: JSON.stringify(tool.schema),
         annotations: tool.annotations ? JSON.stringify(tool.annotations) : null,
@@ -401,7 +401,7 @@ describe("call_tool with a call handle", () => {
     const handle = await describedHandle(client, "postcards", "send_postcard")
 
     await db().mcpTool.delete({
-      where: { serverId_name: { serverId, name: "send_postcard" } },
+      where: { id: (await toolNamed(ctx, "send_postcard", serverId)).id },
     })
     const gone = await call(await connect(), "execute_destructive", {
       call_handle: handle,

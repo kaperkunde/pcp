@@ -333,7 +333,7 @@ describe("proposing tool levels", () => {
         data: {
           id: randomUUID(),
           serverId: id,
-          name: tool,
+          plainName: tool,
           plainDescription: `${tool} does one thing.`,
           plainInputSchema: JSON.stringify({ type: "object" }),
         },

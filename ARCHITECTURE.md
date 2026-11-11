@@ -85,9 +85,13 @@ associated data (a ciphertext cannot be moved to another row):
   and addresses, schema address, what PCP found out of it (mail, SMTP and
   calendar addresses, SSH host and public keys) and its status message,
   as one JSON (`mcp_server.meta`, `mcp_server:<id>:meta`,
-  `lib/core/server-meta.ts`), a definition's name and description
-  (`server_definition.meta`), a tool's title and description, the title
-  its annotations carried (`mcp_tool.about`), its schemas, call plan and
+  `lib/core/server-meta.ts`) with its short name (`slug`, found by its
+  keyed hash in `mcp_server.slug_key`, unique in the vault), a
+  definition's name, short name and description (`server_definition.meta`,
+  `slug_key`), a tool's name, title and description, the title its
+  annotations carried (`mcp_tool.about`; the name found by a keyed hash of
+  its server's id and the name in `mcp_tool.name_key`, unique per server,
+  so two servers' tools of one name hash apart), its schemas, call plan and
   outline (`mcp_tool.schema`) and the owner's wording
   (`mcp_tool.override`, each `mcp_tool:<id>:<column>`,
   `lib/core/tool-rows.ts`), an endpoint's schema text and edits
@@ -99,8 +103,13 @@ associated data (a ciphertext cannot be moved to another row):
   values sealed together are one JSON, written only through a helper that
   reads it and writes it back over what it read
   (`lib/core/sealed-fields.ts`, `server-meta.ts writeServer`), so a write
-  that came between is read again, never lost. Short names (`slug`), tool
-  names, kinds, flags and the status word stay plain. Whatever read these
+  that came between is read again, never lost. Kinds, flags and the status
+  word stay plain. A lookup by a short name or a tool name (a `server/tool`
+  ref, a call handle's tool, `pcp.call`'s names, list_tools' server, a
+  wrapper's calls, a linked repository's item names) hashes the name it is
+  given; sorting and matching a pattern (a proposed level's `get_*`) work
+  on the opened names, in memory: a vault holds hundreds of servers at
+  most. Whatever read these
   at boot with no key (rebuilding the tools of endpoints another version
   built, the browser's tools) runs on each vault's first request in a
   process instead (`lib/core/vault-upkeep.ts`, beside `ensureSealed`), so
@@ -125,7 +134,6 @@ associated data (a ciphertext cannot be moved to another row):
   takes either form meanwhile, and an older export restores in the plain
   form and is sealed the same way. The vault's own name (`vault.name`) stays
   plain on purpose: the sign-in page shows it before anything is unlocked;
-  slugs and tool names stay plain for now (they are what assistants name),
   and an upload page, which holds only its link, names a file the
   assistant took already as "A file",
 - a store's key (`storage_root.store_key`, `storage_store:<server id>`),
@@ -4273,8 +4281,22 @@ context (`noteOwnerAsked`, from `withPermission` and `connectResult`), so the
 line is right however the result is rewritten on its way out. A write that
 fails pauses the log for five minutes rather than failing the call.
 
+A line's names (the tool, the server and its tool, the error, a typed
+secret's name and site, the exit) are sealed under the vault's key (#96):
+`sealed` is their JSON, AES-256-GCM with
+`request_log:<vault id>:<line id>:<time>:<token id>` as associated data, so
+a sealed part opens only on its own line. The time, the vault and token ids,
+the outcome and the permission request's id stay plain: the cleanup deletes
+days by their file names with no key, and paging needs no key. A file or
+upload link's use, whose request holds no vault key, logs PCP's own name for
+it (`file_link/download` and the like) plain, marked `keyless`. Lines from
+before are sealed by the vault's requests (`ensureSealed`): a day's file is
+written again with that vault's lines sealed where they were, so the Log
+page's places hold, while new lines wait for it.
+
 The **Log page** (`/log`, `lib/core/activity.ts`) reads the vault's own lines
-back, newest first, filtered by token, outcome or a tool or server name, and
+back with the vault's key, newest first, filtered by token, outcome or a tool
+or server name (matched on the opened names), and
 fills in from the database what the log does not hold: each token's name, and
 how a request a call made was answered while PCP still keeps it. Paging goes
 by position (`day:line`), which holds while today's file grows; a page stops

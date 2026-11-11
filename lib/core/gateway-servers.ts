@@ -12,6 +12,8 @@ import {
   TOOL_ABOUT_SELECT,
   TOOL_OVERRIDE_SELECT,
   TOOL_SCHEMA_SELECT,
+  byToolName,
+  TOOL_NAME_SELECT,
 } from "./tool-rows"
 import { accessKey, effectiveAccess, loadToolAccess } from "./tool-access"
 import { loadToolTiers } from "./tool-tiers"
@@ -100,12 +102,7 @@ export async function loadGatewayServers(
       },
       include: {
         tools: {
-          orderBy: { name: "asc" },
-          select: {
-            ...TOOL_ABOUT_SELECT,
-            ...TOOL_OVERRIDE_SELECT,
-            name: true,
-          },
+          select: { ...TOOL_ABOUT_SELECT, ...TOOL_OVERRIDE_SELECT },
         },
       },
     }),
@@ -113,33 +110,32 @@ export async function loadGatewayServers(
     loadToolAllowances(scope.tokenId, now),
   ])
 
-  const tiers = await loadToolTiers(scope.ctx, servers)
-  const loaded: GatewayServer[] = servers
+  const opened = servers
     .map((row) => ({
       ...openServer(scope.ctx, row),
-      tools: openTools(scope.ctx, row.tools),
+      tools: openTools(scope.ctx, row.tools).sort(byToolName),
     }))
     .sort(byServerName)
-    .map((server) => ({
-      ...server,
-      note: readServerNote(scope.ctx, server),
-      tools: server.tools.map((tool) => {
-        const level = effectiveAccess(stored, server.id, tool.name)
-        const until = allowances.get(accessKey(server.id, tool.name))
+  const tiers = await loadToolTiers(scope.ctx, opened)
+  const loaded: GatewayServer[] = opened.map((server) => ({
+    ...server,
+    note: readServerNote(scope.ctx, server),
+    tools: server.tools.map((tool) => {
+      const level = effectiveAccess(stored, server.id, tool.name)
+      const until = allowances.get(accessKey(server.id, tool.name))
 
-        return {
-          ...tool,
-          tier:
-            tiers.get(accessKey(server.id, tool.name))?.tier ?? "destructive",
-          tierOverride:
-            tiers.get(accessKey(server.id, tool.name))?.override ?? null,
-          access:
-            level === "ask" && allowanceHolds(until, now.getTime())
-              ? "allowed"
-              : level,
-        }
-      }),
-    }))
+      return {
+        ...tool,
+        tier: tiers.get(accessKey(server.id, tool.name))?.tier ?? "destructive",
+        tierOverride:
+          tiers.get(accessKey(server.id, tool.name))?.override ?? null,
+        access:
+          level === "ask" && allowanceHolds(until, now.getTime())
+            ? "allowed"
+            : level,
+      }
+    }),
+  }))
 
   return applyWrappers(scope.ctx, loaded)
 }
@@ -157,7 +153,7 @@ async function applyWrappers(
 
   const operations = await db().mcpTool.findMany({
     where: { serverId: { in: wrappers.map((server) => server.id) } },
-    select: { ...TOOL_SCHEMA_SELECT, serverId: true, name: true },
+    select: { ...TOOL_SCHEMA_SELECT, ...TOOL_NAME_SELECT },
   })
   const opOf = new Map(
     openTools(ctx, operations).map((row) => [

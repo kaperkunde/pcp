@@ -1,14 +1,13 @@
-import type { Prisma } from "@/lib/generated/prisma/client"
-
 import type { VaultContext } from "./context"
 import { db } from "./db"
 import { openServer } from "./server-meta"
 import {
-  openTool,
   openTools,
+  type OpenTool,
   sealedToolContent,
   type ToolAbout,
   type ToolSchema,
+  byToolName,
 } from "./tool-rows"
 
 /**
@@ -20,14 +19,14 @@ export async function serverNamed(ctx: VaultContext, name: string) {
     where: { vaultId: ctx.vaultId },
     include: {
       authHeaders: { orderBy: { position: "asc" } },
-      tools: { orderBy: { name: "asc" } },
+      tools: true,
     },
     orderBy: { createdAt: "asc" },
   })
   const found = rows
     .map((row) => ({
       ...openServer(ctx, row),
-      tools: openTools(ctx, row.tools),
+      tools: openTools(ctx, row.tools).sort(byToolName),
     }))
     .find((row) => row.name === name)
 
@@ -49,22 +48,64 @@ export async function firstServer(ctx: VaultContext) {
   )
 }
 
+/** Tests: which tools, by server and by name (names are sealed, #96). */
+export type ToolFilter = {
+  serverId?: string
+  name?: string | { in: readonly string[] }
+}
+
+/** Tests: the vault's tools the filter names, opened, by name. */
+export async function toolsWhere(
+  ctx: VaultContext,
+  filter: ToolFilter = {},
+): Promise<OpenTool[]> {
+  const rows = await db().mcpTool.findMany({
+    where: {
+      server: { vaultId: ctx.vaultId },
+      ...(filter.serverId ? { serverId: filter.serverId } : {}),
+    },
+  })
+  const names =
+    filter.name === undefined
+      ? null
+      : typeof filter.name === "string"
+        ? [filter.name]
+        : filter.name.in
+
+  return openTools(ctx, rows)
+    .filter((tool) => !names || names.includes(tool.name))
+    .sort(byToolName)
+}
+
+/** Tests: the one tool of that name (on that server), opened. */
+export async function toolNamed(
+  ctx: VaultContext,
+  name: string,
+  serverId?: string,
+): Promise<OpenTool> {
+  const [tool] = await toolsWhere(ctx, { name, serverId })
+
+  if (!tool) {
+    throw new Error(`No tool named ${name}.`)
+  }
+
+  return tool
+}
+
 /**
- * Tests: changes the title, description or schemas of the tools `where`
- * finds, sealed as PCP writes them.
+ * Tests: changes the title, description or schemas of the tools the
+ * filter names, sealed as PCP writes them.
  */
 export async function editTools(
   ctx: VaultContext,
-  where: Prisma.McpToolWhereInput,
+  filter: ToolFilter,
   patch: Partial<ToolAbout & ToolSchema>,
 ): Promise<void> {
-  const rows = await db().mcpTool.findMany({ where })
-
-  for (const row of rows) {
-    const tool = openTool(ctx, row)
+  for (const tool of await toolsWhere(ctx, filter)) {
     await db().mcpTool.update({
-      where: { id: row.id },
-      data: sealedToolContent(ctx, row.id, {
+      where: { id: tool.id },
+      data: sealedToolContent(ctx, tool.id, tool.serverId, {
+        name: tool.name,
         title: tool.title,
         description: tool.description,
         inputSchema: tool.inputSchema,

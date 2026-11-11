@@ -248,7 +248,12 @@ import {
   serverSlug,
   serverSlugWhere,
 } from "./server-meta"
-import { openTool, TOOL_ABOUT_SELECT, TOOL_SCHEMA_SELECT } from "./tool-rows"
+import {
+  openTool,
+  TOOL_ABOUT_SELECT,
+  TOOL_SCHEMA_SELECT,
+  toolNameWhere,
+} from "./tool-rows"
 import { collectHandleIds, missingResultMessage } from "./result-handles"
 import { capabilityProviders } from "./capabilities/candidates"
 import { sniffMediaType } from "./media-types"
@@ -457,7 +462,6 @@ const TOOL_ROW = {
   ...TOOL_SCHEMA_SELECT,
   // The annotations' title is sealed with the description.
   ...TOOL_ABOUT_SELECT,
-  name: true,
   annotations: true,
   icons: true,
 } as const satisfies Prisma.McpToolSelect
@@ -2187,8 +2191,8 @@ export function buildGatewayServer(
   function toolRow(serverId: string, name: string): Promise<ToolRow | null> {
     // The schema is not carried with the catalogue: fetch this tool's.
     return db()
-      .mcpTool.findUnique({
-        where: { serverId_name: { serverId, name } },
+      .mcpTool.findFirst({
+        where: toolNameWhere(scope.ctx, serverId, name),
         select: TOOL_ROW,
       })
       .then((row) => row && openTool(scope.ctx, row))
@@ -3968,7 +3972,7 @@ export function buildGatewayServer(
 
         const row = await db()
           .mcpTool.findFirst({
-            where: { serverId: target.id, name },
+            where: toolNameWhere(scope.ctx, target.id, name),
             select: TOOL_SCHEMA_SELECT,
           })
           .then((found) => found && openTool(scope.ctx, found))

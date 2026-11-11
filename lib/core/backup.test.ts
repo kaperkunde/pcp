@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
-import { openTool, TOOL_ABOUT, TOOL_OVERRIDE, TOOL_SCHEMA } from "./tool-rows"
+import { TOOL_ABOUT, TOOL_OVERRIDE, TOOL_SCHEMA } from "./tool-rows"
 import type { SealedGroup } from "./sealed-fields"
 import { gunzipSync } from "node:zlib"
 
@@ -104,6 +104,7 @@ import {
 } from "./vault"
 import { tokenName } from "./token-names"
 import { ensureSealed } from "./sealing/convert"
+import { toolNamed, toolsWhere } from "./test-servers"
 
 // Export and restore against a scratch database: the file carries the
 // vault's rows as they are, a restore puts them back whole, and every way a
@@ -248,7 +249,7 @@ describe("restoring", { timeout: 60_000 }, () => {
   it("puts everything back, and the password, recovery key and tokens keep working", async () => {
     const { ctx, recoveryKey, secretId, spareId, token } = await populate()
     const file = await exportVault(ctx, EXPORT_PASSWORD)
-    const before = await db().mcpTool.findFirst({ where: { name: "alpha" } })
+    const before = await toolNamed(ctx, "alpha")
 
     // Changes after the export: gone once it is restored.
     await deleteSecret(ctx, spareId)
@@ -286,7 +287,7 @@ describe("restoring", { timeout: 60_000 }, () => {
       (await listMemories(unlocked!)).map((memory) => memory.text),
     ).toEqual(["Remember this."])
     // Timestamps are the file's, not the restore's.
-    const after = await db().mcpTool.findFirst({ where: { name: "alpha" } })
+    const after = await toolNamed(ctx, "alpha")
     expect(after?.updatedAt.toISOString()).toBe(before?.updatedAt.toISOString())
     expect(after?.id).toBe(before?.id)
     // Host settings stayed as they were: they were not asked for.
@@ -721,10 +722,7 @@ describe("restoring", { timeout: 60_000 }, () => {
       { into: "vault", ctx },
       { restoreHostSettings: false },
     )
-    const tool = openTool(
-      ctx,
-      await db().mcpTool.findFirstOrThrow({ where: { name: "alpha" } }),
-    )
+    const tool = await toolNamed(ctx, "alpha")
     expect(JSON.parse(tool.outputSchema!)).toEqual(outputSchema)
     expect(JSON.parse(tool.icons!)).toEqual(icons)
 
@@ -743,12 +741,10 @@ describe("restoring", { timeout: 60_000 }, () => {
       { into: "vault", ctx },
       { restoreHostSettings: false },
     )
-    expect(
-      openTool(
-        ctx,
-        await db().mcpTool.findFirstOrThrow({ where: { name: "alpha" } }),
-      ),
-    ).toMatchObject({ outputSchema: null, icons: null })
+    expect(await toolNamed(ctx, "alpha")).toMatchObject({
+      outputSchema: null,
+      icons: null,
+    })
   })
 
   it("carries definitions and the owner's notes, and gives each server of a file from before them a definition of its own", async () => {
@@ -883,7 +879,7 @@ describe("restoring", { timeout: 60_000 }, () => {
           inputSchema: { type: "object" },
           program: "return 1",
           calls: [
-            `${openServer(ctx, await db().mcpServer.findUniqueOrThrow({ where: { id: serverId } })).slug}/${(await db().mcpTool.findFirstOrThrow({ where: { serverId } })).name}`,
+            `${openServer(ctx, await db().mcpServer.findUniqueOrThrow({ where: { id: serverId } })).slug}/${(await toolsWhere(ctx, { serverId }))[0]!.name}`,
           ],
         },
       ],
