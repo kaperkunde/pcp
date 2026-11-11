@@ -151,7 +151,7 @@ a checkout with every tag (`git fetch --tags`) and `gh` signed in:
 
 ```bash
 gh pr list --repo kaperkunde/pcp --base develop --state merged --limit 1000 \
-  --json number,title,body,url,mergedAt,mergeCommit,commits > /tmp/prs.json
+  --json number,title,body,url,mergedAt,mergeCommit > /tmp/prs.json
 node scripts/changelog.mjs backfill --repo kaperkunde/pcp --prs /tmp/prs.json > CHANGELOG.md
 ```
 
