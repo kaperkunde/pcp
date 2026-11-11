@@ -5,8 +5,12 @@ import type { VaultContext } from "../context"
 import { SECRET_PLACEHOLDER } from "../constants"
 import { db } from "../db"
 import { contentHash, openWrapperSpec, WRAPPER_SPEC_SELECT } from "../spec-rows"
-import { openTools, TOOL_SCHEMA_SELECT } from "../tool-rows"
-import { openServers, SERVER_NAME_SELECT } from "../server-meta"
+import { openTools, TOOL_SCHEMA_SELECT, TOOL_NAME_SELECT } from "../tool-rows"
+import {
+  openServers,
+  SERVER_NAME_SELECT,
+  serverSlugsWhere,
+} from "../server-meta"
 import { invalid } from "../errors"
 import { hiddenCharacter, withoutPresentation } from "../memories"
 import { outlineSchema } from "../openapi/outline"
@@ -485,7 +489,7 @@ export async function resolveDefinition(
   const servers: KnownServer[] = openServers(
     ctx,
     await db().mcpServer.findMany({
-      where: { vaultId: ctx.vaultId, slug: { in: [...slugs] } },
+      where: serverSlugsWhere(ctx, [...slugs]),
       select: SERVER_NAME_SELECT,
     }),
   ).map(({ id, slug, name, kind, url }) => ({ id, slug, name, kind, url }))
@@ -494,7 +498,7 @@ export async function resolveDefinition(
     ctx,
     await db().mcpTool.findMany({
       where: { serverId: { in: servers.map((server) => server.id) } },
-      select: { ...TOOL_SCHEMA_SELECT, serverId: true, name: true },
+      select: { ...TOOL_SCHEMA_SELECT, ...TOOL_NAME_SELECT },
     }),
   )
   const toolKey = (serverId: string, tool: string) => `${serverId}\n${tool}`

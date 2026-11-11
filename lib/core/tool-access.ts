@@ -8,7 +8,7 @@ import {
 import type { VaultContext } from "./context"
 import { db } from "./db"
 import { byServerName, openServer } from "./server-meta"
-import { openTools, TOOL_ABOUT_SELECT } from "./tool-rows"
+import { openTools, TOOL_ABOUT_SELECT, byToolName } from "./tool-rows"
 import { invalid, notFound } from "./errors"
 import { newId } from "./ids"
 import { getServer } from "./servers"
@@ -363,10 +363,7 @@ export async function listTokenToolAccess(
         : { id: { in: token.servers.map((link) => link.serverId) } }),
     },
     include: {
-      tools: {
-        select: { ...TOOL_ABOUT_SELECT, name: true },
-        orderBy: { name: "asc" },
-      },
+      tools: { select: TOOL_ABOUT_SELECT },
     },
   })
   const stored = await loadToolAccess(ctx.vaultId, tokenId)
@@ -374,7 +371,7 @@ export async function listTokenToolAccess(
   return servers
     .map((row) => ({
       ...openServer(ctx, row),
-      tools: openTools(ctx, row.tools),
+      tools: openTools(ctx, row.tools).sort(byToolName),
     }))
     .sort(byServerName)
     .map((server) => ({

@@ -57,6 +57,20 @@ export type GuardTarget = {
 }
 
 /** What makes two calls the same one: server, tool and arguments. */
+/**
+ * The tool a record is of, as a keyed hash of its server's id and its name
+ * under the vault's key (#96): compared, never read. A record from before
+ * holds the name in plain text and matches nothing; it is gone within the
+ * window.
+ */
+export function recordedTool(
+  dek: Buffer,
+  serverId: string,
+  tool: string,
+): string {
+  return keyedHash(dek, "pcp call record tool", `${serverId}\n${tool}`)
+}
+
 export function callHash(
   dek: Buffer,
   serverId: string,
@@ -330,7 +344,7 @@ export async function guardCall(
         vaultId: scope.ctx.vaultId,
         tokenId: scope.tokenId,
         serverId: target.server.id,
-        toolName: target.tool,
+        toolName: recordedTool(scope.ctx.dek, target.server.id, target.tool),
         argsHash,
         tier: target.tier,
         status: "running",
@@ -349,7 +363,7 @@ export async function guardCall(
     where: {
       tokenId: scope.tokenId,
       serverId: target.server.id,
-      toolName: target.tool,
+      toolName: recordedTool(scope.ctx.dek, target.server.id, target.tool),
       startedAt: { gte: since },
       argsHash: { not: argsHash },
       status: { not: "asked" },

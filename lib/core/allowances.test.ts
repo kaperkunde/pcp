@@ -45,7 +45,7 @@ async function setup() {
     data: {
       id: randomUUID(),
       serverId,
-      name: "send_postcard",
+      plainName: "send_postcard",
       plainInputSchema: JSON.stringify({ type: "object" }),
     },
   })

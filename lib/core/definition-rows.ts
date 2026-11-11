@@ -1,6 +1,7 @@
 import type { Prisma } from "@/lib/generated/prisma/client"
 
 import type { VaultContext } from "./context"
+import { keyedHash } from "./crypto"
 import { db } from "./db"
 import { invalid, notFound } from "./errors"
 import { newId } from "./ids"
@@ -18,7 +19,7 @@ import {
   SERVER_META_SELECT,
   writeServer,
 } from "./server-meta"
-import { toolOverrides, writeToolOverride } from "./tool-rows"
+import { toolOverrides, writeToolOverride, toolNameWhere } from "./tool-rows"
 
 /**
  * The rows behind definitions and instances (lib/core/definitions.ts has the
@@ -52,18 +53,44 @@ export function hasDefinition(kind: string): kind is DefinitionKind {
 type Client = Prisma.TransactionClient | ReturnType<typeof db>
 
 /**
- * A definition's name and description, sealed (#96) as JSON in `meta`
- * under the vault's key as "server_definition:<id>:meta". A row from
- * before holds them in plainName and plainDescription until the vault's
- * rows are sealed (lib/core/sealing/convert.ts).
+ * A definition's name, short name and description, sealed (#96) as JSON
+ * in `meta` under the vault's key as "server_definition:<id>:meta", the
+ * short name found by its keyed hash (`slugKey`, unique in the vault). A
+ * row from before holds them in plainName, plainSlug and plainDescription
+ * until the vault's rows are sealed (lib/core/sealing/convert.ts).
  */
-export type DefinitionMeta = { name: string; description: string }
+export type DefinitionMeta = { name: string; slug: string; description: string }
 
 export const DEFINITION_META: SealedGroup<DefinitionMeta, "meta"> = {
   column: "meta",
   idKey: "id",
   aad: (id) => `server_definition:${id}:meta`,
-  blank: { name: "", description: "" },
+  blank: { name: "", slug: "", description: "" },
+}
+
+const SLUG_LABEL = "pcp definition slug"
+
+/** A definition's short name's keyed hash: what slugKey holds. */
+export function definitionSlugKey(ctx: VaultContext, slug: string): string {
+  return keyedHash(ctx.dek, SLUG_LABEL, slug)
+}
+
+/** The vault's definitions with this short name: by its hash, or from before. */
+export function definitionSlugWhere(
+  ctx: VaultContext,
+  slug: string,
+): Prisma.ServerDefinitionWhereInput {
+  return {
+    vaultId: ctx.vaultId,
+    AND: [
+      {
+        OR: [
+          { slugKey: definitionSlugKey(ctx, slug) },
+          { slugKey: null, plainSlug: slug },
+        ],
+      },
+    ],
+  }
 }
 
 export const DEFINITION_META_SELECT = groupSelect(DEFINITION_META)
@@ -90,19 +117,30 @@ export function sealedDefinitionMeta(
   meta: DefinitionMeta,
 ): {
   meta: Uint8Array<ArrayBuffer>
+  slugKey: string
   plainName: string
+  plainSlug: string
   plainDescription: string
 } {
-  return sealFields(ctx.dek, DEFINITION_META, id, meta) as {
-    meta: Uint8Array<ArrayBuffer>
-    plainName: string
-    plainDescription: string
+  return {
+    ...(sealFields(ctx.dek, DEFINITION_META, id, meta) as {
+      meta: Uint8Array<ArrayBuffer>
+      plainName: string
+      plainSlug: string
+      plainDescription: string
+    }),
+    slugKey: definitionSlugKey(ctx, meta.slug),
   }
 }
 
-/** A definition slug no other definition in the vault has. */
+/**
+ * A definition slug no other definition in the vault has. Without the
+ * vault's key (a restore that holds none) only the rows from before are
+ * compared; the sealed ones are compared by their hash.
+ */
 export async function uniqueDefinitionSlug(
   client: Client,
+  ctx: VaultContext | null,
   vaultId: string,
   base: string,
   exceptId?: string,
@@ -111,12 +149,17 @@ export async function uniqueDefinitionSlug(
   let slug = start
 
   for (let n = 2; ; n++) {
-    const clash = await client.serverDefinition.findUnique({
-      where: { vaultId_slug: { vaultId, slug } },
+    const clash = await client.serverDefinition.findFirst({
+      where: {
+        ...(ctx
+          ? definitionSlugWhere(ctx, slug)
+          : { vaultId, slugKey: null, plainSlug: slug }),
+        ...(exceptId ? { id: { not: exceptId } } : {}),
+      },
       select: { id: true },
     })
 
-    if (!clash || clash.id === exceptId) {
+    if (!clash) {
       return slug
     }
 
@@ -143,18 +186,29 @@ export async function newDefinitionFor(
   >,
   id: string = newId(),
 ): Promise<string> {
+  const slug = await uniqueDefinitionSlug(
+    client,
+    ctx,
+    server.vaultId,
+    server.slug,
+  )
+
   await client.serverDefinition.create({
     data: {
       id,
       vaultId: server.vaultId,
       kind: server.kind,
-      slug: await uniqueDefinitionSlug(client, server.vaultId, server.slug),
       ...(ctx
         ? sealedDefinitionMeta(ctx, id, {
             name: server.name,
+            slug,
             description: server.description,
           })
-        : { plainName: server.name, plainDescription: server.description }),
+        : {
+            plainName: server.name,
+            plainSlug: slug,
+            plainDescription: server.description,
+          }),
     },
   })
   await client.mcpServer.update({
@@ -229,6 +283,7 @@ export async function backfillDefinitions(
       servers.push({
         ...row,
         name: row.plainName,
+        slug: row.plainSlug,
         description: row.plainDescription,
       })
     }
@@ -374,7 +429,11 @@ export async function shareToolDescription(
 
   await writeToolOverride(
     ctx,
-    { serverId: { in: siblings.map((sibling) => sibling.id) }, name: toolName },
+    toolNameWhere(
+      ctx,
+      siblings.map((sibling) => sibling.id),
+      toolName,
+    ),
     override,
   )
 }
@@ -451,7 +510,7 @@ export async function writeDefinition(
   patch: Partial<DefinitionMeta>,
   data: Omit<
     Prisma.ServerDefinitionUncheckedUpdateInput,
-    "id" | "meta" | "plainName" | "plainDescription"
+    "id" | "meta" | "plainName" | "plainSlug" | "plainDescription" | "slugKey"
   > = {},
   client?: Client,
 ): Promise<void> {

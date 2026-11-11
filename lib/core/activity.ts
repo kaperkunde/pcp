@@ -10,9 +10,10 @@ import {
 import { TOKEN_NAME_SELECT, tokenName } from "./token-names"
 
 /**
- * The Log page: the vault's lines of the request log, with what the log
- * itself does not hold (it keeps ids, never names) filled in from the
- * database: each token's name, and how a request the call made was answered.
+ * The Log page: the vault's lines of the request log, their names opened
+ * with the vault's key, with what the log itself does not hold (it keeps
+ * ids, never a token's name) filled in from the database: each token's
+ * name, and how a request the call made was answered.
  */
 
 /** Where a permission request a call made stands now. */
@@ -93,7 +94,7 @@ export async function activityLog(
   now = new Date(),
 ): Promise<ActivityPage> {
   const [page, tokens] = await Promise.all([
-    readRequestLog(ctx.vaultId, query),
+    readRequestLog(ctx, query),
     db().apiToken.findMany({
       where: { vaultId: ctx.vaultId },
       select: { ...TOKEN_NAME_SELECT, revokedAt: true },

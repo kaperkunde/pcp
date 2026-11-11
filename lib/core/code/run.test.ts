@@ -27,7 +27,13 @@ import { appendRequestLog } from "../request-log"
 import { createServer } from "../servers"
 import { scratchDatabase } from "../test-db"
 import { EMPTY_CONFIG, saveResourceConfig } from "../resources/state"
-import { keepBytes, keepResult, openResult, resultName } from "../tool-results"
+import {
+  keepBytes,
+  keepResult,
+  openResult,
+  resultName,
+  resultTool,
+} from "../tool-results"
 import { writeToolAccess } from "../tool-access"
 import { setupVault } from "../vault"
 import {
@@ -40,6 +46,8 @@ import { checkRun, runCode, runProgram } from "./run"
 import { javaScriptExecutor } from "./quickjs"
 import { MAY_HAVE_TAKEN_EFFECT } from "./runs"
 import { sandboxLanguages, startSandbox, stopSandbox } from "./sandbox"
+import { serverSlugWhere } from "../server-meta"
+import { recordedTool } from "../calls/guard"
 
 // run_code as an assistant meets it, through the gateway's MCP interface,
 // with the upstream replaced by a stub that records what actually ran: the
@@ -59,6 +67,11 @@ const PDF = Buffer.concat([
 
 let cleanup: () => Promise<void>
 let ctx: VaultContext
+
+/** A kept result's row, the tool it came from opened (#96). */
+function keptRow<T extends { id: string; toolName: string }>(row: T): T {
+  return { ...row, toolName: resultTool(ctx, row) }
+}
 let scope: GatewayScope
 let client: Client
 let ran: Array<{ tool: string; args: Record<string, unknown> }>
@@ -138,7 +151,7 @@ async function connect(
       data: {
         id: randomUUID(),
         serverId,
-        name,
+        plainName: name,
         plainDescription: `${name} does one thing.`,
         plainInputSchema: JSON.stringify({ type: "object" }),
         // list_cards only reads, as its server says; the others may not.
@@ -414,9 +427,11 @@ describe("a program's calls", () => {
     )
     expect(value.refused).not.toContain(theirs.id)
 
-    const row = await db().toolResult.findUniqueOrThrow({
-      where: { id: value.handle.$result },
-    })
+    const row = keptRow(
+      await db().toolResult.findUniqueOrThrow({
+        where: { id: value.handle.$result },
+      }),
+    )
     expect(row).toMatchObject({ tokenId: scope.tokenId, toolName: "run_code" })
   })
 
@@ -455,9 +470,11 @@ describe("a program's calls", () => {
     })
     expect(value.notBase64).toContain("is not")
 
-    const row = await db().toolResult.findUniqueOrThrow({
-      where: { id: value.copy.$result },
-    })
+    const row = keptRow(
+      await db().toolResult.findUniqueOrThrow({
+        where: { id: value.copy.$result },
+      }),
+    )
     expect(row).toMatchObject({
       tokenId: scope.tokenId,
       kind: "bytes",
@@ -772,7 +789,7 @@ describe("a server the owner has to connect", () => {
       data: {
         id: randomUUID(),
         serverId,
-        name: "list_events",
+        plainName: "list_events",
         plainDescription: "Lists events.",
         plainInputSchema: JSON.stringify({ type: "object" }),
       },
@@ -867,9 +884,11 @@ describe("images and videos", () => {
     expect(value.bytes).toBe(value.handle.size)
     expect(value.bytes).toBeLessThan(original.length / 4)
 
-    const row = await db().toolResult.findUniqueOrThrow({
-      where: { id: value.handle.$result },
-    })
+    const row = keptRow(
+      await db().toolResult.findUniqueOrThrow({
+        where: { id: value.handle.$result },
+      }),
+    )
     expect(row).toMatchObject({
       tokenId: scope.tokenId,
       kind: "bytes",
@@ -1190,9 +1209,11 @@ describe("images and videos", () => {
         expect(value.frames.map((frame) => frame.t)).toEqual([1, 3])
 
         for (const frame of value.frames) {
-          const row = await db().toolResult.findUniqueOrThrow({
-            where: { id: frame.handle.$result },
-          })
+          const row = keptRow(
+            await db().toolResult.findUniqueOrThrow({
+              where: { id: frame.handle.$result },
+            }),
+          )
           expect(row).toMatchObject({
             tokenId: scope.tokenId,
             mediaType: "image/jpeg",
@@ -1685,9 +1706,11 @@ describe("a run that outlives its call", () => {
     expect(ran.map((call) => call.tool)).toEqual(["archive", "slow_send"])
 
     // Kept as a result of the token's own, encrypted.
-    const row = (await db().toolResult.findMany()).find(
-      (kept) => resultName(ctx, kept) === `${id}.txt`,
-    )!
+    const row = keptRow(
+      (await db().toolResult.findMany()).find(
+        (kept) => resultName(ctx, kept) === `${id}.txt`,
+      )!,
+    )
     expect(row).toMatchObject({
       tokenId: scope.tokenId,
       toolName: "run_code",
@@ -1835,8 +1858,11 @@ describe("the same program again", () => {
     // would otherwise hold back each run's archive after the first.
     await setDuplicateCallWindow(
       ctx,
-      (await db().mcpServer.findFirstOrThrow({ where: { slug: "postcards" } }))
-        .id,
+      (
+        await db().mcpServer.findFirstOrThrow({
+          where: serverSlugWhere(ctx, "postcards"),
+        })
+      ).id,
       "archive",
       "exempt",
     )
@@ -2012,7 +2038,11 @@ describe("the same call again (#115)", () => {
   }
 
   const postcards = async () =>
-    (await db().mcpServer.findFirstOrThrow({ where: { slug: "postcards" } })).id
+    (
+      await db().mcpServer.findFirstOrThrow({
+        where: serverSlugWhere(ctx, "postcards"),
+      })
+    ).id
 
   it("answers a Write call made again with how the first went, and runs it once", async () => {
     const first = await callTool("archive", { id: 7 })
@@ -2035,7 +2065,11 @@ describe("the same call again (#115)", () => {
 
     // Only a keyed hash of the arguments is kept.
     const [row] = await db().callRecord.findMany()
-    expect(row).toMatchObject({ toolName: "archive", status: "succeeded" })
+    // The tool, as a keyed hash too (#96).
+    expect(row).toMatchObject({
+      toolName: recordedTool(ctx.dek, row!.serverId, "archive"),
+      status: "succeeded",
+    })
     expect(row!.argsHash).toMatch(/^[0-9a-f]{64}$/)
   })
 

@@ -163,7 +163,15 @@ function openFields<
     ) as Record<string, unknown>
 
     for (const key of keys) {
-      values[key] = opened[key] ?? group.blank[key]
+      // A value sealed later than the rest (a short name, a tool's name)
+      // is missing from JSON written before it was: its plain column still
+      // holds it, until the row is sealed again.
+      values[key] =
+        key in opened
+          ? (opened[key] ?? group.blank[key])
+          : group.sealedOnly?.includes(key)
+            ? group.blank[key]
+            : (row[plainKey(key)] ?? group.blank[key])
     }
   } else {
     for (const key of keys) {

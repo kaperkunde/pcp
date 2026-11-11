@@ -207,6 +207,7 @@ async function populate() {
   const deviceKey = await createDeviceKey(ctx)
   await appendRequestLog({
     vaultId,
+    dek: ctx.dek,
     tokenId,
     tool: "call_tool",
     ok: true,

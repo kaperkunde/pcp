@@ -30,7 +30,7 @@ import {
 } from "./personal-notes"
 import { createSecret } from "./secrets"
 import { createServer, getServer, type ExtraAuthHeaderInput } from "./servers"
-import { writeServer } from "./server-meta"
+import { writeServer, serverSlugWhere } from "./server-meta"
 import { scratchDatabase } from "./test-db"
 import { callServerTool } from "./upstream"
 import { setupVault } from "./vault"
@@ -97,7 +97,7 @@ const enable = (id: string) =>
   db().mcpServer.update({ where: { id }, data: { enabled: true } })
 
 const rowOf = (slug: string) =>
-  db().mcpServer.findFirstOrThrow({ where: { slug } })
+  db().mcpServer.findFirstOrThrow({ where: serverSlugWhere(ctx, slug) })
 
 /**
  * What an owner's "yes" does to an assistant's register_server with OpenAPI

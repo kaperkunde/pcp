@@ -201,7 +201,7 @@ describe("an upload link", () => {
       second.resultId,
     ])
 
-    const { entries } = await readRequestLog(ctx.vaultId)
+    const { entries } = await readRequestLog(ctx)
     expect(
       entries.filter((entry) => entry.tool === "upload_link/upload"),
     ).toHaveLength(2)
@@ -308,7 +308,7 @@ describe("an upload link", () => {
       status: 404,
     })
 
-    const { entries } = await readRequestLog(ctx.vaultId)
+    const { entries } = await readRequestLog(ctx)
     expect(
       entries.filter((entry) => entry.tool === "upload_link/done"),
     ).toHaveLength(1)
@@ -513,7 +513,7 @@ describe("through the gateway", () => {
 
     // The ask is in the request log (written as the call ends).
     await vi.waitFor(async () => {
-      const asked = (await readRequestLog(scope.ctx.vaultId)).entries.find(
+      const asked = (await readRequestLog(scope.ctx)).entries.find(
         (entry) => entry.tool === "create_upload_link",
       )
       expect(asked).toMatchObject({ ok: true, asked: true })

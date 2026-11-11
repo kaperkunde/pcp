@@ -54,7 +54,7 @@ beforeEach(async () => {
     data: {
       id: randomUUID(),
       serverId,
-      name: "send_postcard",
+      plainName: "send_postcard",
       plainDescription: "Sends a postcard.",
       plainInputSchema: JSON.stringify({ type: "object" }),
     },

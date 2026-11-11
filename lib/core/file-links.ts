@@ -22,7 +22,7 @@ import {
   isTextBytes,
   isTextType,
 } from "./media-types"
-import { appendRequestLog } from "./request-log"
+import { appendKeylessLog, type KeylessTool } from "./request-log"
 import { loadResourceLimits } from "./resources/state"
 import { describeResults, openResult, RESULT_TTL_MS } from "./tool-results"
 
@@ -322,11 +322,12 @@ export function tokenCanUseLinks(
 
 export function logUse(
   link: Pick<FileLink, "vaultId" | "tokenId">,
-  tool: string,
+  tool: KeylessTool,
   ok: boolean,
   started: number,
 ): Promise<void> {
-  return appendRequestLog({
+  // A link's request holds no vault key: the name is PCP's own.
+  return appendKeylessLog({
     vaultId: link.vaultId,
     tokenId: link.tokenId,
     tool,

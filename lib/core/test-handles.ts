@@ -2,8 +2,9 @@ import type { Client } from "@modelcontextprotocol/client"
 
 import { makeCallHandle } from "./call-handles"
 import { db } from "./db"
-import { openTool } from "./tool-rows"
+import { openTool, toolNameWhere } from "./tool-rows"
 import type { GatewayScope } from "./gateway"
+import { serverSlugWhere } from "./server-meta"
 
 /**
  * For tests that call tools through the gateway: execute_<tier> takes the
@@ -107,10 +108,14 @@ export async function catalogueHandle(
   slug: string,
   tool: string,
 ): Promise<string> {
+  const server = await db().mcpServer.findFirstOrThrow({
+    where: serverSlugWhere(scope.ctx, slug),
+    select: { id: true },
+  })
   const row = openTool(
     scope.ctx,
     await db().mcpTool.findFirstOrThrow({
-      where: { name: tool, server: { slug, vaultId: scope.ctx.vaultId } },
+      where: toolNameWhere(scope.ctx, server.id, tool),
     }),
   )
 

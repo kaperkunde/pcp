@@ -1,7 +1,6 @@
 import { createHash, randomUUID } from "node:crypto"
 
-import { openTools } from "./tool-rows"
-import { firstServer } from "./test-servers"
+import { firstServer, toolNamed, toolsWhere } from "./test-servers"
 import type { CallToolResult } from "@modelcontextprotocol/server"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
@@ -57,7 +56,7 @@ import { createSecret, revealSecret } from "./secrets"
 import { createServer } from "./servers"
 import { scratchDatabase } from "./test-db"
 import { OwnerNeeded } from "./browser/types"
-import { keepBytes } from "./tool-results"
+import { keepBytes, resultTool } from "./tool-results"
 import { callServerTool, syncServerTools } from "./upstream"
 import { copyTokenAccess, writeToolAccess } from "./tool-access"
 import { setToolTier } from "./tool-tiers"
@@ -126,7 +125,7 @@ async function setup(options: { allowAllServers?: boolean } = {}): Promise<{
       data: {
         id: randomUUID(),
         serverId,
-        name,
+        plainName: name,
         plainDescription: `${name} does one thing.`,
         plainInputSchema: JSON.stringify({ type: "object" }),
         annotations: JSON.stringify(annotations),
@@ -355,7 +354,10 @@ describe("asking the owner", () => {
     )
     const kept = await db().toolResult.findFirstOrThrow()
 
-    expect(kept).toMatchObject({ tokenId, toolName: "add_numbers" })
+    expect({ ...kept, toolName: resultTool(ctx, kept) }).toMatchObject({
+      tokenId,
+      toolName: "add_numbers",
+    })
     expect(textOf(result)).toContain(`report → ${kept.id} (text/plain`)
     expect(textOf(result)).toContain(`"report":{"$result":"${kept.id}"`)
     expect(textOf(result)).not.toContain("THE END")
@@ -429,7 +431,7 @@ describe("asking the owner", () => {
   it("warns about a tool without hints, which counts as Destructive", async () => {
     const { ctx, scope, server } = await setup()
     await db().mcpTool.updateMany({
-      where: { serverId: server.id, name: "send_postcard" },
+      where: { id: (await toolNamed(ctx, "send_postcard", server.id)).id },
       data: { annotations: null },
     })
     await withPermission(scope, call(server, "send_postcard", { to: "Ada" }))
@@ -499,7 +501,7 @@ describe("asking the owner", () => {
       data: {
         id: randomUUID(),
         serverId,
-        name: "run_command",
+        plainName: "run_command",
         plainDescription: "Runs one command.",
         plainInputSchema: JSON.stringify({ type: "object" }),
         annotations: JSON.stringify({ destructiveHint: true }),
@@ -1202,7 +1204,10 @@ describe("the owner's answer", () => {
     expect(textOf(ran)).toContain("PCP kept the whole answer")
 
     const kept = await db().toolResult.findFirstOrThrow()
-    expect(kept).toMatchObject({ tokenId, toolName: "add_numbers" })
+    expect({ ...kept, toolName: resultTool(ctx, kept) }).toMatchObject({
+      tokenId,
+      toolName: "add_numbers",
+    })
     expect(kept.length).toBe(long.length)
 
     // The stored outcome is shorter still, and still names the result.
@@ -1806,13 +1811,7 @@ describe("a change to an API endpoint of the owner's", () => {
     })
     expect(textOf(done)).toBe("Changed Pets: 2 tools.")
 
-    const tools = openTools(
-      ctx,
-      await db().mcpTool.findMany({
-        where: { serverId: id },
-        orderBy: { name: "asc" },
-      }),
-    )
+    const tools = await toolsWhere(ctx, { serverId: id })
     expect(tools.map((tool) => [tool.name, tool.descriptionOverride])).toEqual([
       ["createPet", null],
       ["listPets", "Every pet in the shop."],

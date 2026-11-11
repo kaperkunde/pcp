@@ -190,7 +190,7 @@ export async function createSshServer(
 ): Promise<{ id: string }> {
   const data = normalize(input)
   const id = newId()
-  const slug = await uniqueSlug(ctx.vaultId, slugify(data.name))
+  const slug = await uniqueSlug(ctx, slugify(data.name))
   const key = generateOwnKey(`pcp-${slug}`)
   const secret = await writeManagedSecret(ctx, {
     name: sshKeySecretName(id),

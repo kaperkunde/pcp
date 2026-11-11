@@ -1862,7 +1862,13 @@ export async function openExitForCall(
   { publicUrl, tool }: { publicUrl: string; tool: string },
 ): Promise<OpenedExit> {
   const opened = await openExit(ctx, exit, { publicUrl })
-  noteExitUsed({ vaultId: ctx.vaultId, tokenId, tool, exit: exit.name })
+  noteExitUsed({
+    vaultId: ctx.vaultId,
+    dek: ctx.dek,
+    tokenId,
+    tool,
+    exit: exit.name,
+  })
   return opened
 }
 
@@ -2333,6 +2339,7 @@ async function callBrowser(
         const login = await readTypedLogin(ctx, admitted.id)
         noteSecretTyped({
           vaultId: ctx.vaultId,
+          dek: ctx.dek,
           tokenId,
           server: server.slug,
           secret: admitted.name,
@@ -2345,6 +2352,7 @@ async function callBrowser(
       typed.push(value)
       noteSecretTyped({
         vaultId: ctx.vaultId,
+        dek: ctx.dek,
         tokenId,
         server: server.slug,
         secret: admitted.name,

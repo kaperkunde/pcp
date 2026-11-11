@@ -1021,6 +1021,7 @@ export async function runProgram(
 
       void appendRequestLog({
         vaultId: scope.ctx.vaultId,
+        dek: scope.ctx.dek,
         tokenId: scope.tokenId,
         tool: logAs,
         server,

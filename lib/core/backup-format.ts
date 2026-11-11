@@ -349,6 +349,7 @@ const SecretBrowserOriginRow = z.strictObject({
 const McpServerRow = renamedFrom(
   {
     name: "plainName",
+    slug: "plainSlug",
     description: "plainDescription",
     url: "plainUrl",
     statusMessage: "plainStatusMessage",
@@ -373,7 +374,9 @@ const McpServerRow = renamedFrom(
     id,
     vaultId: id,
     plainName: str,
-    slug: str,
+    // "" once sealed into meta (#96), with its keyed hash in slugKey.
+    plainSlug: str,
+    slugKey: str.nullable().default(null),
     plainDescription: str,
     plainUrl: str,
     enabled: z.boolean(),
@@ -439,12 +442,13 @@ const McpServerRow = renamedFrom(
 
 // Definitions, added with the owner's notes: absent from older exports.
 const ServerDefinitionRow = renamedFrom(
-  { name: "plainName", description: "plainDescription" },
+  { name: "plainName", slug: "plainSlug", description: "plainDescription" },
   z.strictObject({
     id,
     vaultId: id,
     kind: str,
-    slug: str,
+    plainSlug: str,
+    slugKey: str.nullable().default(null),
     plainName: str,
     plainDescription: str,
     // Sealed since (#96): absent from older files.
@@ -468,6 +472,7 @@ const ServerAuthHeaderRow = z.strictObject({
 // plain columns by their old names.
 const McpToolRow = renamedFrom(
   {
+    name: "plainName",
     title: "plainTitle",
     description: "plainDescription",
     descriptionOverride: "plainDescriptionOverride",
@@ -479,7 +484,9 @@ const McpToolRow = renamedFrom(
   z.strictObject({
     id,
     serverId: id,
-    name: str,
+    // "" once sealed into about (#96), with its keyed hash in nameKey.
+    plainName: str,
+    nameKey: str.nullable().default(null),
     plainTitle: str.nullable(),
     plainDescription: str,
     plainDescriptionOverride: str.nullable(),

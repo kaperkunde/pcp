@@ -20,14 +20,21 @@ import { closeSshConnections } from "./ssh/client"
 import { normalizeAuthorizeParams } from "./oauth-client"
 import {
   byServerName,
+  findServerBySlug,
   openServer,
   openServers,
   type OpenServer,
   serverCreateData,
+  serverSlugTaken,
   updateServerRow,
   writeServer,
 } from "./server-meta"
-import { openTools, sealedToolOverride } from "./tool-rows"
+import {
+  openTools,
+  sealedToolOverride,
+  byToolName,
+  toolNameWhere,
+} from "./tool-rows"
 import {
   checkNewSecret,
   createSecret,
@@ -840,19 +847,14 @@ async function requireTextSecret(ctx: VaultContext, id: string) {
 }
 
 export async function uniqueSlug(
-  vaultId: string,
+  ctx: VaultContext,
   base: string,
   exceptId?: string,
 ) {
   let slug = base
 
   for (let n = 2; ; n++) {
-    const clash = await db().mcpServer.findUnique({
-      where: { vaultId_slug: { vaultId, slug } },
-      select: { id: true },
-    })
-
-    if (!clash || clash.id === exceptId) {
+    if (!(await serverSlugTaken(ctx, slug, exceptId))) {
       return slug
     }
 
@@ -914,7 +916,7 @@ export async function getServer(ctx: VaultContext, id: string) {
   const row = await db().mcpServer.findFirst({
     where: { id, vaultId: ctx.vaultId },
     include: {
-      tools: { orderBy: { name: "asc" } },
+      tools: true,
       _count: { select: { tools: true } },
     },
   })
@@ -923,18 +925,17 @@ export async function getServer(ctx: VaultContext, id: string) {
     throw notFound("That server")
   }
 
-  return { ...openServer(ctx, row), tools: openTools(ctx, row.tools) }
+  return {
+    ...openServer(ctx, row),
+    tools: openTools(ctx, row.tools).sort(byToolName),
+  }
 }
 
 export async function getServerBySlug(
   ctx: VaultContext,
   slug: string,
 ): Promise<OpenServer | null> {
-  const row = await db().mcpServer.findUnique({
-    where: { vaultId_slug: { vaultId: ctx.vaultId, slug } },
-  })
-
-  return row ? openServer(ctx, row) : null
+  return findServerBySlug(ctx, slug)
 }
 
 export async function createServer(
@@ -953,7 +954,7 @@ export async function createServer(
         ...serverCreateData(ctx, {
           id,
           vaultId: ctx.vaultId,
-          slug: await uniqueSlug(ctx.vaultId, slugify(data.name)),
+          slug: await uniqueSlug(ctx, slugify(data.name)),
           ...data,
           ...(definition
             ? {
@@ -1217,19 +1218,14 @@ export async function renameServerSlug(
     )
   }
 
-  const clash = await db().mcpServer.findUnique({
-    where: { vaultId_slug: { vaultId: ctx.vaultId, slug: cleaned } },
-    select: { id: true },
-  })
-
-  if (clash && clash.id !== id) {
+  if (await serverSlugTaken(ctx, cleaned, id)) {
     throw new PcpError(
       "conflict",
       `Another server is already called ${cleaned}.`,
     )
   }
 
-  await db().mcpServer.update({ where: { id }, data: { slug: cleaned } })
+  await writeServer(ctx, id, { slug: cleaned })
 }
 
 export async function setServerEnabled(
@@ -1339,8 +1335,8 @@ export async function setToolDescription(
   await getServer(ctx, serverId)
   const trimmed = override?.trim().slice(0, 2000) || null
 
-  const tool = await db().mcpTool.findUniqueOrThrow({
-    where: { serverId_name: { serverId, name: toolName } },
+  const tool = await db().mcpTool.findFirstOrThrow({
+    where: toolNameWhere(ctx, serverId, toolName),
     select: { id: true },
   })
   await db().mcpTool.update({

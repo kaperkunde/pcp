@@ -611,8 +611,11 @@ embeddingProvider`, which hands `embeddings/provider.ts` the header;
   tool, server, upstream tool, time, outcome, the permission request an
   ask made, whether it was a repeat the assistant confirmed (`rerun`, never
   its reason), and for a secret the browser typed, its name and the origin.
-  Never arguments, results, other sites or a secret's value; the Log page
-  (`lib/core/activity.ts`) reads only the vault's own lines. A new way a call
+  Never arguments, results, other sites or a secret's value. A line's names
+  are sealed under the vault's key with the line as associated data (#96),
+  so a new line is written only with the key (a link's use, which holds
+  none, logs PCP's own name for it, `appendKeylessLog`); the Log page
+  (`lib/core/activity.ts`) opens only the vault's own lines. A new way a call
   can ask the owner calls `noteOwnerAsked`. The cleanup
   (`lib/core/cleanup/`) deletes rows and log days by their dates, needs no
   credential and reads nothing it deletes; its schedule is refused if it
@@ -633,8 +636,9 @@ embeddingProvider`, which hands `embeddings/provider.ts` the header;
   Never guarded: the browser, SSH and storage kinds, a capability's calls
   to its provider, a wrapper's calls in a run the owner approved, and
   executions from the owner's page. The lookup and the record are one
-  transaction. `call_record` keeps only an HMAC of the arguments under the
-  vault key (`crypto.ts keyedHash`) and a short answer encrypted, never a
+  transaction. `call_record` keeps only an HMAC of the arguments and one of
+  the server and tool under the vault key (`crypto.ts keyedHash`,
+  `recordedTool`) and a short answer encrypted, never a
   kept result; it is never exported and is pruned by the cleanup. A new
   way to call a tool goes through it, with a test.
 - `lib/core/openapi` never fetches a remote `$ref`, never follows a redirect

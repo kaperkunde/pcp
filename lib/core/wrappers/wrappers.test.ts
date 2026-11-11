@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import { openServer } from "../server-meta"
 
-import { serverNamed } from "../test-servers"
+import { serverNamed, toolNamed } from "../test-servers"
 
 import { createApiToken, resolveApiToken } from "../api-tokens"
 import { createBrowserServer } from "../browser/server"
@@ -61,6 +61,7 @@ import {
 import { flowSites } from "./flow-sites"
 import { FLOW_RUN_TIMEOUT_MS, WRAPPER_RUN_TIMEOUT_MS } from "./limits"
 import { callPace, withWrappers, wrapperRunTimeout } from "./run"
+import { openTools } from "../tool-rows"
 
 /** The run limits as tests set them; the real ones unless a test says. */
 const timeouts = vi.hoisted(() => ({
@@ -1011,7 +1012,9 @@ describe("what an assistant can set", () => {
       }),
     )
     expect(server.name).toBe("Counter")
-    expect(server.tools.map((tool) => tool.name)).toEqual(["count"])
+    expect(openTools(ctx, server.tools).map((tool) => tool.name)).toEqual([
+      "count",
+    ])
 
     // Nothing stands in for things/echo any more: it is back in search.
     const search = await call("search", { query: "says back" })
@@ -1320,7 +1323,7 @@ describe("a wrapper's tool's tier", () => {
     // Once the tool it calls is Write, so is the wrapper's: worked out
     // when asked, never stored.
     await db().mcpTool.updateMany({
-      where: { serverId: endpointId, name: "echo" },
+      where: { id: (await toolNamed(ctx, "echo", endpointId)).id },
       data: {
         annotations: JSON.stringify({
           readOnlyHint: false,
@@ -1347,7 +1350,7 @@ describe("a wrapper's tool's tier", () => {
 
     // The tool it calls becomes Destructive: the owner's Read is now below.
     await db().mcpTool.updateMany({
-      where: { serverId: endpointId, name: "echo" },
+      where: { id: (await toolNamed(ctx, "echo", endpointId)).id },
       data: { annotations: null },
     })
     expect(await toolTierInfo(ctx, wrapper.id, "lookup")).toMatchObject({

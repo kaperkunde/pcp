@@ -2,7 +2,7 @@ import { openOrigin, siteLabel } from "./browser-secrets"
 import type { VaultContext } from "./context"
 import { db } from "./db"
 import { openWrapperSpec, WRAPPER_SPEC_SELECT } from "./spec-rows"
-import { SERVER_META_SELECT, serverName } from "./server-meta"
+import { SERVER_META_SELECT, serverName, serverSlug } from "./server-meta"
 import { openSecretDetails, type SecretKind } from "./secrets"
 import { readEnvBindings } from "./services/definition"
 import { readDefinition } from "./wrappers/definition"
@@ -47,7 +47,7 @@ function kindWords(kind: string): string {
   return KIND_WORDS[kind] ?? "server"
 }
 
-const SERVER = { ...SERVER_META_SELECT, slug: true, kind: true } as const
+const SERVER = { ...SERVER_META_SELECT, kind: true } as const
 
 /**
  * Every server that sends one of these secrets or keeps its OAuth tokens or
@@ -76,11 +76,11 @@ export async function secretUses(
   )
   const add = (
     secretId: string,
-    row: Parameters<typeof serverName>[1] & { slug: string; kind: string },
+    row: Parameters<typeof serverName>[1] & { kind: string },
   ) =>
     uses.get(secretId)?.set(row.id, {
       name: serverName(ctx, row),
-      slug: row.slug,
+      slug: serverSlug(ctx, row),
       kind: kindWords(row.kind),
     })
 

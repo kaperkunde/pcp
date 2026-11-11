@@ -57,6 +57,8 @@ import {
   serverCreateData,
   serverName,
   writeServer,
+  serverSlug,
+  serverSlugWhere,
 } from "../server-meta"
 import { syncWrapperTools } from "./catalogue"
 import {
@@ -236,11 +238,14 @@ async function slugsById(
 ): Promise<Map<string, { slug: string; name: string }>> {
   const rows = await db().mcpServer.findMany({
     where: { vaultId: ctx.vaultId, id: { in: [...new Set(ids)] } },
-    select: { ...SERVER_META_SELECT, slug: true },
+    select: SERVER_META_SELECT,
   })
 
   return new Map(
-    rows.map((row) => [row.id, { slug: row.slug, name: serverName(ctx, row) }]),
+    openServers(ctx, rows).map((row) => [
+      row.id,
+      { slug: row.slug, name: row.name },
+    ]),
   )
 }
 
@@ -293,7 +298,12 @@ async function loadWrapper(
   where: { slug: string } | { id: string },
 ) {
   const row = await db().mcpServer.findFirst({
-    where: { vaultId: ctx.vaultId, kind: "wrapper", ...where },
+    where: {
+      ...("slug" in where
+        ? serverSlugWhere(ctx, where.slug)
+        : { vaultId: ctx.vaultId, id: where.id }),
+      kind: "wrapper",
+    },
     include: { wrapperSpec: true },
   })
 
@@ -1066,10 +1076,13 @@ export async function applyWrapperChange(
       await db().apiTokenServer.create({ data: { tokenId, serverId: id } })
     }
 
-    const { slug } = await db().mcpServer.findUniqueOrThrow({
-      where: { id },
-      select: { slug: true },
-    })
+    const slug = serverSlug(
+      ctx,
+      await db().mcpServer.findUniqueOrThrow({
+        where: { id },
+        select: SERVER_META_SELECT,
+      }),
+    )
 
     const levels = await settleChosenAccess(ctx, {
       serverId: id,
@@ -1142,7 +1155,7 @@ async function createWrapperRow(
         vaultId: ctx.vaultId,
         kind: "wrapper",
         name,
-        slug: await uniqueSlug(ctx.vaultId, slugify(name)),
+        slug: await uniqueSlug(ctx, slugify(name)),
         description: shared?.description ?? description,
         url: WRAPPER_URL,
         authType: "none",

@@ -1,4 +1,5 @@
 import { scrubFreedPages } from "../cleanup/runtime"
+import { getCleanupConfig } from "../cleanup/state"
 import type { VaultContext } from "../context"
 import { db } from "../db"
 import { sealedSiteAllowance } from "../allowances"
@@ -9,11 +10,17 @@ import { isSealedText } from "../sealed"
 import { sealedTokenName } from "../token-names"
 import { sealedResultName } from "../tool-results"
 import {
-  plainServerMeta,
+  readServerMeta,
   sealedServerMeta,
   SERVER_META_SELECT,
+  serverSlugTaken,
 } from "../server-meta"
-import { sealedDefinitionMeta } from "../definition-rows"
+import {
+  DEFINITION_META_SELECT,
+  definitionMeta,
+  sealedDefinitionMeta,
+  uniqueDefinitionSlug,
+} from "../definition-rows"
 import {
   canonicalOf,
   sealedServiceDefinition,
@@ -23,11 +30,14 @@ import {
 } from "../spec-rows"
 import {
   plainToolValues,
-  sealedToolContent,
+  readToolAbout,
+  sealedToolAbout,
+  sealedToolSchema,
   sealedToolOverride,
   splitAnnotations,
 } from "../tool-rows"
 import { PLAIN_SETTINGS, storedSetting } from "../settings"
+import { sealRequestLogDay, unsealedLogDays } from "../request-log"
 import { sealingState } from "./state"
 
 /**
@@ -273,17 +283,32 @@ export const SEAL_CONVERTERS: Converter[] = [
     table: "mcp_server",
     read: (ctx, limit) =>
       db().mcpServer.findMany({
-        where: { vaultId: ctx.vaultId, meta: null },
+        // A row sealed before its short name was still holds that in
+        // plain text, with no hash: sealed again whole.
+        where: { vaultId: ctx.vaultId, slugKey: null },
         select: { ...SERVER_META_SELECT, updatedAt: true },
         take: limit,
       }),
     write: async (ctx, row) => {
-      // Every write of these values since seals the whole row, so a row
-      // still without meta is still as it was read.
+      // Every write of these values since seals the whole row with the
+      // short name's hash, so a row still without one is as it was read.
+      const meta = readServerMeta(ctx, row)
+      // A short name another server has by now (a restore with no key
+      // compared only the plain ones) takes the next free one.
+      let slug = meta.slug
+
+      for (let n = 2; await serverSlugTaken(ctx, slug, row.id); n++) {
+        slug = `${meta.slug}-${n}`
+      }
+
       const { count } = await db().mcpServer.updateMany({
-        where: { id: row.id, meta: null },
+        where: {
+          id: row.id,
+          slugKey: null,
+          meta: row.meta === null ? null : { equals: row.meta },
+        },
         data: {
-          ...sealedServerMeta(ctx, row.id, plainServerMeta(row)),
+          ...sealedServerMeta(ctx, row.id, { ...meta, slug }),
           updatedAt: row.updatedAt,
         },
       })
@@ -294,28 +319,32 @@ export const SEAL_CONVERTERS: Converter[] = [
     table: "server_definition",
     read: (ctx, limit) =>
       db().serverDefinition.findMany({
-        where: { vaultId: ctx.vaultId, meta: null },
-        select: {
-          id: true,
-          plainName: true,
-          plainDescription: true,
-          updatedAt: true,
-        },
+        where: { vaultId: ctx.vaultId, slugKey: null },
+        select: { ...DEFINITION_META_SELECT, updatedAt: true },
         take: limit,
       }),
     write: async (ctx, row) => {
+      const meta = definitionMeta(ctx, row)
+      // A short name another definition has by now (a restore with no key
+      // compared only the plain ones) takes the next free one.
+      const slug = await uniqueDefinitionSlug(
+        db(),
+        ctx,
+        ctx.vaultId,
+        meta.slug,
+        row.id,
+      )
       const { count } = await db().serverDefinition.updateMany({
         where: {
           id: row.id,
-          meta: null,
+          slugKey: null,
+          meta: row.meta === null ? null : { equals: row.meta },
           plainName: row.plainName,
+          plainSlug: row.plainSlug,
           plainDescription: row.plainDescription,
         },
         data: {
-          ...sealedDefinitionMeta(ctx, row.id, {
-            name: row.plainName,
-            description: row.plainDescription,
-          }),
+          ...sealedDefinitionMeta(ctx, row.id, { ...meta, slug }),
           updatedAt: row.updatedAt,
         },
       })
@@ -328,7 +357,12 @@ export const SEAL_CONVERTERS: Converter[] = [
       db().mcpTool.findMany({
         where: {
           server: { vaultId: ctx.vaultId },
-          OR: [{ about: null }, { schema: null }, { override: null }],
+          OR: [
+            { about: null },
+            { schema: null },
+            { override: null },
+            { nameKey: null },
+          ],
         },
         take: limit,
       }),
@@ -337,8 +371,9 @@ export const SEAL_CONVERTERS: Converter[] = [
       let sealed = false
 
       // Each part only while it is still from before: a read of the tools
-      // since seals what it wrote, and the owner's wording is theirs.
-      if (row.about === null || row.schema === null) {
+      // since seals what it wrote, and the owner's wording is theirs. Each
+      // part on its own, so one sealed already leaves the other to do.
+      if (row.about === null) {
         // The annotations' title is words: sealed with the description.
         let annotations = splitAnnotations(null)
 
@@ -351,18 +386,44 @@ export const SEAL_CONVERTERS: Converter[] = [
         }
 
         const { count } = await db().mcpTool.updateMany({
-          where: {
-            id: row.id,
-            about: null,
-            schema: null,
-            annotations: row.annotations,
-          },
+          where: { id: row.id, about: null, annotations: row.annotations },
           data: {
-            ...sealedToolContent(ctx, row.id, {
-              ...values,
+            ...sealedToolAbout(ctx, row.id, row.serverId, {
+              name: values.name,
+              title: values.title,
+              description: values.description,
               annotationsTitle: annotations.annotationsTitle,
             }),
             annotations: annotations.annotations,
+            updatedAt: row.updatedAt,
+          },
+        })
+        sealed ||= count === 1
+      }
+
+      if (row.schema === null) {
+        const { count } = await db().mcpTool.updateMany({
+          where: { id: row.id, schema: null },
+          data: {
+            ...sealedToolSchema(ctx, row.id, values),
+            updatedAt: row.updatedAt,
+          },
+        })
+        sealed ||= count === 1
+      }
+
+      // A tool whose words were sealed before its name was: the name goes
+      // into about, found by its hash from then on.
+      if (row.about !== null && row.nameKey === null) {
+        const { count } = await db().mcpTool.updateMany({
+          where: { id: row.id, nameKey: null, about: { equals: row.about } },
+          data: {
+            ...sealedToolAbout(
+              ctx,
+              row.id,
+              row.serverId,
+              readToolAbout(ctx, row as never),
+            ),
             updatedAt: row.updatedAt,
           },
         })
@@ -507,6 +568,28 @@ export const SEAL_CONVERTERS: Converter[] = [
   }),
 ]
 
+/**
+ * The request log's days that hold a line of the vault's from before its
+ * names were sealed: each file written again with those lines sealed where
+ * they were. Not rows of the database's, so no rebuild of its file.
+ */
+const REQUEST_LOG_CONVERTER: Converter = {
+  table: "request_log",
+  read: async (ctx, limit) =>
+    (
+      await unsealedLogDays(ctx.vaultId, {
+        keepDays: (await getCleanupConfig()).logDays,
+      })
+    )
+      .slice(0, limit)
+      .map((day) => async () => {
+        await sealRequestLogDay(ctx, day)
+        return false
+      }),
+}
+
+SEAL_CONVERTERS.push(REQUEST_LOG_CONVERTER)
+
 export { forgetSealedVaults } from "./state"
 
 /**
@@ -556,8 +639,15 @@ async function sealBatch(
       let count = 0
 
       for (const write of writes) {
-        if (await write()) {
-          count++
+        // One row that fails (a value that does not read, a clash) keeps
+        // the rest of its table from nothing: it is tried again later.
+        try {
+          if (await write()) {
+            count++
+          }
+        } catch {
+          console.error(`[sealing] could not seal a row of ${converter.table}`)
+          failed = true
         }
       }
 

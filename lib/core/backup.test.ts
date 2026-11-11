@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
-import { openTool, TOOL_ABOUT, TOOL_OVERRIDE, TOOL_SCHEMA } from "./tool-rows"
+import { TOOL_ABOUT, TOOL_OVERRIDE, TOOL_SCHEMA } from "./tool-rows"
 import type { SealedGroup } from "./sealed-fields"
 import { gunzipSync } from "node:zlib"
 
@@ -50,7 +50,7 @@ import {
   revealSecret,
   updateSecret,
 } from "./secrets"
-import { createServer, getServer } from "./servers"
+import { createServer, getServer, getServerBySlug } from "./servers"
 import {
   byServerName,
   openServer,
@@ -103,6 +103,8 @@ import {
   unlockOwnerVault,
 } from "./vault"
 import { tokenName } from "./token-names"
+import { ensureSealed } from "./sealing/convert"
+import { toolNamed, toolsWhere } from "./test-servers"
 
 // Export and restore against a scratch database: the file carries the
 // vault's rows as they are, a restore puts them back whole, and every way a
@@ -247,7 +249,7 @@ describe("restoring", { timeout: 60_000 }, () => {
   it("puts everything back, and the password, recovery key and tokens keep working", async () => {
     const { ctx, recoveryKey, secretId, spareId, token } = await populate()
     const file = await exportVault(ctx, EXPORT_PASSWORD)
-    const before = await db().mcpTool.findFirst({ where: { name: "alpha" } })
+    const before = await toolNamed(ctx, "alpha")
 
     // Changes after the export: gone once it is restored.
     await deleteSecret(ctx, spareId)
@@ -285,7 +287,7 @@ describe("restoring", { timeout: 60_000 }, () => {
       (await listMemories(unlocked!)).map((memory) => memory.text),
     ).toEqual(["Remember this."])
     // Timestamps are the file's, not the restore's.
-    const after = await db().mcpTool.findFirst({ where: { name: "alpha" } })
+    const after = await toolNamed(ctx, "alpha")
     expect(after?.updatedAt.toISOString()).toBe(before?.updatedAt.toISOString())
     expect(after?.id).toBe(before?.id)
     // Host settings stayed as they were: they were not asked for.
@@ -720,10 +722,7 @@ describe("restoring", { timeout: 60_000 }, () => {
       { into: "vault", ctx },
       { restoreHostSettings: false },
     )
-    const tool = openTool(
-      ctx,
-      await db().mcpTool.findFirstOrThrow({ where: { name: "alpha" } }),
-    )
+    const tool = await toolNamed(ctx, "alpha")
     expect(JSON.parse(tool.outputSchema!)).toEqual(outputSchema)
     expect(JSON.parse(tool.icons!)).toEqual(icons)
 
@@ -742,12 +741,10 @@ describe("restoring", { timeout: 60_000 }, () => {
       { into: "vault", ctx },
       { restoreHostSettings: false },
     )
-    expect(
-      openTool(
-        ctx,
-        await db().mcpTool.findFirstOrThrow({ where: { name: "alpha" } }),
-      ),
-    ).toMatchObject({ outputSchema: null, icons: null })
+    expect(await toolNamed(ctx, "alpha")).toMatchObject({
+      outputSchema: null,
+      icons: null,
+    })
   })
 
   it("carries definitions and the owner's notes, and gives each server of a file from before them a definition of its own", async () => {
@@ -817,6 +814,14 @@ describe("restoring", { timeout: 60_000 }, () => {
       [cloneId, "upstream-staging", "mcp"],
     ])
     expect(servers.every((row) => row.personalNote === null)).toBe(true)
+    // The short names of the file, in plain text, are found and then
+    // sealed by the vault's next requests (#96).
+    expect((await getServerBySlug(ctx, "upstream-staging"))?.id).toBe(cloneId)
+    expect(await ensureSealed(ctx)).toBe(true)
+    expect(
+      await db().$queryRawUnsafe(`SELECT DISTINCT "slug" FROM "mcp_server"`),
+    ).toEqual([{ slug: "" }])
+    expect((await getServerBySlug(ctx, "upstream-staging"))?.id).toBe(cloneId)
   })
 
   it("carries a token's instructions as they are, and restores a file from before them as not set yet", async () => {
@@ -874,7 +879,7 @@ describe("restoring", { timeout: 60_000 }, () => {
           inputSchema: { type: "object" },
           program: "return 1",
           calls: [
-            `${(await db().mcpServer.findUniqueOrThrow({ where: { id: serverId } })).slug}/${(await db().mcpTool.findFirstOrThrow({ where: { serverId } })).name}`,
+            `${openServer(ctx, await db().mcpServer.findUniqueOrThrow({ where: { id: serverId } })).slug}/${(await toolsWhere(ctx, { serverId }))[0]!.name}`,
           ],
         },
       ],
@@ -1833,6 +1838,10 @@ function unsealed(
 
     delete row[group.column]
   }
+
+  // The keyed hashes a name is found by came with it.
+  delete row.slugKey
+  delete row.nameKey
 }
 
 /** A server row of a file from before #96. */

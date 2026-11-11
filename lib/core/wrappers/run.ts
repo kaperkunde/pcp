@@ -6,7 +6,7 @@ import { runProgram } from "../code/run"
 import type { Executor } from "../code/types"
 import { db } from "../db"
 import { openWrapperSpec } from "../spec-rows"
-import { openTool, TOOL_SCHEMA_SELECT } from "../tool-rows"
+import { openTool, TOOL_SCHEMA_SELECT, toolNameWhere } from "../tool-rows"
 import { notFound, PcpError } from "../errors"
 import { loadGatewayServers, type GatewayServer } from "../gateway-servers"
 import {
@@ -78,7 +78,7 @@ import {
   type Rename,
 } from "../tools/family"
 import { argumentsRefusal, validate } from "../tools/validate"
-import { findServer, type OpenServer } from "../server-meta"
+import { findServerBySlug, type OpenServer } from "../server-meta"
 
 /**
  * A call to a wrapper's tool: its program, run as run_code's are (one
@@ -474,8 +474,7 @@ async function innerCall(
   // server of the vault, whether or not this token reaches it.
   const onApproval = definition.callLevels === "approved"
   const target: OpenServer | undefined = onApproval
-    ? ((await findServer(env.ctx, { vaultId: env.ctx.vaultId, slug })) ??
-      undefined)
+    ? ((await findServerBySlug(env.ctx, slug)) ?? undefined)
     : servers.find((entry) => entry.slug === slug)
   const declared =
     target &&
@@ -543,8 +542,8 @@ async function innerCall(
   // the wrapper's answer while the name still works, and in the refusal
   // once it does not.
   const row = await db()
-    .mcpTool.findUnique({
-      where: { serverId_name: { serverId: target.id, name } },
+    .mcpTool.findFirst({
+      where: toolNameWhere(env.ctx, target.id, name),
       select: TOOL_SCHEMA_SELECT,
     })
     .then((found) => found && openTool(env.ctx, found))

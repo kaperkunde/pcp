@@ -241,7 +241,7 @@ describe("a link to a file of PCP's own store", () => {
     })
 
     // Every use in the log, by name.
-    const { entries } = await readRequestLog(ctx.vaultId)
+    const { entries } = await readRequestLog(ctx)
     expect(
       entries
         .filter((entry) => entry.tool === "file_link/store_download")

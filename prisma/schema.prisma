@@ -637,9 +637,15 @@ model McpServer {
   vault            Vault   @relation(fields: [vaultId], references: [id], onDelete: Cascade)
   /// Shown to people.
   plainName        String  @map("name")
-  /// What an assistant uses to name the server in tool calls: lowercase,
-  /// unique within the vault.
-  slug             String
+  /// What an assistant uses to name the server in tool calls (lowercase,
+  /// unique within the vault), from before short names were sealed (#96):
+  /// "" once sealed into meta, with its keyed hash in slugKey.
+  plainSlug        String  @map("slug")
+  /// The short name, found by: a keyed hash of it under the vault's key
+  /// (keyedHash in lib/core/crypto.ts, label "pcp server slug"). Unique in
+  /// the vault; null on a row from before, until the vault's rows are
+  /// sealed.
+  slugKey          String? @map("slug_key")
   /// What an assistant is told the server is for. Editable, because the
   /// upstream's own description is often missing or written for developers.
   plainDescription String  @default("") @map("description")
@@ -803,7 +809,7 @@ model McpServer {
   pendingAccess String?           @map("pending_access")
 
   /// What the server is and where it is, sealed (#96): the JSON of
-  /// lib/core/server-meta.ts ServerMeta (name, description, address,
+  /// lib/core/server-meta.ts ServerMeta (name, short name, description, address,
   /// logins, what PCP found out of it, its status message), AES-256-GCM
   /// under the vault's data key with "mcp_server:<id>:meta" as associated
   /// data. Null on a row from before, which holds them in the plain*
@@ -834,7 +840,7 @@ model McpServer {
   exitServices       Exit[]                  @relation("ExitService")
   toolTiers          ToolTier[]
 
-  @@unique([vaultId, slug])
+  @@unique([vaultId, slugKey])
   @@index([definitionId])
   @@map("mcp_server")
 }
@@ -853,8 +859,12 @@ model ServerDefinition {
   /// mcp | openapi | wrapper | service: the kind of every instance.
   kind             String
   /// The definition's own short name, unique in the vault: the first
-  /// instance's when it was made. Instances keep their own slugs.
-  slug             String
+  /// instance's when it was made. Instances keep their own slugs. From
+  /// before short names were sealed (#96): "" once sealed into meta.
+  plainSlug        String   @map("slug")
+  /// The short name's keyed hash under the vault's key (label "pcp
+  /// definition slug"): unique in the vault; null on a row from before.
+  slugKey          String?  @map("slug_key")
   /// The name, from before names were sealed (#96): "" once sealed.
   plainName        String   @map("name")
   /// The description every instance carries (mcp_server.description), from
@@ -875,7 +885,7 @@ model ServerDefinition {
   repoExclusions RepoExclusion[]
   toolTiers      ToolTier[]
 
-  @@unique([vaultId, slug])
+  @@unique([vaultId, slugKey])
   @@map("server_definition")
 }
 
@@ -932,8 +942,14 @@ model McpTool {
   id                       String    @id
   serverId                 String    @map("server_id")
   server                   McpServer @relation(fields: [serverId], references: [id], onDelete: Cascade)
-  /// The tool's name: plain, as its server's short name is.
-  name                     String
+  /// The tool's name, from before tool names were sealed (#96): "" once
+  /// sealed into about, with its keyed hash in nameKey.
+  plainName                String    @map("name")
+  /// The name, found by: a keyed hash of the server's id and the name under
+  /// the vault's key (keyedHash in lib/core/crypto.ts, label "pcp tool
+  /// name"). Unique per server; null on a row from before, until the
+  /// vault's rows are sealed.
+  nameKey                  String?   @map("name_key")
   /// From before descriptions were sealed (#96): the title, the
   /// description and the owner's wording, the schemas, the call plan and
   /// the outline of an answer, each in its plain column. A sealed row holds
@@ -958,7 +974,7 @@ model McpTool {
   /// outputSchema, a family tool's (lib/core/tools/family.ts) or a wrapper
   /// tool's. describe shows it as outputSchema.
   plainOutputSchema        String?   @map("output_schema")
-  /// The title and description, sealed: JSON, AES-256-GCM under the
+  /// The name, title and description, sealed: JSON, AES-256-GCM under the
   /// vault's data key with "mcp_tool:<id>:about" as associated data. What
   /// search and the catalogue read on every request.
   about                    Bytes?
@@ -972,7 +988,7 @@ model McpTool {
   createdAt                DateTime  @default(now()) @map("created_at")
   updatedAt                DateTime  @updatedAt @map("updated_at")
 
-  @@unique([serverId, name])
+  @@unique([serverId, nameKey])
   @@map("mcp_tool")
 }
 
@@ -1236,6 +1252,9 @@ model ToolResult {
   token      ApiToken   @relation(fields: [tokenId], references: [id], onDelete: Cascade)
   serverId   String?    @map("server_id")
   server     McpServer? @relation(fields: [serverId], references: [id], onDelete: SetNull)
+  /// The tool it came from, sealed as text (`pcp-sealed:v1:…`, AES-256-GCM
+  /// under the vault's data key with "tool_result:<id>:tool"; #96); plain
+  /// on a row from before, which is gone within a day.
   toolName   String     @map("tool_name")
   /// text | bytes: what was kept. A text answer, or a file's bytes (an
   /// attachment, a binary field of an answer).
@@ -1275,6 +1294,8 @@ model CallRecord {
   tokenId    String    @map("token_id")
   token      ApiToken  @relation(fields: [tokenId], references: [id], onDelete: Cascade)
   serverId   String    @map("server_id")
+  /// The tool, as a keyed hash of the server's id and its name under the
+  /// vault's key (guard.ts recordedTool, #96): compared, never read.
   toolName   String    @map("tool_name")
   /// HMAC-SHA256 of the server id, the tool and the canonical arguments (as
   /// checked and renamed) under a key derived from the vault's data key

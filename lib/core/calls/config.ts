@@ -13,6 +13,7 @@ import {
   MAX_GUARD_OVERRIDES,
   UNGUARDED_KINDS,
 } from "./limits"
+import { TOOL_ABOUT_SELECT, toolName, byToolName } from "../tool-rows"
 
 /**
  * The owner's own windows for the duplicate guard (guard.ts), kept as the
@@ -225,11 +226,16 @@ export async function duplicateCallsOverview(
       select: {
         ...SERVER_NAME_SELECT,
         definitionId: true,
-        tools: { select: { name: true }, orderBy: { name: "asc" } },
+        tools: { select: TOOL_ABOUT_SELECT },
       },
     })
   )
-    .map((row) => openServer(ctx, row))
+    .map((row) => ({
+      ...openServer(ctx, row),
+      tools: row.tools
+        .map((tool) => ({ name: toolName(ctx, tool) }))
+        .sort(byToolName),
+    }))
     .sort(byServerName)
     .filter((server) => !UNGUARDED_KINDS.has(server.kind))
   const tiers = await loadToolTiers(ctx, servers)

@@ -10,6 +10,7 @@ import {
   openDefinition,
   sealedDefinitionMeta,
   type DefinitionKind,
+  definitionSlugWhere,
 } from "./definition-rows"
 import { createEndpoint } from "./endpoints"
 import { invalid, notFound, PcpError } from "./errors"
@@ -603,6 +604,7 @@ export async function mergeDefinitions(
         where: { id: keepId },
         data: sealedDefinitionMeta(ctx, keepId, {
           name: name.slice(0, 200),
+          slug: kept.slug,
           description: kept.description,
         }),
       })
@@ -655,8 +657,8 @@ export async function findBindableDefinition(
   let definitionId = byServer ? await ensureDefinition(ctx, byServer.id) : null
 
   if (!definitionId && name) {
-    const row = await db().serverDefinition.findUnique({
-      where: { vaultId_slug: { vaultId: ctx.vaultId, slug: name } },
+    const row = await db().serverDefinition.findFirst({
+      where: definitionSlugWhere(ctx, name),
       select: { id: true },
     })
 

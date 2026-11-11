@@ -1,13 +1,22 @@
 import { TOOL_TIERS, type ToolTier } from "./constants"
 import type { VaultContext } from "./context"
 import { db } from "./db"
-import { openTools, TOOL_SCHEMA_SELECT } from "./tool-rows"
+import {
+  openTools,
+  TOOL_SCHEMA_SELECT,
+  TOOL_NAME_SELECT,
+  TOOL_ABOUT_SELECT,
+  toolNameWhere,
+  toolName,
+  byToolName,
+} from "./tool-rows"
 import { ensureDefinition } from "./definition-rows"
 import { invalid, notFound } from "./errors"
 import { newId } from "./ids"
 import { getSetting, setSetting } from "./settings"
 import type { ToolAnnotations } from "./tools/define"
 import { readWrapperOperation } from "./wrappers/definition"
+import { openServers, SERVER_META_SELECT, byServerSlug } from "./server-meta"
 
 /**
  * How much a tool can do, in three tiers, and the one place that says which
@@ -250,8 +259,7 @@ function tierResolver(ctx: VaultContext, overrides: OverrideRow[]) {
         where: { serverId: { in: fresh } },
         select: {
           ...TOOL_SCHEMA_SELECT,
-          serverId: true,
-          name: true,
+          ...TOOL_NAME_SELECT,
           annotations: true,
         },
       }),
@@ -476,8 +484,8 @@ export async function setToolTier(
     return
   }
 
-  const tool = await db().mcpTool.findUnique({
-    where: { serverId_name: { serverId, name: toolName } },
+  const tool = await db().mcpTool.findFirst({
+    where: toolNameWhere(ctx, serverId, toolName),
     select: { id: true },
   })
 
@@ -658,21 +666,24 @@ export async function wrapperTiersBelowCalls(
     return []
   }
 
-  const wrappers = await db().mcpServer.findMany({
-    where: { vaultId: ctx.vaultId, kind: "wrapper" },
-    select: {
-      id: true,
-      slug: true,
-      definitionId: true,
-      tools: { select: { name: true } },
-    },
-    orderBy: { slug: "asc" },
-  })
+  const wrappers = openServers(
+    ctx,
+    await db().mcpServer.findMany({
+      where: { vaultId: ctx.vaultId, kind: "wrapper" },
+      select: {
+        ...SERVER_META_SELECT,
+        definitionId: true,
+        tools: { select: TOOL_ABOUT_SELECT },
+      },
+    }),
+  ).sort(byServerSlug)
   const resolver = tierResolver(ctx, overrides)
   const found: TierBelowCalls[] = []
 
   for (const wrapper of wrappers) {
-    for (const tool of wrapper.tools) {
+    for (const tool of wrapper.tools
+      .map((row) => ({ name: toolName(ctx, row) }))
+      .sort(byToolName)) {
       const info = await resolver.tierOf(wrapper.id, tool.name)
 
       if (tierBelowCalls(info)) {

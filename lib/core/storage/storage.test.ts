@@ -7,7 +7,6 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest"
 
 import { createApiToken } from "../api-tokens"
 import type { VaultContext } from "../context"
-import { db } from "../db"
 import { getServer } from "../servers"
 import { closeAllSshConnections } from "../ssh/client"
 import { startFakeSsh, type FakeSsh } from "../ssh/fake-server"
@@ -28,6 +27,7 @@ import {
 import { setupVault } from "../vault"
 import { OBJECTS_FOLDER } from "./limits"
 import { createStorageRoot, loadStorageRoot, updateStorageRoot } from "./roots"
+import { toolsWhere } from "../test-servers"
 
 // Storage roots end to end in the core: an SSH server the owner added and
 // checked, a folder on it (a temporary directory, served by the test
@@ -152,12 +152,7 @@ function refusal(result: CallToolResult): string {
 }
 
 async function toolNames(id: string) {
-  return (
-    await db().mcpTool.findMany({
-      where: { serverId: id },
-      orderBy: { name: "asc" },
-    })
-  ).map((tool) => tool.name)
+  return (await toolsWhere(ctx, { serverId: id })).map((tool) => tool.name)
 }
 
 describe("adding a storage folder", () => {

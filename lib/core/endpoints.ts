@@ -3,7 +3,7 @@ import type { CallToolResult } from "@modelcontextprotocol/client"
 import { storeTools, type SyncResult } from "./catalogue"
 import type { VaultContext } from "./context"
 import { db } from "./db"
-import { openTool, TOOL_SCHEMA_SELECT } from "./tool-rows"
+import { openTool, TOOL_SCHEMA_SELECT, toolNameWhere } from "./tool-rows"
 import {
   contentHash,
   openSpec,
@@ -981,7 +981,7 @@ export async function createEndpoint(
             vaultId: ctx.vaultId,
             kind: "openapi",
             enabled: input.enabled !== false,
-            slug: await uniqueSlug(ctx.vaultId, slugify(data.name)),
+            slug: await uniqueSlug(ctx, slugify(data.name)),
             name: data.name,
             description: data.description,
             url: baseUrl,
@@ -1636,8 +1636,8 @@ export async function callEndpointTool(
   },
 ): Promise<CallToolResult> {
   const tool = await db()
-    .mcpTool.findUnique({
-      where: { serverId_name: { serverId: server.id, name: toolName } },
+    .mcpTool.findFirst({
+      where: toolNameWhere(ctx, server.id, toolName),
       select: TOOL_SCHEMA_SELECT,
     })
     .then((row) => row && openTool(ctx, row))
