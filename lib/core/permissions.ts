@@ -1,11 +1,15 @@
 import type { CallToolResult } from "@modelcontextprotocol/server"
 
-import type {
-  McpServer,
-  McpTool,
-  PermissionRequest,
-} from "@/lib/generated/prisma/client"
+import type { PermissionRequest, Prisma } from "@/lib/generated/prisma/client"
 
+import {
+  openServer,
+  openServers,
+  type OpenServer,
+  SERVER_NAME_SELECT,
+  SERVER_META_SELECT,
+  serverSlug,
+} from "./server-meta"
 import {
   answerValue,
   readFields,
@@ -15,19 +19,26 @@ import {
 import {
   accessReview,
   checkAccessLevels,
+  checkAccessTiers,
+  writeAccessTiers,
+  type OwnToolNames,
   describeAccessAsk,
   describeSavedAccess,
   listAccessLevels,
   writeAccessLevels,
   type AccessAsk,
-  type AccessLevel,
 } from "./access-requests"
 import { allowSiteFor, allowToolFor, parseAllowForMinutes } from "./allowances"
 import type { SyncResult } from "./catalogue"
-import type { PermissionDecision, PermissionKind } from "./constants"
+import type {
+  PasswordRecipe,
+  PermissionDecision,
+  PermissionKind,
+} from "./constants"
 import type { VaultContext } from "./context"
 import { asBytes, decryptString, encryptString } from "./crypto"
 import { db } from "./db"
+import { openTool, toolNameWhere } from "./tool-rows"
 import { definitionBasis } from "./definitions"
 import {
   applyNoteChange,
@@ -49,6 +60,7 @@ import { invalid, isPcpError, notFound, PcpError } from "./errors"
 import { fetchWeb } from "./fetch/fetch"
 import type { FetchArgs } from "./fetch/request"
 import { newId } from "./ids"
+import { callDeadline } from "./pacing"
 import { createCalendarAccount } from "./caldav/accounts"
 import { createMailAccount } from "./mail/accounts"
 import {
@@ -67,22 +79,32 @@ import {
   type ConnectLinks,
   type ServerState,
 } from "./connect"
+import { OWNER_LINK_RULE, markdownLink, nextMessageCheck } from "./owner-link"
+import { withPublicOnlyLink } from "./public-only"
 import {
   handoverTab,
   queueHref,
   WAITING_ORDER,
   waitingRequestsWhere,
 } from "./owner-queue"
-import { waitForOwner } from "./owner-wait"
+import { waitForOwner } from "@kaperkunde/mcp/owner"
+import { foldedText, isFoldingKind, targetKey } from "./permission-fold"
 import {
+  ANSWERED_STATUSES,
+  ANSWERED_WINDOW_MS,
   argsInFull,
   canonicalJson,
   decisionsFor,
   isOpen,
+  MAX_ANSWERED_LISTED,
+  MAX_ANSWERED_SEEN,
   PERMISSION_KEEP_MS,
   PERMISSION_TTL_MS,
   previewArgs,
   requestHash,
+  REUSE_EXECUTED_MS,
+  REUSE_VALUE_MAX_CHARS,
+  reusedNote,
   storedResultText,
   summaryText,
   visible,
@@ -112,45 +134,101 @@ import {
   type ServerInput,
 } from "./servers"
 import { effectiveAccess, loadToolAccess, writeToolAccess } from "./tool-access"
+import { toolTier } from "./tool-tiers"
 import { noteOwnerAsked } from "./request-log"
 import { collectHandleIds } from "./result-handles"
 import {
-  describeResults,
   keepWholeAnswer,
+  openResult,
   resultKeepers,
   resultNotices,
   resultOpener,
+  type OpenedResult,
 } from "./tool-results"
-import { finishHandover, performNavigate } from "./browser/call"
+import {
+  fileLine,
+  requestFiles,
+  requestServes,
+  type RequestFile,
+} from "./permission-files"
+import { applyTabPace, finishHandover, performNavigate } from "./browser/call"
 import { noteHandoverRequest } from "./browser/runtime"
 import { closePendingRequests } from "./permission-close"
 import { RUN_COMMAND, stdinAsText } from "./ssh/tools"
+import { familyError, textAnswer } from "./tools/family"
 import {
   describeBrowseAsk,
   describeHandoverAsk,
   describeSecretRequestAsk,
+  describeSecretSitesChangeAsk,
   describeSecretUseAsk,
+  describeScriptUseAsk,
+  describeTabPaceAsk,
 } from "./browser/describe"
 import type { fetchThroughBrowser } from "./browser/solve"
 import {
   isOwnerNeeded,
   type BrowseAsk,
+  type ExitUseAsk,
   type HandoverAsk,
+  type ScriptUseAsk,
+  type TabPaceAsk,
   type SecretRequestAsk,
+  type SecretSitesChangeAsk,
   type SecretUseAsk,
 } from "./browser/types"
 import {
+  allowScriptOnce,
+  dropScriptOnce,
+  scriptDigest,
+  writeScriptAccess,
+} from "./browser-scripts"
+import {
   applySecretRequest,
+  applySecretSitesChange,
   checkSecretAnswer,
+  checkSecretSitesAnswer,
   dropOnceAllowance,
   findTypableSecret,
   grantSecretUse,
   isBoundOrigin,
+  showSecretSitesChange,
+  type SecretSitesShown,
   type SecretUseLevel,
 } from "./browser-secrets"
+import { checkPasswordRecipe, generatePassword } from "./generate-password"
 import { resourceLimits } from "./resources/state"
+import {
+  askFirstLine,
+  checkChosenAccess,
+  proposedAccessLine,
+  proposedAccessShown,
+  settleChosenAccess,
+  type AccessRule,
+  type ProposedAccess,
+  type ProposedAccessShown,
+} from "./proposed-access"
 import { namesInWords, secretUses } from "./secret-uses"
-import { callServerTool, needsConnecting, syncServerTools } from "./upstream"
+import {
+  browserExitsFor,
+  callServerTool,
+  launchService,
+  needsConnecting,
+  openExitForCall,
+  syncServerTools,
+  updateService,
+} from "./upstream"
+import {
+  applyServiceChange,
+  describeServiceAsk,
+  type ServiceChangeAsk,
+} from "./services/proposals"
+import {
+  applyServiceUpdate,
+  describeServiceUpdate,
+  isServiceUpdate,
+  type ServiceUpdateAsk,
+} from "./services/updates"
 import {
   applyWrapperChange,
   type WrapperChangeAsk,
@@ -164,13 +242,17 @@ import {
   type RepoShown,
 } from "./repos/assist"
 import type { SecretGrant } from "./wrappers/placeholders"
+import { decideExit, getExit, writeExitAccess } from "./exits/exits"
+import { exitTitle } from "./exits/use"
 import {
+  decideFetch,
   describeFetchAsk,
   privateAllowedFor,
   fetchHostOf,
   runFetch,
   writeSiteAccess,
 } from "./web-fetch"
+import { TOKEN_NAME_SELECT, tokenName } from "./token-names"
 
 /**
  * The owner's say before an assistant's call runs. A call to a tool the
@@ -181,8 +263,8 @@ import {
  * trusts the assistant: only the owner's answer on that page runs anything.
  *
  * The assistant ends its reply with the link and calls check_permission
- * once the owner says they have answered; it holds the call while they are
- * still on it (lib/core/owner-wait.ts). The link has to come last: Claude's
+ * on the owner's next message, whatever it says (their words rarely say
+ * whether they answered); it holds the call while they are still on it (lib/core/owner-wait.ts). The link has to come last: Claude's
  * apps fold the text written before a tool call into the tool's row and
  * show a summary of their own, so a link followed by check_permission in
  * the same reply was often never seen. Prompts in the client (elicitation)
@@ -247,14 +329,21 @@ export type RegisterArgs = Omit<ServerInput, "authExtraHeaders"> & {
   }
   /** The owner's note it gets, which they read whole. */
   note?: string | null
+  /**
+   * Levels and tiers the assistant proposed for its tools
+   * (proposed-access.ts): by tool where they are known up front (an API
+   * endpoint, a mail or calendar account), by name pattern otherwise.
+   * Shown filled in on the page and saved only as the owner leaves them.
+   */
+  proposedAccess?: ProposedAccess | null
 }
 
 export type PermissionAsk =
   | ({
       kind: "call"
-      server: McpServer
+      server: OpenServer
       /** Only the name is read: the gateway keeps a slimmer tool than the row. */
-      tool: Pick<McpTool, "name">
+      tool: { name: string }
       args: Record<string, unknown>
     } & AnswerShape)
   | { kind: "register"; input: RegisterArgs }
@@ -263,6 +352,7 @@ export type PermissionAsk =
   | { kind: "repo_change"; input: RepoChangeAsk }
   | { kind: "repo_share"; input: RepoShareAsk }
   | { kind: "note_change"; input: NoteChangeAsk }
+  | { kind: "service_change"; input: ServiceChangeAsk | ServiceUpdateAsk }
   | MemoryAsk
   | SkillAsk
   | AccessAsk
@@ -271,6 +361,10 @@ export type PermissionAsk =
   | { kind: "browser_handover"; input: HandoverAsk }
   | { kind: "secret_use"; input: SecretUseAsk }
   | { kind: "secret_request"; input: SecretRequestAsk }
+  | { kind: "secret_sites_change"; input: SecretSitesChangeAsk }
+  | { kind: "exit_use"; input: ExitUseAsk }
+  | { kind: "script_use"; input: ScriptUseAsk }
+  | { kind: "tab_pace"; input: TabPaceAsk }
 
 /** The requests about a secret the browser types (browser-secrets.ts). */
 function isSecretKind(kind: string): kind is "secret_use" | "secret_request" {
@@ -287,6 +381,10 @@ export type PermissionExecutor = {
   solveWeb?: typeof fetchThroughBrowser
   /** The browser opening a site the owner allowed; the real one when left out. */
   browse?: typeof performNavigate
+  /** A service the owner agreed to launch; the real one when left out. */
+  launchService?: typeof launchService
+  /** An image update the owner agreed to; the real one when left out. */
+  updateService?: typeof updateService
 }
 
 export const defaultExecutor: PermissionExecutor = {
@@ -320,6 +418,12 @@ export type PermissionView = {
    * it all.
    */
   full: ShownText[] | null
+  /**
+   * The kept results a call's arguments name, as the page shows them: one
+   * chip each, to open and download while the request waits
+   * (permission-files.ts). Empty for anything but a call.
+   */
+  files: RequestFile[]
   /** A memory request's memory, for the page to show its text first. */
   memory: MemoryShown | null
   /** A skill request's skill as it would be, and what changes, in full. */
@@ -336,6 +440,18 @@ export type PermissionView = {
    */
   shareHref: string | null
   url: string
+  /**
+   * The version of the request the owner reads: it changes when an
+   * assistant folds another change into it, and an answer given on the
+   * version before is refused (decidePermission's `revision`).
+   */
+  revision: string
+  /**
+   * Other requests still waiting on the same skill, shared memory or note
+   * (another token's, or one that could not fold): approving one makes the
+   * others fail, since each is made on the item as it is now.
+   */
+  conflicts: Array<{ id: string; tokenName: string; url: string }>
   createdAt: Date
   expiresAt: Date
   outcome: string | null
@@ -343,6 +459,12 @@ export type PermissionView = {
   decisions: Array<{ value: PermissionDecision; label: string }>
   /** Set once an allowed request left an OAuth server needing connecting. */
   connect: ConnectLinks | null
+  /**
+   * A proposed MCP server or API endpoint whose address is private: the page
+   * offers "Allow private addresses", off, so it is public-only unless the
+   * owner ticks it (decidePermission's `allowPrivate`).
+   */
+  offersPrivateAddresses: boolean
   /**
    * A new server that sends a secret PCP does not hold yet: the owner types
    * its value in on PCP's page, so that is the only place to agree. `exists`
@@ -364,11 +486,28 @@ export type PermissionView = {
      */
     kind?: "text" | "totp"
     origins?: string[]
+    /** request_secret: the login name it goes with, which the owner can change. */
+    username?: string | null
+    /** request_secret: the password the assistant asked PCP to make. */
+    generate?: PasswordRecipe | null
   } | null
+  /**
+   * update_secret_sites: the secret's sites now and each change asked for,
+   * with lookalikes flagged, for the owner to tick; `basis` goes back with
+   * the answer (decidePermission's `sites`). Null for other requests and
+   * once answered.
+   */
+  secretSites: SecretSitesShown | null
+  /**
+   * A new or changed server's levels and tiers the assistant proposed
+   * (proposed-access.ts), for the page to show filled in and editable
+   * beside the approval; null when it proposed none, or when answered.
+   */
+  proposedAccess: ProposedAccessShown | null
 }
 
 type Row = PermissionRequest & {
-  server: McpServer | null
+  server: OpenServer | null
   token: {
     name: string
     revokedAt: Date | null
@@ -381,7 +520,7 @@ const ROW_INCLUDE = {
   server: true,
   token: {
     select: {
-      name: true,
+      ...TOKEN_NAME_SELECT,
       revokedAt: true,
       expiresAt: true,
       manageEndpoints: true,
@@ -393,11 +532,13 @@ function aad(id: string): string {
   return `permission_request:${id}`
 }
 
+/**
+ * An answer in words, or a refusal of what the request is in (gone,
+ * decided, not this kind), through the one mapping
+ * (lib/core/tools/outcome.ts).
+ */
 function text(value: string, isError = false): CallToolResult {
-  return {
-    content: [{ type: "text", text: value }],
-    ...(isError ? { isError: true } : {}),
-  }
+  return isError ? familyError(value, "state") : textAnswer(value)
 }
 
 export function permissionUrl(publicUrl: string, id: string): string {
@@ -416,7 +557,7 @@ export function permissionUrl(publicUrl: string, id: string): string {
  */
 export async function runCall(
   ctx: VaultContext,
-  server: McpServer,
+  server: OpenServer,
   toolName: string,
   args: Record<string, unknown>,
   {
@@ -427,6 +568,7 @@ export async function runCall(
     keep,
     ownerAllowed = false,
     executor = defaultExecutor,
+    deadline = callDeadline(),
   }: {
     publicUrl: string
     /** The token the call is made for: the one that may read a kept answer. */
@@ -434,6 +576,11 @@ export async function runCall(
     /** The owner allowed this very call, its arguments shown to them. */
     ownerAllowed?: boolean
     executor?: PermissionExecutor
+    /**
+     * The latest the call may still go, under pacing: by default the budget
+     * of a call straight from a request (execute, the owner's answer).
+     */
+    deadline?: number
   } & AnswerShape,
 ): Promise<CallToolResult> {
   if (needsConnecting(server)) {
@@ -449,6 +596,7 @@ export async function runCall(
       keep: keepers.text,
       keepBytes: keepers.bytes,
       open: resultOpener(ctx, tokenId),
+      deadline,
     })
     const { shown, whole } = await shapeAnswerKeeping(
       answer,
@@ -476,11 +624,18 @@ export async function runCall(
       error.ask.kind === "browse" &&
       collectHandleIds(args).length === 0
     ) {
-      const { tabId, url } = error.ask.input
+      const { tabId, url, exit } = error.ask.input
 
       return (executor.browse ?? performNavigate)(
-        { ctx, tokenId, publicUrl, serverId: server.id },
-        { tabId, url },
+        {
+          ctx,
+          tokenId,
+          publicUrl,
+          serverId: server.id,
+          deadline,
+          exits: browserExitsFor(ctx, tokenId, publicUrl),
+        },
+        { tabId, url, ...(exit ? { exit } : {}) },
         { allowedByOwner: true },
       )
     }
@@ -501,7 +656,7 @@ export async function runCall(
  */
 async function ownerFirst(
   error: unknown,
-  { ctx, tokenId, publicUrl, server }: PermissionScope & { server: McpServer },
+  { ctx, tokenId, publicUrl, server }: PermissionScope & { server: OpenServer },
 ): Promise<CallToolResult | null> {
   // The browser needs the owner first: a site to allow, or a tab handed
   // over. Asked like any other request.
@@ -522,7 +677,12 @@ async function ownerFirst(
 
 /** What one call of a program run by run_code came to. */
 export type CodeCallOutcome =
-  | { ok: true; value: unknown }
+  | {
+      ok: true
+      value: unknown
+      /** Said beside the value: an old argument name the call used. */
+      notes?: string[]
+    }
   | {
       ok: false
       error: string
@@ -533,6 +693,14 @@ export type CodeCallOutcome =
        * answer in time), so it may have gone through.
        */
       transit?: boolean
+      /**
+       * "paced": its turn under pacing was too far off; nothing was sent.
+       * Otherwise the tool error's own code, when it gave one ("timeout",
+       * "browser_busy", …).
+       */
+      code?: string
+      /** When trying again may go through, where the code says so. */
+      retryAfterMs?: number
     }
   /** The owner has to act first: the result with their link. */
   | { owner: CallToolResult }
@@ -548,7 +716,7 @@ export type CodeCallOutcome =
  */
 export async function runCodeCall(
   ctx: VaultContext,
-  server: McpServer,
+  server: OpenServer,
   toolName: string,
   args: Record<string, unknown>,
   {
@@ -595,7 +763,9 @@ export async function runCodeCall(
         ? {
             runId: run.runId,
             signal: run.signal,
+            deadline: run.deadline,
             ...(run.onRun ? { onRun: run.onRun } : {}),
+            ...(run.pace ? { pace: run.pace } : {}),
           }
         : {}),
     })
@@ -696,6 +866,13 @@ function describeAsk(ask: PermissionAsk): {
         target: `note:${ask.input.target}:${ask.input.id}`,
         args: ask.input as Record<string, unknown>,
       }
+    case "service_change":
+      return {
+        target: isServiceUpdate(ask.input)
+          ? `service_update:${ask.input.serviceId}\n${ask.input.to}`
+          : `service:${ask.input.host.id}\n${ask.input.name}`,
+        args: ask.input as Record<string, unknown>,
+      }
     case "fetch":
       return {
         target: `fetch:${ask.input.method} ${ask.input.url}`,
@@ -721,6 +898,26 @@ function describeAsk(ask: PermissionAsk): {
         target: `secret_request:${ask.input.name}`,
         args: ask.input as Record<string, unknown>,
       }
+    case "secret_sites_change":
+      return {
+        target: `secret_sites:${ask.input.secretName}`,
+        args: ask.input as Record<string, unknown>,
+      }
+    case "script_use":
+      return {
+        target: `script_use:${ask.input.site}\n${ask.input.tabId}\n${scriptDigest(ask.input.script)}`,
+        args: ask.input as Record<string, unknown>,
+      }
+    case "tab_pace":
+      return {
+        target: `tab_pace:${ask.input.tabId}\n${JSON.stringify(ask.input.pace)}`,
+        args: ask.input as Record<string, unknown>,
+      }
+    case "exit_use":
+      return {
+        target: `exit_use:${ask.input.exitId}\n${ask.input.via} ${ask.input.fetch ? `${ask.input.fetch.method} ${ask.input.fetch.url}` : (ask.input.browse?.url ?? "")}`,
+        args: ask.input as Record<string, unknown>,
+      }
   }
 }
 
@@ -734,6 +931,9 @@ function toolNameOf(ask: PermissionAsk): string {
       return ask.tool.name
     case "register":
       return "register_server"
+    case "service_change":
+      // An image update is asked by the service's own tool.
+      return isServiceUpdate(ask.input) ? "update" : "register_server"
     case "access":
       return "propose_tool_access"
     case "endpoint_change":
@@ -754,6 +954,14 @@ function toolNameOf(ask: PermissionAsk): string {
       return "type"
     case "secret_request":
       return "request_secret"
+    case "secret_sites_change":
+      return "update_secret_sites"
+    case "exit_use":
+      return ask.input.via === "web_fetch" ? "web_fetch" : "tabs"
+    case "script_use":
+      return "evaluate"
+    case "tab_pace":
+      return "tabs"
     // A skill is changed through the memory tool, as a memory is.
     case "skill_change":
     default:
@@ -784,12 +992,38 @@ function tokenIsLive(token: Row["token"], now = new Date()): boolean {
   )
 }
 
-async function loadRow(where: {
-  id: string
-  vaultId: string
-  tokenId?: string
-}): Promise<Row | null> {
-  return db().permissionRequest.findFirst({ where, include: ROW_INCLUDE })
+type LoadedRow = Prisma.PermissionRequestGetPayload<{
+  include: typeof ROW_INCLUDE
+}>
+
+/** A row as loaded, its token's name opened (token-names.ts). */
+function named(ctx: VaultContext, row: LoadedRow): Row {
+  const { token, server, ...rest } = row
+  return {
+    ...rest,
+    server: server ? openServer(ctx, server) : null,
+    token: {
+      name: tokenName(ctx, token),
+      revokedAt: token.revokedAt,
+      expiresAt: token.expiresAt,
+      manageEndpoints: token.manageEndpoints,
+    },
+  }
+}
+
+async function loadRow(
+  ctx: VaultContext,
+  where: {
+    id: string
+    vaultId: string
+    tokenId?: string
+  },
+): Promise<Row | null> {
+  const row = await db().permissionRequest.findFirst({
+    where,
+    include: ROW_INCLUDE,
+  })
+  return row ? named(ctx, row) : null
 }
 
 function toolLabel(row: Pick<Row, "server" | "toolName">): string {
@@ -887,6 +1121,7 @@ async function summarizeRow(
   lines: string[]
   warning: string | null
   full?: ShownText[] | null
+  files?: RequestFile[]
   memory?: MemoryShown
   skill?: SkillShown
   wrapper?: WrapperShown
@@ -955,9 +1190,17 @@ async function summarizeRow(
     return { ...shown, lines: [...shown.lines, asker] }
   }
 
+  if (row.kind === "service_change") {
+    const asked = isServiceUpdate(args)
+      ? describeServiceUpdate(args)
+      : describeServiceAsk(args as ServiceChangeAsk)
+
+    return { ...asked, lines: [...asked.lines, asker] }
+  }
+
   if (row.kind === "browse") {
     const asked = describeBrowseAsk(args as BrowseAsk, {
-      privateAllowed: await privateAllowedFor(ctx.vaultId, row.tokenId),
+      privateAllowed: await privateAllowedFor(ctx, row.tokenId),
     })
 
     return { ...asked, lines: [...asked.lines, asker] }
@@ -973,8 +1216,20 @@ async function summarizeRow(
     const ask = args as SecretUseAsk
     const secret = await findTypableSecret(ctx, ask.secretName)
     const asked = describeSecretUseAsk(ask, {
-      bound: secret ? await isBoundOrigin(secret.id, ask.origin) : false,
+      bound: secret ? await isBoundOrigin(ctx, secret.id, ask.origin) : false,
     })
+
+    return { ...asked, lines: [...asked.lines, asker] }
+  }
+
+  if (row.kind === "script_use") {
+    const asked = describeScriptUseAsk(args as ScriptUseAsk)
+
+    return { ...asked, lines: [...asked.lines, asker] }
+  }
+
+  if (row.kind === "tab_pace") {
+    const asked = describeTabPaceAsk(args as TabPaceAsk)
 
     return { ...asked, lines: [...asked.lines, asker] }
   }
@@ -985,24 +1240,56 @@ async function summarizeRow(
     return { ...asked, lines: [...asked.lines, asker] }
   }
 
+  if (row.kind === "secret_sites_change") {
+    const ask = args as SecretSitesChangeAsk
+    const asked = describeSecretSitesChangeAsk(
+      ask,
+      await showSecretSitesChange(ctx, ask),
+    )
+
+    return { ...asked, lines: [...asked.lines, asker] }
+  }
+
   if (row.kind === "fetch") {
-    const asked = describeFetchAsk(args as FetchArgs, {
-      privateAllowed: await privateAllowedFor(ctx.vaultId, row.tokenId),
+    const fetchArgs = args as FetchArgs
+    const exit = fetchArgs.exit
+      ? await findExitLabel(ctx, fetchArgs.exit)
+      : undefined
+    const asked = describeFetchAsk(fetchArgs, {
+      privateAllowed: await privateAllowedFor(ctx, row.tokenId),
+      ...(exit ? { exitLabel: exit } : {}),
+    })
+
+    return { ...asked, lines: [...asked.lines, asker] }
+  }
+
+  if (row.kind === "exit_use") {
+    const asked = describeExitUseAsk(args as ExitUseAsk, {
+      privateAllowed: await privateAllowedFor(ctx, row.tokenId),
     })
 
     return { ...asked, lines: [...asked.lines, asker] }
   }
 
   if (row.kind === "access") {
-    const { levels } = args as AccessAsk["input"]
+    const { levels, tiers = [] } = args as AccessAsk["input"]
     const servers = await db().mcpServer.findMany({
       where: {
         vaultId: ctx.vaultId,
-        id: { in: [...new Set(levels.map((level) => level.serverId))] },
+        id: {
+          in: [
+            ...new Set([
+              ...levels.map((level) => level.serverId),
+              ...tiers.flatMap((entry) =>
+                entry.serverId ? [entry.serverId] : [],
+              ),
+            ]),
+          ],
+        },
       },
-      select: { id: true, name: true, slug: true },
+      select: SERVER_NAME_SELECT,
     })
-    const asked = describeAccessAsk(levels, servers)
+    const asked = describeAccessAsk(levels, openServers(ctx, servers), tiers)
 
     return { ...asked, lines: [...asked.lines, asker] }
   }
@@ -1064,7 +1351,7 @@ async function summarizeRow(
     const boundLines = bound
       ? [
           `Another server of ${bound.name}, beside ${bound.instances.join(", ") || "(none)"}: it shares their description${input.endpoint ? ", schema, edits" : ""} and tool descriptions, so a change to those changes every one of them`,
-          "Its tools ask you first, for every token, as a new server's do",
+          askFirstLine(Boolean(input.proposedAccess)),
         ]
       : []
     // The owner's words once they agree: shown whole.
@@ -1196,7 +1483,7 @@ async function summarizeRow(
     }
 
     const flagged = input.privateAddress
-      ? `${input.privateAddress} A server an assistant proposes reaches public addresses only: if you agree, it connects once you allow private addresses on its page.`
+      ? `${input.privateAddress} A server an assistant proposes reaches public addresses only: allow private addresses below as you agree, or later on its page.`
       : null
 
     return {
@@ -1218,21 +1505,18 @@ async function summarizeRow(
   }
 
   const tool = row.serverId
-    ? await db().mcpTool.findUnique({
-        where: {
-          serverId_name: { serverId: row.serverId, name: row.toolName },
-        },
-      })
+    ? await db()
+        .mcpTool.findFirst({
+          where: toolNameWhere(ctx, row.serverId, row.toolName),
+        })
+        .then((found) => found && openTool(ctx, found))
     : null
-  let destructive = false
-
-  try {
-    destructive =
-      (JSON.parse(tool?.annotations ?? "{}") as { destructiveHint?: boolean })
-        .destructiveHint === true
-  } catch {
-    destructive = false
-  }
+  // The tool's tier (tool-tiers.ts): the owner's choice, a wrapper's calls,
+  // or its annotations, where hints left out count as Destructive.
+  const destructive =
+    tool !== null &&
+    row.serverId !== null &&
+    (await toolTier(ctx, row.serverId, row.toolName)) === "destructive"
 
   const about = tool
     ? summarize(tool.descriptionOverride ?? tool.description)
@@ -1242,6 +1526,7 @@ async function summarizeRow(
     row.server?.kind === "ssh" && row.toolName === RUN_COMMAND
       ? stdinAsText(args)
       : null
+  const files = await requestFiles(ctx, row.tokenId, args)
 
   return {
     title: `Allow ${toolLabel(row)}?`,
@@ -1255,16 +1540,19 @@ async function summarizeRow(
         : []),
       asker,
       ...previewArgs(args),
-      ...(await handleLines(ctx, row.tokenId, args)),
     ],
+    files,
     warning: destructive
-      ? "The server marks this tool as destructive: it can change or delete things for good."
+      ? "This is a Destructive tool: it can change or delete things for good."
       : null,
     full: argsInFull(
       args,
       stdin === null
         ? []
         : [{ label: "stdin_base64, decoded as text", text: visible(stdin) }],
+      // A call that carries files shows its arguments as they are under
+      // the chips, so the owner can see where each one goes.
+      { always: files.length > 0 },
     ),
   }
 }
@@ -1277,7 +1565,7 @@ async function summarizeRow(
  */
 async function wrapperCallLines(
   ctx: VaultContext,
-  server: McpServer,
+  server: OpenServer,
   operation: string | null,
 ): Promise<string[]> {
   const { calls, callLevels } = readWrapperOperation(operation)
@@ -1286,9 +1574,11 @@ async function wrapperCallLines(
       vaultId: ctx.vaultId,
       id: { in: [...new Set(calls.map((call) => call.serverId))] },
     },
-    select: { id: true, slug: true },
+    select: SERVER_META_SELECT,
   })
-  const slugs = new Map(servers.map((entry) => [entry.id, entry.slug]))
+  const slugs = new Map(
+    servers.map((entry) => [entry.id, serverSlug(ctx, entry)]),
+  )
 
   return [
     `Runs the program you approved for the wrapper ${server.name}, which may call: ${calls.map((call) => `${slugs.get(call.serverId) ?? "(removed server)"}/${call.tool}`).join(", ")}`,
@@ -1296,56 +1586,6 @@ async function wrapperCallLines(
       ? `Those calls were approved with the wrapper, so they run in this call whatever the token's own levels for them are, as often as the program makes them (at most ${MAX_CALLS_PER_RUN} calls in all), with whatever arguments it works out.`
       : `Allowing this call lets those calls run in it, as the token's levels allow. Any of them that would ask you first is not asked about again in this run: the program may call it as often as it does (at most ${MAX_CALLS_PER_RUN} calls in all), with whatever arguments it works out.`,
   ]
-}
-
-const COUNT = new Intl.NumberFormat("en-US")
-
-/**
- * What each kept result a call's arguments name is, so the owner sees what
- * the call carries without its content: its name, type and size, which
- * server's tool kept it, and until when. An id the token no longer has is
- * said too, since the call would fail.
- */
-async function handleLines(
-  ctx: VaultContext,
-  tokenId: string,
-  args: Record<string, unknown>,
-): Promise<string[]> {
-  let ids: string[]
-
-  try {
-    ids = collectHandleIds(args, { loose: true })
-  } catch {
-    return []
-  }
-
-  const infos = await describeResults(ctx, tokenId, ids)
-  const serverIds = infos.flatMap((info) =>
-    info.found && info.serverId ? [info.serverId] : [],
-  )
-  const servers = serverIds.length
-    ? await db().mcpServer.findMany({
-        where: { id: { in: serverIds }, vaultId: ctx.vaultId },
-        select: { id: true, slug: true },
-      })
-    : []
-  const slugs = new Map(servers.map((server) => [server.id, server.slug]))
-
-  return infos.map((info) => {
-    if (!info.found) {
-      return `Kept result ${info.id}: no longer available for this token; the call will fail`
-    }
-
-    const size =
-      info.kind === "bytes"
-        ? `${COUNT.format(info.length)} bytes`
-        : `${COUNT.format(info.length)} characters`
-    const from = info.serverId
-      ? `${slugs.get(info.serverId) ?? "(removed server)"}/${info.toolName}`
-      : info.toolName
-
-    return `Kept result ${info.id}: ${info.name ?? "(unnamed)"}, ${info.mediaType}, ${size}, from ${from}, readable until ${info.expiresAt.toISOString()}`
-  })
 }
 
 async function toView(
@@ -1359,6 +1599,7 @@ async function toView(
     wrapper = null,
     repo = null,
     full = null,
+    files = [],
     ownerOnly = [],
     ...summary
   } = await summarizeRow(ctx, row, publicUrl)
@@ -1368,6 +1609,7 @@ async function toView(
       ? "expired"
       : (row.status as PermissionStatus)
   const finished = status === "executed" || status === "failed"
+  const proposal = proposedAccessOf(ctx, row)
 
   return {
     id: row.id,
@@ -1382,9 +1624,13 @@ async function toView(
     ...summary,
     // Whatever made the lines, nothing in them hides from the owner.
     title: visible(summary.title),
-    lines: summary.lines.map((line) => visible(line)),
+    lines: [
+      ...summary.lines,
+      ...(proposal ? [proposedAccessLine(proposal, row.token.name)] : []),
+    ].map((line) => visible(line)),
     ownerOnly: ownerOnly.map((line) => visible(line)),
     full,
+    files,
     memory,
     skill,
     wrapper,
@@ -1395,17 +1641,104 @@ async function toView(
         ? shareReviewHref(readArgs(ctx, row) as RepoShareAsk, row.id)
         : null,
     url: permissionUrl(publicUrl, row.id),
+    revision: row.argsHash,
+    conflicts:
+      status === "pending" ? await conflictsOf(ctx, row, publicUrl) : [],
     createdAt: row.createdAt,
     expiresAt: row.expiresAt,
     outcome: readResult(ctx, row),
     outcomeIsError: row.resultIsError,
-    decisions: decisionsFor(kind),
+    decisions:
+      kind === "service_change" && isServiceUpdate(readArgs(ctx, row))
+        ? decisionsFor(kind).map((decision) =>
+            decision.value === "allow_once"
+              ? { ...decision, label: "Update it" }
+              : decision,
+          )
+        : decisionsFor(kind),
     connect:
       finished && row.server && needsConnecting(row.server)
         ? connectLinks(row.server, publicUrl)
         : null,
     secretToEnter: await secretToEnter(ctx, row),
+    secretSites:
+      kind === "secret_sites_change" && status === "pending"
+        ? await showSecretSitesChange(
+            ctx,
+            readArgs(ctx, row) as SecretSitesChangeAsk,
+          )
+        : null,
+    offersPrivateAddresses:
+      kind === "register" &&
+      registersPrivateAddress(readArgs(ctx, row) as RegisterArgs),
+    proposedAccess:
+      proposal && status === "pending"
+        ? proposedAccessShown(proposal, row.token.name)
+        : null,
   }
+}
+
+/**
+ * Whether a proposed MCP server or endpoint was flagged as being at a private
+ * address: the only kind of request on which the owner may allow private
+ * addresses as they agree. A mail or calendar account has no such rule.
+ */
+function registersPrivateAddress(asked: RegisterArgs): boolean {
+  if (asked.mail || asked.calendar) {
+    return false
+  }
+
+  return Boolean(
+    asked.endpoint
+      ? asked.endpoint.preview.privateAddress
+      : asked.privateAddress,
+  )
+}
+
+/**
+ * The levels and tiers a request for a new or changed server carries from
+ * the assistant (proposed-access.ts), or null.
+ */
+function proposedAccessOf(ctx: VaultContext, row: Row): ProposedAccess | null {
+  if (
+    row.kind !== "register" &&
+    row.kind !== "wrapper_change" &&
+    row.kind !== "service_change"
+  ) {
+    return null
+  }
+
+  return (
+    (readArgs(ctx, row) as { proposedAccess?: ProposedAccess | null })
+      .proposedAccess ?? null
+  )
+}
+
+/** The other requests waiting on what this one changes (`conflicts`). */
+async function conflictsOf(
+  ctx: VaultContext,
+  row: Row,
+  publicUrl: string,
+): Promise<PermissionView["conflicts"]> {
+  if (!isFoldingKind(row.kind) || !row.targetKey) {
+    return []
+  }
+
+  const others = await db().permissionRequest.findMany({
+    where: {
+      ...waitingRequestsWhere(ctx),
+      targetKey: row.targetKey,
+      id: { not: row.id },
+    },
+    orderBy: { createdAt: "asc" },
+    select: { id: true, token: { select: TOKEN_NAME_SELECT } },
+  })
+
+  return others.map((other) => ({
+    id: other.id,
+    tokenName: tokenName(ctx, other.token),
+    url: permissionUrl(publicUrl, other.id),
+  }))
 }
 
 /** The tab a browser request is about, if it names one. */
@@ -1416,7 +1749,9 @@ function browserTabOf(
   if (
     row.kind !== "browse" &&
     row.kind !== "browser_handover" &&
-    row.kind !== "secret_use"
+    row.kind !== "secret_use" &&
+    row.kind !== "script_use" &&
+    row.kind !== "tab_pace"
   ) {
     return null
   }
@@ -1436,6 +1771,8 @@ function newSecretOf(
   login: string | null
   kind?: "text" | "totp"
   origins?: string[]
+  username?: string | null
+  generate?: PasswordRecipe | null
 } | null {
   if (row.kind === "secret_request") {
     const asked = readArgs(ctx, row) as SecretRequestAsk
@@ -1447,7 +1784,17 @@ function newSecretOf(
       login: null,
       kind: asked.kind,
       origins: asked.origins,
+      username: asked.username ?? null,
+      generate: asked.generate ?? null,
     }
+  }
+
+  if (row.kind === "service_change") {
+    const { newSecret } = readArgs(ctx, row) as ServiceChangeAsk
+
+    return newSecret
+      ? { name: newSecret, optional: false, clientId: null, login: null }
+      : null
   }
 
   if (row.kind === "wrapper_change") {
@@ -1531,7 +1878,7 @@ function outcomeOf(view: PermissionView): CallToolResult {
       )
     default:
       return text(
-        `Still waiting for the owner. They can answer until ${view.expiresAt.toISOString()}. When they say they have, call check_permission with id "${view.id}" for the result.\n\n${linkLastText(view.url)}`,
+        `Still waiting for the owner. They can answer until ${view.expiresAt.toISOString()}. ${nextMessageCheck(`check_permission with id "${view.id}"`)}\n\n${linkLastText(view.url, view.title)}`,
       )
   }
 }
@@ -1541,7 +1888,7 @@ async function outcomeFromRow(
   id: string,
   publicUrl: string,
 ): Promise<CallToolResult> {
-  const row = await loadRow({ id, vaultId: ctx.vaultId })
+  const row = await loadRow(ctx, { id, vaultId: ctx.vaultId })
 
   return row
     ? outcomeOf(await toView(ctx, row, publicUrl))
@@ -1550,7 +1897,7 @@ async function outcomeFromRow(
 
 function pendingText(view: PermissionView, detail?: string): string {
   if (view.kind === "access") {
-    return `Not done yet: the owner saves tool levels themselves.\n\n${summaryText(view)}${detail ? `\n\n${detail}` : ""}\n\nThe owner opens the link below signed in to PCP. Your levels are filled in there and each change is marked; they can adjust any of them, and nothing changes until they save. When they say they have saved, call check_permission with id "${view.id}": it says what they saved (and waits a little if they are still on it). The request stays open until ${view.expiresAt.toISOString()}.\n\n${linkLastText(view.url)}`
+    return `Not done yet: the owner saves tool levels themselves.\n\n${summaryText(view)}${detail ? `\n\n${detail}` : ""}\n\nThe owner opens the link below signed in to PCP. Your levels are filled in there and each change is marked; they can adjust any of them, and nothing changes until they save. ${nextMessageCheck(`check_permission with id "${view.id}"`)} It says what they saved (and waits a little if they are still on it). The request stays open until ${view.expiresAt.toISOString()}.\n\n${linkLastText(view.url, view.title)}`
   }
 
   const typed = view.secretToEnter
@@ -1563,10 +1910,13 @@ function pendingText(view: PermissionView, detail?: string): string {
 
   const told = {
     ...view,
-    lines: view.lines.filter((line) => !view.ownerOnly.includes(line)),
+    lines: [
+      ...view.lines.filter((line) => !view.ownerOnly.includes(line)),
+      ...view.files.map(fileLine),
+    ],
   }
 
-  return `Not done yet: this needs the owner's permission.\n\n${summaryText(told)}\n\nThe owner answers on the page at the link below, signed in to PCP.${typed} When they say they have answered, call check_permission with id "${view.id}" for the result (it waits a little if they are still on it). The request stays open until ${view.expiresAt.toISOString()}.\n\n${linkLastText(view.url)}`
+  return `Not done yet: this needs the owner's permission.\n\n${summaryText(told)}\n\nThe owner answers on the page at the link below, signed in to PCP.${typed} ${nextMessageCheck(`check_permission with id "${view.id}"`)} It gives the result (and waits a little if they are still on it). The request stays open until ${view.expiresAt.toISOString()}.\n\n${linkLastText(view.url, view.title)}`
 }
 
 /**
@@ -1578,8 +1928,20 @@ export async function withPermission(
   ask: PermissionAsk,
 ): Promise<CallToolResult> {
   const { target, args } = describeAsk(ask)
-  const argsHash = requestHash(ask.kind, target, args)
+  const argsHash = requestHash(scope.ctx.dek, ask.kind, target, args)
   const now = new Date()
+
+  // The same call the owner just allowed once, made again (a program run
+  // again after it stopped there): answered with what that run did.
+  if (ask.kind === "call") {
+    const reused = await reuseExecuted(scope, argsHash, now)
+
+    if (reused) {
+      return text(`${reusedNote(reused.ranAt, now)}\n${reused.text}`)
+    }
+  }
+
+  const key = targetKey(scope.ctx.dek, target)
 
   // The same request asked again finds the row it already has, so the owner
   // is not asked twice for one thing.
@@ -1595,6 +1957,44 @@ export async function withPermission(
   })
 
   let id = existing?.id
+  let folded = false
+
+  // A change made on top of the token's own waiting request (skills.ts,
+  // memories.ts: `fold`), or a note proposed again, replaces that request:
+  // the owner is asked once, about everything together, and a page they
+  // had open answers only after they read it again (`revision`).
+  const foldInto = id ? undefined : await foldTarget(scope, ask, key, now)
+
+  if (foldInto) {
+    const { count } = await db().permissionRequest.updateMany({
+      where: {
+        id: foldInto,
+        vaultId: scope.ctx.vaultId,
+        tokenId: scope.tokenId,
+        kind: ask.kind,
+        status: "pending",
+        expiresAt: { gt: now },
+      },
+      data: {
+        argsCiphertext: asBytes(
+          encryptString(scope.ctx.dek, JSON.stringify(args), aad(foldInto)),
+        ),
+        argsHash,
+        targetKey: key,
+        expiresAt: new Date(now.getTime() + PERMISSION_TTL_MS),
+      },
+    })
+
+    if (count !== 1) {
+      return text(
+        `Your open request ${foldInto}, which this change was made on top of, was answered or ended in the meantime, so this change was not added to it and the owner was not asked. Call check_permission with id "${foldInto}" to see how it went, then read the item again and propose the change anew.`,
+        true,
+      )
+    }
+
+    id = foldInto
+    folded = true
+  }
 
   if (!id) {
     id = newId()
@@ -1611,11 +2011,18 @@ export async function withPermission(
                 ask.kind === "browse" ||
                 ask.kind === "browser_handover" ||
                 ask.kind === "secret_use" ||
-                ask.kind === "secret_request"
+                ask.kind === "secret_request" ||
+                ask.kind === "secret_sites_change" ||
+                ask.kind === "script_use" ||
+                ask.kind === "tab_pace"
               ? ask.input.serverId
-              : ask.kind === "note_change" && ask.input.target === "server"
-                ? ask.input.id
-                : null,
+              : ask.kind === "exit_use"
+                ? (ask.input.browse?.serverId ?? null)
+                : ask.kind === "note_change" && ask.input.target === "server"
+                  ? ask.input.id
+                  : ask.kind === "service_change" && isServiceUpdate(ask.input)
+                    ? ask.input.serviceId
+                    : null,
         toolName: toolNameOf(ask),
         fields:
           ask.kind === "call" && ask.fields ? JSON.stringify(ask.fields) : null,
@@ -1626,6 +2033,7 @@ export async function withPermission(
           encryptString(scope.ctx.dek, JSON.stringify(args), aad(id)),
         ),
         argsHash,
+        targetKey: key,
         expiresAt: new Date(now.getTime() + PERMISSION_TTL_MS),
       },
     })
@@ -1634,34 +2042,257 @@ export async function withPermission(
   noteOwnerAsked(id)
 
   // Closed with the tab it is about, if that closes before the owner answers.
-  if (ask.kind === "browser_handover") {
+  if (ask.kind === "browser_handover" || ask.kind === "tab_pace") {
     noteHandoverRequest(scope.ctx.vaultId, ask.input.tabId, id)
   }
 
-  const row = await loadRow({ id, vaultId: scope.ctx.vaultId })
+  const row = await loadRow(scope.ctx, { id, vaultId: scope.ctx.vaultId })
   // The assistant hears which tools it named, to check its own patterns;
   // the page shows the owner the same levels in full.
   const detail =
     ask.kind === "access"
       ? listAccessLevels(
           ask.input.levels,
-          await db().mcpServer.findMany({
-            where: {
-              vaultId: scope.ctx.vaultId,
-              id: {
-                in: [
-                  ...new Set(ask.input.levels.map((level) => level.serverId)),
-                ],
+          openServers(
+            scope.ctx,
+            await db().mcpServer.findMany({
+              where: {
+                vaultId: scope.ctx.vaultId,
+                id: {
+                  in: [
+                    ...new Set([
+                      ...ask.input.levels.map((level) => level.serverId),
+                      ...(ask.input.tiers ?? []).flatMap((entry) =>
+                        entry.serverId ? [entry.serverId] : [],
+                      ),
+                    ]),
+                  ],
+                },
               },
-            },
-            select: { id: true, slug: true },
-          }),
+              select: SERVER_META_SELECT,
+            }),
+          ),
+          ask.input.tiers ?? [],
         )
       : undefined
 
-  return text(
-    pendingText(await toView(scope.ctx, row!, scope.publicUrl), detail),
+  const pending = pendingText(
+    await toView(scope.ctx, row!, scope.publicUrl),
+    detail,
   )
+
+  return text(folded ? `${foldedText(id, ask.kind)}\n\n${pending}` : pending)
+}
+
+type CallAsk = Extract<PermissionAsk, { kind: "call" }>
+
+/**
+ * A program's call to a tool that asks (run_code's pcp.call): the value of
+ * the run the owner allowed once, when this is that same call made again
+ * within REUSE_EXECUTED_MS, and otherwise the owner asked, as for execute.
+ */
+export async function askCodeCall(
+  scope: PermissionScope,
+  ask: CallAsk,
+): Promise<CodeCallOutcome> {
+  const { target, args } = describeAsk(ask)
+  const now = new Date()
+  const reused = await reuseExecuted(
+    scope,
+    requestHash(scope.ctx.dek, ask.kind, target, args),
+    now,
+  )
+
+  if (reused) {
+    // Too long to keep as a value: the text the assistant would read.
+    return reused.outcome ?? { ok: true, value: reused.text }
+  }
+
+  return { owner: await withPermission(scope, ask) }
+}
+
+type Reused = {
+  ranAt: Date
+  /** The stored text, as check_permission gives it. */
+  text: string
+  /** What a program is handed, when it was short enough to keep. */
+  outcome: Extract<CodeCallOutcome, { ok: boolean }> | null
+}
+
+/**
+ * The run of this same call (same token, same request hash) that the owner
+ * allowed once and that went through, if it ran within REUSE_EXECUTED_MS
+ * and no identical call took its answer yet. Taking it clears it, so it
+ * answers one call: a third asks the owner again. Never another token's,
+ * and never a call allowed for a while or always, which run without asking.
+ */
+async function reuseExecuted(
+  { ctx, tokenId }: PermissionScope,
+  argsHash: string,
+  now: Date,
+): Promise<Reused | null> {
+  const found = await db().permissionRequest.findFirst({
+    where: {
+      vaultId: ctx.vaultId,
+      tokenId,
+      kind: "call",
+      argsHash,
+      status: "executed",
+      resultIsError: false,
+      reuseUntil: { gt: now },
+    },
+    orderBy: { decidedAt: "desc" },
+  })
+
+  if (!found) {
+    return null
+  }
+
+  // One winner, however many identical calls race for it.
+  const { count } = await db().permissionRequest.updateMany({
+    where: { id: found.id, reuseUntil: { gt: now } },
+    data: { reuseUntil: null, resultJsonCiphertext: null },
+  })
+
+  if (count !== 1) {
+    return null
+  }
+
+  return {
+    ranAt: found.decidedAt ?? now,
+    text: readResult(ctx, found) ?? "",
+    outcome: readResultJson(ctx, found),
+  }
+}
+
+function readResultJson(
+  ctx: VaultContext,
+  row: PermissionRequest,
+): Reused["outcome"] {
+  if (!row.resultJsonCiphertext) {
+    return null
+  }
+
+  try {
+    const parsed = JSON.parse(
+      decryptString(
+        ctx.dek,
+        Buffer.from(row.resultJsonCiphertext),
+        `${aad(row.id)}:result_json`,
+      ),
+    ) as { ok?: unknown; value?: unknown; error?: unknown }
+
+    if (parsed.ok === true) {
+      return { ok: true, value: parsed.value ?? null }
+    }
+
+    return typeof parsed.error === "string"
+      ? { ok: false, error: parsed.error }
+      : null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * The answer a program would have been handed for a call the owner allowed
+ * once, as JSON to keep beside its text, from the upstream's own answer:
+ * shaped as runCodeCall shapes it, files and long texts kept as the token's
+ * results and shown as handles. Null when there is no such answer (the
+ * browser opened a site instead) or it is longer than REUSE_VALUE_MAX_CHARS.
+ */
+async function programAnswer(
+  ctx: VaultContext,
+  row: Row,
+  answer: CallToolResult | undefined,
+): Promise<string | null> {
+  if (!answer || answer.isError) {
+    return null
+  }
+
+  try {
+    const keepers = resultKeepers(ctx, row.tokenId)
+    const context = { serverId: row.serverId ?? "", toolName: row.toolName }
+    const outcome = await answerValue(
+      answer,
+      {
+        fields: readStoredFields(row.fields),
+        decode: readStoredFields(row.decode),
+        keep: readStoredFields(row.keep),
+      },
+      {
+        text: (input) => keepers.text({ ...input, ...context }),
+        bytes: (input) => keepers.bytes({ ...input, ...context }),
+      },
+      { max: resourceLimits().answerChars },
+    )
+    const json = JSON.stringify(
+      outcome.ok
+        ? { ok: true, value: outcome.value }
+        : { ok: false, error: outcome.error },
+    )
+
+    return json.length <= REUSE_VALUE_MAX_CHARS ? json : null
+  } catch {
+    // Nothing to keep (the token's room for kept results is full): an
+    // identical call gets the text instead.
+    return null
+  }
+}
+
+/**
+ * The executor a call the owner allowed is run with, noting the answer of
+ * the call itself (not of the calls a wrapper's program makes, which go to
+ * the executor beneath).
+ */
+function noting(
+  executor: PermissionExecutor,
+  into: { answer?: CallToolResult },
+): PermissionExecutor {
+  return {
+    ...executor,
+    callTool: async (...args) => {
+      const answer = await executor.callTool(...args)
+      into.answer = answer
+      return answer
+    },
+  }
+}
+
+/**
+ * The waiting request an ask replaces, if it replaces one: the one a skill
+ * or memory change was made on top of, or the token's note proposal still
+ * waiting for the same item (a note is proposed whole, so the newer one is
+ * what the assistant wants).
+ */
+async function foldTarget(
+  scope: PermissionScope,
+  ask: PermissionAsk,
+  key: string,
+  now: Date,
+): Promise<string | undefined> {
+  if ("fold" in ask && ask.fold) {
+    return ask.fold
+  }
+
+  if (ask.kind !== "note_change") {
+    return undefined
+  }
+
+  const open = await db().permissionRequest.findFirst({
+    where: {
+      vaultId: scope.ctx.vaultId,
+      tokenId: scope.tokenId,
+      kind: "note_change",
+      targetKey: key,
+      status: "pending",
+      expiresAt: { gt: now },
+    },
+    orderBy: { createdAt: "desc" },
+    select: { id: true },
+  })
+
+  return open?.id
 }
 
 /**
@@ -1681,21 +2312,56 @@ export async function decidePermission(
     always,
     minutes,
     origins,
+    loginName,
+    generate,
+    sites,
+    revision,
+    allowPrivate,
+    access,
   }: {
     publicUrl: string
     tokenId?: string
+    /**
+     * A proposed server at a private address: the owner ticked "Allow
+     * private addresses" on PCP's page. Taken only where the page offered it
+     * (`offersPrivateAddresses`); nothing an assistant sends sets it.
+     */
+    allowPrivate?: boolean
+    /**
+     * The view's `revision` the owner answered: a request an assistant
+     * changed since (a change folded in) is not answered on what they read.
+     */
+    revision?: string
     /** The value of a new server's secret, typed in on PCP's page. */
     secretValue?: string
     /** request_secret: the sites the owner left in, on PCP's page. */
     origins?: string[]
+    /** request_secret: the login name the owner left on PCP's page. */
+    loginName?: string
+    /**
+     * request_secret: the owner's Generate, a password PCP makes here in
+     * place of a typed value (generate-password.ts); never sent back.
+     */
+    generate?: unknown
+    /**
+     * update_secret_sites: the changes the owner ticked, by key, and the
+     * sites as the page showed them (SecretSitesShown `basis`).
+     */
+    sites?: { basis?: string; keep?: string[] }
     /** A memory to share: read it in every conversation, ticked on the page. */
     always?: boolean
     /** "Allow for": how long, one of ALLOW_FOR_MINUTES. */
     minutes?: number
+    /**
+     * A new or changed server: the levels and tiers the owner left on the
+     * page, from the assistant's proposal (proposed-access.ts). Nothing
+     * else writes them, and left out, none are written.
+     */
+    access?: unknown
   },
   executor: PermissionExecutor = defaultExecutor,
 ): Promise<CallToolResult> {
-  const row = await loadRow({
+  const row = await loadRow(ctx, {
     id,
     vaultId: ctx.vaultId,
     ...(tokenId ? { tokenId } : {}),
@@ -1709,6 +2375,13 @@ export async function decidePermission(
     return outcomeOf(await toView(ctx, row, publicUrl))
   }
 
+  if (revision !== undefined && revision !== row.argsHash) {
+    return text(
+      "The assistant added to this request while you had it open, so nothing was done. Read it again, then answer.",
+      true,
+    )
+  }
+
   const kind = row.kind as PermissionKind
   // Only a tool call (for the tool) and a web request (for the site) have
   // "always", "allow_for" and "block": any other answer is about this one
@@ -1717,6 +2390,8 @@ export async function decidePermission(
     kind === "call" ||
     kind === "fetch" ||
     kind === "browse" ||
+    kind === "exit_use" ||
+    kind === "script_use" ||
     isSecretKind(kind)
   const choice: PermissionDecision = !settles
     ? decision === "always" || decision === "allow_for"
@@ -1773,9 +2448,41 @@ export async function decidePermission(
         ? fetchHostOf(readArgs(ctx, row) as BrowseAsk)
         : null
 
+  // An exit's answer is about the exit: never the site, never the tool.
+  const exitId =
+    kind === "exit_use" ? (readArgs(ctx, row) as ExitUseAsk).exitId : null
+
+  if (exitId && choice === "block") {
+    await writeExitAccess(ctx.vaultId, row.tokenId, exitId, "blocked")
+
+    return finishUnrun(
+      ctx,
+      row,
+      publicUrl,
+      "The owner blocked that exit for this token, so nothing was sent.",
+    )
+  }
+
+  if (exitId && choice === "always") {
+    await writeExitAccess(ctx.vaultId, row.tokenId, exitId, "allowed")
+  }
+
+  // A script's answer is about scripts at its site: never the tool.
+  if (kind === "script_use" && choice === "block") {
+    const { site } = readArgs(ctx, row) as ScriptUseAsk
+    await writeScriptAccess(ctx, row.tokenId, site, "blocked")
+
+    return finishUnrun(
+      ctx,
+      row,
+      publicUrl,
+      `The owner blocked scripts at ${site} for this token, so the script was not run.`,
+    )
+  }
+
   if (choice === "block" || choice === "decline") {
     if (choice === "block" && host) {
-      await writeSiteAccess(ctx.vaultId, row.tokenId, host, "blocked")
+      await writeSiteAccess(ctx, row.tokenId, host, "blocked")
     } else if (choice === "block" && row.serverId) {
       await writeToolAccess(row.tokenId, row.serverId, row.toolName, "blocked")
     }
@@ -1822,11 +2529,43 @@ export async function decidePermission(
   // A secret for the browser: its value (or one the owner added since) and
   // the sites, checked before anything is written, so a mistyped seed can
   // be typed again.
+  // Generate makes the value here, on PCP's machine: it is stored and never
+  // passes through the page or the assistant.
+  let typedValue = secretValue
+
+  if (
+    kind === "secret_request" &&
+    generate !== undefined &&
+    generate !== null
+  ) {
+    try {
+      typedValue = generatePassword(checkPasswordRecipe(generate))
+    } catch (error) {
+      if (isPcpError(error)) {
+        return text(error.message, true)
+      }
+
+      throw error
+    }
+  }
+
+  if (kind === "secret_sites_change") {
+    const problem = await checkSecretSitesAnswer(
+      ctx,
+      readArgs(ctx, row) as SecretSitesChangeAsk,
+      sites ?? {},
+    )
+
+    if (problem) {
+      return text(problem, true)
+    }
+  }
+
   if (kind === "secret_request") {
     const problem = await checkSecretAnswer(
       ctx,
       readArgs(ctx, row) as SecretRequestAsk,
-      { value: secretValue, origins },
+      { value: typedValue, origins, loginName },
     )
 
     if (problem) {
@@ -1844,15 +2583,34 @@ export async function decidePermission(
     }
   }
 
-  // A secret's answer is about the secret, never the browser tool's level.
-  if (isSecretKind(kind)) {
-    // Written by executeSecretUse and applySecretRequest below.
+  // The levels and tiers the owner left beside the approval, checked before
+  // anything is written, so a mistake can be fixed and answered again.
+  const proposal = proposedAccessOf(ctx, row)
+  let chosenAccess: AccessRule[] = []
+
+  if (proposal && access !== undefined) {
+    try {
+      chosenAccess = checkChosenAccess(proposal, access)
+    } catch (error) {
+      if (isPcpError(error)) {
+        return text(error.message, true)
+      }
+
+      throw error
+    }
+  }
+
+  // A secret's answer is about the secret, never the browser tool's level;
+  // an exit's was written above.
+  if (isSecretKind(kind) || kind === "exit_use" || kind === "script_use") {
+    // Written by executeSecretUse, executeScriptUse and applySecretRequest
+    // below.
   } else if (choice === "always" && host) {
-    await writeSiteAccess(ctx.vaultId, row.tokenId, host, "allowed")
+    await writeSiteAccess(ctx, row.tokenId, host, "allowed")
   } else if (choice === "always" && row.serverId) {
     await writeToolAccess(row.tokenId, row.serverId, row.toolName, "allowed")
   } else if (allowFor && host) {
-    await allowSiteFor(row.tokenId, host, allowFor)
+    await allowSiteFor(ctx, row.tokenId, host, allowFor)
   } else if (allowFor && row.serverId) {
     await allowToolFor(row.tokenId, row.serverId, row.toolName, allowFor)
   }
@@ -1865,11 +2623,13 @@ export async function decidePermission(
   }
 
   let result: CallToolResult
+  // A call's own answer, for an identical call to be handed (programAnswer).
+  const answered: { answer?: CallToolResult } = {}
 
   try {
     result =
       kind === "call"
-        ? await executeCall(ctx, row, publicUrl, executor)
+        ? await executeCall(ctx, row, publicUrl, executor, answered)
         : kind === "endpoint_change"
           ? text(
               await applyEndpointChange(
@@ -1893,6 +2653,7 @@ export async function decidePermission(
                     {
                       tokenId: row.tokenId,
                       ...(secretValue ? { secretValue } : {}),
+                      access: chosenAccess,
                     },
                   ),
                 )
@@ -1911,40 +2672,111 @@ export async function decidePermission(
                         readArgs(ctx, row) as NoteChangeAsk,
                       ),
                     )
-                  : kind === "fetch"
-                    ? await executeFetch(ctx, row, publicUrl, executor)
-                    : kind === "browse"
-                      ? await executeBrowse(ctx, row, publicUrl, executor)
-                      : kind === "browser_handover"
-                        ? await executeHandover(ctx, row)
-                        : kind === "secret_use"
-                          ? await executeSecretUse(
-                              ctx,
-                              row,
-                              secretLevel(choice),
-                              publicUrl,
-                              executor,
-                            )
-                          : kind === "secret_request"
-                            ? text(
-                                await applySecretRequest(
-                                  ctx,
-                                  row.tokenId,
-                                  readArgs(ctx, row) as SecretRequestAsk,
-                                  {
-                                    value: secretValue,
-                                    origins,
-                                    level: secretLevel(choice),
-                                  },
+                  : kind === "service_change" &&
+                      isServiceUpdate(readArgs(ctx, row))
+                    ? text(
+                        await applyServiceUpdate(
+                          ctx,
+                          readArgs(ctx, row) as ServiceUpdateAsk,
+                          {
+                            update: (updateCtx, id, change) =>
+                              (executor.updateService ?? updateService)(
+                                updateCtx,
+                                id,
+                                { publicUrl },
+                                change,
+                              ),
+                          },
+                        ),
+                      )
+                    : kind === "service_change"
+                      ? text(
+                          await applyServiceChange(
+                            ctx,
+                            readArgs(ctx, row) as ServiceChangeAsk,
+                            {
+                              tokenId: row.tokenId,
+                              ...(secretValue ? { secretValue } : {}),
+                              access: chosenAccess,
+                              launch: (launchCtx, input) =>
+                                (executor.launchService ?? launchService)(
+                                  launchCtx,
+                                  input,
+                                  { publicUrl },
                                 ),
-                              )
-                            : await executeRegister(
-                                ctx,
-                                row,
-                                publicUrl,
-                                executor,
-                                secretValue,
-                              )
+                            },
+                          ),
+                        )
+                      : kind === "fetch"
+                        ? await executeFetch(ctx, row, publicUrl, executor)
+                        : kind === "browse"
+                          ? await executeBrowse(ctx, row, publicUrl, executor)
+                          : kind === "browser_handover"
+                            ? await executeHandover(ctx, row)
+                            : kind === "tab_pace"
+                              ? executeTabPace(ctx, row)
+                              : kind === "secret_use"
+                                ? await executeSecretUse(
+                                    ctx,
+                                    row,
+                                    secretLevel(choice),
+                                    publicUrl,
+                                    executor,
+                                  )
+                                : kind === "script_use"
+                                  ? await executeScriptUse(
+                                      ctx,
+                                      row,
+                                      choice,
+                                      publicUrl,
+                                      executor,
+                                    )
+                                  : kind === "exit_use"
+                                    ? await executeExitUse(
+                                        ctx,
+                                        row,
+                                        publicUrl,
+                                        executor,
+                                      )
+                                    : kind === "secret_request"
+                                      ? text(
+                                          await applySecretRequest(
+                                            ctx,
+                                            row.tokenId,
+                                            readArgs(
+                                              ctx,
+                                              row,
+                                            ) as SecretRequestAsk,
+                                            {
+                                              value: typedValue,
+                                              origins,
+                                              level: secretLevel(choice),
+                                              loginName,
+                                              generated:
+                                                typedValue !== secretValue,
+                                            },
+                                          ),
+                                        )
+                                      : kind === "secret_sites_change"
+                                        ? text(
+                                            await applySecretSitesChange(
+                                              ctx,
+                                              readArgs(
+                                                ctx,
+                                                row,
+                                              ) as SecretSitesChangeAsk,
+                                              sites ?? {},
+                                            ),
+                                          )
+                                        : await executeRegister(
+                                            ctx,
+                                            row,
+                                            publicUrl,
+                                            executor,
+                                            secretValue,
+                                            allowPrivate === true,
+                                            chosenAccess,
+                                          )
   } catch (error) {
     if (!isPcpError(error)) {
       console.error("[permissions] running an allowed request failed", {
@@ -1967,6 +2799,10 @@ export async function decidePermission(
     part.type === "text" ? [part.text] : [],
   )
   const stored = storedResultText(texts, undefined, resultNotices(texts))
+  // Allowed once and through: the same token's identical call is answered
+  // with this run for a while (reuseExecuted), a program's with its value.
+  const reusable = kind === "call" && choice === "allow_once" && !failed
+  const json = reusable ? await programAnswer(ctx, row, answered.answer) : null
 
   await db().permissionRequest.update({
     where: { id: row.id },
@@ -1976,6 +2812,16 @@ export async function decidePermission(
       resultCiphertext: asBytes(
         encryptString(ctx.dek, stored, `${aad(row.id)}:result`),
       ),
+      ...(reusable
+        ? {
+            reuseUntil: new Date(Date.now() + REUSE_EXECUTED_MS),
+            resultJsonCiphertext: json
+              ? asBytes(
+                  encryptString(ctx.dek, json, `${aad(row.id)}:result_json`),
+                )
+              : null,
+          }
+        : {}),
     },
   })
 
@@ -1987,6 +2833,7 @@ async function executeCall(
   row: Row,
   publicUrl: string,
   executor: PermissionExecutor,
+  answered: { answer?: CallToolResult } = {},
 ): Promise<CallToolResult> {
   if (!row.server) {
     return text(
@@ -2024,7 +2871,7 @@ async function executeCall(
     decode: readStoredFields(row.decode),
     keep: readStoredFields(row.keep),
     ownerAllowed: true,
-    executor: wrapped,
+    executor: noting(wrapped, answered),
   })
 }
 
@@ -2050,8 +2897,18 @@ async function executeBrowse(
   const asked = readArgs(ctx, row) as BrowseAsk
 
   return (executor.browse ?? performNavigate)(
-    { ctx, tokenId: row.tokenId, publicUrl, serverId: row.server.id },
-    { tabId: asked.tabId, url: asked.url },
+    {
+      ctx,
+      tokenId: row.tokenId,
+      publicUrl,
+      serverId: row.server.id,
+      exits: browserExitsFor(ctx, row.tokenId, publicUrl),
+    },
+    {
+      tabId: asked.tabId,
+      url: asked.url,
+      ...(asked.exit ? { exit: asked.exit } : {}),
+    },
     { allowedByOwner: true },
   )
 }
@@ -2127,14 +2984,100 @@ async function executeSecretUse(
       ctx,
       row.server,
       "type",
-      { ...asked.call, text: { $secret: secret.name } },
+      {
+        ...asked.call,
+        text: {
+          $secret: secret.name,
+          ...(asked.part === "username" ? { part: "username" } : {}),
+        },
+      },
       { publicUrl, tokenId: row.tokenId, ownerAllowed: true, executor },
     )
   } finally {
     if (level === "once") {
-      await dropOnceAllowance(use)
+      await dropOnceAllowance(ctx, use)
     }
   }
+}
+
+/**
+ * A script the owner let run: Allow scripts at this site is the token's
+ * level for the site (browser-scripts.ts); Run it once lets this very
+ * script run in this tab. Then the evaluate call is made again through
+ * upstream.ts, where the browser finds the answer. A once allowance the
+ * call did not take (the tab moved to another site) goes with it.
+ */
+async function executeScriptUse(
+  ctx: VaultContext,
+  row: Row,
+  choice: PermissionDecision,
+  publicUrl: string,
+  executor: PermissionExecutor,
+): Promise<CallToolResult> {
+  if (!row.server || row.server.kind !== "browser") {
+    return text("The browser was removed from PCP, so nothing ran.", true)
+  }
+
+  if (!row.server.enabled) {
+    return text("The browser is switched off in PCP, so nothing ran.", true)
+  }
+
+  // An answer about a site's scripts never lifts a block on the tool.
+  if (
+    effectiveAccess(
+      await loadToolAccess(ctx.vaultId, row.tokenId),
+      row.server.id,
+      "evaluate",
+    ) === "blocked"
+  ) {
+    return text(
+      `${row.server.slug}/evaluate is blocked for this token, so nothing ran.`,
+      true,
+    )
+  }
+
+  const asked = readArgs(ctx, row) as ScriptUseAsk
+  const once = {
+    tokenId: row.tokenId,
+    tabId: asked.tabId,
+    site: asked.site,
+    script: asked.script,
+  }
+
+  if (choice === "always") {
+    await writeScriptAccess(ctx, row.tokenId, asked.site, "allowed")
+  } else {
+    allowScriptOnce(once)
+  }
+
+  try {
+    return await runCall(
+      ctx,
+      row.server,
+      "evaluate",
+      { tab: asked.tabId, script: asked.script },
+      { publicUrl, tokenId: row.tokenId, ownerAllowed: true, executor },
+    )
+  } finally {
+    dropScriptOnce(once)
+  }
+}
+
+/**
+ * A tab's pace the owner allowed: set on that tab, as asked, while it is
+ * open (browser/tab-pace.ts); the vault's pacing settings stay as they are.
+ */
+function executeTabPace(ctx: VaultContext, row: Row): CallToolResult {
+  const asked = readArgs(ctx, row) as TabPaceAsk
+
+  return applyTabPace(ctx, row.tokenId, asked.tabId, asked.pace)
+    ? text(
+        `The owner allowed it: tab ${asked.tabId} follows that pace now, while it is open.`,
+      )
+    : text(
+        `Tab ${asked.tabId} is gone (it was closed, or the browser has closed since), so its pace was not set. Open the page again, then set its pace.`,
+        true,
+      )
 }
 
 /** The owner is done in a tab an assistant handed them. */
@@ -2173,11 +3116,224 @@ async function executeFetch(
     )
   }
 
-  return runFetch(ctx, row.tokenId, readArgs(ctx, row) as FetchArgs, {
+  const args = readArgs(ctx, row) as FetchArgs
+  let exit: Awaited<ReturnType<typeof openExitForCall>> | null = null
+
+  // The owner allowed the site; the exit must still be one the token may
+  // use without asking (its level is read now, not when it asked).
+  if (args.exit) {
+    const found = await findExitForRun(ctx, row.tokenId, args.exit)
+
+    if (typeof found === "string") {
+      return text(found, true)
+    }
+
+    exit = await openExitForCall(ctx, row.tokenId, found, {
+      publicUrl,
+      tool: "web_fetch",
+    })
+  }
+
+  return runFetch(ctx, row.tokenId, args, {
     publicUrl,
     fetcher: executor.fetchWeb ?? fetchWeb,
     solver: executor.solveWeb,
+    ...(exit ? { exit: exit.dialer } : {}),
   })
+}
+
+/** An exit's label for the owner's page, or undefined when it has none or is gone. */
+async function findExitLabel(
+  ctx: VaultContext,
+  name: string,
+): Promise<string | undefined> {
+  const exit = await db().exit.findUnique({
+    where: { vaultId_name: { vaultId: ctx.vaultId, name } },
+    select: { label: true },
+  })
+
+  return exit?.label || undefined
+}
+
+/**
+ * The exit a request the owner allowed goes out through, if the token may
+ * use it without asking; otherwise why nothing ran.
+ */
+async function findExitForRun(
+  ctx: VaultContext,
+  tokenId: string,
+  name: string,
+): Promise<Awaited<ReturnType<typeof getExit>> | string> {
+  const row = await db().exit.findUnique({
+    where: { vaultId_name: { vaultId: ctx.vaultId, name } },
+    select: { id: true },
+  })
+
+  if (!row) {
+    return `The exit ${name} is no longer in PCP, so nothing was sent.`
+  }
+
+  const decided = await decideExit(ctx.vaultId, tokenId, row.id)
+
+  if (decided.access !== "allowed") {
+    return `The exit ${name} is not allowed for this token (${decided.access === "ask" ? "it asks the owner first" : "blocked"}), so nothing was sent.`
+  }
+
+  return getExit(ctx, row.id)
+}
+
+/** What the owner is shown before a request goes out through an exit. */
+function describeExitUseAsk(
+  ask: ExitUseAsk,
+  { privateAllowed }: { privateAllowed: boolean },
+): {
+  title: string
+  lines: string[]
+  warning: string | null
+  full: ShownText[] | null
+} {
+  const where = exitTitle({ name: ask.exitName, label: ask.exitLabel })
+
+  if (ask.fetch) {
+    const asked = describeFetchAsk(ask.fetch, {
+      privateAllowed,
+      ...(ask.exitLabel ? { exitLabel: ask.exitLabel } : {}),
+    })
+
+    return {
+      ...asked,
+      title: `Send this request through the exit ${where}?`,
+      lines: [
+        `Exit: ${where}. The site sees the request come from there, not from PCP.`,
+        ...asked.lines,
+      ],
+    }
+  }
+
+  const url = ask.browse?.url ?? ""
+  let site = url
+
+  try {
+    site = new URL(url).host
+  } catch {
+    // Shown as it is.
+  }
+
+  return {
+    title: `Open ${site} in a new tab through the exit ${where}?`,
+    lines: [
+      `Exit: ${where}. Every page of the tab comes from there, not from PCP.`,
+      `Address: ${url}`,
+      "A tab of its own, signed in to nothing, and nothing it does is saved",
+      privateAllowed
+        ? "Public addresses, and the exit's own network, since you allowed private addresses for this token"
+        : "Public addresses only",
+    ],
+    warning: null,
+    full: null,
+  }
+}
+
+/**
+ * A request the owner let go out through an exit, once (Always allow wrote
+ * the token's level for the exit before this). The site's own level is
+ * read again: a site blocked since is not reached; one that asks counts as
+ * answered, since the owner saw it in this request.
+ */
+async function executeExitUse(
+  ctx: VaultContext,
+  row: Row,
+  publicUrl: string,
+  executor: PermissionExecutor,
+): Promise<CallToolResult> {
+  const ask = readArgs(ctx, row) as ExitUseAsk
+  const exit = await db().exit.findFirst({
+    where: { id: ask.exitId, vaultId: ctx.vaultId },
+    select: { id: true },
+  })
+
+  if (!exit) {
+    return text(
+      `The exit ${ask.exitName} is no longer in PCP, so nothing was sent.`,
+      true,
+    )
+  }
+
+  if (
+    (await decideExit(ctx.vaultId, row.tokenId, exit.id)).access === "blocked"
+  ) {
+    return text(
+      `The exit ${ask.exitName} is blocked for this token now, so nothing was sent.`,
+      true,
+    )
+  }
+
+  const found = await getExit(ctx, exit.id)
+
+  if (ask.via === "web_fetch" && ask.fetch) {
+    const token = await db().apiToken.findUnique({
+      where: { id: row.tokenId },
+      select: { webFetch: true },
+    })
+
+    if (!token?.webFetch) {
+      return text(
+        "This token can no longer fetch web pages (the owner turned it off), so nothing ran.",
+        true,
+      )
+    }
+
+    const site = await decideFetch({ ctx, tokenId: row.tokenId }, ask.fetch)
+
+    if (site.access === "blocked") {
+      return text(
+        `The owner has blocked ${site.host} for this token, so nothing was sent.`,
+        true,
+      )
+    }
+
+    const opened = await openExitForCall(ctx, row.tokenId, found, {
+      publicUrl,
+      tool: "web_fetch",
+    })
+
+    return runFetch(
+      ctx,
+      row.tokenId,
+      { ...ask.fetch, exit: found.name },
+      {
+        publicUrl,
+        fetcher: executor.fetchWeb ?? fetchWeb,
+        exit: opened.dialer,
+      },
+    )
+  }
+
+  if (ask.via === "browser" && ask.browse) {
+    if (!row.server || row.server.kind !== "browser") {
+      return text("The browser was removed from PCP, so nothing ran.", true)
+    }
+
+    if (!row.server.enabled) {
+      return text("The browser is switched off in PCP, so nothing ran.", true)
+    }
+
+    return (executor.browse ?? performNavigate)(
+      {
+        ctx,
+        tokenId: row.tokenId,
+        publicUrl,
+        serverId: row.server.id,
+        exits: browserExitsFor(ctx, row.tokenId, publicUrl, {
+          ownerAllowed: found.id,
+        }),
+      },
+      { tabId: null, url: ask.browse.url, exit: found.name },
+      { allowedByOwner: true },
+    )
+  }
+
+  return text("This request cannot be run.", true)
 }
 
 /**
@@ -2261,14 +3417,21 @@ async function executeRegister(
   publicUrl: string,
   executor: PermissionExecutor,
   secretValue?: string,
+  allowPrivate = false,
+  /** The levels and tiers the owner left on the page (proposed-access.ts). */
+  access: AccessRule[] = [],
 ): Promise<CallToolResult> {
   const asked = readArgs(ctx, row) as RegisterArgs
+  // Public addresses only, unless the owner ticked "Allow private addresses"
+  // on a request flagged as private; whatever the stored arguments say.
+  const flagged = registersPrivateAddress(asked)
+  const publicOnly = !(allowPrivate && flagged)
 
   // Another server of a definition shares what the owner was shown of it,
   // or nothing is made.
   if (
     asked.definition &&
-    (await definitionBasis(asked.definition.id)) !== asked.definition.basis
+    (await definitionBasis(ctx, asked.definition.id)) !== asked.definition.basis
   ) {
     throw new PcpError(
       "state",
@@ -2293,6 +3456,7 @@ async function executeRegister(
           ...secretFields(asked, secret.id),
           endpoint: asked.endpoint,
           definitionId: asked.definition?.id ?? null,
+          publicOnly,
         })
       : asked.mail
         ? await createMailAccount(ctx, {
@@ -2326,9 +3490,10 @@ async function executeRegister(
               authValueTemplate: asked.authValueTemplate,
               authExtraHeaders: asked.authExtraHeaders,
               ...secretFields(asked, secret.id),
-              // The address is the assistant's: public ones only, until the
-              // owner allows private addresses on the server's page.
-              publicOnly: true,
+              // The address is the assistant's: public ones only, unless the
+              // owner allowed private addresses as they agreed, or does so
+              // on the server's page.
+              publicOnly,
               definitionId: asked.definition?.id ?? null,
             })
   } catch (error) {
@@ -2372,21 +3537,54 @@ async function executeRegister(
     : ""
 
   if (server.authType === "oauth") {
-    return connectResult(server, publicUrl, { lead: added })
+    // Its tools are read once the owner connects it: what they saved
+    // applies to those, unless it has them already.
+    const levels = await settleChosenAccess(ctx, {
+      serverId: id,
+      tokenId: row.tokenId,
+      rules: access,
+    })
+
+    return connectResult(server, publicUrl, {
+      lead: levels
+        ? `${added}, with the levels and tiers the owner saved for its tools`
+        : added,
+    })
   }
 
   // An endpoint's tools were read from the text the owner just approved.
   const sync =
     created.sync ?? (await executor.syncTools(ctx, server, { publicUrl }))
+  // Left public-only at a private address: the link to its switch, last.
+  const leftPublic = flagged && server.publicOnly
+  const linked = (message: string) =>
+    leftPublic ? withPublicOnlyLink(message, server, publicUrl) : message
+  // What the owner saved beside the approval: on the tools read now, or
+  // once, on the first ones read later.
+  const levels = await settleChosenAccess(ctx, {
+    serverId: id,
+    tokenId: row.tokenId,
+    rules: access,
+  })
 
   if (sync.status !== "ok") {
     return text(
-      `${added}, but its tools could not be read yet: ${sync.message}${saved}`,
+      linked(
+        `${added}, but its tools could not be read yet: ${sync.message}${levels ? ` ${levels}` : ""}${saved}`,
+      ),
     )
   }
 
+  const done = `${added} with ${sync.toolCount} tool${sync.toolCount === 1 ? "" : "s"}.${created.sync && sync.message ? ` ${sync.message}` : ""} ${levels ? `${levels.replace(/\.$/, "")}; search finds them.` : "They ask the owner the first time they are used; search finds them."}${saved}`
+
+  // An endpoint's tools come from its schema, so they are there; its calls
+  // are refused until the owner allows private addresses.
   return text(
-    `${added} with ${sync.toolCount} tool${sync.toolCount === 1 ? "" : "s"}.${created.sync && sync.message ? ` ${sync.message}` : ""} They ask the owner the first time they are used; search finds them.${saved}`,
+    leftPublic && asked.endpoint
+      ? linked(
+          `${done} Its address is private and it reaches public addresses only, so its calls are refused until the owner allows private addresses on its page.`,
+        )
+      : done,
   )
 }
 
@@ -2489,13 +3687,36 @@ export async function getPermissionView(
   id: string,
   { publicUrl, tokenId }: { publicUrl: string; tokenId?: string },
 ): Promise<PermissionView | null> {
-  const row = await loadRow({
+  const row = await loadRow(ctx, {
     id,
     vaultId: ctx.vaultId,
     ...(tokenId ? { tokenId } : {}),
   })
 
   return row ? toView(ctx, row, publicUrl) : null
+}
+
+/**
+ * A kept result a waiting call's arguments name, opened for the owner's
+ * page (app/api/permissions/[id]/files/[result]/route.ts): only while the
+ * request waits, only a result its arguments name, and only one of the
+ * request's own token, still kept. Null for anything else, which the page
+ * reads as gone.
+ */
+export async function openRequestFile(
+  ctx: VaultContext,
+  input: { permissionId: string; resultId: string },
+  now = new Date(),
+): Promise<OpenedResult | null> {
+  const row = await db().permissionRequest.findFirst({
+    where: { id: input.permissionId, vaultId: ctx.vaultId },
+  })
+
+  if (!row || !requestServes(row, readArgs(ctx, row), input.resultId, now)) {
+    return null
+  }
+
+  return openResult(ctx, { tokenId: row.tokenId, id: input.resultId }, now)
 }
 
 /** A hand-over waiting for the owner, as its tab shows it in the tabs view. */
@@ -2523,15 +3744,17 @@ export async function waitingHandovers(
     return []
   }
 
-  const rows = await db().permissionRequest.findMany({
-    where: {
-      ...waitingRequestsWhere(ctx),
-      kind: "browser_handover",
-      id: { in: ids },
-    },
-    include: ROW_INCLUDE,
-    orderBy: WAITING_ORDER,
-  })
+  const rows = await db()
+    .permissionRequest.findMany({
+      where: {
+        ...waitingRequestsWhere(ctx),
+        kind: "browser_handover",
+        id: { in: ids },
+      },
+      include: ROW_INCLUDE,
+      orderBy: WAITING_ORDER,
+    })
+    .then((rows) => rows.map((row) => named(ctx, row)))
 
   return rows.map((row) => {
     const ask = readArgs(ctx, row) as HandoverAsk
@@ -2556,11 +3779,13 @@ export async function listOpenPermissions(
   tokenId: string,
   publicUrl: string,
 ): Promise<PermissionView[]> {
-  const rows = await db().permissionRequest.findMany({
-    where: waitingRequestsWhere(ctx, { tokenId }),
-    include: ROW_INCLUDE,
-    orderBy: WAITING_ORDER,
-  })
+  const rows = await db()
+    .permissionRequest.findMany({
+      where: waitingRequestsWhere(ctx, { tokenId }),
+      include: ROW_INCLUDE,
+      orderBy: WAITING_ORDER,
+    })
+    .then((rows) => rows.map((row) => named(ctx, row)))
 
   return Promise.all(rows.map((row) => toView(ctx, row, publicUrl)))
 }
@@ -2589,12 +3814,14 @@ export async function listPendingRequests(
   const where = waitingRequestsWhere(ctx)
   const [total, rows] = await Promise.all([
     db().permissionRequest.count({ where }),
-    db().permissionRequest.findMany({
-      where,
-      include: ROW_INCLUDE,
-      orderBy: WAITING_ORDER,
-      take: limit,
-    }),
+    db()
+      .permissionRequest.findMany({
+        where,
+        include: ROW_INCLUDE,
+        orderBy: WAITING_ORDER,
+        take: limit,
+      })
+      .then((rows) => rows.map((row) => named(ctx, row))),
   ])
   const requests = await Promise.all(
     rows.map(async (row) => {
@@ -2652,7 +3879,7 @@ export async function checkPermission(
 
   if (view.status === "pending") {
     return text(
-      `Still waiting for the owner:\n\n${summaryText(view)}\n\nThey can answer until ${view.expiresAt.toISOString()}. Stop here, and call check_permission again when they say they have answered.\n\n${linkLastText(view.url)}`,
+      `Still waiting for the owner:\n\n${summaryText(view)}\n\nThey can answer until ${view.expiresAt.toISOString()}. Stop here. ${nextMessageCheck(`check_permission with id "${view.id}" again`)}\n\n${linkLastText(view.url, view.title)}`,
     )
   }
 
@@ -2676,10 +3903,12 @@ export async function checkPermission(
   // says it needs connecting, so say where it is now.
   const added =
     view.kind === "register" && view.serverId
-      ? await db().mcpServer.findFirst({
-          where: { id: view.serverId, vaultId: scope.ctx.vaultId },
-          include: { _count: { select: { tools: true } } },
-        })
+      ? await db()
+          .mcpServer.findFirst({
+            where: { id: view.serverId, vaultId: scope.ctx.vaultId },
+            include: { _count: { select: { tools: true } } },
+          })
+          .then((found) => found && openServer(scope.ctx, found))
       : null
 
   if (added?.authType === "oauth") {
@@ -2706,37 +3935,357 @@ export async function checkPermission(
   return outcome
 }
 
+/** One request in check_permission's answer to several. */
+export type PermissionStatusEntry = {
+  id: string
+  /** "unknown" for an id that is not one of this token's requests. */
+  status: string
+  /** What it came to, as check_permission says it; only once answered. */
+  outcome?: string
+}
+
+/**
+ * check_permission with several ids: `any` returns as soon as one of them
+ * is answered, `all` once none is waiting, either at `waitMs` (the owner
+ * wait's cap) with every request's status as it stands. Each answered
+ * request carries its outcome in full (`told` names those, for the
+ * session's note); an id that is not this token's is listed as unknown.
+ */
+export async function checkPermissions(
+  scope: PermissionScope,
+  ids: string[],
+  {
+    mode = "any",
+    signal,
+    waitMs,
+  }: { mode?: "any" | "all"; signal?: AbortSignal; waitMs?: number } = {},
+): Promise<{
+  entries: PermissionStatusEntry[]
+  text: string
+  told: string[]
+}> {
+  const unique = [...new Set(ids)]
+  const looks = async () =>
+    Promise.all(
+      unique.map(
+        async (id) =>
+          [
+            id,
+            await getPermissionView(scope.ctx, id, {
+              publicUrl: scope.publicUrl,
+              tokenId: scope.tokenId,
+            }),
+          ] as const,
+      ),
+    )
+  const open = (view: PermissionView | null) =>
+    view !== null && (view.status === "pending" || view.status === "running")
+  const ready = (views: Awaited<ReturnType<typeof looks>>) => {
+    const known = views.filter(([, view]) => view !== null)
+    const waiting = known.filter(([, view]) => open(view))
+
+    if (known.length === 0) return views
+    if (mode === "all") return waiting.length === 0 ? views : null
+    return waiting.length < known.length ? views : null
+  }
+  const views =
+    (await waitForOwner(async () => ready(await looks()), {
+      signal,
+      ms: waitMs,
+    })) ?? (await looks())
+
+  const entries: PermissionStatusEntry[] = []
+  const told: string[] = []
+  const lines: string[] = []
+  const links: string[] = []
+  const checks: string[] = []
+
+  for (const [id, view] of views) {
+    if (!view) {
+      entries.push({ id, status: "unknown" })
+      lines.push(`Request ${id}: there is no permission request with that id.`)
+    } else if (open(view)) {
+      entries.push({ id, status: view.status })
+      lines.push(
+        `Request ${id}: still waiting for the owner. ${summaryText(view)}`,
+      )
+      if (view.status === "pending") {
+        links.push(markdownLink(view.title, view.url))
+      }
+    } else {
+      const answer = await checkPermission(scope, id, { waitMs: 0 })
+      const full = answer.content
+        .map((part) => (part.type === "text" ? part.text : ""))
+        .join("")
+        .trim()
+      const structured = answer.structuredContent as
+        { kind?: unknown; url?: string; label?: string } | undefined
+
+      // Allowed, but the server it added needs connecting: that is a link for
+      // the owner, which goes last with the others, not in the middle.
+      if (structured?.kind === "needs_owner" && structured.url) {
+        // What came before the connect text, which carries its own link and
+        // check: those go with the others below.
+        const kept: string[] = []
+
+        for (const line of full.split("\n")) {
+          if (
+            /needs (connecting|an OAuth client)|Not connected yet/.test(line)
+          ) {
+            const lead = line.match(/^(.*?): /)?.[1]
+            if (lead && !/needs /.test(lead)) kept.push(lead)
+            break
+          }
+
+          kept.push(line)
+        }
+
+        const said = kept.join("\n").trim()
+        const server = view.connect
+          ? await getServer(scope.ctx, view.connect.serverId)
+          : null
+
+        entries.push({
+          id,
+          status: view.status,
+          outcome:
+            `${said}${said ? "\n" : ""}The server it added needs connecting first (link below).`.trim(),
+        })
+        lines.push(
+          `Request ${id} (${view.status}):\n${said}\nThe server it added needs connecting first (link below).`,
+        )
+        links.push(markdownLink(structured.label ?? view.title, structured.url))
+        checks.push(
+          nextMessageCheck(
+            server
+              ? `check_server with server "${server.slug}"`
+              : "check_server",
+            "it is still not connected",
+          ),
+        )
+        continue
+      }
+
+      entries.push({ id, status: view.status, outcome: full })
+      told.push(id)
+      lines.push(`Request ${id} (${view.status}):\n${full}`)
+    }
+  }
+
+  const waiting = entries.filter(
+    (entry) => entry.status === "pending" || entry.status === "running",
+  )
+
+  if (links.length > 0 && waiting.length > 0) {
+    checks.unshift(
+      nextMessageCheck(
+        `check_permission with ids ${JSON.stringify(waiting.map((entry) => entry.id))} again`,
+      ),
+    )
+  }
+
+  const tail =
+    links.length > 0
+      ? `\n\n${checks.join(" ")} ${OWNER_LINK_RULE} Hand these over as they are below.\n${links.join("\n")}`
+      : ""
+
+  return { entries, text: `${lines.join("\n\n")}${tail}`, told }
+}
+
+/** A request the owner answered, as the token that asked is told of it. */
+export type AnsweredRequest = {
+  id: string
+  kind: PermissionKind
+  title: string
+  status: string
+  decidedAt: Date
+  /** What it came to, in a line: the first of check_permission's answer. */
+  outcome: string
+}
+
+/** The most characters of an answered request's outcome line. */
+const ANSWERED_OUTCOME_CHARS = 200
+
+/**
+ * The token's own requests the owner answered since `since` (allowed,
+ * running or done, or declined; never one it withdrew or that closed),
+ * newest first: `seen` names every one by id and time (up to
+ * MAX_ANSWERED_SEEN, in one query on the token's rows), `answered` reads
+ * the first `limit` of those not in `skip` in full, and `more` counts the
+ * rest left out. Only reads.
+ */
+export async function listAnsweredRequests(
+  scope: PermissionScope,
+  {
+    since,
+    limit = MAX_ANSWERED_LISTED,
+    skip,
+  }: { since: Date; limit?: number; skip?: ReadonlySet<string> },
+): Promise<{
+  seen: { id: string; decidedAt: Date }[]
+  answered: AnsweredRequest[]
+  more: number
+}> {
+  const found = await db().permissionRequest.findMany({
+    where: {
+      vaultId: scope.ctx.vaultId,
+      tokenId: scope.tokenId,
+      status: { in: [...ANSWERED_STATUSES] },
+      decidedAt: { gte: since },
+    },
+    select: { id: true, decidedAt: true },
+    orderBy: { decidedAt: "desc" },
+    take: MAX_ANSWERED_SEEN,
+  })
+  const seen = found.map((row) => ({
+    id: row.id,
+    decidedAt: row.decidedAt ?? since,
+  }))
+  const fresh = seen.filter((row) => !skip?.has(row.id))
+  const picked = fresh.slice(0, Math.max(0, limit))
+
+  if (picked.length === 0) {
+    return { seen, answered: [], more: fresh.length }
+  }
+
+  const rows = await db()
+    .permissionRequest.findMany({
+      where: {
+        id: { in: picked.map((row) => row.id) },
+        vaultId: scope.ctx.vaultId,
+        tokenId: scope.tokenId,
+      },
+      include: ROW_INCLUDE,
+    })
+    .then((rows) => rows.map((row) => named(scope.ctx, row)))
+  const byId = new Map(rows.map((row) => [row.id, row]))
+  const answered: AnsweredRequest[] = []
+
+  for (const { id, decidedAt } of picked) {
+    const row = byId.get(id)
+
+    if (!row) {
+      continue
+    }
+
+    const view = await toView(scope.ctx, row, scope.publicUrl)
+    const said = outcomeOf(view).content.find((part) => part.type === "text")
+    const line =
+      said?.type === "text"
+        ? (said.text
+            .split("\n")
+            .find((part) => part.trim())
+            ?.trim() ?? "")
+        : ""
+
+    answered.push({
+      id,
+      kind: view.kind,
+      title: view.title,
+      status: view.status,
+      decidedAt,
+      outcome:
+        line.length > ANSWERED_OUTCOME_CHARS
+          ? `${line.slice(0, ANSWERED_OUTCOME_CHARS - 1).trimEnd()}…`
+          : line,
+    })
+  }
+
+  return { seen, answered, more: fresh.length - picked.length }
+}
+
+/** One answered request's line, as check_permission and the note say it. */
+export function answeredLine(
+  request: AnsweredRequest,
+  now = new Date(),
+): string {
+  return `- ${request.id} (${request.kind}, answered ${ageText(now.getTime() - request.decidedAt.getTime())}): ${request.title} ${request.outcome}`
+}
+
+/**
+ * How the note below starts: e2e/lib/mcp.ts reads past a text that starts
+ * so, to the answer it is in front of.
+ */
+export const ANSWERED_NOTE_LEAD =
+  "Answered by the owner since PCP last told you"
+
+/**
+ * What a session's next answer says of requests the owner answered since
+ * it last heard (clients/sessions.ts), once each; null for none.
+ */
+export function answeredNote(
+  answered: AnsweredRequest[],
+  more: number,
+  now = new Date(),
+): string | null {
+  if (answered.length === 0 && more <= 0) {
+    return null
+  }
+
+  const lines = answered.map((request) => answeredLine(request, now))
+  const rest =
+    more > 0
+      ? [`- and ${more} more: check_permission with no id lists them.`]
+      : []
+
+  return `${ANSWERED_NOTE_LEAD} (check_permission with an id gives the whole outcome; none of them needs its link sent again):\n${[...lines, ...rest].join("\n")}`
+}
+
 /**
  * check_permission with no id: the token's own requests still waiting for
- * the owner, oldest first, each with its id, kind, title, age and link.
- * Only reads.
+ * the owner, oldest first, each with its id, kind, title, age and link;
+ * then those the owner answered in the last ANSWERED_WINDOW_MS, newest
+ * first, each with its id, kind, title and outcome. Only reads.
  */
+export async function ownRequests(
+  scope: PermissionScope,
+  now = new Date(),
+): Promise<{
+  open: PermissionView[]
+  answered: AnsweredRequest[]
+  text: string
+}> {
+  const [open, { answered, more }] = await Promise.all([
+    listOpenPermissions(scope.ctx, scope.tokenId, scope.publicUrl),
+    listAnsweredRequests(scope, {
+      since: new Date(now.getTime() - ANSWERED_WINDOW_MS),
+    }),
+  ])
+
+  const waiting =
+    open.length === 0
+      ? "You have no requests waiting for the owner."
+      : `${
+          open.length === 1
+            ? "1 request of yours is"
+            : `${open.length} requests of yours are`
+        } waiting for the owner. check_permission with an id says where one stands; withdraw_request with an id takes back one you no longer need. Hand a link to the owner as a markdown link with its label, never the bare address.\n\n${open
+          .map(
+            (view) =>
+              `- ${view.id} (${view.kind}, asked ${ageText(now.getTime() - view.createdAt.getTime())}): ${view.title}\n  ${markdownLink(view.title, view.url)}`,
+          )
+          .join("\n")}`
+
+  if (answered.length === 0) {
+    return { open, answered, text: waiting }
+  }
+
+  const listed = answered.map((request) => answeredLine(request, now))
+  const rest = more > 0 ? [`- and ${more} more, not listed.`] : []
+
+  return {
+    open,
+    answered,
+    text: `${waiting}\n\nAnswered by the owner in the last hour, newest first (check_permission with an id gives the whole outcome):\n${[...listed, ...rest].join("\n")}`,
+  }
+}
+
+/** ownRequests' text, as check_permission with no id answers. */
 export async function listOwnOpenRequests(
   scope: PermissionScope,
   now = new Date(),
 ): Promise<CallToolResult> {
-  const views = await listOpenPermissions(
-    scope.ctx,
-    scope.tokenId,
-    scope.publicUrl,
-  )
-
-  if (views.length === 0) {
-    return text("You have no requests waiting for the owner.")
-  }
-
-  const lines = views.map(
-    (view) =>
-      `- ${view.id} (${view.kind}, asked ${ageText(now.getTime() - view.createdAt.getTime())}): ${view.title}\n  ${view.url}`,
-  )
-  const count =
-    views.length === 1
-      ? "1 request of yours is"
-      : `${views.length} requests of yours are`
-
-  return text(
-    `${count} waiting for the owner. check_permission with an id says where one stands; withdraw_request with an id takes back one you no longer need.\n\n${lines.join("\n")}`,
-  )
+  return text((await ownRequests(scope, now)).text)
 }
 
 /**
@@ -2752,7 +4301,7 @@ export async function withdrawPermission(
   id: string,
 ): Promise<CallToolResult> {
   const where = { id, vaultId: scope.ctx.vaultId, tokenId: scope.tokenId }
-  const row = await loadRow(where)
+  const row = await loadRow(scope.ctx, where)
 
   if (!row) {
     return text("There is no permission request with that id.", true)
@@ -2776,7 +4325,7 @@ export async function withdrawPermission(
   }
 
   // Not open, or answered while this looked: say how it stands.
-  const status = ((await loadRow(where)) ?? row).status
+  const status = ((await loadRow(scope.ctx, where)) ?? row).status
   const reason =
     status === "withdrawn"
       ? "You already withdrew this request."
@@ -2813,20 +4362,22 @@ function ageText(ms: number): string {
 export async function getAccessProposal(
   ctx: VaultContext,
   id: string,
+  /** PCP's own tools, for tiers proposed for them (own-tool-tiers.ts). */
+  ownTools: Parameters<typeof accessReview>[4] = [],
 ): Promise<
   (Awaited<ReturnType<typeof accessReview>> & { tokenId: string }) | null
 > {
-  const row = await loadRow({ id, vaultId: ctx.vaultId })
+  const row = await loadRow(ctx, { id, vaultId: ctx.vaultId })
 
   if (!row || row.kind !== "access" || !isOpen(row)) {
     return null
   }
 
-  const { levels } = readArgs(ctx, row) as AccessAsk["input"]
+  const { levels, tiers = [] } = readArgs(ctx, row) as AccessAsk["input"]
 
   return {
     tokenId: row.tokenId,
-    ...(await accessReview(ctx, row.tokenId, levels)),
+    ...(await accessReview(ctx, row.tokenId, levels, tiers, ownTools)),
   }
 }
 
@@ -2844,7 +4395,7 @@ export async function openShareRequest(
   ctx: VaultContext,
   id: string,
 ): Promise<OpenShareRequest | null> {
-  const row = await loadRow({ id, vaultId: ctx.vaultId })
+  const row = await loadRow(ctx, { id, vaultId: ctx.vaultId })
 
   if (!row || row.kind !== "repo_share" || !isOpen(row)) {
     return null
@@ -2887,7 +4438,7 @@ export async function confirmProposedShare(
     publicUrl: string
   },
 ): Promise<ShareResult> {
-  const row = await loadRow({ id, vaultId: ctx.vaultId })
+  const row = await loadRow(ctx, { id, vaultId: ctx.vaultId })
 
   if (!row || row.kind !== "repo_share") {
     throw notFound("That request")
@@ -2955,9 +4506,19 @@ export async function applyAccessRequest(
   ctx: VaultContext,
   id: string,
   levels: unknown,
-  { publicUrl }: { publicUrl: string },
+  {
+    publicUrl,
+    tiers,
+    ownNames,
+  }: {
+    publicUrl: string
+    /** The tiers the owner left on the page (only what changes). */
+    tiers?: unknown
+    /** PCP's own tools' names, for a tier chosen for one of them. */
+    ownNames?: OwnToolNames
+  },
 ): Promise<CallToolResult> {
-  const row = await loadRow({ id, vaultId: ctx.vaultId })
+  const row = await loadRow(ctx, { id, vaultId: ctx.vaultId })
 
   if (!row || row.kind !== "access") {
     throw notFound("That proposal")
@@ -2979,6 +4540,7 @@ export async function applyAccessRequest(
 
   // Refused before the row is claimed, so the owner can fix it and save.
   const chosen = await checkAccessLevels(ctx, row.tokenId, levels)
+  const chosenTiers = await checkAccessTiers(ctx, row.tokenId, tiers, ownNames)
   const claimed = await claim(row.id)
 
   if (claimed.count !== 1) {
@@ -2992,10 +4554,15 @@ export async function applyAccessRequest(
 
   try {
     await writeAccessLevels(ctx, row.tokenId, chosen)
-    const { levels: proposed } = readArgs(ctx, row) as {
-      levels: AccessLevel[]
+    await writeAccessTiers(ctx, chosenTiers)
+    const { levels: proposed, tiers: proposedTiers = [] } = readArgs(
+      ctx,
+      row,
+    ) as AccessAsk["input"]
+    outcome = {
+      failed: false,
+      text: describeSavedAccess(proposed, chosen, proposedTiers, chosenTiers),
     }
-    outcome = { failed: false, text: describeSavedAccess(proposed, chosen) }
   } catch (error) {
     if (!isPcpError(error)) {
       console.error("[permissions] saving tool levels failed", {
@@ -3032,6 +4599,19 @@ export async function prunePermissionRequests(
 ): Promise<number> {
   const { count } = await db().permissionRequest.deleteMany({
     where: { expiresAt: { lt: new Date(now.getTime() - PERMISSION_KEEP_MS) } },
+  })
+
+  return count
+}
+
+/**
+ * The answers kept for an identical call (reuseExecuted) once their while
+ * is over, cleared from rows that stay for their outcome. Reads nothing.
+ */
+export async function pruneReusableAnswers(now = new Date()): Promise<number> {
+  const { count } = await db().permissionRequest.updateMany({
+    where: { reuseUntil: { lte: now } },
+    data: { reuseUntil: null, resultJsonCiphertext: null },
   })
 
   return count

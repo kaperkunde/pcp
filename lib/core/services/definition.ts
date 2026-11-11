@@ -1,0 +1,919 @@
+import { isIP } from "node:net"
+
+import { z } from "zod"
+
+import type { VaultContext } from "../context"
+import { invalid } from "../errors"
+import { canonicalJson } from "../permission-rules"
+import { contentHash } from "../spec-rows"
+import {
+  MAX_BUILD_ARGS,
+  MAX_ENV_DESCRIPTION_CHARS,
+  MAX_ENV_VALUE_CHARS,
+  MAX_IMAGE_CHARS,
+  MAX_PATH_CHARS,
+  MAX_SERVICE_ARG_CHARS,
+  MAX_SERVICE_ARGS,
+  MAX_SERVICE_DEFINITION_BYTES,
+  MAX_SERVICE_ENV,
+  MAX_SERVICE_PORTS,
+  MAX_SERVICE_VOLUMES,
+} from "./limits"
+
+/**
+ * What a service is (the definition its instances share) and where one runs
+ * (the instance's own part), checked field by field. Every value that ends
+ * up in an engine command passes one of the patterns here first, and is
+ * then quoted (services/shell.ts): an image reference, a port, a variable's
+ * name, a volume's name and path, an argument.
+ *
+ * - The image is pinned by digest (`repo@sha256:…`): what the owner approved
+ *   is what runs. `source` is the tag an update resolves to a new digest.
+ *   Or, the owner's alone, it is built on the SSH server from a public
+ *   GitHub repository at a pinned commit (`build`), and the image id PCP
+ *   built is what it pins (`localhost/pcp-<repo>@sha256:<id>`), never
+ *   pulled.
+ * - Volumes are named volumes only, named after the container
+ *   (`pcp-<name>-<volume>`): never a path on the host, so a definition can
+ *   neither read nor write the host's files.
+ * - `files` names a folder in one of those volumes that PCP copies a kept
+ *   file into, and back out of, with the engine's own `cp` (a tar stream
+ *   over standard input or output, engine.ts): for a service whose tools
+ *   take paths in its volume.
+ * - Environment variables are names here; their values are the owner's
+ *   secrets, bound per instance, or a fixed value that is no secret. Values
+ *   reach the host over standard input only.
+ * - `registers` is what PCP adds for it in the same step: an API endpoint
+ *   from the schema it serves, an MCP server, an exit (a VPN container's
+ *   proxy, lib/core/exits/), or nothing.
+ * - An exit's container is the one kind that may be given more than a
+ *   container gets by default, and only from two allow-lists: the
+ *   capability NET_ADMIN (`cap_add`) and the device /dev/net/tun
+ *   (`devices`), what a VPN client needs for its tunnel. Its ports are
+ *   published on the SSH server's loopback only (parsePublish), where PCP
+ *   reaches its proxy through the SSH connection, never the network.
+ * - Every other service is published on the SSH server's 127.0.0.1 unless
+ *   the owner chooses an address of its network (or 0.0.0.0) on the launch
+ *   form, and PCP reaches it through the SSH connection either way
+ *   (tunnelAddress, `reach` "tunnel"): a direct-tcpip channel to the
+ *   address its ports are bound to on the SSH server, so it works when PCP
+ *   runs in a container on that same machine.
+ */
+
+// ---- Patterns ---------------------------------------------------------------
+
+const DOMAIN_PART = "[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?"
+const DOMAIN = `${DOMAIN_PART}(?:\\.${DOMAIN_PART})*(?::[0-9]{1,5})?`
+const PATH_PART = "[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*"
+const NAME = `(?:${DOMAIN}/)?${PATH_PART}(?:/${PATH_PART})*`
+
+/** `repository@sha256:<64 hex>`, as Docker and Podman both take it. */
+export const IMAGE_BY_DIGEST = new RegExp(`^${NAME}@sha256:[a-f0-9]{64}$`)
+/** `repository:tag` (or a bare repository, meaning latest). */
+export const IMAGE_BY_TAG = new RegExp(
+  `^${NAME}(?::[A-Za-z0-9_][A-Za-z0-9_.-]{0,127})?$`,
+)
+/**
+ * An image PCP built on the SSH server itself (`build`): its image id,
+ * named for the repository it came from. Never pulled from anywhere; a
+ * container runs it by that id (engine.ts runReference).
+ */
+export const LOCAL_IMAGE =
+  /^localhost\/pcp-[a-z0-9][a-z0-9-]{0,60}@sha256:[a-f0-9]{64}$/
+/** A GitHub repository, owner/name, as GitHub allows them. */
+export const GITHUB_REPOSITORY =
+  /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})\/(?!\.{1,2}$)[A-Za-z0-9._-]{1,100}$/
+/** A commit, by its full 40-hex id: what the owner approved is what builds. */
+export const COMMIT = /^[a-f0-9]{40}$/
+/**
+ * A path inside the repository: relative, letters, digits and ._-/ only,
+ * never `..`, `.` as a part, a leading dash or an empty part.
+ */
+export const REPOSITORY_PATH =
+  /^(?!-)(?!.*(?:^|\/)\.{1,2}(?:\/|$))[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)*$/
+/** A variable's name, as POSIX shells and env files take one. */
+export const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]{0,127}$/
+/** A volume's own name; on the host it is `<container>-<name>`. */
+export const VOLUME_NAME = /^[a-z0-9][a-z0-9_.-]{0,62}$/
+/** An absolute path in the container: no `..`, no `:` or `,` (they split -v). */
+const CONTAINER_PATH = /^\/(?:[A-Za-z0-9._@+-]+\/?)*$/
+/** A path on the service's HTTP side, without a query. */
+const HTTP_PATH = /^\/[A-Za-z0-9._~!$&'()*+,;=:@%/-]*$/
+/** A header's name, as HTTP allows one. */
+const HEADER_NAME = /^[A-Za-z0-9!#$%&'*+.^_`|~-]{1,100}$/
+/** The repository part of an image reference, before its tag or digest. */
+export function imageRepository(reference: string): string {
+  const at = reference.indexOf("@")
+  const base = at === -1 ? reference : reference.slice(0, at)
+  const slash = base.lastIndexOf("/")
+  const colon = base.lastIndexOf(":")
+  return colon > slash ? base.slice(0, colon) : base
+}
+
+/** A container path without its trailing slashes ("/" stays "/"). */
+export function trimPath(path: string): string {
+  return path.replace(/\/+$/, "") || "/"
+}
+
+/** Whether `path` is `folder` or inside it, by their words alone. */
+export function pathWithin(path: string, folder: string): boolean {
+  const inner = trimPath(path)
+  const outer = trimPath(folder)
+  return inner === outer || inner.startsWith(outer === "/" ? "/" : `${outer}/`)
+}
+
+// ---- The definition ---------------------------------------------------------
+
+const port = z.number().int().min(1).max(65535)
+const httpPath = z
+  .string()
+  .max(MAX_PATH_CHARS)
+  .regex(HTTP_PATH, { message: "A path starting with /, without a query." })
+const envName = z.string().regex(ENV_NAME, {
+  message:
+    "A variable's name is letters, digits and underscores, not starting with a digit.",
+})
+
+const EnvSchema = z.strictObject({
+  name: envName,
+  description: z.string().max(MAX_ENV_DESCRIPTION_CHARS).default(""),
+  /** Whether the service needs it: a launch refuses to start without it. */
+  required: z.boolean().default(false),
+  /**
+   * The owner types its value per instance (a VPN provider's name, a
+   * country): no secret, kept with the instance and shown on its page. A
+   * secret bound to the name still overrides it.
+   */
+  plain: z.boolean().default(false),
+  /**
+   * A fixed value that is no secret (`LOG_LEVEL=info`), shared with every
+   * instance; a secret bound to the name overrides it. For a `plain`
+   * variable it is the value when the owner types none.
+   */
+  value: z
+    .string()
+    .max(MAX_ENV_VALUE_CHARS)
+    .refine((value) => !/[\0\r\n]/.test(value), {
+      message: "A fixed value is one line.",
+    })
+    .optional(),
+})
+
+const VolumeSchema = z.strictObject({
+  name: z.string().regex(VOLUME_NAME, {
+    message:
+      "A volume's name is lowercase letters, digits, dots, dashes and underscores.",
+  }),
+  path: z
+    .string()
+    .max(MAX_PATH_CHARS)
+    .regex(CONTAINER_PATH, {
+      message: "Where it is mounted: an absolute path in the container.",
+    })
+    .refine(
+      (value) =>
+        !value.split("/").some((part) => part === ".." || part === "."),
+      { message: "A mount path cannot go up with .." },
+    ),
+})
+
+/**
+ * The folder in one of its named volumes that PCP puts files into and gets
+ * them back from (the service's put_file and get_file tools, engine.ts
+ * copyIntoContainer): for a service whose own tools take paths in its
+ * volume (a PDF tool's /data). `path` is the volume's mount path or a
+ * folder inside it, so what PCP writes is the volume's, and stays when the
+ * container is made again.
+ */
+const FilesSchema = z.strictObject({
+  volume: z.string().regex(VOLUME_NAME, {
+    message: "The volume files go in: one of the service's volumes, by name.",
+  }),
+  path: z
+    .string()
+    .max(MAX_PATH_CHARS)
+    .regex(CONTAINER_PATH, {
+      message:
+        "Where files go: an absolute path in the container, in that volume.",
+    })
+    .refine(
+      (value) =>
+        !value.split("/").some((part) => part === ".." || part === "."),
+      { message: "The files' folder cannot go up with .." },
+    ),
+})
+
+export type ServiceFiles = z.output<typeof FilesSchema>
+
+const HealthSchema = z.discriminatedUnion("kind", [
+  z.strictObject({ kind: z.literal("http"), port, path: httpPath }),
+  z.strictObject({ kind: z.literal("none") }),
+])
+
+/**
+ * The secret header an API endpoint or an MCP server it registers sends,
+ * with the secret bound to `env`.
+ */
+const RegisterAuthSchema = z.strictObject({
+  env: envName,
+  header: z.string().regex(HEADER_NAME),
+  template: z
+    .string()
+    .max(200)
+    .refine((value) => value.includes("{{secret}}"), {
+      message: "The header's value names {{secret}}.",
+    }),
+})
+
+/**
+ * The proxy's login, which PCP makes itself for each instance (a random
+ * password, kept as a managed secret): `user_env` and `password_env` are
+ * the variables the container reads them from. Neither is one of the
+ * definition's own variables, so nobody binds or types them.
+ */
+const ExitAuthSchema = z.strictObject({
+  user_env: envName,
+  password_env: envName,
+})
+
+/** The capabilities a definition may add: NET_ADMIN only, for a VPN's tunnel. */
+export const ALLOWED_CAPABILITIES = ["NET_ADMIN"] as const
+/** The devices a definition may pass in: the tunnel device only. */
+export const ALLOWED_DEVICES = ["/dev/net/tun"] as const
+
+const RegistersSchema = z.discriminatedUnion("kind", [
+  z.strictObject({
+    kind: z.literal("openapi"),
+    port,
+    /** Where the service serves its OpenAPI schema. */
+    specPath: httpPath,
+    /** What every operation's path is appended to. */
+    basePath: httpPath.default("/"),
+    auth: RegisterAuthSchema.optional(),
+  }),
+  z.strictObject({
+    kind: z.literal("mcp"),
+    port,
+    path: httpPath,
+    auth: RegisterAuthSchema.optional(),
+  }),
+  /** A VPN container's proxy, which PCP adds as an exit. */
+  z.strictObject({
+    kind: z.literal("exit"),
+    port,
+    protocol: z.enum(["http", "socks5"]),
+    auth: ExitAuthSchema.optional(),
+  }),
+  z.strictObject({ kind: z.literal("none") }),
+])
+
+/** A build argument: a name and a value, no secret (it shows in the image). */
+const BuildArgSchema = z.strictObject({
+  name: envName,
+  value: z
+    .string()
+    .max(MAX_ENV_VALUE_CHARS)
+    .refine((value) => !/[\u0000-\u001f\u007f]/.test(value), {
+      message: "A build argument's value is one line, no control characters.",
+    }),
+})
+
+/**
+ * Where the owner's own image comes from: a public GitHub repository at a
+ * pinned commit, built on the SSH server with its engine (engine.ts
+ * buildImage). The owner's alone: an assistant never proposes one.
+ */
+const BuildSchema = z.strictObject({
+  /** owner/name on GitHub. */
+  repository: z.string().regex(GITHUB_REPOSITORY, {
+    message: "The repository on GitHub, as owner/name.",
+  }),
+  /** The commit, all 40 hex digits of it. */
+  commit: z.string().regex(COMMIT, {
+    message: "The commit, by its full id: 40 hex digits.",
+  }),
+  /** The Containerfile (or Dockerfile), relative to the repository's root. */
+  containerfile: z.string().max(MAX_PATH_CHARS).regex(REPOSITORY_PATH, {
+    message:
+      "The Containerfile's path in the repository, like Containerfile or docker/Dockerfile.",
+  }),
+  /** The build's context, relative to the repository's root; its root by default. */
+  context: z
+    .string()
+    .max(MAX_PATH_CHARS)
+    .refine((value) => value === "." || REPOSITORY_PATH.test(value), {
+      message: "The build's folder in the repository, like . or app.",
+    })
+    .default("."),
+  args: z.array(BuildArgSchema).max(MAX_BUILD_ARGS).default([]),
+})
+
+export type ServiceBuild = z.output<typeof BuildSchema>
+
+export const ServiceDefinitionSchema = z
+  .strictObject({
+    /**
+     * The image, pinned by digest. For a `build`, the image PCP built (its
+     * id, LOCAL_IMAGE), written once it is built; absent before.
+     */
+    image: z
+      .string()
+      .max(MAX_IMAGE_CHARS)
+      .regex(IMAGE_BY_DIGEST, {
+        message:
+          "The image, pinned by digest: repository@sha256:<64 hex digits>.",
+      })
+      .optional(),
+    /** Built on the SSH server from a repository, in place of a pulled image. */
+    build: BuildSchema.optional(),
+    /** The tag an update resolves to a new digest; none: updates by hand. */
+    source: z
+      .string()
+      .max(MAX_IMAGE_CHARS)
+      .regex(IMAGE_BY_TAG, {
+        message: "The image to update from, like ghcr.io/org/app:latest.",
+      })
+      .optional(),
+    ports: z
+      .array(z.strictObject({ container: port }))
+      .max(MAX_SERVICE_PORTS)
+      .default([]),
+    env: z.array(EnvSchema).max(MAX_SERVICE_ENV).default([]),
+    volumes: z.array(VolumeSchema).max(MAX_SERVICE_VOLUMES).default([]),
+    /** Arguments after the image: the container's command. */
+    args: z
+      .array(
+        z
+          .string()
+          .max(MAX_SERVICE_ARG_CHARS)
+          .refine((value) => !/[\u0000-\u001f\u007f]/.test(value), {
+            message: "An argument has no control characters.",
+          }),
+      )
+      .max(MAX_SERVICE_ARGS)
+      .default([]),
+    /** Capabilities the container gets on top of the engine's default. */
+    cap_add: z
+      .array(
+        z.enum(ALLOWED_CAPABILITIES, {
+          message: "A service can be given NET_ADMIN only, for an exit.",
+        }),
+      )
+      .max(ALLOWED_CAPABILITIES.length)
+      .default([]),
+    /** Devices of the SSH server passed into the container. */
+    devices: z
+      .array(
+        z.enum(ALLOWED_DEVICES, {
+          message: "A service can be given /dev/net/tun only, for an exit.",
+        }),
+      )
+      .max(ALLOWED_DEVICES.length)
+      .default([]),
+    health: HealthSchema.default({ kind: "none" }),
+    registers: RegistersSchema.default({ kind: "none" }),
+    /**
+     * Where PCP puts files for the service's own tools, and gets them back
+     * from: a folder in one of its volumes. None: no put_file or get_file.
+     */
+    files: FilesSchema.optional(),
+  })
+  .superRefine((definition, issue) => {
+    if (definition.build) {
+      if (definition.source !== undefined) {
+        issue.addIssue({
+          code: "custom",
+          message:
+            "A service built from a repository updates to a new commit, not from a source tag: leave source out.",
+        })
+      }
+
+      if (
+        definition.image !== undefined &&
+        !LOCAL_IMAGE.test(definition.image)
+      ) {
+        issue.addIssue({
+          code: "custom",
+          message:
+            "A service built from a repository runs the image PCP built: leave image out.",
+        })
+      }
+    } else if (definition.image === undefined) {
+      issue.addIssue({
+        code: "custom",
+        message:
+          "The image, pinned by digest: repository@sha256:<64 hex digits> (or build, from a repository).",
+      })
+    } else if (LOCAL_IMAGE.test(definition.image)) {
+      issue.addIssue({
+        code: "custom",
+        message:
+          "localhost/pcp-… is an image PCP built from a repository: it comes with its build.",
+      })
+    }
+
+    const ports = definition.ports.map((entry) => entry.container)
+    const names = definition.env.map((entry) => entry.name)
+    const volumes = definition.volumes.map((entry) => entry.name)
+    const paths = definition.volumes.map((entry) => entry.path)
+
+    const lists: Array<[Array<string | number>, string]> = [
+      [ports, "port"],
+      [names, "variable"],
+      [volumes, "volume"],
+      [paths, "mount path"],
+      [definition.cap_add, "capability"],
+      [definition.devices, "device"],
+    ]
+
+    for (const [list, what] of lists) {
+      const twice = list.find((value, at) => list.indexOf(value) !== at)
+      if (twice !== undefined) {
+        issue.addIssue({
+          code: "custom",
+          message: `The ${what} ${twice} is named twice.`,
+        })
+      }
+    }
+
+    const needsPort = (what: string, value: number) => {
+      if (!ports.includes(value)) {
+        issue.addIssue({
+          code: "custom",
+          message: `${what} uses port ${value}, which the service does not publish.`,
+        })
+      }
+    }
+
+    if (definition.health.kind === "http") {
+      needsPort("The health check", definition.health.port)
+    }
+
+    if (definition.registers.kind !== "none") {
+      needsPort("What it registers", definition.registers.port)
+    }
+
+    if (
+      definition.registers.kind !== "exit" &&
+      (definition.cap_add.length > 0 || definition.devices.length > 0)
+    ) {
+      issue.addIssue({
+        code: "custom",
+        message:
+          "Only an exit's container (registers kind exit) is given a capability or a device.",
+      })
+    }
+
+    if (definition.files) {
+      const { volume, path } = definition.files
+      const mounted = definition.volumes.find((entry) => entry.name === volume)
+
+      if (!mounted) {
+        issue.addIssue({
+          code: "custom",
+          message: `Files go in the volume ${volume}, which is not one of the service's volumes.`,
+        })
+      } else if (!pathWithin(path, mounted.path)) {
+        issue.addIssue({
+          code: "custom",
+          message: `Files go in ${path}, which is not in the volume ${volume} (mounted at ${mounted.path}).`,
+        })
+      }
+    }
+
+    if (definition.registers.kind === "exit" && definition.registers.auth) {
+      const { user_env, password_env } = definition.registers.auth
+
+      if (user_env === password_env) {
+        issue.addIssue({
+          code: "custom",
+          message: "The proxy's user and password are two variables.",
+        })
+      }
+
+      for (const name of [user_env, password_env]) {
+        if (names.includes(name)) {
+          issue.addIssue({
+            code: "custom",
+            message: `${name} carries the proxy's login, which PCP makes itself: it is not one of the service's variables.`,
+          })
+        }
+      }
+    }
+
+    const auth = registerAuth(definition.registers)
+
+    if (auth && !names.includes(auth.env)) {
+      issue.addIssue({
+        code: "custom",
+        message: `The ${registeredNoun(definition.registers)}'s secret comes from ${auth.env}, which is not one of the service's variables.`,
+      })
+    }
+  })
+
+export type ServiceDefinition = z.output<typeof ServiceDefinitionSchema>
+export type ServiceDefinitionInput = z.input<typeof ServiceDefinitionSchema>
+export type ServiceRegisters = ServiceDefinition["registers"]
+export type ServiceRegisterAuth = z.output<typeof RegisterAuthSchema>
+
+/**
+ * The secret header what a service registers sends (an API endpoint's or an
+ * MCP server's), or null: an exit's login is PCP's own (ExitAuthSchema).
+ */
+export function registerAuth(
+  registers: ServiceRegisters,
+): ServiceRegisterAuth | null {
+  return registers.kind === "openapi" || registers.kind === "mcp"
+    ? (registers.auth ?? null)
+    : null
+}
+
+/** What a service registers, in words: "endpoint" or "MCP server". */
+function registeredNoun(registers: Pick<ServiceRegisters, "kind">): string {
+  return registers.kind === "mcp" ? "MCP server" : "endpoint"
+}
+
+function problems(error: z.ZodError): string {
+  return error.issues
+    .slice(0, 5)
+    .map((issue) =>
+      issue.path.length > 0
+        ? `${issue.path.join(".")}: ${issue.message}`
+        : issue.message,
+    )
+    .join(" ")
+}
+
+/** A definition as the owner (or a linked repository) gives it, checked. */
+export function parseServiceDefinition(value: unknown): ServiceDefinition {
+  const parsed = ServiceDefinitionSchema.safeParse(value)
+
+  if (!parsed.success) {
+    throw invalid(`The service's definition: ${problems(parsed.error)}`)
+  }
+
+  if (
+    Buffer.byteLength(JSON.stringify(parsed.data)) >
+    MAX_SERVICE_DEFINITION_BYTES
+  ) {
+    throw invalid(
+      `A service's definition is at most ${MAX_SERVICE_DEFINITION_BYTES / 1024} KB.`,
+    )
+  }
+
+  return parsed.data
+}
+
+/** A stored definition (service_spec.definition), checked again as it is read. */
+export function readServiceDefinition(json: string): ServiceDefinition {
+  let value: unknown
+
+  try {
+    value = JSON.parse(json)
+  } catch {
+    throw invalid("The service's stored definition is not JSON.")
+  }
+
+  return parseServiceDefinition(value)
+}
+
+/** A definition's keyed hash under the vault's key (spec-rows.ts). */
+export function serviceDefinitionHash(
+  ctx: VaultContext,
+  definition: ServiceDefinition,
+): string {
+  return contentHash(ctx, "service", canonicalJson(definition))
+}
+
+// ---- The instance's own part ------------------------------------------------
+
+/** Where an exit's proxy is published: the SSH server's loopback, nothing else. */
+export const EXIT_PUBLISH_ADDRESS = "127.0.0.1"
+
+/** Where the container's ports are published on the SSH server. */
+export type ServicePublish = {
+  /** The host's address the ports are bound to: an IP literal. */
+  address: string
+  ports: Array<{ container: number; host: number }>
+}
+
+/** Which secret (by id) each variable takes. */
+export type ServiceEnvBindings = Record<string, string>
+
+/**
+ * The publish settings, checked against the definition: one host port for
+ * each of its ports, all different, on one IP address of the host.
+ */
+export function parsePublish(
+  value: unknown,
+  definition: ServiceDefinition,
+): ServicePublish {
+  const parsed = z
+    .strictObject({
+      address: z.string().max(64),
+      ports: z.array(z.strictObject({ container: port, host: port })),
+    })
+    .safeParse(value)
+
+  if (!parsed.success) {
+    throw invalid(`Where the service is published: ${problems(parsed.error)}`)
+  }
+
+  const address = parsed.data.address.trim().replace(/^\[(.*)\]$/, "$1")
+
+  if (isIP(address) === 0) {
+    throw invalid(
+      "Publish the service on an IP address of the SSH server: 0.0.0.0 for every address, 127.0.0.1 for that machine alone, or one of its own.",
+    )
+  }
+
+  // An exit's proxy is reached through the SSH connection, on the SSH
+  // server's own loopback: anywhere else, anyone on its network could use
+  // it (and the VPN behind it).
+  if (
+    definition.registers.kind === "exit" &&
+    address !== EXIT_PUBLISH_ADDRESS
+  ) {
+    throw invalid(
+      `An exit's proxy is published on ${EXIT_PUBLISH_ADDRESS} only, the SSH server's own loopback: PCP reaches it through the SSH connection.`,
+    )
+  }
+
+  const ports: ServicePublish["ports"] = []
+
+  for (const { container } of definition.ports) {
+    const found = parsed.data.ports.find(
+      (entry) => entry.container === container,
+    )
+
+    if (!found) {
+      throw invalid(
+        `Choose the SSH server's port for the service's port ${container}.`,
+      )
+    }
+
+    if (ports.some((entry) => entry.host === found.host)) {
+      throw invalid(`The SSH server's port ${found.host} is chosen twice.`)
+    }
+
+    ports.push({ container, host: found.host })
+  }
+
+  if (parsed.data.ports.length !== ports.length) {
+    throw invalid("Publish only the ports the service has.")
+  }
+
+  return { address, ports }
+}
+
+export function readPublish(json: string): ServicePublish {
+  try {
+    const value = JSON.parse(json) as Partial<ServicePublish>
+
+    if (typeof value.address === "string" && Array.isArray(value.ports)) {
+      return { address: value.address, ports: value.ports }
+    }
+  } catch {
+    // Read as nothing published.
+  }
+
+  return { address: "127.0.0.1", ports: [] }
+}
+
+export function readEnvBindings(json: string): ServiceEnvBindings {
+  try {
+    const value = JSON.parse(json) as unknown
+
+    if (value && typeof value === "object" && !Array.isArray(value)) {
+      return Object.fromEntries(
+        Object.entries(value).filter(
+          (entry): entry is [string, string] =>
+            ENV_NAME.test(entry[0]) && typeof entry[1] === "string",
+        ),
+      )
+    }
+  } catch {
+    // Read as nothing bound.
+  }
+
+  return {}
+}
+
+/** The values the owner typed for a service's plain variables, by name. */
+export type ServicePlainValues = Record<string, string>
+
+export function readPlainValues(json: string): ServicePlainValues {
+  return readEnvBindings(json)
+}
+
+/**
+ * The values typed for plain variables, checked against the definition:
+ * only its plain variables, each one line within bounds, no character that
+ * does not show. The empty ones are left out.
+ */
+export function checkPlainValues(
+  values: ServicePlainValues,
+  definition: ServiceDefinition,
+): ServicePlainValues {
+  const known = new Map(definition.env.map((entry) => [entry.name, entry]))
+  const checked: ServicePlainValues = {}
+
+  for (const [name, raw] of Object.entries(values)) {
+    const value = typeof raw === "string" ? raw.trim() : ""
+
+    if (!value) {
+      continue
+    }
+
+    const entry = known.get(name)
+
+    if (!entry) {
+      throw invalid(`The service has no variable called ${name}.`)
+    }
+
+    if (!entry.plain) {
+      throw invalid(`${name} takes a secret of yours, not a value typed here.`)
+    }
+
+    if (value.length > MAX_ENV_VALUE_CHARS) {
+      throw invalid(
+        `The value for ${name} is at most ${MAX_ENV_VALUE_CHARS} characters.`,
+      )
+    }
+
+    if (
+      /[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u2028-\u202e\u2060-\u206f\ufeff]/.test(
+        value,
+      )
+    ) {
+      throw invalid(`The value for ${name} is one line of plain text.`)
+    }
+
+    checked[name] = value
+  }
+
+  return checked
+}
+
+/**
+ * The bindings, checked against the definition: only its variables, and
+ * every required one either bound, given a typed value (`values`, its plain
+ * ones) or a fixed value.
+ */
+export function checkEnvBindings(
+  bindings: ServiceEnvBindings,
+  definition: ServiceDefinition,
+  values: ServicePlainValues = {},
+): ServiceEnvBindings {
+  const known = new Map(definition.env.map((entry) => [entry.name, entry]))
+  const checked: ServiceEnvBindings = {}
+
+  for (const [name, secretId] of Object.entries(bindings)) {
+    if (!secretId) {
+      continue
+    }
+
+    if (!known.has(name)) {
+      throw invalid(`The service has no variable called ${name}.`)
+    }
+
+    checked[name] = secretId
+  }
+
+  for (const entry of definition.env) {
+    if (
+      entry.required &&
+      !checked[entry.name] &&
+      !values[entry.name] &&
+      entry.value === undefined
+    ) {
+      throw invalid(
+        entry.plain
+          ? `Type the value for ${entry.name}: the service needs it.`
+          : `Choose the secret for ${entry.name}: the service needs it.`,
+      )
+    }
+  }
+
+  const auth = registerAuth(definition.registers)
+
+  if (auth && !checked[auth.env]) {
+    throw invalid(
+      `Choose the secret for ${auth.env}: the ${registeredNoun(definition.registers)} sends it in ${auth.header}.`,
+    )
+  }
+
+  return checked
+}
+
+/**
+ * How PCP reaches what a service publishes: "tunnel", a direct-tcpip channel
+ * through the SSH connection to the address its ports are bound to on the
+ * SSH server; "direct", from PCP's machine to the published address (a
+ * service launched before tunnels, until it is updated or made again).
+ */
+export type ServiceReach = "tunnel" | "direct"
+
+export function readReach(value: string): ServiceReach {
+  return value === "tunnel" ? "tunnel" : "direct"
+}
+
+/** Where the service is published unless the owner chooses its network. */
+export const DEFAULT_PUBLISH_ADDRESS = "127.0.0.1"
+
+/** Loopback addresses: the SSH server's own machine only. */
+export function isLoopback(address: string): boolean {
+  return address === "::1" || /^127\./.test(address) || address === "localhost"
+}
+
+function isWildcard(address: string): boolean {
+  return address === "0.0.0.0" || address === "::"
+}
+
+/**
+ * The host name PCP reaches a published port at: the SSH server's address
+ * when the port is bound to every address, the bound address otherwise.
+ * Null when the port is on the SSH server's loopback and PCP is not on that
+ * machine: a service reached directly (`reach` "direct") cannot be.
+ */
+export function reachHost(
+  publish: ServicePublish,
+  sshHost: string,
+): string | null {
+  if (isWildcard(publish.address)) {
+    return sshHost
+  }
+
+  if (isLoopback(publish.address) && !isLoopback(sshHost)) {
+    return null
+  }
+
+  return publish.address
+}
+
+/**
+ * The address the SSH server itself reaches its published ports at, which
+ * a tunnel's channel goes to: its loopback for a port bound to every
+ * address, the bound address otherwise.
+ */
+export function tunnelAddress(publish: ServicePublish): string {
+  if (publish.address === "0.0.0.0") {
+    return "127.0.0.1"
+  }
+
+  if (publish.address === "::") {
+    return "::1"
+  }
+
+  return publish.address
+}
+
+/**
+ * `http://host:port` for a container port, as PCP addresses it: through a
+ * tunnel, the address the SSH server reaches it at (the channel goes
+ * there); directly, where PCP's machine reaches it, or null when it cannot.
+ */
+export function serviceOrigin(
+  publish: ServicePublish,
+  sshHost: string,
+  containerPort: number,
+  reach: ServiceReach,
+): string | null {
+  if (reach === "direct") {
+    return reachUrl(publish, sshHost, containerPort)
+  }
+
+  const published = publish.ports.find(
+    (entry) => entry.container === containerPort,
+  )
+
+  if (!published) {
+    return null
+  }
+
+  const host = tunnelAddress(publish)
+  return `http://${host.includes(":") ? `[${host}]` : host}:${published.host}`
+}
+
+/** `http://host:port`, for a container port PCP can reach; null otherwise. */
+export function reachUrl(
+  publish: ServicePublish,
+  sshHost: string,
+  containerPort: number,
+): string | null {
+  const host = reachHost(publish, sshHost)
+  const published = publish.ports.find(
+    (entry) => entry.container === containerPort,
+  )
+
+  if (!host || !published) {
+    return null
+  }
+
+  return `http://${host.includes(":") ? `[${host}]` : host}:${published.host}`
+}
+
+/** The volume's name on the host. */
+export function volumeOnHost(containerName: string, volume: string): string {
+  return `${containerName}-${volume}`
+}

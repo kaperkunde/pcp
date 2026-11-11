@@ -35,8 +35,10 @@ import {
   type BrowserStatus,
   type Tab,
 } from "./runtime"
-import { findBrowserServer, syncAllBrowserTools } from "./server"
+import { findBrowserServer } from "./server"
+import { noteBrowserChanged } from "../vault-upkeep"
 import type { TabView } from "./types"
+import { TOKEN_NAME_SELECT, tokenName } from "../token-names"
 
 /**
  * What the owner does with the browser from PCP's pages: open a tab of
@@ -111,7 +113,7 @@ export async function openOwnerTab(
 
   pageUrl(url)
   const vault = await ensureBrowser(ctx, { publicUrl })
-  const shared = await loadSharedFetchRules(ctx.vaultId)
+  const shared = await loadSharedFetchRules(ctx)
   const tab = await withVault(vault, () =>
     openTab(vault, {
       openedBy: "owner",
@@ -178,7 +180,7 @@ export async function browserTokens(
     return []
   }
 
-  return db().apiToken.findMany({
+  const rows = await db().apiToken.findMany({
     where: {
       vaultId: ctx.vaultId,
       revokedAt: null,
@@ -192,9 +194,14 @@ export async function browserTokens(
         },
       ],
     },
-    select: { id: true, name: true },
-    orderBy: [{ name: "asc" }, { createdAt: "asc" }],
+    select: TOKEN_NAME_SELECT,
+    orderBy: { createdAt: "asc" },
   })
+
+  // By name, then age: sorted here, since the names are sealed.
+  return rows
+    .map((row) => ({ id: row.id, name: tokenName(ctx, row) }))
+    .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
 }
 
 /**
@@ -270,7 +277,9 @@ export async function startChromiumInstall(): Promise<void> {
   void installChromium({ dataDir: dataDir() })
     .then(async (state) => {
       if (state.stage === "done") {
-        await syncAllBrowserTools()
+        // Each vault's browser is checked on its next request, which holds
+        // the key its status is sealed under.
+        noteBrowserChanged()
       } else {
         console.error("[browser] could not install Chromium", {
           message: state.error,
@@ -328,11 +337,13 @@ async function overviewTabs(ctx: VaultContext): Promise<OverviewTab[]> {
     tokenIds.length > 0
       ? db().apiToken.findMany({
           where: { vaultId: ctx.vaultId, id: { in: tokenIds } },
-          select: { id: true, name: true },
+          select: TOKEN_NAME_SELECT,
         })
       : [],
   ])
-  const names = new Map(tokens.map((token) => [token.id, token.name]))
+  const names = new Map(
+    tokens.map((token) => [token.id, tokenName(ctx, token)]),
+  )
   const waiting = new Map<string, WaitingHandover>()
 
   // Oldest first: a tab shows the first of its hand-overs.

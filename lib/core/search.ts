@@ -1,5 +1,5 @@
 /**
- * Ranking for the gateway's search: tools (search_tools ranks those alone),
+ * Ranking for the gateway's search: tools (searchTools ranks those alone),
  * and beside them the skills and memories a token reads. Pure: takes the
  * rows, returns the best matches. A vault has tens to a few hundred tools
  * and skills, so scoring every row per query is cheaper than keeping an
@@ -13,6 +13,8 @@ export type ToolCandidate = {
   name: string
   title: string | null
   description: string
+  /** Its tier (tool-tiers.ts), which search's line names. */
+  tier?: "read" | "write" | "destructive"
 }
 
 export type ToolMatch = ToolCandidate & { score: number }
@@ -38,6 +40,10 @@ const STOP_WORDS = new Set([
   "get",
 ])
 
+/** A name's tier: an exact match ranks above everything, a prefix next. */
+const EXACT = 1000
+const PREFIX = 500
+
 /** Words from a query or a name: lower case, split on case and symbols. */
 export function tokenize(text: string): string[] {
   return text
@@ -47,60 +53,426 @@ export function tokenize(text: string): string[] {
     .filter((word) => word.length > 1)
 }
 
-function stem(word: string): string {
-  // Just enough to make "issues" find "issue" and "creating" find "create".
-  if (word.length > 5 && word.endsWith("ing")) return word.slice(0, -3)
-  if (word.length > 4 && word.endsWith("ies")) return `${word.slice(0, -3)}y`
-  if (word.length > 4 && word.endsWith("es")) return word.slice(0, -2)
-  if (word.length > 3 && word.endsWith("s")) return word.slice(0, -1)
-  if (word.length > 4 && word.endsWith("ed")) return word.slice(0, -2)
+/**
+ * Stems that the rules below would not find: a noun made of a verb
+ * ("storage", "deployment"), irregular forms ("kept"), and a word they
+ * would cut too short ("embed").
+ */
+const WORD_FORMS: Readonly<Record<string, string>> = {
+  storage: "stor",
+  deployment: "deploy",
+  deployments: "deploy",
+  kept: "keep",
+  ran: "run",
+  sent: "send",
+  embed: "embed",
+  embedded: "embed",
+}
+
+const VOWEL = /[aeiouy]/
+
+/**
+ * A word's stem, enough that "issues" finds "issue", "creating" finds
+ * "create", "running" finds "run" and "storage" finds "stored": a plural,
+ * then -ing or -ed, then a final e come off, and a doubled last letter left
+ * by -ing or -ed is undone. Pure and light: no dictionary but WORD_FORMS.
+ */
+export function stem(input: string): string {
+  const known = WORD_FORMS[input]
+
+  if (known) {
+    return known
+  }
+
+  let word = input
+
+  if (word.length <= 3) {
+    return word
+  }
+
+  if (word.endsWith("ies") && word.length > 4) {
+    word = `${word.slice(0, -3)}y`
+  } else if (
+    word.endsWith("s") &&
+    !/(ss|us|is)$/.test(word) &&
+    word.length > 3
+  ) {
+    word = word.slice(0, -1)
+  }
+
+  const suffix = /(ing|ed)$/.exec(word)?.[1]
+
+  if (suffix) {
+    const rest = word.slice(0, -suffix.length)
+
+    if (rest.length >= 3 && VOWEL.test(rest)) {
+      word =
+        /([^aeiouylsz])\1$/.test(rest) && rest.length > 3
+          ? rest.slice(0, -1)
+          : rest
+    }
+  }
+
+  if (word.length > 3 && word.endsWith("e")) {
+    word = word.slice(0, -1)
+  }
+
   return word
 }
 
-function scoreOne(candidate: ToolCandidate, words: string[], query: string) {
+/**
+ * Words that mean the same thing to someone looking for a tool, by stem:
+ * a query word finds a tool that says one of the others, scored lower than
+ * the word itself. Kept short: each group is a way people phrase a task
+ * that tools phrase another way.
+ */
+const SYNONYM_GROUPS: ReadonlyArray<readonly string[]> = [
+  ["file", "document", "doc"],
+  ["container", "service", "docker", "podman"],
+  ["launch", "start", "run", "deploy"],
+  ["store", "save", "keep"],
+  ["email", "mail"],
+  ["folder", "directory"],
+]
+
+const SYNONYMS: ReadonlyMap<string, readonly string[]> = (() => {
+  const map = new Map<string, string[]>()
+
+  for (const group of SYNONYM_GROUPS) {
+    const stems = group.map(stem)
+
+    for (const one of stems) {
+      map.set(one, [
+        ...(map.get(one) ?? []),
+        ...stems.filter((other) => other !== one),
+      ])
+    }
+  }
+
+  return map
+})()
+
+/** The stems a stemmed word stands for besides itself. */
+export function synonymsOf(word: string): readonly string[] {
+  return SYNONYMS.get(word) ?? []
+}
+
+/**
+ * A name as an exact match compares it: lower case, its words (by case or
+ * by any of - _ . and spaces) joined by _, a / kept. "check-permission",
+ * "Check permission" and "checkPermission" are all check_permission.
+ */
+export function normalName(text: string): string {
+  return text
+    .replace(/([a-z0-9])([A-Z])/g, "$1_$2")
+    .toLowerCase()
+    .replace(/[^a-z0-9/]+/g, "_")
+    .replace(/_*\/_*/g, "/")
+    .replace(/^_+|_+$/g, "")
+}
+
+/**
+ * What a name may be once an app's prefix for a server's tools is taken
+ * off (mcp__PCP_Bazzite__run_code, as Claude's apps name PCP's tools): the
+ * text itself first, then what follows each __ after mcp__.
+ */
+function withoutClientPrefix(text: string): string[] {
+  const variants = [text]
+
+  if (/^mcp__/i.test(text)) {
+    for (
+      let at = text.indexOf("__", 6);
+      at >= 0;
+      at = text.indexOf("__", at + 1)
+    ) {
+      const rest = text.slice(at + 2)
+
+      if (rest && !rest.startsWith("_")) {
+        variants.push(rest)
+      }
+    }
+  }
+
+  return variants
+}
+
+/**
+ * A name given with an app's prefix (mcp__<server>__<name>) and the one of
+ * `names` it stands for, or null when it has no such prefix or names none.
+ */
+export function clientPrefixed(
+  text: string,
+  names: Iterable<string>,
+): { prefix: string; name: string } | null {
+  const given = text.trim()
+  const known = new Map([...names].map((name) => [normalName(name), name]))
+
+  for (const variant of withoutClientPrefix(given).slice(1)) {
+    const name = known.get(normalName(variant))
+
+    if (name) {
+      return { prefix: given.slice(0, given.length - variant.length), name }
+    }
+  }
+
+  return null
+}
+
+/** What search says when a name came with an app's prefix. */
+export function clientPrefixNote(prefixed: {
+  prefix: string
+  name: string
+}): string {
+  return `"${prefixed.prefix}" is your app's prefix for PCP's tools, not part of the name: the tool is ${prefixed.name}.`
+}
+
+/** A query, read once for every candidate. */
+type Query = {
+  /** Lower case, trimmed. */
+  cleaned: string
+  /** Its words, stop words left out. */
+  words: string[]
+  /**
+   * What would be a tool's name: the whole query, and each term in it that
+   * reads as a name (it has _ - . / or a capital inside), each also without
+   * an app's prefix, as normalName writes them.
+   */
+  names: string[]
+}
+
+function readQuery(query: string): Query {
+  const raw = query.trim()
+  const cleaned = raw.toLowerCase()
+  const terms = raw
+    .split(/\s+/)
+    .filter((term) => /[_./-]|[a-z][A-Z]/.test(term) && term !== raw)
+
+  return {
+    cleaned,
+    words: tokenize(cleaned).filter((word) => !STOP_WORDS.has(word)),
+    names: [
+      ...new Set(
+        [raw, ...terms]
+          .flatMap(withoutClientPrefix)
+          .map(normalName)
+          .filter(Boolean),
+      ),
+    ],
+  }
+}
+
+/**
+ * The words of a query that some candidate has in its name, its title, or
+ * its server's short name or name: for those, a server's description or
+ * the owner's note on it counts for nothing, so a word ("PCP") that a
+ * server's description happens to use does not lift each of its tools over
+ * the tools named by it.
+ */
+function namedWords(candidates: ToolCandidate[], words: string[]): Set<string> {
+  const named = new Set<string>()
+
+  for (const candidate of candidates) {
+    if (named.size === words.length) break
+
+    const text =
+      `${candidate.name} ${candidate.title ?? ""} ${candidate.server} ${candidate.serverName}`.toLowerCase()
+    const stems = new Set(tokenize(text).map(stem))
+
+    for (const word of words) {
+      if (stems.has(stem(word)) || text.includes(word)) {
+        named.add(word)
+      }
+    }
+  }
+
+  return named
+}
+
+/**
+ * A description's lead: what the tool does, before how. Up to its first
+ * full stop, semicolon or colon that ends a clause, or its first line.
+ */
+export function descriptionLead(description: string): string {
+  return description.trim().split(/[.;:](?=\s|$)|\n/)[0] ?? ""
+}
+
+/** Whether a word of the query is in a candidate's name or title. */
+function namesAWord(candidate: ToolCandidate, words: string[]): boolean {
+  const text = `${candidate.name} ${candidate.title ?? ""}`.toLowerCase()
+  const stems = new Set(tokenize(text).map(stem))
+
+  return words.some((word) => stems.has(stem(word)) || text.includes(word))
+}
+
+/**
+ * The stems the leads of many of PCP's own tools share ("owner", "tool",
+ * "pcp"): PCP's vocabulary, not what one of them is for, so none of them
+ * finds one by its lead. Many is a fifth of them, and at least three.
+ */
+function commonLeadWords(tools: ToolCandidate[]): Set<string> {
+  const counts = new Map<string, number>()
+
+  for (const tool of tools) {
+    for (const word of new Set(
+      tokenize(descriptionLead(tool.description)).map(stem),
+    )) {
+      counts.set(word, (counts.get(word) ?? 0) + 1)
+    }
+  }
+
+  const many = Math.max(3, tools.length / 5)
+
+  return new Set(
+    [...counts].filter(([, count]) => count >= many).map(([word]) => word),
+  )
+}
+
+/** A lead's stems, PCP's common ones left out. */
+function leadStems(
+  candidate: ToolCandidate,
+  common: ReadonlySet<string>,
+): string[] {
+  return tokenize(descriptionLead(candidate.description))
+    .map(stem)
+    .filter((word) => word !== "pcp" && !common.has(word))
+}
+
+/**
+ * Whether the lead of one of PCP's own tools says a word of the query, or
+ * one of its synonyms (PCP's common words aside).
+ */
+function leadSaysAWord(
+  candidate: ToolCandidate,
+  words: string[],
+  common: ReadonlySet<string>,
+): boolean {
+  const stems = new Set(leadStems(candidate, common))
+
+  return words.some((raw) => {
+    const word = stem(raw)
+
+    return stems.has(word) || synonymsOf(word).some((other) => stems.has(other))
+  })
+}
+
+/** EXACT when the query names the candidate, PREFIX when it starts its name. */
+function nameTier(candidate: ToolCandidate, names: string[]): number {
+  const bare = normalName(candidate.name)
+  const full = normalName(`${candidate.server}/${candidate.name}`)
+
+  if (names.some((name) => name === bare || name === full)) {
+    return EXACT
+  }
+
+  return names.some(
+    (name) =>
+      name.length >= 3 &&
+      (bare.startsWith(name) || (name.includes("/") && full.startsWith(name))),
+  )
+    ? PREFIX
+    : 0
+}
+
+/**
+ * What a word scores where it is found. A synonym (synonymsOf) scores
+ * about half of the word itself; a word in a description's lead scores a
+ * little more than one further on.
+ */
+const WEIGHT = {
+  nameWord: 10,
+  namePrefix: 6,
+  nameText: 4,
+  nameSynonym: 5,
+  title: 4,
+  titleSynonym: 2,
+  description: 3,
+  descriptionText: 1,
+  descriptionSynonym: 1,
+  lead: 2,
+  leadSynonym: 1,
+  server: 3,
+} as const
+
+function scoreOne(
+  candidate: ToolCandidate,
+  { words, cleaned: query, names }: Query,
+  named: ReadonlySet<string> | null = null,
+  {
+    taskWords = null,
+  }: {
+    /**
+     * When set, the title and the description's lead score as the name
+     * does, but for these common words (commonLeadWords): for one of PCP's
+     * own tools, whose name is PCP's own word for it (share_result) while
+     * its title and lead say the task (store a file).
+     */
+    taskWords?: ReadonlySet<string> | null
+  } = {},
+) {
   const name = candidate.name.toLowerCase()
-  const nameWords = tokenize(candidate.name).map(stem)
+  const lead = descriptionLead(candidate.description)
+  const nameWords = [
+    ...tokenize(
+      taskWords ? `${candidate.name} ${candidate.title ?? ""}` : name,
+    ).map(stem),
+    ...(taskWords ? leadStems(candidate, taskWords) : []),
+  ]
   const title = (candidate.title ?? "").toLowerCase()
+  const titleWords = new Set(tokenize(title).map(stem))
   const description = candidate.description.toLowerCase()
   const descriptionWords = new Set(tokenize(candidate.description).map(stem))
+  const leadWords = new Set(tokenize(lead).map(stem))
   const server = `${candidate.server} ${candidate.serverName}`.toLowerCase()
-  const serverWords = new Set(
-    tokenize(
-      `${candidate.server} ${candidate.serverName} ${candidate.serverDescription}`,
-    ).map(stem),
-  )
+  const serverWords = new Set(tokenize(server).map(stem))
+  const aboutServer = new Set(tokenize(candidate.serverDescription).map(stem))
 
-  let score = 0
+  let score = nameTier(candidate, names)
 
-  if (query && (name === query || `${candidate.server}/${name}` === query)) {
-    score += 40
-  } else if (query && name.includes(query)) {
+  if (!score && query && name.includes(query)) {
     score += 15
   }
 
   for (const raw of words) {
     const word = stem(raw)
+    const alike = synonymsOf(word)
+    const saysAlike = (set: ReadonlySet<string>) =>
+      alike.some((other) => set.has(other))
+    // A prefix of a name's word only for a stem long enough to mean
+    // something: "fil" (file) is not the start of "filter".
+    const prefix = word.length >= 4 ? word : raw
 
     if (nameWords.includes(word)) {
-      score += 10
-    } else if (nameWords.some((part) => part.startsWith(word))) {
-      score += 6
+      score += WEIGHT.nameWord
+    } else if (nameWords.some((part) => part.startsWith(prefix))) {
+      score += WEIGHT.namePrefix
     } else if (name.includes(raw)) {
-      score += 4
+      score += WEIGHT.nameText
+    } else if (alike.some((other) => nameWords.includes(other))) {
+      score += WEIGHT.nameSynonym
     }
 
-    if (title.includes(raw)) {
-      score += 4
+    if (title.includes(raw) || titleWords.has(word)) {
+      score += WEIGHT.title
+    } else if (saysAlike(titleWords)) {
+      score += WEIGHT.titleSynonym
     }
 
     if (descriptionWords.has(word)) {
-      score += 3
+      score += WEIGHT.description + (leadWords.has(word) ? WEIGHT.lead : 0)
     } else if (description.includes(raw)) {
-      score += 1
+      score += WEIGHT.descriptionText
+    } else if (saysAlike(descriptionWords)) {
+      score +=
+        WEIGHT.descriptionSynonym +
+        (saysAlike(leadWords) ? WEIGHT.leadSynonym : 0)
     }
 
-    if (serverWords.has(word) || server.includes(raw)) {
-      score += 3
+    if (
+      serverWords.has(word) ||
+      server.includes(raw) ||
+      (aboutServer.has(word) && !named?.has(raw))
+    ) {
+      score += WEIGHT.server
     }
   }
 
@@ -116,8 +488,8 @@ export function searchTools(
     ? candidates.filter((candidate) => candidate.server === server)
     : candidates
 
-  const cleaned = query.trim().toLowerCase()
-  const words = tokenize(cleaned).filter((word) => !STOP_WORDS.has(word))
+  const read = readQuery(query)
+  const { cleaned, words } = read
 
   if (!cleaned || words.length === 0) {
     return scoped
@@ -130,10 +502,12 @@ export function searchTools(
       .map((candidate) => ({ ...candidate, score: 0 }))
   }
 
+  const named = namedWords(candidates, words)
+
   return scoped
     .map((candidate) => ({
       ...candidate,
-      score: scoreOne(candidate, words, cleaned),
+      score: scoreOne(candidate, read, named),
     }))
     .filter((match) => match.score > 0)
     .sort(
@@ -146,26 +520,129 @@ export function searchTools(
 }
 
 /** A skill as search sees it: its name and description. */
-export type SkillCandidate = { name: string; description: string }
+/**
+ * A skill as search sees it: its name, and how its ref names it when that
+ * is not its name (mine/<name> for a token's own).
+ */
+export type SkillCandidate = {
+  name: string
+  description: string
+  pathName?: string
+}
 
 /** A memory as search sees it: its full path and its text. */
 export type MemoryCandidate = { path: string; text: string }
 
-export type SearchKind = "tool" | "skill" | "memory"
+/**
+ * One of PCP's own tools the token has (gateway.ts registers them), which
+ * an assistant runs by name through execute_<tier>, with no call_handle.
+ */
+export type PcpToolCandidate = {
+  name: string
+  title: string
+  description: string
+  /** Its tier, as its annotations (the owner's choice included) say. */
+  tier?: "read" | "write" | "destructive"
+}
+
+export type SearchKind = "tool" | "pcp" | "skill" | "memory"
+
+/** What a result of kind pcp says after its line: how it is run. */
+export function pcpToolNote(
+  name: string,
+  tier: "read" | "write" | "destructive" = "destructive",
+): string {
+  return `PCP's own tool: run it with execute_${tier}, {"tool": "${name}", "arguments": {…}}.`
+}
 
 /** One result of search: what it is, how describe names it, one line on it. */
 export type SearchResult = {
   kind: SearchKind
-  /** tool: server/tool; skill: skill:<name>; memory: its path. */
+  /**
+   * tool: server/tool; pcp: the tool's name; skill: skill:<name>; memory:
+   * its path.
+   */
   ref: string
   /** A tool's title, when it has one. */
   title: string | null
   description: string
+  /** A tool's tier, or one of PCP's own. */
+  tier?: "read" | "write" | "destructive"
   score: number
 }
 
 /** Where kinds that score the same come in a list. */
-const KIND_ORDER: Record<SearchKind, number> = { skill: 0, tool: 1, memory: 2 }
+const KIND_ORDER: Record<SearchKind, number> = {
+  skill: 0,
+  tool: 1,
+  pcp: 2,
+  memory: 3,
+}
+
+/** How a result is named among search's similarities (embeddings/). */
+export function semanticKey(kind: SearchKind, ref: string): string {
+  return `${kind} ${ref}`
+}
+
+/** The most an item's nearness to the query adds to its keyword score. */
+export const SEMANTIC_WEIGHT = 30
+
+/**
+ * How far below the nearest item an item may be and still be lifted: the
+ * band of similarities that counts, whatever the model's own scale.
+ */
+const SEMANTIC_BAND = 0.2
+
+/** A similarity below this lifts nothing, however near the rest are. */
+const SEMANTIC_MIN = 0.05
+
+/**
+ * Points for each item's similarity to the query (cosine), relative to
+ * the others: the nearest gets SEMANTIC_WEIGHT, one at the edge of the
+ * band or below the middle of all of them nothing, the rest in between,
+ * the nearer the steeper. Relative, because each model has its own scale
+ * (one puts unrelated texts at 0.1, another at 0.4).
+ */
+export function semanticBoosts(
+  similarities: ReadonlyMap<string, number>,
+): Map<string, number> {
+  const values = [...similarities.values()].sort((a, b) => a - b)
+  const boosts = new Map<string, number>()
+
+  if (values.length === 0) {
+    return boosts
+  }
+
+  const top = values.at(-1)!
+  const middle = values[Math.floor(values.length / 2)]!
+  let floor = Math.max(middle, top - SEMANTIC_BAND)
+
+  if (floor >= top) {
+    floor = top - SEMANTIC_BAND
+  }
+
+  for (const [key, similarity] of similarities) {
+    if (similarity > floor && similarity >= SEMANTIC_MIN) {
+      const share = (similarity - floor) / (top - floor)
+      boosts.set(key, SEMANTIC_WEIGHT * share * share)
+    }
+  }
+
+  return boosts
+}
+
+/** One of PCP's own tools, scored as a tool on a server called pcp. */
+function pcpCandidate(tool: PcpToolCandidate): ToolCandidate {
+  return {
+    server: "pcp",
+    serverName: "PCP",
+    serverDescription: "",
+    name: tool.name,
+    title: tool.title,
+    description: tool.description,
+    ...(tool.tier ? { tier: tool.tier } : {}),
+  }
+}
 
 /**
  * A memory's line in a search: the line that mentions most words of the
@@ -193,18 +670,22 @@ function memoryLine(text: string, words: string[]): string {
 }
 
 /**
- * Tools, skills and memories ranked together for one query, scored the
- * same way: a skill as a tool whose name is its name, a memory as one whose
- * name is its path and whose description is its text. `server` keeps to
+ * Tools, PCP's own tools, skills and memories ranked together for one
+ * query, scored the same way: one of PCP's tools as a tool on a server
+ * called pcp, a skill as a tool whose name is its name, a memory as one
+ * whose name is its path and whose description is its text. A name the
+ * query gives exactly comes first, then one it starts. `server` keeps to
  * that server's tools; `kind` to one kind.
  */
 export function searchEverything(
   {
     tools,
+    pcp = [],
     skills = [],
     memories = [],
   }: {
     tools: ToolCandidate[]
+    pcp?: PcpToolCandidate[]
     skills?: SkillCandidate[]
     memories?: MemoryCandidate[]
   },
@@ -213,12 +694,27 @@ export function searchEverything(
     limit = 10,
     server,
     kind,
-  }: { limit?: number; server?: string | null; kind?: SearchKind | null } = {},
+    similarities = null,
+  }: {
+    limit?: number
+    server?: string | null
+    kind?: SearchKind | null
+    /**
+     * How near each item is to the query by the owner's embeddings
+     * provider, by semanticKey (embeddings/): blended into the keyword
+     * score, so a name given exactly still comes first. Null for keywords
+     * alone.
+     */
+    similarities?: ReadonlyMap<string, number> | null
+  } = {},
 ): SearchResult[] {
-  const cleaned = query.trim().toLowerCase()
-  const words = tokenize(cleaned).filter((word) => !STOP_WORDS.has(word))
+  const read = readQuery(query)
+  const { cleaned, words } = read
   const wants = (wanted: SearchKind) =>
     (!kind || kind === wanted) && (!server || wanted === "tool")
+  const own = pcp.map(pcpCandidate)
+  const common = commonLeadWords(own)
+  const named = words.length ? namedWords([...tools, ...own], words) : null
 
   const toolResults = wants("tool")
     ? (server ? tools.filter((tool) => tool.server === server) : tools).map(
@@ -227,13 +723,35 @@ export function searchEverything(
           ref: `${tool.server}/${tool.name}`,
           title: tool.title,
           description: summarize(tool.description) || "no description",
-          score: words.length ? scoreOne(tool, words, cleaned) : 0,
+          ...(tool.tier ? { tier: tool.tier } : {}),
+          score: words.length ? scoreOne(tool, read, named) : 0,
         }),
       )
     : []
+  const pcpResults = wants("pcp")
+    ? own.map((tool): SearchResult => ({
+        kind: "pcp",
+        ref: tool.name,
+        title: tool.title,
+        description: `${summarize(tool.description)} ${pcpToolNote(tool.name, tool.tier)}`,
+        ...(tool.tier ? { tier: tool.tier } : {}),
+        // One comes up by its name or title (or for "pcp"), or by what
+        // its description's lead says it is for; never by a word further
+        // on, which says how it works with the others ("call
+        // check_permission once the owner answered").
+        score:
+          words.length &&
+          (namesAWord(tool, words) ||
+            nameTier(tool, read.names) > 0 ||
+            words.every((word) => word === "pcp") ||
+            leadSaysAWord(tool, words, common))
+            ? scoreOne(tool, read, named, { taskWords: common })
+            : 0,
+      }))
+    : []
   const skillResults = wants("skill")
     ? skills.map((skill): SearchResult => {
-        const ref = `skill:${skill.name}`
+        const ref = `skill:${skill.pathName ?? skill.name}`
         const score = words.length
           ? scoreOne(
               {
@@ -244,8 +762,7 @@ export function searchEverything(
                 title: null,
                 description: skill.description,
               },
-              words,
-              cleaned,
+              read,
             ) + (cleaned === ref ? 40 : 0)
           : 0
 
@@ -274,28 +791,95 @@ export function searchEverything(
                 title: null,
                 description: memory.text,
               },
-              words,
-              cleaned,
+              read,
             ) + (cleaned === memory.path.toLowerCase() ? 40 : 0)
           : 0,
       }))
     : []
+
+  // Nearness by the provider, on top of the keywords: it also brings in
+  // what no keyword found, PCP's own tools included.
+  const boosts =
+    similarities && cleaned && words.length
+      ? semanticBoosts(similarities)
+      : null
+  const blend = (results: SearchResult[]) =>
+    boosts
+      ? results.map((result) => ({
+          ...result,
+          score:
+            result.score +
+            (boosts.get(semanticKey(result.kind, result.ref)) ?? 0),
+        }))
+      : results
 
   const order = (a: SearchResult, b: SearchResult) =>
     b.score - a.score ||
     KIND_ORDER[a.kind] - KIND_ORDER[b.kind] ||
     a.ref.localeCompare(b.ref)
 
-  // Nothing to rank by: the skills, then the tools, in name order. A memory
-  // is found by what it says, or listed by read_memory.
+  // Nothing to rank by: the skills, then the tools, in name order (PCP's
+  // own only when asked for: the app lists those already). A memory is
+  // found by what it says, or listed by read_memory.
   if (!cleaned || words.length === 0) {
-    return [...skillResults, ...toolResults].sort(order).slice(0, limit)
+    return [
+      ...skillResults,
+      ...toolResults,
+      ...(kind === "pcp" ? pcpResults : []),
+    ]
+      .sort(order)
+      .slice(0, limit)
   }
 
-  return [...toolResults, ...skillResults, ...memoryResults]
+  return blend([
+    ...toolResults,
+    ...pcpResults,
+    ...skillResults,
+    ...memoryResults,
+  ])
     .filter((result) => result.score > 0)
     .sort(order)
     .slice(0, limit)
+}
+
+/** One of PCP's own tools as describe gives it. */
+export type OwnToolDescription = PcpToolCandidate & {
+  inputSchema: Record<string, unknown>
+  outputSchema?: Record<string, unknown> | undefined
+  annotations: Record<string, boolean>
+  /** Its tier, as its annotations (the owner's choice included) say. */
+  tier?: "read" | "write" | "destructive"
+}
+
+/**
+ * describe's answer for one of PCP's own tools: what it is and its schemas,
+ * and that execute_<tier> runs it by name, so it has no call_handle. `note` says
+ * first what describe made of the name it was given; `extra` adds what the
+ * gateway knows of it (a capability's providers).
+ */
+export function describeOwnTool(
+  tool: OwnToolDescription,
+  note: string | null = null,
+  extra: Record<string, unknown> = {},
+): string {
+  return JSON.stringify(
+    {
+      ...(note ? { note } : {}),
+      tool: tool.name,
+      kind: "pcp",
+      call: `PCP's own tool: run it with execute_${tool.tier ?? "destructive"} as {"tool": "${tool.name}", "arguments": {…}}, the arguments matching its inputSchema. It has no call_handle.`,
+      run_with: `execute_${tool.tier ?? "destructive"}`,
+      ...(tool.tier ? { tier: tool.tier } : {}),
+      ...extra,
+      title: tool.title,
+      description: tool.description,
+      inputSchema: tool.inputSchema,
+      ...(tool.outputSchema ? { outputSchema: tool.outputSchema } : {}),
+      annotations: tool.annotations,
+    },
+    null,
+    1,
+  )
 }
 
 /** The first sentence, cut to fit one line of a search result. */
@@ -343,6 +927,8 @@ export type ListedTool = {
   title: string | null
   description: string
   access: "allowed" | "ask"
+  /** Its tier (tool-tiers.ts): which execute_<tier> runs it. */
+  tier?: "read" | "write" | "destructive"
 }
 
 /**
@@ -394,7 +980,7 @@ export function listTools(
     }`,
     ...page.map(
       (tool) =>
-        `${server}/${tool.name} [${tool.access}]${tool.title ? ` (${tool.title})` : ""} — ${summarize(tool.description) || "no description"}`,
+        `${server}/${tool.name} [${tool.access}${tool.tier ? `, ${tool.tier}: execute_${tool.tier}` : ""}]${tool.title ? ` (${tool.title})` : ""} — ${summarize(tool.description) || "no description"}`,
     ),
     ...(end < sorted.length
       ? [`More: call list_tools again with offset ${end}.`]

@@ -1,7 +1,10 @@
-import { randomUUID } from "node:crypto"
+import { createHash, randomUUID } from "node:crypto"
 
+import { firstServer, toolNamed, toolsWhere } from "./test-servers"
 import type { CallToolResult } from "@modelcontextprotocol/server"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
+
+import { serverNamed } from "./test-servers"
 
 import { listTokenAllowances } from "./allowances"
 import { createApiToken, resolveApiToken, revokeApiToken } from "./api-tokens"
@@ -15,20 +18,36 @@ import {
   type GatewayServer,
 } from "./gateway"
 import { listMemories } from "./memories"
+import { OWNER_LINK_RULE } from "./owner-link"
+import { permissionLinkIn } from "./tools/serve"
 import {
+  askCodeCall,
   checkPermission,
+  checkPermissions,
   decidePermission,
   getPermissionView,
+  listAnsweredRequests,
+  openRequestFile,
   listOwnOpenRequests,
+  answeredNote,
+  ownRequests,
   listPendingRequests,
   prunePermissionRequests,
+  pruneReusableAnswers,
   runCall,
   withdrawPermission,
   withPermission,
+  type PermissionAsk,
   type PermissionExecutor,
   type RegisterArgs,
 } from "./permissions"
 import { closePendingRequests } from "./permission-close"
+import {
+  REUSE_VALUE_MAX_CHARS,
+  canonicalJson,
+  requestHash,
+} from "./permission-rules"
+import { decryptString } from "./crypto"
 import { finishHandover } from "./browser/call"
 import { createFakeCalDav } from "./caldav/fake-caldav"
 import { createFakeJmap, type FakeJmap } from "./mail/fake-jmap"
@@ -37,11 +56,13 @@ import { createSecret, revealSecret } from "./secrets"
 import { createServer } from "./servers"
 import { scratchDatabase } from "./test-db"
 import { OwnerNeeded } from "./browser/types"
-import { keepBytes } from "./tool-results"
+import { keepBytes, resultTool } from "./tool-results"
 import { callServerTool, syncServerTools } from "./upstream"
 import { copyTokenAccess, writeToolAccess } from "./tool-access"
+import { setToolTier } from "./tool-tiers"
 import { setupVault } from "./vault"
 import { createSshServer } from "./ssh/hosts"
+import { openSecretMeta, secretNameWhere } from "./secret-meta"
 
 // The owner's permission against a scratch database, with the upstream
 // replaced by a stub that counts what actually ran.
@@ -104,9 +125,9 @@ async function setup(options: { allowAllServers?: boolean } = {}): Promise<{
       data: {
         id: randomUUID(),
         serverId,
-        name,
-        description: `${name} does one thing.`,
-        inputSchema: JSON.stringify({ type: "object" }),
+        plainName: name,
+        plainDescription: `${name} does one thing.`,
+        plainInputSchema: JSON.stringify({ type: "object" }),
         annotations: JSON.stringify(annotations),
       },
     })
@@ -139,6 +160,58 @@ async function onlyRequestId(): Promise<string> {
 }
 
 describe("asking the owner", () => {
+  it("ends every kind of request with a markdown link labelled with its title", async () => {
+    const { ctx, scope, server } = await setup()
+    const asks: PermissionAsk[] = [
+      call(server, "send_postcard", { to: "Ada" }),
+      {
+        kind: "memory_share" as const,
+        input: { path: "preferences.md", text: "Metric units." },
+      },
+      {
+        kind: "browser_handover" as const,
+        input: {
+          serverId: server.id,
+          tabId: "tab1",
+          message: "Please sign in.",
+          url: "https://shop.example/login",
+          title: "Sign in",
+        },
+      },
+      {
+        kind: "register" as const,
+        input: {
+          name: "Linear",
+          url: "https://mcp.linear.example/mcp",
+          authType: "none",
+        },
+      },
+    ]
+
+    for (const ask of asks) {
+      const asked = await withPermission(scope, ask)
+      const row = await db().permissionRequest.findFirstOrThrow({
+        orderBy: { createdAt: "desc" },
+      })
+      const view = (await getPermissionView(ctx, row.id, {
+        publicUrl: PUBLIC_URL,
+      }))!
+      const lines = textOf(asked).trimEnd().split("\n")
+
+      expect(lines.at(-2), ask.kind).toContain(OWNER_LINK_RULE)
+      expect(lines.at(-1), ask.kind).toBe(`[${view.title}](${view.url})`)
+      expect(permissionLinkIn(asked as CallToolResult, PUBLIC_URL)).toEqual({
+        kind: "needs_owner",
+        reason: "permission",
+        url: view.url,
+        label: view.title,
+        request: row.id,
+      })
+      // The bare address appears nowhere else for the assistant to paste.
+      expect(textOf(asked).split(view.url)).toHaveLength(2)
+    }
+  })
+
   it("hands out a link, keeps the arguments encrypted and asks once per request", async () => {
     const { scope, server } = await setup()
     const asked = call(server, "send_postcard", { to: "Ada", message: "Hi" })
@@ -150,12 +223,14 @@ describe("asking the owner", () => {
     expect(textOf(first)).toContain(`${PUBLIC_URL}/permissions/${id}`)
     // The link comes last, with nothing after it: some apps hide the text
     // written before a tool call, so check_permission waits for the owner.
-    expect(textOf(first)).toContain("End your reply with this link")
+    // As a markdown link labelled with what the owner is asked, never the
+    // bare address: an app that reads the reply aloud says the label.
+    expect(textOf(first)).toContain(OWNER_LINK_RULE)
     expect(textOf(first).split("\n").at(-1)).toBe(
-      `${PUBLIC_URL}/permissions/${id}`,
+      `[Allow postcards/send_postcard?](${PUBLIC_URL}/permissions/${id})`,
     )
     expect(textOf(first)).toContain(
-      `When they say they have answered, call check_permission with id "${id}"`,
+      `On the owner's next message, whatever it says, call check_permission with id "${id}" before you send the link again or assume the request is still open.`,
     )
     expect((first as CallToolResult).structuredContent).toBeUndefined()
 
@@ -173,6 +248,34 @@ describe("asking the owner", () => {
       scope,
       call(server, "send_postcard", { to: "Bob", message: "Hi" }),
     )
+    expect(await db().permissionRequest.count()).toBe(2)
+  })
+
+  it("finds a request by a hash keyed under the vault key, and an old plain hash by nothing", async () => {
+    const { ctx, scope, server } = await setup()
+    const args = { to: "Ada", message: "Hi" }
+    const asked = call(server, "send_postcard", args)
+
+    await withPermission(scope, asked)
+    const id = await onlyRequestId()
+    const row = await db().permissionRequest.findUniqueOrThrow({
+      where: { id },
+    })
+    const plain = createHash("sha256")
+      .update(`call\n${server.id}/send_postcard\n${canonicalJson(args)}`)
+      .digest("hex")
+
+    expect(row.argsHash).toBe(
+      requestHash(ctx.dek, "call", `${server.id}/send_postcard`, args),
+    )
+    expect(row.argsHash).not.toContain(plain)
+
+    // A row stored before the hash was keyed: the same call is a new request.
+    await db().permissionRequest.update({
+      where: { id },
+      data: { argsHash: plain },
+    })
+    await withPermission(scope, asked)
     expect(await db().permissionRequest.count()).toBe(2)
   })
 
@@ -251,7 +354,10 @@ describe("asking the owner", () => {
     )
     const kept = await db().toolResult.findFirstOrThrow()
 
-    expect(kept).toMatchObject({ tokenId, toolName: "add_numbers" })
+    expect({ ...kept, toolName: resultTool(ctx, kept) }).toMatchObject({
+      tokenId,
+      toolName: "add_numbers",
+    })
     expect(textOf(result)).toContain(`report → ${kept.id} (text/plain`)
     expect(textOf(result)).toContain(`"report":{"$result":"${kept.id}"`)
     expect(textOf(result)).not.toContain("THE END")
@@ -309,7 +415,31 @@ describe("asking the owner", () => {
     expect(view?.title).toBe("Allow postcards/send_postcard?")
     expect(view?.lines).toContain("to: Ada")
     expect(view?.lines).toContain('Asked by the token "Claude"')
-    expect(view?.warning).toMatch(/destructive/)
+    expect(view?.warning).toMatch(/a Destructive tool/)
+
+    // The tier decides, the owner's choice over the hints.
+    await setToolTier(ctx, server.id, "send_postcard", "write")
+    expect(
+      (
+        await getPermissionView(ctx, await onlyRequestId(), {
+          publicUrl: PUBLIC_URL,
+        })
+      )?.warning,
+    ).toBeNull()
+  })
+
+  it("warns about a tool without hints, which counts as Destructive", async () => {
+    const { ctx, scope, server } = await setup()
+    await db().mcpTool.updateMany({
+      where: { id: (await toolNamed(ctx, "send_postcard", server.id)).id },
+      data: { annotations: null },
+    })
+    await withPermission(scope, call(server, "send_postcard", { to: "Ada" }))
+
+    const view = await getPermissionView(ctx, await onlyRequestId(), {
+      publicUrl: PUBLIC_URL,
+    })
+    expect(view?.warning).toMatch(/a Destructive tool/)
   })
   it("shows everything a call runs with when the lines cut it short, with what does not show written out", async () => {
     const { ctx, scope, server } = await setup()
@@ -371,9 +501,9 @@ describe("asking the owner", () => {
       data: {
         id: randomUUID(),
         serverId,
-        name: "run_command",
-        description: "Runs one command.",
-        inputSchema: JSON.stringify({ type: "object" }),
+        plainName: "run_command",
+        plainDescription: "Runs one command.",
+        plainInputSchema: JSON.stringify({ type: "object" }),
         annotations: JSON.stringify({ destructiveHint: true }),
       },
     })
@@ -435,13 +565,14 @@ describe("kept results in a call", () => {
     ).id
   }
 
-  it("shows the owner what each handle is, and warns when one is gone", async () => {
+  it("shows the owner each handle as a file, and warns when one is gone", async () => {
     const { ctx, scope, server, tokenId } = await setup()
     const id = await keepFile(ctx, server.id, tokenId)
-    await withPermission(
+    const asked = await withPermission(
       scope,
       call(server, "send_postcard", {
         attachments: [{ $result: id }, { $result: "gone" }],
+        nested: { deep: [{ file: { $result: id } }] },
       }),
     )
 
@@ -452,14 +583,89 @@ describe("kept results in a call", () => {
     expect(view?.lines).toContain(
       `attachments: [{"$result":"${id}"},{"$result":"gone"}]`,
     )
-    expect(
-      view?.lines.find((line) => line.startsWith(`Kept result ${id}:`)),
-    ).toMatch(
-      /^Kept result [^:]+: dot\.png, image\/png, 8 bytes, from postcards\/get_attachment, readable until \d{4}-/,
+    // Files are chips, not lines of text; named twice, shown once.
+    expect(view?.lines.some((line) => line.startsWith("Kept result"))).toBe(
+      false,
     )
-    expect(view?.lines).toContain(
+    expect(view?.files).toEqual([
+      {
+        id,
+        found: true,
+        name: "dot.png",
+        mediaType: "image/png",
+        kind: "bytes",
+        length: 8,
+        size: "8 B",
+        from: "postcards/get_attachment",
+        expiresAt: expect.any(Date),
+        preview: "image",
+      },
+      { id: "gone", found: false },
+    ])
+    // The raw arguments fold under them, even when the lines said it all.
+    expect(view?.full?.map((part) => part.label)).toEqual([
+      "attachments",
+      "nested",
+    ])
+
+    // The assistant is still told what each one is.
+    const told = textOf(asked)
+    expect(told).toMatch(
+      /Kept result [^:]+: dot\.png, image\/png, 8 bytes, from postcards\/get_attachment, readable until \d{4}-/,
+    )
+    expect(told).toContain(
       "Kept result gone: no longer available for this token; the call will fail",
     )
+  })
+
+  it("serves the owner only a file the waiting request names, of its own token, while it waits", async () => {
+    const { ctx, scope, server, tokenId } = await setup()
+    const named = await keepFile(ctx, server.id, tokenId)
+    const unnamed = await keepFile(ctx, server.id, tokenId)
+    const { id: otherToken } = await createApiToken(ctx, {
+      name: "Other",
+      allowAllServers: true,
+      serverIds: [],
+    })
+    const foreign = await keepFile(ctx, server.id, otherToken)
+    await withPermission(
+      scope,
+      call(server, "send_postcard", {
+        attachments: [{ $result: named }, { $result: foreign }],
+      }),
+    )
+    const permissionId = await onlyRequestId()
+    const open = (resultId: string, now?: Date) =>
+      openRequestFile(ctx, { permissionId, resultId }, now)
+
+    expect((await open(named))?.bytes()).toEqual(PNG)
+    // Not named in its arguments.
+    expect(await open(unnamed)).toBeNull()
+    // Named, but another token's: the call could not send it either.
+    expect(await open(foreign)).toBeNull()
+    // Another vault's request, or none.
+    expect(
+      await openRequestFile(ctx, { permissionId: "nope", resultId: named }),
+    ).toBeNull()
+
+    // Not once the result is gone (a day), nor once the request expired.
+    const row = await db().permissionRequest.findFirstOrThrow()
+    expect(
+      await open(named, new Date(row.expiresAt.getTime() + 1000)),
+    ).toBeNull()
+    const kept = await db().toolResult.findUniqueOrThrow({
+      where: { id: named },
+    })
+    expect(
+      await open(named, new Date(kept.expiresAt.getTime() + 1000)),
+    ).toBeNull()
+
+    // Nor once it is answered.
+    await db().permissionRequest.update({
+      where: { id: permissionId },
+      data: { status: "declined" },
+    })
+    expect(await open(named)).toBeNull()
   })
 
   it("hands the upstream a way to open the token's own results, and no other's", async () => {
@@ -476,7 +682,7 @@ describe("kept results in a call", () => {
       syncTools: async () => ({ status: "ok", message: "", toolCount: 3 }),
     }
 
-    const row = await db().mcpServer.findFirstOrThrow()
+    const row = await firstServer(ctx)
     await runCall(
       ctx,
       row,
@@ -543,7 +749,7 @@ describe("a site the browser asks about", () => {
         return { content: [{ type: "text", text: "opened" }] }
       },
     }
-    const row = await db().mcpServer.findFirstOrThrow()
+    const row = await firstServer(ctx)
 
     await runCall(ctx, row, "navigate", args, {
       publicUrl: PUBLIC_URL,
@@ -599,10 +805,10 @@ describe("check_permission", () => {
     const late = await checkPermission(scope, id, { waitMs: 50 })
     expect(textOf(late)).toContain("Still waiting for the owner")
     expect(textOf(late)).toContain(
-      "call check_permission again when they say they have answered",
+      `On the owner's next message, whatever it says, call check_permission with id "${id}" again before you send the link again`,
     )
     expect(textOf(late).split("\n").at(-1)).toBe(
-      `${PUBLIC_URL}/permissions/${id}`,
+      `[Allow postcards/add_numbers?](${PUBLIC_URL}/permissions/${id})`,
     )
 
     const gone = new AbortController()
@@ -632,6 +838,136 @@ describe("check_permission", () => {
     const started = Date.now()
     expect(textOf(await checkPermission(scope, id))).toContain("said no")
     expect(Date.now() - started).toBeLessThan(1_000)
+  })
+})
+
+describe("check_permission on several requests", () => {
+  async function two() {
+    const made = await setup()
+    await withPermission(made.scope, call(made.server, "add_numbers", { a: 1 }))
+    await withPermission(made.scope, call(made.server, "add_numbers", { a: 2 }))
+    const rows = await db().permissionRequest.findMany({
+      orderBy: { createdAt: "asc" },
+    })
+    return { ...made, a: rows[0].id, b: rows[1].id }
+  }
+
+  it("any: returns as soon as one is answered, with the rest's status", async () => {
+    const { ctx, scope, a, b } = await two()
+    const { executor } = stub()
+
+    const checked = checkPermissions(scope, [a, b], { waitMs: 10_000 })
+    setTimeout(() => {
+      void decidePermission(
+        ctx,
+        b,
+        "allow_once",
+        { publicUrl: PUBLIC_URL },
+        executor,
+      )
+    }, 200)
+    const result = await checked
+
+    expect(result.entries).toEqual([
+      { id: a, status: "pending" },
+      { id: b, status: "executed", outcome: expect.stringContaining("ran") },
+    ])
+    expect(result.told).toEqual([b])
+    expect(result.text).toContain(`/permissions/${a}`)
+    expect(result.text.split("\n").at(-1)).toContain(`/permissions/${a}`)
+  })
+
+  it("all: waits until none is waiting", async () => {
+    const { ctx, scope, a, b } = await two()
+    const { executor } = stub()
+    const decide = (id: string, delay: number) =>
+      setTimeout(() => {
+        void decidePermission(
+          ctx,
+          id,
+          "allow_once",
+          { publicUrl: PUBLIC_URL },
+          executor,
+        )
+      }, delay)
+    decide(a, 100)
+    decide(b, 1_500)
+
+    const started = Date.now()
+    const result = await checkPermissions(scope, [a, b], {
+      mode: "all",
+      waitMs: 10_000,
+    })
+
+    expect(Date.now() - started).toBeGreaterThanOrEqual(1_400)
+    expect(result.entries.map((entry) => entry.status)).toEqual([
+      "executed",
+      "executed",
+    ])
+    expect(result.told).toEqual([a, b])
+  })
+
+  it("on timeout lists every status, and an unknown id stays one entry", async () => {
+    const { ctx, scope, a, b } = await two()
+    await decidePermission(
+      ctx,
+      b,
+      "decline",
+      { publicUrl: PUBLIC_URL },
+      stub().executor,
+    )
+
+    const result = await checkPermissions(scope, [a, "nope", b], {
+      mode: "all",
+      waitMs: 50,
+    })
+
+    expect(result.entries).toEqual([
+      { id: a, status: "pending" },
+      { id: "nope", status: "unknown" },
+      {
+        id: b,
+        status: "declined",
+        outcome: expect.stringContaining("said no"),
+      },
+    ])
+    expect(result.told).toEqual([b])
+  })
+
+  it("stops waiting at once when the client goes away", async () => {
+    const { scope, a, b } = await two()
+    const gone = new AbortController()
+    const started = Date.now()
+    const checked = checkPermissions(scope, [a, b], {
+      mode: "all",
+      waitMs: 30_000,
+      signal: gone.signal,
+    })
+    setTimeout(() => gone.abort(), 100)
+    const result = await checked
+
+    expect(Date.now() - started).toBeLessThan(5_000)
+    expect(result.entries.map((entry) => entry.status)).toEqual([
+      "pending",
+      "pending",
+    ])
+  })
+
+  it("answers at once when every id is unknown, and never shows another token's request", async () => {
+    const { ctx, a } = await two()
+    const { token } = await createApiToken(ctx, {
+      name: "Other",
+      allowAllServers: true,
+      serverIds: [],
+    })
+    const other = { ...(await resolveApiToken(token))!, publicUrl: PUBLIC_URL }
+
+    const started = Date.now()
+    const result = await checkPermissions(other, [a], { waitMs: 10_000 })
+
+    expect(Date.now() - started).toBeLessThan(2_000)
+    expect(result.entries).toEqual([{ id: a, status: "unknown" }])
+    expect(result.text).not.toContain("/permissions/")
   })
 })
 
@@ -868,7 +1204,10 @@ describe("the owner's answer", () => {
     expect(textOf(ran)).toContain("PCP kept the whole answer")
 
     const kept = await db().toolResult.findFirstOrThrow()
-    expect(kept).toMatchObject({ tokenId, toolName: "add_numbers" })
+    expect({ ...kept, toolName: resultTool(ctx, kept) }).toMatchObject({
+      tokenId,
+      toolName: "add_numbers",
+    })
     expect(kept.length).toBe(long.length)
 
     // The stored outcome is shorter still, and still names the result.
@@ -974,7 +1313,7 @@ describe("adding a server", () => {
       },
     })
     expect(textOf(asked)).toMatch(
-      /End your reply with this link.*\n.*\/permissions\//,
+      /never paste the bare address.*\n\[Add the server Linear\?\]\(.*\/permissions\/[\w-]+\)$/,
     )
     expect(await db().mcpServer.count()).toBe(1)
 
@@ -994,12 +1333,11 @@ describe("adding a server", () => {
       { publicUrl: PUBLIC_URL },
       executor,
     )
-    const linear = await db().mcpServer.findFirstOrThrow({
-      where: { name: "Linear" },
-    })
+    const linear = await serverNamed(ctx, "Linear")
 
     expect(added.structuredContent).toMatchObject({
-      kind: "connect",
+      kind: "needs_owner",
+      reason: "connect",
       connect: {
         serverId: linear.id,
         startUrl: `${PUBLIC_URL}/api/servers/${linear.id}/oauth/start`,
@@ -1027,9 +1365,20 @@ describe("adding a server", () => {
     // owner has signed in, then done.
     const waiting = await checkPermission(scope, id)
     expect(waiting.structuredContent).toMatchObject({
-      kind: "connect",
+      kind: "needs_owner",
+      reason: "connect",
       connect: { serverId: linear.id, slug: linear.slug },
     })
+
+    const several = await checkPermissions(scope, [id, "nope"], { waitMs: 50 })
+    expect(several.told).toEqual([])
+    expect(several.entries[0]).toMatchObject({ id, status: "executed" })
+    const lines = several.text.split("\n")
+    expect(lines.at(-1)).toMatch(/^\[Connect Linear in PCP\]\(.+\)$/)
+    expect(several.text).toContain(`check_server with server "${linear.slug}"`)
+    // The link appears once, at the end, never inside an entry.
+    expect(several.text.split("Connect Linear in PCP").length).toBe(2)
+
     expect(textOf(waiting)).toContain("Linear needs connecting")
 
     await db().mcpServer.update({
@@ -1076,9 +1425,10 @@ describe("adding a server", () => {
       executor,
     )
     expect(textOf(added)).toMatch(/Added Weather as "weather" with 3 tools/)
-    expect(
-      await db().mcpServer.findFirstOrThrow({ where: { name: "Weather" } }),
-    ).toMatchObject({ authType: "header", authSecretId: secret.id })
+    expect(await serverNamed(ctx, "Weather")).toMatchObject({
+      authType: "header",
+      authSecretId: secret.id,
+    })
   })
 
   it("names every secret when the credential has several headers, and adds them all", async () => {
@@ -1149,10 +1499,7 @@ describe("adding a server", () => {
       { publicUrl: PUBLIC_URL },
       executor,
     )
-    const added = await db().mcpServer.findFirstOrThrow({
-      where: { name: "Domains" },
-      include: { authHeaders: true },
-    })
+    const added = await serverNamed(ctx, "Domains")
     expect(added.authHeaders).toMatchObject([
       {
         position: 1,
@@ -1294,10 +1641,7 @@ describe("adding an API from OpenAPI text", () => {
     )
     expect(textOf(added)).toMatch(/Added Pets as "pets" with 3 tools/)
 
-    const pets = await db().mcpServer.findFirstOrThrow({
-      where: { name: "Pets" },
-      include: { tools: true },
-    })
+    const pets = await serverNamed(ctx, "Pets")
     expect(pets).toMatchObject({
       kind: "openapi",
       url: "https://api.example.com/v1",
@@ -1374,9 +1718,7 @@ describe("adding an API from OpenAPI text", () => {
       { publicUrl: PUBLIC_URL },
       executor,
     )
-    expect(
-      await db().mcpServer.findFirstOrThrow({ where: { name: "Pets" } }),
-    ).toMatchObject({
+    expect(await serverNamed(ctx, "Pets")).toMatchObject({
       authType: "header",
       authSecretId: secret.id,
       readOnly: true,
@@ -1469,10 +1811,7 @@ describe("a change to an API endpoint of the owner's", () => {
     })
     expect(textOf(done)).toBe("Changed Pets: 2 tools.")
 
-    const tools = await db().mcpTool.findMany({
-      where: { serverId: id },
-      orderBy: { name: "asc" },
-    })
+    const tools = await toolsWhere(ctx, { serverId: id })
     expect(tools.map((tool) => [tool.name, tool.descriptionOverride])).toEqual([
       ["createPet", null],
       ["listPets", "Every pet in the shop."],
@@ -1528,7 +1867,7 @@ describe("a new secret the owner types in", () => {
       input: await withNewSecret(ctx),
     })
     expect(textOf(asked)).toMatch(
-      /End your reply with this link.*\n.*\/permissions\//,
+      /never paste the bare address.*\n\[Add the API endpoint .+\?\]\(.*\/permissions\/[\w-]+\)$/,
     )
     expect(textOf(asked)).toMatch(
       /type the value of the secret "Pets API key" in there; do not ask them for it here/,
@@ -1610,13 +1949,13 @@ describe("a new secret the owner types in", () => {
     expect(textOf(added)).not.toContain("k-123")
 
     const secret = await db().secret.findFirstOrThrow({
-      where: { name: "Pets API key" },
+      where: secretNameWhere(ctx, "Pets API key"),
     })
     expect(await revealSecret(ctx, secret.id)).toBe("k-123")
-    expect(secret.description).toBe("Sent to Pets in the X-API-Key header.")
-    expect(
-      await db().mcpServer.findFirstOrThrow({ where: { name: "Pets" } }),
-    ).toMatchObject({
+    expect(openSecretMeta(ctx, secret).description).toBe(
+      "Sent to Pets in the X-API-Key header.",
+    )
+    expect(await serverNamed(ctx, "Pets")).toMatchObject({
       authType: "header",
       authSecretId: secret.id,
       authHeaderName: "X-API-Key",
@@ -1650,9 +1989,9 @@ describe("a new secret the owner types in", () => {
     ).toMatchObject({ name: "Pets API key", exists: true })
 
     await decidePermission(ctx, first, "allow_once", web, executor)
-    expect(
-      await db().mcpServer.findFirstOrThrow({ where: { name: "Pets" } }),
-    ).toMatchObject({ authSecretId: added.id })
+    expect(await serverNamed(ctx, "Pets")).toMatchObject({
+      authSecretId: added.id,
+    })
 
     await withPermission(scope, {
       kind: "register",
@@ -1795,9 +2134,7 @@ describe("an API that signs in with OAuth", () => {
 
     expect(textOf(added)).toMatch(/Added Mail as "mail"/)
     expect(textOf(added)).not.toContain("client-s3cret")
-    const server = await db().mcpServer.findFirstOrThrow({
-      where: { name: "Mail" },
-    })
+    const server = await serverNamed(ctx, "Mail")
     expect(server).toMatchObject({
       kind: "openapi",
       authType: "oauth",
@@ -1829,9 +2166,7 @@ describe("an API that signs in with OAuth", () => {
     )
 
     expect(added.isError ?? false).toBe(false)
-    expect(
-      await db().mcpServer.findFirstOrThrow({ where: { name: "Mail" } }),
-    ).toMatchObject({
+    expect(await serverNamed(ctx, "Mail")).toMatchObject({
       oauthClientId: "owner-client",
       oauthClientSecretId: null,
     })
@@ -2144,12 +2479,12 @@ describe("an assistant withdrawing its own request", () => {
 
     const listed = textOf(await listOwnOpenRequests(scope))
     expect(listed.split("\n")).toEqual([
-      "2 requests of yours are waiting for the owner. check_permission with an id says where one stands; withdraw_request with an id takes back one you no longer need.",
+      "2 requests of yours are waiting for the owner. check_permission with an id says where one stands; withdraw_request with an id takes back one you no longer need. Hand a link to the owner as a markdown link with its label, never the bare address.",
       "",
       `- ${first!.id} (call, asked 3 hours ago): Allow postcards/add_numbers?`,
-      `  ${PUBLIC_URL}/permissions/${first!.id}`,
+      `  [Allow postcards/add_numbers?](${PUBLIC_URL}/permissions/${first!.id})`,
       `- ${third.id} (call, asked just now): Allow postcards/add_numbers?`,
-      `  ${PUBLIC_URL}/permissions/${third.id}`,
+      `  [Allow postcards/add_numbers?](${PUBLIC_URL}/permissions/${third.id})`,
     ])
     // Nothing of the arguments, and nothing of the other token's.
     expect(listed).not.toContain("Ada")
@@ -2157,6 +2492,75 @@ describe("an assistant withdrawing its own request", () => {
     expect(
       await db().permissionRequest.count({ where: { status: "pending" } }),
     ).toBe(3)
+  })
+
+  it("lists the token's requests answered in the last hour after the open ones (#59)", async () => {
+    const { ctx, scope, server } = await setup()
+    const other = await otherScope(ctx)
+    const { executor } = stub()
+    const web = { publicUrl: PUBLIC_URL }
+
+    await withPermission(scope, call(server, "add_numbers", { a: 1 }))
+    await withPermission(scope, call(server, "send_postcard", { to: "Ada" }))
+    await withPermission(scope, call(server, "add_numbers", { a: 2 }))
+    await withPermission(scope, call(server, "add_numbers", { a: 3 }))
+    await withPermission(other, call(server, "add_numbers", { a: 9 }))
+    const [declined, withdrawn, old, open] =
+      await db().permissionRequest.findMany({
+        where: { tokenId: scope.tokenId },
+        orderBy: { createdAt: "asc" },
+      })
+    const theirs = await db().permissionRequest.findFirstOrThrow({
+      where: { tokenId: other.tokenId },
+    })
+    await decidePermission(ctx, declined!.id, "decline", web, executor)
+    await decidePermission(ctx, theirs.id, "decline", web, executor)
+    await decidePermission(ctx, old!.id, "decline", web, executor)
+    await db().permissionRequest.update({
+      where: { id: old!.id },
+      data: { decidedAt: new Date(Date.now() - 2 * 60 * 60_000) },
+    })
+    // Taken back by the assistant: not an answer of the owner's.
+    await withdrawPermission(scope, withdrawn!.id)
+
+    const listed = await ownRequests(scope)
+    expect(listed.open.map((view) => view.id)).toEqual([open!.id])
+    expect(listed.answered).toEqual([
+      expect.objectContaining({
+        id: declined!.id,
+        kind: "call",
+        status: "declined",
+        outcome: "The owner said no, so nothing ran.",
+      }),
+    ])
+    expect(listed.text.split("\n").slice(-2)).toEqual([
+      "Answered by the owner in the last hour, newest first (check_permission with an id gives the whole outcome):",
+      `- ${declined!.id} (call, answered just now): Allow postcards/add_numbers? The owner said no, so nothing ran.`,
+    ])
+    expect(listed.text).not.toContain(theirs.id)
+
+    // The note a session gets names those it has not heard of, and counts
+    // what it leaves out.
+    const { seen, answered, more } = await listAnsweredRequests(scope, {
+      since: new Date(Date.now() - 60 * 60_000),
+      limit: 0,
+      skip: new Set(),
+    })
+    expect(seen.map((row) => row.id)).toEqual([declined!.id])
+    expect(answered).toEqual([])
+    expect(more).toBe(1)
+    expect(answeredNote(answered, more)).toContain(
+      "- and 1 more: check_permission with no id lists them.",
+    )
+    expect(
+      (
+        await listAnsweredRequests(scope, {
+          since: new Date(Date.now() - 60 * 60_000),
+          skip: new Set([declined!.id]),
+        })
+      ).answered,
+    ).toEqual([])
+    expect(answeredNote([], 0)).toBeNull()
   })
 })
 
@@ -2230,6 +2634,232 @@ describe("pruning", () => {
     expect(
       (await db().permissionRequest.findMany()).map((row) => row.id),
     ).toEqual([recent.id])
+  })
+})
+
+describe("a call the owner allowed once, made again", () => {
+  /** The call asked about, allowed once, and run. */
+  async function allowedOnce(
+    executor: PermissionExecutor,
+    args: Record<string, unknown> = { to: "Grace" },
+  ) {
+    const { ctx, scope, server, tokenId } = await setup()
+    await withPermission(scope, call(server, "send_postcard", args))
+    const id = await onlyRequestId()
+    await decidePermission(
+      ctx,
+      id,
+      "allow_once",
+      { publicUrl: PUBLIC_URL },
+      executor,
+    )
+
+    return { ctx, scope, server, tokenId, id }
+  }
+
+  it("answers the identical call with that run's answer, once, without running it again", async () => {
+    const { calls, executor } = stub()
+    const { scope, server, id } = await allowedOnce(executor)
+
+    const again = await withPermission(
+      scope,
+      call(server, "send_postcard", { to: "Grace" }),
+    )
+    expect(again.isError).toBeFalsy()
+    expect(textOf(again)).toBe(
+      "The owner allowed this call once and it already ran less than a minute ago; this is that run's answer (it was not run again).\nran send_postcard",
+    )
+    expect(calls).toHaveLength(1)
+    expect(await db().permissionRequest.count()).toBe(1)
+    expect(
+      await db().permissionRequest.findUniqueOrThrow({ where: { id } }),
+    ).toMatchObject({ reuseUntil: null, resultJsonCiphertext: null })
+
+    // A third time is a new request for the owner.
+    const third = await withPermission(
+      scope,
+      call(server, "send_postcard", { to: "Grace" }),
+    )
+    expect(textOf(third)).toContain("Not done yet")
+    expect(await db().permissionRequest.count()).toBe(2)
+    expect(calls).toHaveLength(1)
+  })
+
+  it("hands a program's call the value it would have had", async () => {
+    const executor: PermissionExecutor = {
+      ...stub().executor,
+      callTool: async () => ({
+        content: [{ type: "text", text: JSON.stringify({ sent: 3 }) }],
+      }),
+    }
+    const { scope, server, ctx, id } = await allowedOnce(executor)
+    const row = await db().permissionRequest.findUniqueOrThrow({
+      where: { id },
+    })
+    expect(row.reuseUntil!.getTime() - Date.now()).toBeGreaterThan(14 * 60_000)
+    // Encrypted under the row's own associated data.
+    expect(
+      decryptString(
+        ctx.dek,
+        Buffer.from(row.resultJsonCiphertext!),
+        `permission_request:${id}:result_json`,
+      ),
+    ).toBe(JSON.stringify({ ok: true, value: { sent: 3 } }))
+
+    expect(
+      await askCodeCall(scope, call(server, "send_postcard", { to: "Grace" })),
+    ).toEqual({ ok: true, value: { sent: 3 } })
+    // Once: the next is asked.
+    expect(
+      await askCodeCall(scope, call(server, "send_postcard", { to: "Grace" })),
+    ).toHaveProperty("owner")
+  })
+
+  it("hands a program the text when the value was too long to keep", async () => {
+    const executor: PermissionExecutor = {
+      ...stub().executor,
+      callTool: async () => ({
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({ text: "x".repeat(REUSE_VALUE_MAX_CHARS) }),
+          },
+        ],
+      }),
+    }
+    const { scope, server, id } = await allowedOnce(executor)
+    expect(
+      (await db().permissionRequest.findUniqueOrThrow({ where: { id } }))
+        .resultJsonCiphertext,
+    ).toBeNull()
+
+    const outcome = await askCodeCall(
+      scope,
+      call(server, "send_postcard", { to: "Grace" }),
+    )
+    expect(outcome).toMatchObject({ ok: true, value: expect.any(String) })
+  })
+
+  it("asks again once the while is over", async () => {
+    const { executor } = stub()
+    const { scope, server, id } = await allowedOnce(executor)
+    await db().permissionRequest.update({
+      where: { id },
+      data: { reuseUntil: new Date(Date.now() - 1) },
+    })
+
+    expect(
+      textOf(
+        await withPermission(
+          scope,
+          call(server, "send_postcard", { to: "Grace" }),
+        ),
+      ),
+    ).toContain("Not done yet")
+  })
+
+  it("asks for other arguments, and for another token", async () => {
+    const { executor } = stub()
+    const { ctx, scope, server } = await allowedOnce(executor)
+
+    expect(
+      textOf(
+        await withPermission(
+          scope,
+          call(server, "send_postcard", { to: "Ada" }),
+        ),
+      ),
+    ).toContain("Not done yet")
+
+    const { token } = await createApiToken(ctx, {
+      name: "Other",
+      allowAllServers: true,
+    })
+    const other = { ...(await resolveApiToken(token))!, publicUrl: PUBLIC_URL }
+    expect(
+      textOf(
+        await withPermission(
+          other,
+          call(server, "send_postcard", { to: "Grace" }),
+        ),
+      ),
+    ).toContain("Not done yet")
+    // And the first token still gets its answer.
+    expect(
+      textOf(
+        await withPermission(
+          scope,
+          call(server, "send_postcard", { to: "Grace" }),
+        ),
+      ),
+    ).toContain("it already ran")
+  })
+
+  it("never answers from a run that failed", async () => {
+    const executor: PermissionExecutor = {
+      ...stub().executor,
+      callTool: async () => ({
+        content: [{ type: "text", text: "The printer is on fire." }],
+        isError: true,
+      }),
+    }
+    const { scope, server, id } = await allowedOnce(executor)
+    expect(
+      await db().permissionRequest.findUniqueOrThrow({ where: { id } }),
+    ).toMatchObject({ status: "failed", reuseUntil: null })
+
+    expect(
+      textOf(
+        await withPermission(
+          scope,
+          call(server, "send_postcard", { to: "Grace" }),
+        ),
+      ),
+    ).toContain("Not done yet")
+  })
+
+  it("keeps nothing for a call allowed always or for a while", async () => {
+    for (const decision of ["always", "allow_for"] as const) {
+      const { ctx, scope, server } = await setup()
+      const { executor } = stub()
+      await withPermission(scope, call(server, "send_postcard", { n: 1 }))
+      const { id } = await db().permissionRequest.findFirstOrThrow({
+        where: { tokenId: scope.tokenId },
+      })
+      await decidePermission(
+        ctx,
+        id,
+        decision,
+        { publicUrl: PUBLIC_URL, minutes: 60 },
+        executor,
+      )
+      expect(
+        await db().permissionRequest.findUniqueOrThrow({ where: { id } }),
+      ).toMatchObject({
+        status: "executed",
+        reuseUntil: null,
+        resultJsonCiphertext: null,
+      })
+      await cleanup()
+      ;({ cleanup } = await scratchDatabase())
+    }
+  })
+
+  it("is cleared by the cleanup once the while is over", async () => {
+    const { executor } = stub()
+    const { id } = await allowedOnce(executor)
+
+    expect(await pruneReusableAnswers()).toBe(0)
+    expect(await pruneReusableAnswers(new Date(Date.now() + 16 * 60_000))).toBe(
+      1,
+    )
+    expect(
+      await db().permissionRequest.findUniqueOrThrow({ where: { id } }),
+    ).toMatchObject({
+      status: "executed",
+      reuseUntil: null,
+      resultJsonCiphertext: null,
+    })
   })
 })
 
@@ -2307,13 +2937,13 @@ describe("an API with a user name and password", () => {
     expect(textOf(added)).not.toContain("pw-123")
 
     const secret = await db().secret.findFirstOrThrow({
-      where: { name: "Pets password" },
+      where: secretNameWhere(ctx, "Pets password"),
     })
     expect(await revealSecret(ctx, secret.id)).toBe("pw-123")
-    expect(secret.description).toBe("The password for ada at Pets.")
-    expect(
-      await db().mcpServer.findFirstOrThrow({ where: { name: "Pets" } }),
-    ).toMatchObject({
+    expect(openSecretMeta(ctx, secret).description).toBe(
+      "The password for ada at Pets.",
+    )
+    expect(await serverNamed(ctx, "Pets")).toMatchObject({
       kind: "openapi",
       authType: "basic",
       authUsername: "ada",
@@ -2370,9 +3000,7 @@ describe("a calendar account an assistant proposes", () => {
 
       expect(textOf(added)).toMatch(/Added iCloud as "icloud" with 13 tools/)
       expect(textOf(added)).not.toContain(PASSWORD)
-      const account = await db().mcpServer.findFirstOrThrow({
-        where: { name: "iCloud" },
-      })
+      const account = await serverNamed(ctx, "iCloud")
       expect(account).toMatchObject({
         kind: "caldav",
         authUsername: "ada@icloud.com",
@@ -2497,13 +3125,13 @@ describe("a mail account an assistant proposes", () => {
     expect(textOf(added)).not.toContain(PASSWORD)
 
     const secret = await db().secret.findFirstOrThrow({
-      where: { name: "Mail password" },
+      where: secretNameWhere(ctx, "Mail password"),
     })
     expect(await revealSecret(ctx, secret.id)).toBe(PASSWORD)
-    expect(secret.description).toBe("The password for ada@example.com at Mail.")
-    const account = await db().mcpServer.findFirstOrThrow({
-      where: { name: "Mail" },
-    })
+    expect(openSecretMeta(ctx, secret).description).toBe(
+      "The password for ada@example.com at Mail.",
+    )
+    const account = await serverNamed(ctx, "Mail")
     expect(account).toMatchObject({
       kind: "jmap",
       authType: "basic",
@@ -2610,9 +3238,7 @@ describe("a mail account an assistant proposes", () => {
     )
     expect(textOf(added)).toMatch(/Added Mail as "mail" with 7 tools/)
     expect(fake.requests[0]!.authorization).toBe("Bearer token-1")
-    expect(
-      await db().mcpServer.findFirstOrThrow({ where: { name: "Mail" } }),
-    ).toMatchObject({
+    expect(await serverNamed(ctx, "Mail")).toMatchObject({
       kind: "jmap",
       authType: "header",
       readOnly: true,
@@ -2648,12 +3274,11 @@ describe("a mail account an assistant proposes", () => {
     const added = await decidePermission(ctx, id, "allow_once", web, real)
 
     expect(textOf(added)).toMatch(/Added Mail as "mail"/)
-    expect(
-      (added.structuredContent as { kind?: string } | undefined)?.kind,
-    ).toBe("connect")
-    expect(
-      await db().mcpServer.findFirstOrThrow({ where: { name: "Mail" } }),
-    ).toMatchObject({
+    expect(added.structuredContent).toMatchObject({
+      kind: "needs_owner",
+      reason: "connect",
+    })
+    expect(await serverNamed(ctx, "Mail")).toMatchObject({
       kind: "jmap",
       authType: "oauth",
       oauthConnectedAt: null,
@@ -2698,9 +3323,10 @@ describe("a mail account an assistant proposes", () => {
     expect(textOf(added)).toMatch(
       /Added Mail as "mail", but its tools could not be read yet/,
     )
-    expect(
-      await db().mcpServer.findFirstOrThrow({ where: { name: "Mail" } }),
-    ).toMatchObject({ kind: "imap", status: "error" })
+    expect(await serverNamed(ctx, "Mail")).toMatchObject({
+      kind: "imap",
+      status: "error",
+    })
   })
 
   it("notes a private address that PCP did not look at, for the owner to weigh", async () => {

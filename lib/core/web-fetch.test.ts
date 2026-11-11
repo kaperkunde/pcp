@@ -21,6 +21,7 @@ import {
   type PermissionExecutor,
   type PermissionScope,
 } from "./permissions"
+import { serverCreateData } from "./server-meta"
 import { scratchDatabase } from "./test-db"
 import { copyTokenAccess } from "./tool-access"
 import { setupVault } from "./vault"
@@ -176,7 +177,7 @@ describe("a request's level", () => {
       lastFetchedAt: null,
     })
 
-    await recordFetch(ctx.vaultId, tokenId, "example.com")
+    await recordFetch(ctx, tokenId, "example.com")
     const fetched = (await listFetchRules(ctx, tokenId)).sites.find(
       (site) => site.host === "example.com",
     )
@@ -355,8 +356,8 @@ describe("private addresses", () => {
       access: "allowed",
       own: "allowed",
     })
-    expect(await privateAllowedFor(ctx.vaultId, tokenId)).toBe(true)
-    expect(await privateAllowedFor(ctx.vaultId, other.tokenId)).toBe(false)
+    expect(await privateAllowedFor(ctx, tokenId)).toBe(true)
+    expect(await privateAllowedFor(ctx, other.tokenId)).toBe(false)
 
     // Blocked again needs no line of its own.
     await setFetchPrivate(ctx, tokenId, "blocked")
@@ -374,7 +375,7 @@ describe("private addresses", () => {
       own: null,
       shared: "allowed",
     })
-    expect(await privateAllowedFor(ctx.vaultId, other.tokenId)).toBe(true)
+    expect(await privateAllowedFor(ctx, other.tokenId)).toBe(true)
 
     await setFetchPrivate(ctx, other.tokenId, "blocked")
     expect(await view(other.tokenId)).toMatchObject({
@@ -382,7 +383,7 @@ describe("private addresses", () => {
       own: "blocked",
       shared: "allowed",
     })
-    expect(await privateAllowedFor(ctx.vaultId, other.tokenId)).toBe(false)
+    expect(await privateAllowedFor(ctx, other.tokenId)).toBe(false)
 
     // Unticked, the token keeps what it had and the others lose it.
     await setFetchRuleShared(ctx, tokenId, "private", "private", false)
@@ -391,7 +392,7 @@ describe("private addresses", () => {
       own: "allowed",
       shared: null,
     })
-    expect(await privateAllowedFor(ctx.vaultId, other.tokenId)).toBe(false)
+    expect(await privateAllowedFor(ctx, other.tokenId)).toBe(false)
   })
 
   it("refuses a level that is not allowed or blocked", async () => {
@@ -548,7 +549,7 @@ describe("the owner's answer to a request", () => {
     ).toBe("ask")
 
     // Once the time is up, it asks again.
-    const rules = await loadFetchRules(ctx.vaultId, tokenId)
+    const rules = await loadFetchRules(ctx, tokenId)
     expect(
       resolveFetchAccess(rules, "example.com", "GET", Date.now() + 16 * 60_000)
         .access,
@@ -778,13 +779,13 @@ describe("a site's check of its visitors", () => {
     // A token with other servers than the browser.
     const otherId = newId()
     await db().mcpServer.create({
-      data: {
+      data: serverCreateData(ctx, {
         id: otherId,
         vaultId: ctx.vaultId,
         name: "Other",
         slug: "other",
         url: "https://other.example/mcp",
-      },
+      }),
     })
     await updateApiToken(ctx, tokenId, {
       name: "Claude",

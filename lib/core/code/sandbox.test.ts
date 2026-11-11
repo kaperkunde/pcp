@@ -130,7 +130,7 @@ print(answer["n"], handle["$result"], pcp.read(handle))
     expect(seen).toEqual(["call", "keep", "read"])
   })
 
-  it("reads and keeps a file's bytes, and lists tools, from Python and the shell", async () => {
+  it("reads and keeps a file's bytes, and lists and describes tools, from Python and the shell", async () => {
     const pdf = Buffer.concat([
       Buffer.from("%PDF-1.7\n"),
       Buffer.alloc(64, 0xfe),
@@ -142,7 +142,12 @@ print(answer["n"], handle["$result"], pcp.read(handle))
         ? { ok: true, value: pdf.toString("base64") }
         : op === "tools"
           ? { ok: true, value: [{ name: "list", access: "allowed" }] }
-          : { ok: true, value: { $result: "k1" } }
+          : op === "describe"
+            ? {
+                ok: true,
+                value: { tool: "list", inputSchema: { type: "object" } },
+              }
+            : { ok: true, value: { $result: "k1" } }
     }
 
     const python = await run(
@@ -153,6 +158,7 @@ data = pcp.read({"$result": "f1"}, as_="bytes")
 pcp.keep(data[:4], name="head.bin")
 pcp.keep("aGk=", encoding="base64", type="text/plain")
 print(len(data), data[:8].decode(), [tool["name"] for tool in pcp.tools("files")])
+print(pcp.describe("files", "list")["inputSchema"])
 `,
       bridge,
     )
@@ -163,17 +169,19 @@ print(len(data), data[:8].decode(), [tool["name"] for tool in pcp.tools("files")
       head -c 8 file.pdf; echo
       pcp keep --bytes --type application/pdf file.pdf > /dev/null
       pcp tools | jq -c .
+      pcp describe files list | jq -c .inputSchema
       `,
       bridge,
     )
 
     expect(python).toMatchObject({
       kind: "done",
-      output: `${pdf.length} %PDF-1.7 ['list']\n`,
+      output: `${pdf.length} %PDF-1.7 ['list']\n{'type': 'object'}\n`,
     })
     expect(shell).toMatchObject({
       kind: "done",
-      output: '%PDF-1.7\n[{"name":"list","access":"allowed"}]\n',
+      output:
+        '%PDF-1.7\n[{"name":"list","access":"allowed"}]\n{"type":"object"}\n',
     })
     expect(seen).toEqual([
       { op: "read", payload: { id: "f1", as: "base64" } },
@@ -191,6 +199,7 @@ print(len(data), data[:8].decode(), [tool["name"] for tool in pcp.tools("files")
         payload: { value: "aGk=", encoding: "base64", type: "text/plain" },
       },
       { op: "tools", payload: { server: "files" } },
+      { op: "describe", payload: { server: "files", tool: "list" } },
       { op: "read", payload: { id: "f1", as: "base64" } },
       {
         op: "keep",
@@ -201,6 +210,7 @@ print(len(data), data[:8].decode(), [tool["name"] for tool in pcp.tools("files")
         },
       },
       { op: "tools", payload: { server: null } },
+      { op: "describe", payload: { server: "files", tool: "list" } },
     ])
   })
 

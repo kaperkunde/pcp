@@ -6,6 +6,8 @@ import { redirect } from "next/navigation"
 import { invalid } from "@/lib/core/errors"
 import { nextPendingRequest } from "@/lib/core/owner-queue"
 import { confirmProposedShare } from "@/lib/core/permissions"
+import { isCapabilityId } from "@/lib/core/capabilities/list"
+import { addCommonRepository } from "@/lib/core/repos/common"
 import { ITEM_DIRS, type ItemKind } from "@/lib/core/repos/layout"
 import {
   confirmShare,
@@ -37,7 +39,7 @@ import {
   type AddChoice,
 } from "@/lib/core/repos/sync"
 import { getServer } from "@/lib/core/servers"
-import { syncServerTools } from "@/lib/core/upstream"
+import { launchService, syncServerTools } from "@/lib/core/upstream"
 import {
   type ActionState,
   field,
@@ -46,6 +48,7 @@ import {
 } from "@/lib/server/action-state"
 import { instanceInputFrom } from "@/lib/server/instance-input"
 import { publicUrlFor } from "@/lib/server/public-url"
+import { serviceInputFrom, withNewSecrets } from "@/lib/server/service-input"
 import { requireContext } from "@/lib/server/session"
 
 const ITEM_KINDS = Object.keys(ITEM_DIRS)
@@ -165,6 +168,31 @@ export async function deleteRepoAction(id: string): Promise<RepoActionResult> {
 
   if (result.status === "ok") {
     redirect(PAGES)
+  }
+
+  return result
+}
+
+/**
+ * PCP's common items (lib/core/repos/common.ts): linked read-only and
+ * untrusted, then the owner browses what it offers, or goes back to the
+ * capability's page they added them from (/plugins/<id>), which offers
+ * its items to launch.
+ */
+export async function addCommonRepoAction(
+  forCapability?: string,
+): Promise<RepoActionResult> {
+  const ctx = await requireContext()
+  const result = await guarded(() => addCommonRepository(ctx))
+
+  revalidate()
+
+  if (result.status === "ok") {
+    redirect(
+      isCapabilityId(forCapability)
+        ? `/plugins/${forCapability}`
+        : `${PAGES}/${encodeURIComponent(result.id!)}/browse`,
+    )
   }
 
   return result
@@ -482,11 +510,67 @@ export async function importItemAction(
   redirect(`/servers/${encodeURIComponent(result.id!)}`)
 }
 
+/**
+ * A new service from a repository, launched with the owner's own part:
+ * the item read again at the commit shown, and launched only when it hashes
+ * as it did; then linked to the repository.
+ */
+export async function importServiceAction(
+  repoId: string,
+  choice: { commit: string; root: string; hash: string },
+  _previous: RepoActionResult,
+  formData: FormData,
+): Promise<RepoActionResult> {
+  const ctx = await requireContext()
+  const publicUrl = await publicUrlFor(ctx)
+  const result = await guarded(async () => {
+    const input = serviceInputFrom(formData)
+    // A launch that fails keeps the secrets typed in for it, and says so.
+    const added = await withNewSecrets(
+      ctx,
+      formData,
+      input.env,
+      async (env) => {
+        const [one] = await addFromRepo(ctx, repoId, {
+          commit: String(choice.commit),
+          items: [
+            {
+              root: String(choice.root),
+              hash: String(choice.hash),
+              service: {
+                input: { ...input, env },
+                launch: (launchCtx, launchInput) =>
+                  launchService(launchCtx, launchInput, { publicUrl }),
+              },
+            },
+          ],
+        })
+
+        if (!one?.ok || !one.id) {
+          throw invalid(one?.message ?? "Nothing was launched.")
+        }
+
+        return one
+      },
+    )
+
+    return { id: added.id! }
+  })
+
+  if (result.status !== "ok") {
+    return result
+  }
+
+  revalidate()
+  revalidatePath("/servers", "layout")
+  redirect(`/servers/${encodeURIComponent(result.id!)}`)
+}
+
 /** The owner's answer to a change sync left for them. */
 export async function answerChangeAction(
   itemId: string,
   answer: "approve" | "decline" | "keep",
-  shown: { sha: string; hash: string },
+  shown: { sha: string; hash: string; flags?: number },
 ): Promise<RepoActionResult> {
   const ctx = await requireContext()
   const result = await guarded(async () => {
@@ -497,6 +581,7 @@ export async function answerChangeAction(
           const notes = await approveChange(ctx, itemId, {
             sha,
             hash: String(shown.hash),
+            ...(typeof shown.flags === "number" ? { flags: shown.flags } : {}),
           })
           return { message: "Applied as you were shown it.", lines: notes }
         }

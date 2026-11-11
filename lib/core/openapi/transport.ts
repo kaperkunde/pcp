@@ -1,8 +1,10 @@
-import dns from "node:dns"
 import http from "node:http"
 import https from "node:https"
-import { isIP } from "node:net"
-import { Readable } from "node:stream"
+import { isIP, type Socket } from "node:net"
+import type { Duplex } from "node:stream"
+import tls from "node:tls"
+
+import { NotPublicError, publicLookup } from "@kaperkunde/security/net"
 
 import { AddressBlockedError, bareHostname, isPublicAddress } from "./address"
 
@@ -29,6 +31,17 @@ export type SendOptions = {
    * the socket would connect to and the port.
    */
   addressCheck?: (address: string, port: number) => boolean
+  /**
+   * Connects somewhere else than from PCP's machine: web_fetch through an
+   * exit (lib/core/exits/dial.ts), which resolves the name and checks every
+   * address itself, from the exit's side; or a service's endpoint or MCP
+   * server through the SSH connection to the port it publishes on its SSH
+   * server (services.ts serviceDial). It hands back the raw connection;
+   * TLS (with the URL's host as SNI and for the certificate) is laid over
+   * it here. Replaces the lookup and `addressCheck`, with or without
+   * `publicOnly`.
+   */
+  dial?: (host: string, port: number, signal?: AbortSignal) => Promise<Duplex>
 }
 
 export type SendInit = {
@@ -49,7 +62,7 @@ export async function send(
   init: SendInit,
   options: SendOptions = {},
 ): Promise<Response> {
-  if (!options.publicOnly) {
+  if (!options.publicOnly && !options.dial) {
     return fetch(rawUrl, {
       method: init.method,
       headers: init.headers,
@@ -64,54 +77,63 @@ export async function send(
     new URL(rawUrl),
     init,
     options.addressCheck ?? isPublicAddress,
+    options.dial,
   )
+}
+
+/**
+ * The request's socket from a dial (an exit): the raw connection, with
+ * TLS over it for https, the certificate checked against the URL's host.
+ */
+function dialedConnection(
+  url: URL,
+  dial: NonNullable<SendOptions["dial"]>,
+  signal: AbortSignal | undefined,
+): http.RequestOptions["createConnection"] {
+  const host = bareHostname(url)
+  const port = Number(url.port) || (url.protocol === "https:" ? 443 : 80)
+
+  return (_options, callback) => {
+    dial(host, port, signal).then(
+      (raw) => {
+        if (url.protocol !== "https:") {
+          callback(null, raw as Socket)
+          return
+        }
+
+        const secure = tls.connect({
+          socket: raw as Socket,
+          host,
+          // An IP address is no server name: no SNI, but still checked.
+          ...(isIP(host) ? {} : { servername: host }),
+          ALPNProtocols: ["http/1.1"],
+        })
+        callback(null, secure)
+      },
+      (error: Error) => callback(error, undefined as unknown as Socket),
+    )
+    return undefined
+  }
 }
 
 function sendPinned(
   url: URL,
   init: SendInit,
   allowed: (address: string, port: number) => boolean,
+  dial?: SendOptions["dial"],
 ): Promise<Response> {
   const host = bareHostname(url)
   const port = Number(url.port) || (url.protocol === "https:" ? 443 : 80)
 
-  if (isIP(host) && !allowed(host, port)) {
+  if (!dial && isIP(host) && !allowed(host, port)) {
     return Promise.reject(new AddressBlockedError(host, host))
   }
 
-  const lookup: NonNullable<http.RequestOptions["lookup"]> = (
-    hostname,
-    lookupOptions,
-    callback,
-  ) => {
-    dns.lookup(hostname, { ...lookupOptions, all: true }, (error, found) => {
-      if (error) {
-        return (callback as (error: Error) => void)(error)
-      }
-
-      const addresses = found as dns.LookupAddress[]
-      const bad = addresses.find((entry) => !allowed(entry.address, port))
-
-      if (bad || addresses.length === 0) {
-        return (callback as (error: Error) => void)(
-          new AddressBlockedError(hostname, bad?.address ?? "no address"),
-        )
-      }
-
-      if (lookupOptions.all) {
-        return (callback as (e: null, a: dns.LookupAddress[]) => void)(
-          null,
-          addresses,
-        )
-      }
-
-      return (callback as (e: null, a: string, f: number) => void)(
-        null,
-        addresses[0]!.address,
-        addresses[0]!.family,
-      )
-    })
-  }
+  // The check rides on the socket's own lookup: a name is refused unless
+  // every address it resolves to is allowed at this port.
+  const lookup = publicLookup({
+    allow: (address) => allowed(address, port),
+  })
 
   return new Promise<Response>((resolve, reject) => {
     const transport = url.protocol === "https:" ? https : http
@@ -120,9 +142,10 @@ function sendPinned(
       {
         method: init.method ?? "GET",
         headers: { "accept-encoding": "identity", ...init.headers },
-        lookup,
-        agent: false,
         signal: init.signal,
+        ...(dial
+          ? { createConnection: dialedConnection(url, dial, init.signal) }
+          : { lookup, agent: false }),
       },
       (res) => {
         // This runs as an event listener: an exception here would not reach
@@ -151,9 +174,7 @@ function sendPinned(
             }
           }
 
-          const body = NO_BODY.has(status)
-            ? null
-            : (Readable.toWeb(res) as unknown as ReadableStream<Uint8Array>)
+          const body = NO_BODY.has(status) ? null : webBody(res)
 
           if (body === null) {
             res.resume()
@@ -175,9 +196,71 @@ function sendPinned(
       },
     )
 
-    request.on("error", reject)
+    request.on("error", (error) =>
+      reject(
+        error instanceof NotPublicError
+          ? new AddressBlockedError(error.host, "")
+          : error,
+      ),
+    )
     request.end(init.body)
   })
+}
+
+/**
+ * An answer's body as a web stream, read as the reader asks for it. Not
+ * Readable.toWeb: a body cancelled there (a redirect or an error answer
+ * let go of) can still be written to by data already on its way, which
+ * throws where nothing catches it.
+ */
+function webBody(res: http.IncomingMessage): ReadableStream<Uint8Array> {
+  let over = false
+
+  return new ReadableStream<Uint8Array>(
+    {
+      start(controller) {
+        res.on("data", (chunk: Buffer) => {
+          if (over) {
+            return
+          }
+
+          controller.enqueue(chunk)
+
+          if ((controller.desiredSize ?? 0) <= 0) {
+            res.pause()
+          }
+        })
+        res.once("end", () => {
+          if (!over) {
+            over = true
+            controller.close()
+          }
+        })
+        res.on("error", (error) => {
+          if (!over) {
+            over = true
+            controller.error(error)
+          }
+        })
+        res.once("close", () => {
+          if (!over) {
+            over = true
+            controller.error(
+              new Error("the connection closed before the answer ended"),
+            )
+          }
+        })
+      },
+      pull() {
+        res.resume()
+      },
+      cancel() {
+        over = true
+        res.destroy()
+      },
+    },
+    { highWaterMark: 16 },
+  )
 }
 
 /** fetch's shape, as the MCP SDK takes it for its requests. */

@@ -1,27 +1,37 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
 
 import { createBrowserServer } from "../browser/server"
+import { getWrapper, saveWrapperByOwner } from "../wrappers/admin"
 import type { VaultContext } from "../context"
 import { scratchDatabase } from "../test-db"
 import { setupVault } from "../vault"
 
 import { applyItem, type InstanceInput } from "./apply"
 import {
+  FORMAT_OF_KIND,
   PCP_FORMAT,
   readRepo,
   serializeItem,
   programHeader,
   type ItemDocument,
+  type ServiceDocument,
   type SkillDocument,
   type WrapperDocument,
 } from "./documents"
 import { localHash } from "./hash"
-import { checkDistinct, groupRepoFiles, type RepoFiles } from "./layout"
+import {
+  checkDistinct,
+  groupRepoFiles,
+  itemOfPath,
+  type RepoFiles,
+} from "./layout"
 import { MAX_FILE_BYTES, MAX_ITEM_FILES } from "./limits"
 import { localItem, localItems } from "./local"
 import {
   addSecrets,
+  addService,
   ANTHROPIC_SKILL,
+  DOCLING,
   CLIENT_SECRET,
   OAUTH_TOKEN,
   PETS_KEY,
@@ -616,7 +626,11 @@ describe("a hostile repository", () => {
       await problemOf(
         wrapperFiles({ ...WRAPPER, pcp_format: PCP_FORMAT + 1, more: "new" }),
       ),
-    ).toMatch(/format 3, written by a newer PCP; this one reads format 2/)
+    ).toMatch(
+      new RegExp(
+        `format ${PCP_FORMAT + 1}, written by a newer PCP; this one reads format ${PCP_FORMAT}`,
+      ),
+    )
     expect(
       await problemOf({
         "skills/pdf-tools/SKILL.md": ANTHROPIC_SKILL.replace(
@@ -690,5 +704,369 @@ describe("a hostile repository", () => {
         files: { "SKILL.md": "x", "ref/b.md": "x" },
       },
     ])
+  })
+})
+
+describe("format 5: a wrapper's pace", () => {
+  const PACE = {
+    actions: { min_ms: 100, max_ms: 300 },
+    tools: [{ tool: "navigate", min_ms: 500, max_ms: 900 }],
+  }
+
+  it("writes a flow with a pace of its own in format 5, and only that one, and reads it back the same", async () => {
+    const ctx = await freshVault()
+    const { ids } = await populate(ctx)
+    const flow = await getWrapper(ctx, { id: ids.flow })
+    await saveWrapperByOwner(ctx, ids.flow, {
+      name: flow.name,
+      description: flow.description,
+      callLevels: flow.callLevels,
+      tools: flow.tools,
+      secrets: flow.secrets,
+      pace: PACE,
+    })
+
+    const { document } = await localItem(ctx, "flow", ids.flow)
+    const files = serializeItem(document)
+    const text = files["flows/open-the-shop/wrapper.yaml"]!
+    expect(text).toContain("pcp_format: 5\n")
+    expect(text).toMatch(
+      /pace:\n {2}actions:\n {4}min_ms: 100\n {4}max_ms: 300\n/,
+    )
+    expect((document as { pace?: unknown }).pace).toEqual(PACE)
+
+    const read = await readRepo(files)
+    expect(read.problems).toEqual([])
+    expect(read.items).toEqual([document])
+    expect(serializeItem(read.items[0]!)).toEqual(files)
+
+    // A wrapper without one stays in the format that first held it.
+    const { document: plain } = await localItem(ctx, "wrapper", ids.wrapper)
+    expect(
+      Object.values(serializeItem(plain)).find((file) =>
+        file.startsWith("pcp_format"),
+      ),
+    ).toMatch(/^pcp_format: 2\n/)
+  })
+
+  it("refuses a pace in an older format's document, and one that does not check out", async () => {
+    expect(
+      await problemOf(wrapperFiles({ ...WRAPPER, pcp_format: 2, pace: PACE })),
+    ).toMatch(/format 2, which has no pace: write it as format 5/)
+    expect(
+      await problemOf(
+        wrapperFiles({
+          ...WRAPPER,
+          pcp_format: 5,
+          pace: { actions: { min_ms: 900, max_ms: 100 } },
+        }),
+      ),
+    ).toMatch(/the shortest wait comes first/)
+    expect(
+      await problemOf(
+        wrapperFiles({
+          ...WRAPPER,
+          pcp_format: 5,
+          pace: { tools: [{ tool: "zoom", min_ms: 1, max_ms: 2 }] },
+        }),
+      ),
+    ).toMatch(/zoom is not a browser tool/)
+    const fine = await readRepo(
+      wrapperFiles({ ...WRAPPER, pcp_format: 5, pace: PACE }),
+    )
+    expect(fine.problems).toEqual([])
+    expect((fine.items[0] as { pace?: unknown }).pace).toEqual(PACE)
+  })
+
+  it("applies a document's pace onto the wrapper, and takes it away when the document has none", async () => {
+    const ctx = await freshVault()
+    const { ids } = await populate(ctx)
+    const { document } = await localItem(ctx, "flow", ids.flow)
+
+    await applyItem(
+      ctx,
+      { ...document, pace: PACE } as unknown as ItemDocument,
+      {
+        id: ids.flow,
+      },
+    )
+    expect((await getWrapper(ctx, { id: ids.flow })).pace).toEqual(PACE)
+
+    await applyItem(ctx, document, { id: ids.flow })
+    expect((await getWrapper(ctx, { id: ids.flow })).pace).toBeUndefined()
+  })
+})
+
+describe("format 4: a service's files folder", () => {
+  const WITH_FILES = {
+    ...DOCLING,
+    volumes: [{ name: "data", path: "/data" }],
+    files: { volume: "data", path: "/data" },
+  }
+
+  it("writes a service with a files folder in format 4, and only that one", async () => {
+    const ctx = await freshVault()
+    const { id } = await addService(ctx, WITH_FILES)
+    const { document } = await localItem(ctx, "service", id)
+    const files = serializeItem(document)
+    const text = files["services/docling-service.yaml"]!
+
+    expect(text).toContain("pcp_format: 4\n")
+    expect(text).toMatch(/files:\n {2}volume: data\n {2}path: \/data\n/)
+    const read = await readRepo(files)
+    expect(read.problems).toEqual([])
+    expect(read.items).toEqual([document])
+    expect(serializeItem(read.items[0]!)).toEqual(files)
+  })
+
+  it("refuses a files folder in a format-3 document, as an older PCP would", async () => {
+    const read = await readRepo({
+      "services/docling.yaml": yamlText({
+        pcp_format: 3,
+        version: 1,
+        name: "Docling",
+        ...WITH_FILES,
+      }),
+    })
+    expect(read.problems[0]?.message).toMatch(/format 3, which has no files/)
+    const fine = await readRepo({
+      "services/docling.yaml": yamlText({
+        pcp_format: 4,
+        version: 1,
+        name: "Docling",
+        ...WITH_FILES,
+      }),
+    })
+    expect(fine.problems).toEqual([])
+    expect((fine.items[0] as ServiceDocument).definition.files).toEqual({
+      volume: "data",
+      path: "/data",
+    })
+  })
+})
+
+describe("format 3: services", () => {
+  it("writes a service's definition as services/<name>.yaml in format 3, and reads it back the same", async () => {
+    const ctx = await freshVault()
+    const { id } = await addService(ctx)
+    const { document } = await localItem(ctx, "service", id)
+
+    expect(document).toMatchObject({
+      kind: "service",
+      name: "docling-service",
+      displayName: "Docling service",
+      description: "Turns PDFs and images into Markdown.",
+    })
+
+    const files = serializeItem(document)
+    expect(Object.keys(files)).toEqual(["services/docling-service.yaml"])
+    const text = files["services/docling-service.yaml"]!
+    expect(text).toContain(`pcp_format: ${FORMAT_OF_KIND.service}\n`)
+    expect(FORMAT_OF_KIND.service).toBe(3)
+    expect(PCP_FORMAT).toBe(5)
+    expect(text).toContain(`image: ${DOCLING.image}`)
+    // Nothing of the instance: not its SSH server, address, container,
+    // secrets or what it registered.
+    for (const own of [
+      "build.ada-home.net",
+      "192.168.7.20",
+      "pcp-docling",
+      "Docling key",
+      "dk-SERVICE-KEY",
+      "deploy",
+    ]) {
+      expect(text).not.toContain(own)
+    }
+
+    const read = await readRepo(files)
+    expect(read.problems).toEqual([])
+    expect(read.items).toEqual([document])
+    expect(serializeItem(read.items[0]!)).toEqual(files)
+  })
+
+  it("writes a service whose MCP server sends a secret header in format 4, and only that one", async () => {
+    const ctx = await freshVault()
+    const registers = {
+      kind: "mcp" as const,
+      port: 5001,
+      path: "/mcp",
+      auth: {
+        env: "DOCLING_SERVE_API_KEY",
+        header: "Authorization",
+        template: "Bearer {{secret}}",
+      },
+    }
+    const { id } = await addService(ctx, { ...DOCLING, registers })
+    const document = (await localItem(ctx, "service", id))
+      .document as ServiceDocument
+    const files = serializeItem(document)
+    const text = files["services/docling-service.yaml"]!
+
+    expect(text).toContain("pcp_format: 4\n")
+    expect(text).toContain("template: Bearer {{secret}}")
+    expect(text).not.toContain("dk-SERVICE-KEY")
+    const read = await readRepo(files)
+    expect(read.problems).toEqual([])
+    expect((read.items[0] as ServiceDocument).definition.registers).toEqual(
+      registers,
+    )
+    expect(serializeItem(read.items[0]!)).toEqual(files)
+
+    // Without a header it is format 3 still, as it always was.
+    const plain = serializeItem({
+      ...document,
+      definition: {
+        ...document.definition,
+        registers: { kind: "mcp", port: 5001, path: "/mcp" },
+      },
+    })
+    expect(plain["services/docling-service.yaml"]).toContain("pcp_format: 3\n")
+
+    // A format-3 document has no header on an MCP server, as a PCP that
+    // reads format 3 says.
+    const older = await readRepo({
+      "services/docling.yaml": yamlText({
+        pcp_format: 3,
+        version: 1,
+        name: "Docling",
+        ...DOCLING,
+        registers,
+      }),
+    })
+    expect(older.items).toEqual([])
+    expect(older.problems[0]?.message).toMatch(
+      /format 3, whose MCP server sends no secret header: write it as format 4/,
+    )
+  })
+
+  it("never shares a service built from a repository, and reads no build from a document", async () => {
+    const ctx = await freshVault()
+    const rest = Object.fromEntries(
+      Object.entries(DOCLING).filter(
+        ([key]) => key !== "image" && key !== "source",
+      ),
+    )
+    const { id } = await addService(ctx, {
+      ...rest,
+      build: {
+        repository: "kaperkunde/docling",
+        commit: "a".repeat(40),
+        containerfile: "Containerfile",
+      },
+      image: `localhost/pcp-docling@sha256:${"d".repeat(64)}`,
+    })
+    const skipped: Array<{ id: string; name: string; message: string }> = []
+
+    expect(
+      (await localItems(ctx, skipped)).map((item) => item.id),
+    ).not.toContain(id)
+    expect(skipped).toEqual([
+      expect.objectContaining({
+        id,
+        message: expect.stringMatching(/not shared through a repository/),
+      }),
+    ])
+
+    const read = await readRepo({
+      "services/docling.yaml": yamlText({
+        pcp_format: 3,
+        version: 1,
+        name: "Docling",
+        ...rest,
+        build: {
+          repository: "kaperkunde/docling",
+          commit: "a".repeat(40),
+          containerfile: "Containerfile",
+        },
+      }),
+    })
+    expect(read.items).toEqual([])
+    expect(read.problems.map((problem) => problem.message).join(" ")).toMatch(
+      /only the owner sets up on PCP's launch page/,
+    )
+  })
+
+  it("shares a service as the service: what it registered is not an item of its own", async () => {
+    const ctx = await freshVault()
+    const { id, registeredId } = await addService(ctx)
+    const items = await localItems(ctx)
+
+    expect(items.map((item) => item.id)).toContain(id)
+    expect(items.map((item) => item.id)).not.toContain(registeredId)
+  })
+
+  it("keeps the other kinds in format 2, so a PCP that reads format 2 reads them", async () => {
+    const ctx = await freshVault()
+    await populate(ctx)
+    await addService(ctx)
+    const files = await vaultFiles(ctx)
+
+    for (const [path, text] of Object.entries(files)) {
+      if (
+        !/openapi\.(yaml|json)$|\.js$|\.md$/.test(path) ||
+        path.endsWith("SKILL.md")
+      ) {
+        expect(text).toContain(
+          path.startsWith("services/") ? "pcp_format: 3\n" : "pcp_format: 2\n",
+        )
+      }
+    }
+  })
+
+  it("leaves a folder it does not know alone, as a PCP before format 3 does services/", async () => {
+    // An older PCP's layout has no services/: its files are no item's, as
+    // a folder this one does not know is.
+    expect(itemOfPath("exits/wireproxy.yaml")).toBeNull()
+    const read = await readRepo({
+      "exits/wireproxy.yaml": "pcp_format: 9\nanything: at all\n",
+      "README.md": "# Shared",
+    })
+    expect(read).toEqual({ items: [], problems: [] })
+  })
+
+  it("refuses an instance's own part, a definition that does not check out, and a newer format", async () => {
+    const service = (value: Record<string, unknown>) =>
+      readRepo({
+        "services/docling.yaml": yamlText({
+          pcp_format: 3,
+          version: 1,
+          name: "Docling",
+          ...DOCLING,
+          ...value,
+        }),
+      })
+    const problem = async (value: Record<string, unknown>) =>
+      (await service(value)).problems[0]?.message ?? ""
+
+    const fine = await service({})
+    expect(fine.problems).toEqual([])
+    expect(
+      (fine.items[0] as ServiceDocument).definition.registers,
+    ).toMatchObject({ kind: "openapi", basePath: "/" })
+
+    expect(await problem({ host: "build.ada-home.net" })).toMatch(
+      /the SSH server it runs on.*definition only/,
+    )
+    expect(
+      await problem({ publish: { address: "0.0.0.0", ports: [] } }),
+    ).toMatch(/where its ports are published/)
+    expect(await problem({ secrets: { DOCLING_SERVE_API_KEY: "x" } })).toMatch(
+      /which secret each variable takes/,
+    )
+    expect(
+      await problem({ image: "ghcr.io/docling-project/docling-serve:latest" }),
+    ).toMatch(/pinned by digest/)
+    expect(
+      await problem({ volumes: [{ name: "data", path: "/var/../etc" }] }),
+    ).toMatch(/cannot go up/)
+    expect(await problem({ privileged: true })).toMatch(/privileged/)
+    expect(await problem({ pcp_format: PCP_FORMAT + 1 })).toMatch(/newer PCP/)
+    expect(
+      (
+        await readRepo({
+          "services/docling/service.yaml": yamlText({ pcp_format: 3 }),
+        })
+      ).problems[0]?.message,
+    ).toMatch(/one file, services\/<name>\.yaml/)
   })
 })

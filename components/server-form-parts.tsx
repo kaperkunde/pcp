@@ -2,18 +2,18 @@
 
 import type { FormEvent, ReactNode } from "react"
 
-import { FormError, FormNote } from "@/components/form-status"
+import { FormError, FormNote } from "@kaperkunde/ui/form-status"
 import { useSharedChangeGuard } from "@/components/shared-definition"
-import { SubmitButton } from "@/components/submit-button"
-import { ButtonLink } from "@/components/ui/button"
-import { Card } from "@/components/ui/card"
-import { Disclosure } from "@/components/ui/disclosure"
-import { Input, Textarea } from "@/components/ui/input"
-import { Field } from "@/components/ui/label"
+import { SubmitButton } from "@kaperkunde/ui/submit-button"
+import { ButtonLink } from "@kaperkunde/ui/button"
+import { Card } from "@kaperkunde/ui/card"
+import { Disclosure } from "@kaperkunde/ui/disclosure"
+import { Input, Textarea } from "@kaperkunde/ui/input"
+import { Field } from "@kaperkunde/ui/label"
 import {
   SegmentedControl,
   type SegmentedOption,
-} from "@/components/ui/segmented-control"
+} from "@kaperkunde/ui/segmented-control"
 import type { ServerActionResult } from "@/lib/actions/servers"
 import { cn } from "@/lib/utils"
 

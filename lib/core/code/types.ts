@@ -7,16 +7,34 @@ import type { Output } from "./output"
  * untrusted, and the bridge alone decides what happens.
  */
 
-/** The operations a program can ask the bridge for. */
-export type BridgeOp = "call" | "read" | "keep" | "tools" | "media"
+/**
+ * The operations a program can ask the bridge for. `sleep` waits, `deadline`
+ * is pcp.withTimeout's timer and `cancel` ends one early: every wait is
+ * PCP's, on the run's wall clock, and the program holds no timer.
+ */
+export type BridgeOp =
+  | "call"
+  | "read"
+  | "keep"
+  | "tools"
+  | "describe"
+  | "media"
+  | "sleep"
+  | "deadline"
+  | "cancel"
 
 /**
  * The bridge's answer to one request. `ok: false` is an error the program
- * sees and may catch; `stop` ends the run where it is (the owner has to act
- * first), and the executor runs nothing of the program after it.
+ * sees and may catch: with a `code` (a call PCP's pacing refused, "paced",
+ * nothing sent; or a tool error's own, such as "timeout" or "browser_busy")
+ * its error carries the code, and `retryAfterMs` where there is one. `stop` ends
+ * the run where it is (the owner has to act first), and the executor runs
+ * nothing of the program after it.
  */
 export type BridgeReply =
-  { ok: true; value: unknown } | { ok: false; error: string } | { stop: true }
+  | { ok: true; value: unknown }
+  | { ok: false; error: string; code?: string; retryAfterMs?: number }
+  | { stop: true }
 
 export type Bridge = (op: string, payload: unknown) => Promise<BridgeReply>
 

@@ -6,6 +6,7 @@ import { readServerNote, setPersonalNote } from "../definitions"
 import { createEndpoint, storedSpec } from "../endpoints"
 import { createSecret } from "../secrets"
 import { createSkill, getSkill, updateSkill } from "../skills"
+import { writeServer } from "../server-meta"
 import { scratchDatabase } from "../test-db"
 import { setupVault } from "../vault"
 
@@ -17,6 +18,7 @@ import {
   renameShared,
   REVIEW_CHANGED,
   shareReview,
+  vaultOwnerFacts,
 } from "./share-review"
 import {
   createRepo,
@@ -25,7 +27,9 @@ import {
   listExclusions,
   setExcluded,
 } from "./store"
-import { PETS_SPEC } from "./test-vault"
+import { addService, PETS_SPEC } from "./test-vault"
+import { secretNameWhere } from "../secret-meta"
+import { openServer } from "../server-meta"
 
 // The review before a push: every file in full, what stays in the vault,
 // what looks personal and what fixes it, Confirm pushing exactly what was
@@ -64,7 +68,9 @@ async function writeRepo(
     private: hidden,
     files: { "README.md": "Shared things." },
   })
-  const secret = await db().secret.findFirst({ where: { name: "GitHub" } })
+  const secret = await db().secret.findFirst({
+    where: secretNameWhere(ctx, "GitHub"),
+  })
   const secretId =
     secret?.id ?? (await createSecret(ctx, { name: "GitHub", value: PAT })).id
 
@@ -158,10 +164,7 @@ describe("the review", () => {
       "endpoints/coolify-gaaf/pcp.yaml",
     )
 
-    await db().mcpServer.update({
-      where: { id },
-      data: { description: "Lists the apps." },
-    })
+    await writeServer(ctx, id, { description: "Lists the apps." })
     const second = await shareReview(ctx, repoId, item, {
       publicUrl: PUBLIC_URL,
     })
@@ -317,12 +320,15 @@ describe("fixing a hit", () => {
       description: "Lists the apps.",
       note: "Coolify on gaaf.kaperkun.de.",
     })
-    const row = await db().mcpServer.findUniqueOrThrow({ where: { id } })
+    const row = openServer(
+      ctx,
+      await db().mcpServer.findUniqueOrThrow({ where: { id } }),
+    )
     expect(row.description).toBe("Lists the apps.")
     expect(readServerNote(ctx, row)).toBe("Coolify on gaaf.kaperkun.de.")
 
     await keepAddressPrivate(ctx, id)
-    expect(JSON.parse((await storedSpec(id))!.text)).not.toHaveProperty(
+    expect(JSON.parse((await storedSpec(ctx, id))!.text)).not.toHaveProperty(
       "servers",
     )
     expect(row.url).toBe("https://gaaf.kaperkun.de/v1")
@@ -334,7 +340,8 @@ describe("fixing a hit", () => {
     expect(after.root).toBe("endpoints/coolify")
     expect(after.hits).toEqual([])
     expect(
-      (await db().mcpServer.findUniqueOrThrow({ where: { id } })).name,
+      openServer(ctx, await db().mcpServer.findUniqueOrThrow({ where: { id } }))
+        .name,
     ).toBe("Coolify gaaf")
   })
 
@@ -377,5 +384,71 @@ describe("excluded items", () => {
     })
     expect(await listExclusions(ctx, repoId)).toEqual(new Set())
     expect(await findRepoItem(ctx, "skill", skill)).toMatchObject({ repoId })
+  })
+})
+
+describe("a service", () => {
+  it("pushes its definition only, lists what stays in the vault, and catches its own machine in its words", async () => {
+    const repoId = await writeRepo("services")
+    const { id } = await addService(ctx)
+    await writeServer(ctx, id, {
+      description: "Docling on 192.168.7.20, our build box.",
+    })
+    const item = { kind: "service" as const, id }
+    const review = await shareReview(ctx, repoId, item, {
+      publicUrl: PUBLIC_URL,
+    })
+
+    expect(review.root).toBe("services/docling-service.yaml")
+    expect(review.files.map((file) => [file.path, file.change])).toEqual([
+      ["services/docling-service.yaml", "added"],
+    ])
+    const written = review.files[0]!.text
+    expect(written).not.toContain("build.ada-home.net")
+    expect(written).not.toContain("pcp-docling")
+    expect(written).not.toContain("Docling key")
+    expect(review.staysPrivate).toEqual(
+      expect.arrayContaining([
+        { label: "Runs on", value: "docling-service: Build box" },
+        {
+          label: "Published on",
+          value: "docling-service: 192.168.7.20:5001 (5001)",
+        },
+        { label: "Containers", value: "docling-service: pcp-docling" },
+        {
+          label: "Secrets for its variables",
+          value: 'docling-service: DOCLING_SERVE_API_KEY takes "Docling key"',
+        },
+        {
+          label: "What it registered",
+          value: "docling-service: Docling (docling)",
+        },
+      ]),
+    )
+    // Its SSH server and the address it is published on are the owner's.
+    const facts = await vaultOwnerFacts(ctx)
+    expect(facts.hosts).toEqual(
+      expect.arrayContaining(["build.ada-home.net", "192.168.7.20"]),
+    )
+    expect(review.hits.map((hit) => hit.match)).toContain("192.168.7.20")
+    expect(
+      review.hits.find((hit) => hit.match === "192.168.7.20")?.fixes,
+    ).toEqual(expect.arrayContaining(["edit_description", "move_to_note"]))
+    await expect(
+      confirmShare(ctx, repoId, item, {
+        basis: review.basis,
+        acknowledged: [],
+        publicUrl: PUBLIC_URL,
+      }),
+    ).rejects.toThrow()
+
+    await confirmShare(ctx, repoId, item, {
+      basis: review.basis,
+      acknowledged: acknowledgeAll(review),
+      publicUrl: PUBLIC_URL,
+    })
+    expect(
+      fake.files("kevin", "services")["services/docling-service.yaml"],
+    ).toBe(written)
   })
 })

@@ -7,8 +7,9 @@ import { json, startTestApi, type TestApi } from "./openapi/test-api"
 import { runCall } from "./permissions"
 import { getServer } from "./servers"
 import { scratchDatabase } from "./test-db"
-import { keepBytes, keepResult } from "./tool-results"
+import { keepBytes, keepResult, openResult } from "./tool-results"
 import { setupVault } from "./vault"
+import { toolNamed } from "./test-servers"
 
 // A kept result named in a call's arguments reaches the upstream as what it
 // stands for: through runCall, an API endpoint and a real request.
@@ -316,5 +317,83 @@ describe("an upload to an endpoint", () => {
       /A kept result named in the arguments is not there for this token/,
     )
     expect(api.requests).toEqual([])
+  })
+})
+
+describe("a file an endpoint answers", () => {
+  const PDF = Buffer.from("%PDF-1.7\n\u0000ÿ binary invoice")
+
+  function invoiceSchema(origin: string) {
+    return JSON.stringify({
+      openapi: "3.0.3",
+      info: { title: "Invoices" },
+      servers: [{ url: `${origin}/api` }],
+      paths: {
+        "/invoices/{id}/pdf": {
+          get: {
+            operationId: "getInvoicePdf",
+            parameters: [
+              {
+                name: "id",
+                in: "path",
+                required: true,
+                schema: { type: "string" },
+              },
+            ],
+            responses: {
+              "200": {
+                description: "The invoice",
+                content: {
+                  "application/pdf": {
+                    schema: { type: "string", format: "binary" },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+    })
+  }
+
+  it("becomes the token's kept result, answered as a handle with its type, size and name", async () => {
+    api = await startTestApi((_, res) => {
+      res.setHeader("content-type", "application/pdf")
+      res.setHeader("content-disposition", 'attachment; filename="inv-7.pdf"')
+      res.end(PDF)
+    })
+    const { id } = await createEndpoint(ctx, {
+      name: "Invoices",
+      specSource: "upload",
+      specText: invoiceSchema(api.origin),
+      readOnly: false,
+      authType: "none",
+    })
+    const server = await getServer(ctx, id)
+    const tool = await toolNamed(ctx, "getInvoicePdf", id)
+    expect(tool.output).toMatch(/^\{file: \{\$result: string/)
+
+    const answer = await runCall(
+      ctx,
+      server,
+      "getInvoicePdf",
+      { id: "7" },
+      { ...PUBLIC, tokenId },
+    )
+
+    expect(answer.isError).toBeUndefined()
+    const block = answer.content[0]
+    const value = JSON.parse(block?.type === "text" ? block.text : "") as {
+      file: { $result: string; type: string; size: number; name: string }
+    }
+    expect(value.file).toMatchObject({
+      type: "application/pdf",
+      size: PDF.length,
+      name: "inv-7.pdf",
+    })
+
+    const opened = await openResult(ctx, { tokenId, id: value.file.$result })
+    expect(opened?.bytes().equals(PDF)).toBe(true)
+    expect(opened?.name).toBe("inv-7.pdf")
   })
 })

@@ -1,14 +1,14 @@
 "use client"
 
-import { useActionState } from "react"
+import { useActionState, type ReactNode } from "react"
 
 import {
   FormFooter,
   FormSection,
   ServerFormFrame,
 } from "@/components/server-form-parts"
-import { Input, Select, Textarea } from "@/components/ui/input"
-import { Field } from "@/components/ui/label"
+import { Input, Select, Textarea } from "@kaperkunde/ui/input"
+import { Field } from "@kaperkunde/ui/label"
 import type { ServerActionResult } from "@/lib/actions/servers"
 import {
   createWrapperAction,
@@ -68,10 +68,16 @@ export const EMPTY_WRAPPER: WrapperFormValues = {
 export function WrapperForm({
   initial,
   secretNames,
+  found,
 }: {
   initial: WrapperFormValues
   /** The secrets you hold, by name, for the secrets list. */
   secretNames: string[]
+  /**
+   * The secrets its programs type into pages by name, whose places PCP
+   * made: read only, as they come from the programs, not the JSON.
+   */
+  found?: ReactNode
 }) {
   const editing = Boolean(initial.id)
   const [state, action] = useActionState<ServerActionResult, FormData>(
@@ -158,6 +164,7 @@ export function WrapperForm({
             spellCheck={false}
           />
         </Field>
+        {found}
         <DefinitionGuide secretNames={secretNames} />
       </FormSection>
 
@@ -192,7 +199,10 @@ function DefinitionGuide({ secretNames }: { secretNames: string[] }) {
         (server/tool), <code>argument</code> (a JSON Pointer such as{" "}
         <code>&quot;/api_key&quot;</code>) and optionally <code>template</code>{" "}
         (<code>&quot;Bearer {"{{secret}}"}&quot;</code>); the program writes{" "}
-        <code>{'{"$secret": "<name>"}'}</code> there.
+        <code>{'{"$secret": "<name>"}'}</code> there. A secret a program types
+        into a page with <code>browser/type</code> needs none when its name is
+        written as it is: PCP finds it and types it only at the sites you bound
+        it to, or after asking you.
       </dd>
       <dt className="text-foreground">Your secrets</dt>
       <dd className="m-0 break-words">

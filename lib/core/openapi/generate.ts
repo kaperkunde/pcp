@@ -16,7 +16,7 @@ import {
   REF_MAX_NODES,
 } from "./limits"
 import { readOAuth, type OAuthReading } from "./oauth"
-import { outlineAnswer } from "./outline"
+import { fileAnswerTypes, outlineAnswer } from "./outline"
 import type { OpenApiDocument } from "./parse"
 import type { BodyPlan, CallPlan, ParamPlan } from "./plan"
 import {
@@ -567,10 +567,13 @@ function buildTool(
 
   const summary = shorten(ownString(operation, "summary"), 500)
   const title = summary && summary.length <= 100 ? summary : null
+  // Both hints stated, so the tier is never MCP's default (Destructive):
+  // GET reads, DELETE destroys, POST, PUT and PATCH write
+  // (lib/core/tool-tiers.ts).
   const annotations: ToolAnnotations = {
     ...(title ? { title } : {}),
     readOnlyHint: method === "get",
-    ...(method === "delete" ? { destructiveHint: true } : {}),
+    destructiveHint: method === "delete",
     ...(method === "get" || method === "put" || method === "delete"
       ? { idempotentHint: true }
       : {}),
@@ -584,6 +587,11 @@ function buildTool(
     params,
     body: body?.plan ?? null,
     accept: acceptFor(doc, operation),
+  }
+  const fileAnswers = fileAnswerTypes(doc, operation)
+
+  if (fileAnswers.length > 0) {
+    plan.fileAnswers = fileAnswers
   }
 
   return {

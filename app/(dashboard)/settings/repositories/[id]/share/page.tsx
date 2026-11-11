@@ -2,16 +2,16 @@ import { Globe, Lock, TriangleAlert } from "lucide-react"
 import Link from "next/link"
 import type { Metadata } from "next"
 
-import { PageColumn } from "@/components/page-column"
-import { PageHeader } from "@/components/page-header"
+import { PageColumn } from "@kaperkunde/ui/page"
+import { PageHeader } from "@kaperkunde/ui/page"
 import {
   ShareConfirm,
   ShareHits,
   type HitView,
 } from "@/components/share-review"
 import { Diff } from "@/components/skill-review"
-import { Badge } from "@/components/ui/badge"
-import { List, ListRow, ListSection, RowValue } from "@/components/ui/list"
+import { Badge } from "@kaperkunde/ui/badge"
+import { List, ListRow, ListSection, RowValue } from "@kaperkunde/ui/list"
 import { isPcpError } from "@/lib/core/errors"
 import { openShareRequest } from "@/lib/core/permissions"
 import type { ItemKind } from "@/lib/core/repos/layout"
@@ -36,6 +36,7 @@ const KIND: Record<ItemKind, string> = {
   flow: "browser flow",
   endpoint: "API endpoint",
   server: "MCP server",
+  service: "service",
 }
 
 const CHANGE_LABEL = {

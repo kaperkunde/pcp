@@ -1,12 +1,12 @@
 "use client"
 
 import { useRouter } from "next/navigation"
-import { useCallback, useEffect, useRef, useState, useTransition } from "react"
+import { useCallback, useEffect, useRef, useState } from "react"
 
-import { FormError } from "@/components/form-status"
-import { Badge } from "@/components/ui/badge"
-import { Button } from "@/components/ui/button"
-import { Input, Select, Textarea } from "@/components/ui/input"
+import { FormError } from "@kaperkunde/ui/form-status"
+import { Badge } from "@kaperkunde/ui/badge"
+import { Button } from "@kaperkunde/ui/button"
+import { Input, Select, Textarea } from "@kaperkunde/ui/input"
 import {
   backTabAction,
   closeTabAction,
@@ -42,7 +42,7 @@ import type { ActionState } from "@/lib/server/action-state"
  * browser will not give it, takes the text in a box you can paste into.
  */
 
-type Status = "connecting" | "live" | "lost" | "closed" | "full"
+type Status = "connecting" | "live" | "lost" | "closed" | "signed-out" | "full"
 
 const MODIFIERS = (event: {
   altKey: boolean
@@ -76,7 +76,9 @@ export function BrowserTabView({
   const [address, setAddress] = useState(initial.url)
   const [editing, setEditing] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const [pending, startTransition] = useTransition()
+  // Not a transition: a transition stays pending until every refresh the
+  // page started has drawn, and a slow tab list would keep the buttons off.
+  const [pending, setPending] = useState(false)
   // Hand back offers the token whose tab it was; a tab you opened that no
   // token had yet waits for you to choose one.
   const [handTo, setHandTo] = useState(
@@ -116,6 +118,8 @@ export function BrowserTabView({
     let latest: { data: string; metadata: FrameMetadata } | null = null
     let drawing = false
     let stopped = false
+    let opened = false
+    let check: AbortController | null = null
 
     const draw = () => {
       if (drawing || !latest) return
@@ -149,6 +153,7 @@ export function BrowserTabView({
         `/api/browser/tabs/${encodeURIComponent(tabId)}/stream`,
       )
       source.addEventListener("open", () => {
+        opened = true
         attempts = 0
         setStatus("live")
       })
@@ -174,23 +179,84 @@ export function BrowserTabView({
         source?.close()
       })
       source.addEventListener("full", () => {
+        source?.close()
+
+        // Watching before: our own earlier connection may still hold the
+        // place for a moment, so it is tried again.
+        if (opened) {
+          attempts += 1
+          setStatus("lost")
+          schedule()
+          return
+        }
+
         stopped = true
         setStatus("full")
-        source?.close()
       })
       source.addEventListener("error", () => {
         source?.close()
         if (stopped) return
         attempts += 1
-        setStatus(attempts > 5 ? "closed" : "lost")
-        if (attempts <= 5) retry = setTimeout(connect, 1000 * attempts)
+        setStatus("lost")
+        schedule()
       })
     }
+
+    // A dropped stream is tried again, further apart each time up to 30 s
+    // (with some jitter), and at once when the window comes back. Before each
+    // try a HEAD asks whether the tab is still there and the owner still
+    // signed in (it takes no place among the viewers); only the server saying
+    // the tab is closed or gone, or the owner signed out, ends it.
+    const schedule = () => {
+      if (retry) clearTimeout(retry)
+      const base = Math.min(1000 * attempts, 30_000)
+      retry = setTimeout(() => void probe(), base * (0.75 + Math.random() / 2))
+    }
+    const probe = async () => {
+      retry = null
+      if (stopped) return
+      check = new AbortController()
+      try {
+        const response = await fetch(
+          `/api/browser/tabs/${encodeURIComponent(tabId)}/stream`,
+          { method: "HEAD", signal: check.signal },
+        )
+        if (stopped) return
+
+        if (response.status === 404) {
+          stopped = true
+          setStatus("closed")
+          return
+        }
+
+        if (response.status === 401 || response.status === 403) {
+          stopped = true
+          setStatus("signed-out")
+          return
+        }
+      } catch {
+        if (stopped) return
+        // Unreachable still: the stream's own attempt decides.
+      }
+      connect()
+    }
+    const wake = () => {
+      if (stopped || document.visibilityState === "hidden") return
+      if (retry) {
+        clearTimeout(retry)
+        void probe()
+      }
+    }
+    document.addEventListener("visibilitychange", wake)
+    window.addEventListener("focus", wake)
 
     connect()
 
     return () => {
       stopped = true
+      check?.abort()
+      document.removeEventListener("visibilitychange", wake)
+      window.removeEventListener("focus", wake)
       if (retry) clearTimeout(retry)
       source?.close()
     }
@@ -364,7 +430,11 @@ export function BrowserTabView({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [holding])
 
-  function act(run: () => Promise<ActionState>, control?: TabView["control"]) {
+  function act(
+    run: () => Promise<ActionState>,
+    control?: TabView["control"],
+    closing = false,
+  ) {
     const choose = (chosen: TabView["control"]) => {
       pinned.current = { control: chosen, until: Date.now() + 3_000 }
       setView((current) => ({ ...current, control: chosen }))
@@ -372,27 +442,43 @@ export function BrowserTabView({
 
     if (control === "owner") choose(control)
 
-    startTransition(async () => {
-      if (control === "assistant") {
-        await drain()
-        choose(control)
+    setPending(true)
+    void (async () => {
+      try {
+        if (control === "assistant") {
+          await drain()
+          choose(control)
+        }
+
+        const result = await run()
+        setError(result.status === "error" ? result.error : null)
+
+        if (result.status === "error" && control) {
+          pinned.current = null
+          setView((current) => ({
+            ...current,
+            control: control === "owner" ? "assistant" : "owner",
+          }))
+        } else if (control) {
+          pinned.current = { control, until: Date.now() + 3_000 }
+        }
+      } catch {
+        setError("That did not go through. Try again.")
+        if (control) {
+          pinned.current = null
+          setView((current) => ({
+            ...current,
+            control: control === "owner" ? "assistant" : "owner",
+          }))
+        }
+      } finally {
+        setPending(false)
       }
 
-      const result = await run()
-      setError(result.status === "error" ? result.error : null)
-
-      if (result.status === "error" && control) {
-        pinned.current = null
-        setView((current) => ({
-          ...current,
-          control: control === "owner" ? "assistant" : "owner",
-        }))
-      } else if (control) {
-        pinned.current = { control, until: Date.now() + 3_000 }
-      }
-
-      router.refresh()
-    })
+      // The view shows what the buttons did and the list around it polls;
+      // only closing a tab changes the page, so only that asks for a refresh.
+      if (closing) router.refresh()
+    })()
   }
 
   // An assistant handed it over: it goes back when you answer its request.
@@ -464,17 +550,19 @@ export function BrowserTabView({
               ? "Connecting…"
               : status === "lost"
                 ? "Connection lost; trying again…"
-                : status === "closed"
-                  ? "This tab is closed."
-                  : status === "full"
-                    ? "Too many people are watching this tab."
-                    : holding
-                      ? handover
-                        ? "What you do here goes to the page. The assistant waits until you say Done or Not now on its request."
-                        : view.tokenId === null
-                          ? "What you do here goes to the page. No assistant sees this tab until you hand it to one."
-                          : "What you do here goes to the page. The assistant whose tab it is waits until you hand it back."
-                      : "You are watching. Take it over to click and type."}
+                : status === "signed-out"
+                  ? "You are signed out. Sign in again to watch this tab."
+                  : status === "closed"
+                    ? "This tab is closed."
+                    : status === "full"
+                      ? "Too many people are watching this tab."
+                      : holding
+                        ? handover
+                          ? "What you do here goes to the page. The assistant waits until you say Done or Not now on its request."
+                          : view.tokenId === null
+                            ? "What you do here goes to the page. No assistant sees this tab until you hand it to one."
+                            : "What you do here goes to the page. The assistant whose tab it is waits until you hand it back."
+                        : "You are watching. Take it over to click and type."}
           </span>
         </div>
         <div className="flex flex-wrap gap-2">
@@ -544,7 +632,9 @@ export function BrowserTabView({
             <Button
               type="button"
               size="sm"
-              disabled={pending || status === "closed"}
+              disabled={
+                pending || status === "closed" || status === "signed-out"
+              }
               onClick={() => act(() => takeOverTabAction(tabId), "owner")}
             >
               Take over
@@ -554,10 +644,10 @@ export function BrowserTabView({
             type="button"
             variant="plain"
             size="sm"
-            disabled={pending || status === "closed"}
+            disabled={pending || status === "closed" || status === "signed-out"}
             onClick={() => {
               if (window.confirm("Close this tab?")) {
-                act(() => closeTabAction(tabId))
+                act(() => closeTabAction(tabId), undefined, true)
               }
             }}
           >

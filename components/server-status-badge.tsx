@@ -1,4 +1,4 @@
-import { Badge, StatusDot } from "@/components/ui/badge"
+import { Badge, StatusDot } from "@kaperkunde/ui/badge"
 import type { ServerKind, ServerStatus } from "@/lib/core/servers"
 import { cn } from "@/lib/utils"
 
@@ -90,10 +90,22 @@ export function serverStatus({
     }
   }
 
+  // A service is checked by reading its container on its SSH server.
+  if (kind === "service") {
+    switch (status) {
+      case "ok":
+        return ok("Running")
+      case "error":
+        return error("Not running")
+      default:
+        return unchecked
+    }
+  }
+
   // An SSH server is checked by signing in with PCP's key: the server can
   // refuse the key (not added yet), or show another host key than the one
   // PCP pinned.
-  if (kind === "ssh") {
+  if (kind === "ssh" || kind === "storage") {
     switch (status) {
       case "ok":
         return ok("Ready")

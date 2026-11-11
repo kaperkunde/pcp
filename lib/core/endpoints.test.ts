@@ -1,9 +1,18 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
+import { openSpec, sealedSpecPatches } from "./spec-rows"
+import { readFileSync } from "node:fs"
+import {
+  catchUpVault,
+  forgetVaultUpkeeps,
+  RETRY_AFTER_MS,
+} from "./vault-upkeep"
+import { editTools } from "./test-servers"
 import { createApiToken, resolveApiToken } from "./api-tokens"
 import { db } from "./db"
 import {
   createEndpoint,
+  endpointMigration,
   rebuildOutdatedEndpoints,
   syncEndpointTools,
   updateEndpoint,
@@ -24,6 +33,7 @@ import {
   setToolDescription,
   updateServer,
 } from "./servers"
+import { writeServer } from "./server-meta"
 import { scratchDatabase } from "./test-db"
 import { callServerTool, syncServerTools } from "./upstream"
 import { setupVault } from "./vault"
@@ -178,7 +188,7 @@ describe("createEndpoint", () => {
     const spec = await db().openApiSpec.findUniqueOrThrow({
       where: { serverId: id },
     })
-    expect(spec.text).toBe(schema(api.origin))
+    expect(openSpec(ctx, spec).text).toBe(schema(api.origin))
     expect(spec.hash).toMatch(/^[0-9a-f]{64}$/)
   })
 
@@ -425,7 +435,7 @@ describe("downloaded schemas", () => {
         authType: "none",
       })
       body = "<html>moved</html>"
-      const result = await syncEndpointTools(await getServer(ctx, id))
+      const result = await syncEndpointTools(ctx, await getServer(ctx, id))
 
       expect(result.status).toBe("error")
       const server = await getServer(ctx, id)
@@ -650,25 +660,83 @@ describe("tools an earlier PCP built", () => {
       input({ specText: JSON.stringify(described) }),
     )
 
-    await db().mcpTool.updateMany({
-      where: { serverId: id },
-      data: { description: "stale", output: null },
-    })
+    await editTools(
+      ctx,
+      { serverId: id },
+      { description: "stale", output: null },
+    )
     await db().openApiSpec.update({
       where: { serverId: id },
       data: { builtWith: "0.0.1" },
     })
-    await db().mcpServer.update({
-      where: { id },
-      data: {
-        status: "ok",
-        statusMessage:
-          "The schema at its URL has changed since it was approved.",
-      },
+    await writeServer(ctx, id, {
+      status: "ok",
+      statusMessage: "The schema at its URL has changed since it was approved.",
     })
 
     return id
   }
+
+  it("are rebuilt by the vault's first request with its key, once per process, and never at boot", async () => {
+    const id = await builtByEarlierPcp()
+
+    // Boot holds no key: nothing there reads the sealed schemas.
+    const boot = readFileSync("instrumentation.ts", "utf8")
+    expect(boot).not.toMatch(/rebuildOutdatedEndpoints|syncAllBrowserTools/)
+
+    forgetVaultUpkeeps()
+    await catchUpVault(ctx)
+    const listPets = (await getServer(ctx, id)).tools.find(
+      (tool) => tool.name === "listPets",
+    )!
+    expect(listPets.description).not.toBe("stale")
+
+    // Once per process: a second request does not build it again.
+    await editTools(ctx, { serverId: id }, { description: "stale" })
+    await db().openApiSpec.update({
+      where: { serverId: id },
+      data: { builtWith: "0.0.1" },
+    })
+    await catchUpVault(ctx)
+    expect(
+      (await getServer(ctx, id)).tools.find((tool) => tool.name === "listPets")!
+        .description,
+    ).toBe("stale")
+  })
+
+  it("are tried again by a later request when catching up failed, at most once a minute", async () => {
+    const id = await builtByEarlierPcp()
+    const browser = await import("./browser/server")
+    const failing = vi
+      .spyOn(browser, "syncVaultBrowserTools")
+      .mockRejectedValueOnce(new Error("down"))
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {})
+
+    try {
+      forgetVaultUpkeeps()
+      const start = Date.now()
+      await catchUpVault(ctx, start)
+      expect(failing).toHaveBeenCalledTimes(1)
+
+      // Within the minute: not tried again.
+      await catchUpVault(ctx, start + 1_000)
+      expect(failing).toHaveBeenCalledTimes(1)
+
+      // After it: tried again, and done.
+      await catchUpVault(ctx, start + RETRY_AFTER_MS + 1)
+      expect(failing).toHaveBeenCalledTimes(2)
+      await catchUpVault(ctx, start + 2 * RETRY_AFTER_MS + 2)
+      expect(failing).toHaveBeenCalledTimes(2)
+      expect(
+        (await getServer(ctx, id)).tools.find(
+          (tool) => tool.name === "listPets",
+        )!.description,
+      ).not.toBe("stale")
+    } finally {
+      failing.mockRestore()
+      logged.mockRestore()
+    }
+  })
 
   it("are rebuilt from the kept copy once, and nothing else about the endpoint changes", async () => {
     const id = await builtByEarlierPcp()
@@ -676,7 +744,10 @@ describe("tools an earlier PCP built", () => {
       where: { serverId: id },
     })
 
-    expect(await rebuildOutdatedEndpoints()).toEqual({ rebuilt: 1, failed: [] })
+    expect(await rebuildOutdatedEndpoints(ctx)).toEqual({
+      rebuilt: 1,
+      failed: [],
+    })
 
     const server = await getServer(ctx, id)
     const listPets = server.tools.find((tool) => tool.name === "listPets")!
@@ -693,19 +764,24 @@ describe("tools an earlier PCP built", () => {
     expect(after.builtWith).toBe(PCP_VERSION)
     expect(after.fetchedAt).toEqual(before.fetchedAt)
 
-    expect(await rebuildOutdatedEndpoints()).toEqual({ rebuilt: 0, failed: [] })
+    expect(await rebuildOutdatedEndpoints(ctx)).toEqual({
+      rebuilt: 0,
+      failed: [],
+    })
   })
 
   it("stay as they are when the kept schema no longer builds, to be tried again", async () => {
     const id = await builtByEarlierPcp()
     await db().openApiSpec.update({
       where: { serverId: id },
-      data: {
-        patches: JSON.stringify([{ op: "remove", path: "/paths/~1gone" }]),
-      },
+      data: sealedSpecPatches(
+        ctx,
+        id,
+        JSON.stringify([{ op: "remove", path: "/paths/~1gone" }]),
+      ),
     })
 
-    const result = await rebuildOutdatedEndpoints()
+    const result = await rebuildOutdatedEndpoints(ctx)
     expect(result.rebuilt).toBe(0)
     expect(result.failed).toEqual([
       { serverId: id, message: expect.any(String) },
@@ -720,6 +796,47 @@ describe("tools an earlier PCP built", () => {
       (await db().openApiSpec.findUniqueOrThrow({ where: { serverId: id } }))
         .builtWith,
     ).toBe("0.0.1")
+  })
+
+  it("are built again when a call or describe meets them, or say how to fix a schema that no longer builds", async () => {
+    const builds = await builtByEarlierPcp()
+    expect(
+      await endpointMigration(
+        ctx,
+        await db().mcpServer.findUniqueOrThrow({ where: { id: builds } }),
+      ),
+    ).toBeNull()
+    expect(
+      (
+        await db().openApiSpec.findUniqueOrThrow({
+          where: { serverId: builds },
+        })
+      ).builtWith,
+    ).toBe(PCP_VERSION)
+
+    const broken = await builtByEarlierPcp()
+    await db().openApiSpec.update({
+      where: { serverId: broken },
+      data: sealedSpecPatches(
+        ctx,
+        broken,
+        JSON.stringify([{ op: "remove", path: "/paths/~1gone" }]),
+      ),
+    })
+    const server = await db().mcpServer.findUniqueOrThrow({
+      where: { id: broken },
+    })
+
+    const message = await endpointMigration(ctx, server)
+    expect(message).toMatch(/^This endpoint needs migrating: /)
+    expect(message).toContain("update_endpoint's add_patches")
+    // Its tools stay as they were, and it is not built again for nothing.
+    expect(
+      (await getServer(ctx, broken)).tools.every(
+        (tool) => tool.description === "stale",
+      ),
+    ).toBe(true)
+    expect(await endpointMigration(ctx, server)).toBe(message)
   })
 
   it("are marked with the version that built them", async () => {
@@ -818,10 +935,7 @@ describe("a credential in several headers", () => {
     const echo = await startTestApi((req, res) =>
       json(res, 200, { echoed: req.headers["x-secret-api-key"] }),
     )
-    await db().mcpServer.update({
-      where: { id },
-      data: { url: `${echo.origin}/api` },
-    })
+    await writeServer(ctx, id, { url: `${echo.origin}/api` })
 
     try {
       const result = await callServerTool(
@@ -1015,10 +1129,7 @@ describe("a user name and password (Basic authentication)", () => {
     const echo = await startTestApi((req, res) =>
       json(res, 200, { youSent: req.headers.authorization }),
     )
-    await db().mcpServer.update({
-      where: { id },
-      data: { url: `${echo.origin}/api` },
-    })
+    await writeServer(ctx, id, { url: `${echo.origin}/api` })
 
     try {
       const result = await callServerTool(
@@ -1174,10 +1285,7 @@ describe("calling an endpoint tool", () => {
       }
       json(res, 200, { youSent: req.headers["x-api-key"] })
     })
-    await db().mcpServer.update({
-      where: { id: server.id },
-      data: { url: `${reflecting.origin}/api` },
-    })
+    await writeServer(ctx, server.id, { url: `${reflecting.origin}/api` })
     const moved = await getServer(ctx, server.id)
 
     try {

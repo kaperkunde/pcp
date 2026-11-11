@@ -2,10 +2,10 @@
 
 import { useState, useTransition } from "react"
 
-import { CopyableValue } from "@/components/copyable-value"
-import { FormError, FormNote } from "@/components/form-status"
-import { Button } from "@/components/ui/button"
-import { List, ListRow, ListSection } from "@/components/ui/list"
+import { CopyableValue } from "@kaperkunde/ui/copy-button"
+import { FormError, FormNote } from "@kaperkunde/ui/form-status"
+import { Button } from "@kaperkunde/ui/button"
+import { List, ListRow, ListSection } from "@kaperkunde/ui/list"
 import type { ServerActionResult } from "@/lib/actions/servers"
 import {
   forgetSshHostKeyAction,

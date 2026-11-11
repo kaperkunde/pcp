@@ -1,7 +1,7 @@
 import type { VaultContext } from "../context"
 
 import { localHash } from "./hash"
-import { itemRoot, type ItemKind } from "./layout"
+import { isOneFileKind, itemRoot, type ItemKind } from "./layout"
 import { GITHUB_WEB_URL } from "./limits"
 import { localItems } from "./local"
 import { refOf } from "./documents"
@@ -38,10 +38,11 @@ export const ITEM_STATUSES: readonly ItemStatus[] = [
   "excluded",
 ]
 
-export type ItemGroup = "servers" | "wrappers" | "skills" | "flows"
+export type ItemGroup = "servers" | "services" | "wrappers" | "skills" | "flows"
 
 export const ITEM_GROUPS: readonly ItemGroup[] = [
   "servers",
+  "services",
   "wrappers",
   "skills",
   "flows",
@@ -52,6 +53,8 @@ export function groupOf(kind: ItemKind): ItemGroup {
     case "server":
     case "endpoint":
       return "servers"
+    case "service":
+      return "services"
     case "wrapper":
       return "wrappers"
     case "flow":
@@ -108,7 +111,7 @@ export function githubPathUrl(
   const ref = encodeURIComponent(at ?? repo.branch)
   const place = path.split("/").map(encodeURIComponent).join("/")
 
-  return `${base}/${kind === "server" ? "blob" : "tree"}/${ref}/${place}`
+  return `${base}/${isOneFileKind(kind) ? "blob" : "tree"}/${ref}/${place}`
 }
 
 /** A commit on GitHub. */

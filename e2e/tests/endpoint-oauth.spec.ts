@@ -98,8 +98,8 @@ test("the owner connects it, and the assistant's calls carry the token, which it
   // provider is on loopback.
   await showServerSettings(page)
   const slug = await page.getByLabel("Short name").inputValue()
+  // On the page, outside Advanced: the switch saves as it is turned.
   await page.getByLabel("Public addresses only").uncheck()
-  await page.getByRole("button", { name: "Save changes" }).click()
   await expect(
     page.getByRole("status").filter({ hasText: "Saved." }),
   ).toBeVisible()
@@ -117,7 +117,7 @@ test("the owner connects it, and the assistant's calls carry the token, which it
   expect(upstream.closedSignIns.at(-1)).not.toHaveProperty("resource")
 
   await allowAllTools(page, TOKEN_NAME, slug)
-  const result = await callTool(baseURL!, token, "call_tool", {
+  const result = await callTool(baseURL!, token, "execute_destructive", {
     server: slug,
     tool: "whoami",
     arguments: {},

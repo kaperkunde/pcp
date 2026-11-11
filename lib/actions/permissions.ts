@@ -17,6 +17,7 @@ import {
 } from "@/lib/core/permissions"
 import { type ActionState, guarded } from "@/lib/server/action-state"
 import { publicUrlFor } from "@/lib/server/public-url"
+import { listOwnToolTiers } from "@/lib/core/own-tool-tiers"
 import { requireContext } from "@/lib/server/session"
 
 /**
@@ -74,6 +75,25 @@ export async function decidePermissionAction(
   minutes?: number,
   /** A secret for the browser: the sites the owner left in. */
   origins?: string[],
+  /** The request as the owner read it (PermissionView `revision`). */
+  revision?: string,
+  /** A proposed server at a private address: "Allow private addresses". */
+  allowPrivate?: boolean,
+  /**
+   * A new or changed server: the levels and tiers left beside the approval
+   * (PermissionView `proposedAccess`), checked against the request.
+   */
+  access?: Array<{ pattern: string; access?: string; tier?: string }>,
+  /**
+   * A secret for the browser: the login name left on the page and the
+   * recipe of a password PCP makes (request_secret), or the site changes
+   * ticked and the sites as shown (update_secret_sites).
+   */
+  browserSecret?: {
+    loginName?: string
+    generate?: Record<string, unknown>
+    sites?: { basis?: string; keep?: string[] }
+  },
 ): Promise<DecidePermissionResult> {
   const ctx = await requireContext()
   const publicUrl = await publicUrlFor(ctx)
@@ -103,6 +123,33 @@ export async function decidePermissionAction(
           origins: Array.isArray(origins)
             ? origins.filter((origin) => typeof origin === "string")
             : undefined,
+          revision: typeof revision === "string" ? revision : undefined,
+          allowPrivate: allowPrivate === true,
+          access: Array.isArray(access) ? access : undefined,
+          loginName:
+            typeof browserSecret?.loginName === "string"
+              ? browserSecret.loginName
+              : undefined,
+          // Checked in full by checkPasswordRecipe before anything is made.
+          generate:
+            browserSecret?.generate &&
+            typeof browserSecret.generate === "object"
+              ? browserSecret.generate
+              : undefined,
+          sites:
+            browserSecret?.sites && typeof browserSecret.sites === "object"
+              ? {
+                  basis:
+                    typeof browserSecret.sites.basis === "string"
+                      ? browserSecret.sites.basis
+                      : undefined,
+                  keep: Array.isArray(browserSecret.sites.keep)
+                    ? browserSecret.sites.keep.filter(
+                        (key) => typeof key === "string",
+                      )
+                    : undefined,
+                }
+              : undefined,
         },
       )
       const message = outcome.content
@@ -131,6 +178,7 @@ export async function decidePermissionAction(
 export async function saveAccessRequestAction(
   id: string,
   levels: Array<{ serverId: string; tool: string; access: string }>,
+  tiers: Array<{ serverId: string | null; tool: string; tier: string }> = [],
 ): Promise<DecidePermissionResult> {
   const ctx = await requireContext()
   const publicUrl = await publicUrlFor(ctx)
@@ -142,7 +190,12 @@ export async function saveAccessRequestAction(
       throw notFound("That request")
     }
 
-    const outcome = await applyAccessRequest(ctx, id, levels, { publicUrl })
+    const outcome = await applyAccessRequest(ctx, id, levels, {
+      publicUrl,
+      tiers,
+      ownNames: async () =>
+        (await listOwnToolTiers(ctx)).map((tool) => tool.name),
+    })
     const message = outcome.content
       .flatMap((part) => (part.type === "text" ? [part.text] : []))
       .join("\n")

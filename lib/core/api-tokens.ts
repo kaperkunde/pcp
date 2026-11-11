@@ -1,12 +1,20 @@
 import type { Prisma } from "@/lib/generated/prisma/client"
 
+import {
+  chosenProfile,
+  parseClientSeen,
+  type ClientSeenRecord,
+} from "./clients/detect"
+import { isClientProfileId, type ClientProfileId } from "./clients/profiles"
 import type { VaultContext } from "./context"
 import { newHkdfParams, randomSecret } from "./crypto"
 import { db } from "./db"
+import { SERVER_META_SELECT, serverName } from "./server-meta"
 import { invalid, notFound, PcpError } from "./errors"
 import { newId } from "./ids"
 import { newTokenInstructions, openInstructions } from "./instructions"
 import { createCredentialGrant, unlockWithCredential } from "./keys"
+import { sealedTokenName, tokenName } from "./token-names"
 
 /**
  * API tokens: what an MCP client presents to /mcp as a bearer token. Each
@@ -56,6 +64,10 @@ export type ApiTokenSummary = {
   openPermissions: number
   /** The assistant it was made for by signing in with OAuth, if it was. */
   oauthClient: { id: string; name: string } | null
+  /** The owner's choice of client profile; null: detected per request. */
+  clientProfile: ClientProfileId | null
+  /** The client last seen using it, as detected (clients/detect.ts). */
+  clientSeen: ClientSeenRecord | null
 }
 
 export type TokenInput = {
@@ -79,6 +91,11 @@ export type TokenInput = {
   manageWrappers?: boolean
   /** Left alone on an update when undefined. */
   shareFiles?: boolean
+  /**
+   * The client profile the owner chose (clients/profiles.ts); null detects
+   * it per request. Left alone on an update when undefined.
+   */
+  clientProfile?: ClientProfileId | null
   expiresAt?: Date | null
 }
 
@@ -105,18 +122,28 @@ export type ResolvedToken = {
   runCode: boolean
   /** May read wrappers and propose new ones and changes (get_wrapper, …). */
   manageWrappers: boolean
-  /** May move files to and from its own computer by link (share_result, receive_file). */
+  /**
+   * May move files to and from its own computer by link (share_result,
+   * receive_file), and ask the owner to upload files (create_upload_link,
+   * check_upload).
+   */
   shareFiles: boolean
   /**
    * The owner's instructions for the assistant (lib/core/instructions.ts),
    * decrypted: given at the start of every conversation. Null for none.
    */
   instructions: string | null
+  /** The owner's choice of client profile; null: detected per request. */
+  clientProfile: ClientProfileId | null
+  /** The name the client gave when it signed in with OAuth, if it did. */
+  oauthClientName: string | null
+  /** The client last seen using it (clients/detect.ts). */
+  clientSeen: ClientSeenRecord | null
 }
 
 function summaryInclude(now: Date) {
   return {
-    servers: { include: { server: { select: { id: true, name: true } } } },
+    servers: { include: { server: { select: SERVER_META_SELECT } } },
     _count: {
       select: {
         permissionRequests: {
@@ -129,7 +156,8 @@ function summaryInclude(now: Date) {
 
 type SummaryRow = {
   id: string
-  name: string
+  plainName: string
+  sealedName: Uint8Array | null
   prefix: string
   allowAllServers: boolean
   manageEndpoints: boolean
@@ -145,14 +173,16 @@ type SummaryRow = {
   lastUsedAt: Date | null
   oauthClientId: string | null
   oauthClientName: string | null
-  servers: Array<{ server: { id: string; name: string } }>
+  clientProfile: string | null
+  clientSeen: string | null
+  servers: Array<{ server: Parameters<typeof serverName>[1] }>
   _count: { permissionRequests: number }
 }
 
-function toSummary(row: SummaryRow): ApiTokenSummary {
+function toSummary(ctx: VaultContext, row: SummaryRow): ApiTokenSummary {
   return {
     id: row.id,
-    name: row.name,
+    name: tokenName(ctx, row),
     prefix: row.prefix,
     allowAllServers: row.allowAllServers,
     manageEndpoints: row.manageEndpoints,
@@ -162,7 +192,10 @@ function toSummary(row: SummaryRow): ApiTokenSummary {
     runCode: row.runCode,
     manageWrappers: row.manageWrappers,
     shareFiles: row.shareFiles,
-    servers: row.servers.map((link) => link.server),
+    servers: row.servers.map((link) => ({
+      id: link.server.id,
+      name: serverName(ctx, link.server),
+    })),
     expiresAt: row.expiresAt,
     revokedAt: row.revokedAt,
     createdAt: row.createdAt,
@@ -171,6 +204,8 @@ function toSummary(row: SummaryRow): ApiTokenSummary {
     oauthClient: row.oauthClientId
       ? { id: row.oauthClientId, name: row.oauthClientName ?? "" }
       : null,
+    clientProfile: chosenProfile(row.clientProfile),
+    clientSeen: parseClientSeen(row.clientSeen),
   }
 }
 
@@ -183,7 +218,7 @@ export async function listApiTokens(
     orderBy: { createdAt: "desc" },
   })
 
-  return rows.map(toSummary)
+  return rows.map((row) => toSummary(ctx, row))
 }
 
 export async function getApiToken(
@@ -199,7 +234,7 @@ export async function getApiToken(
     throw notFound("That token")
   }
 
-  return toSummary(row)
+  return toSummary(ctx, row)
 }
 
 /** The token row, when it belongs to this vault. */
@@ -308,7 +343,7 @@ export async function createApiToken(
       id,
       vaultId: ctx.vaultId,
       grantId: grant.id,
-      name,
+      ...sealedTokenName(ctx, id, name),
       prefix: token.slice(0, DISPLAY_PREFIX_LENGTH),
       allowAllServers: input.allowAllServers,
       manageEndpoints: input.manageEndpoints ?? false,
@@ -317,6 +352,7 @@ export async function createApiToken(
       runCode: input.runCode ?? false,
       manageWrappers: input.manageWrappers ?? false,
       shareFiles: input.shareFiles ?? false,
+      clientProfile: checkedProfile(input.clientProfile ?? null),
       expiresAt: input.expiresAt ?? null,
       // A copy of PCP's suggested instructions, for the owner to change.
       ...newTokenInstructions(ctx, id),
@@ -357,7 +393,7 @@ export async function createOAuthApiToken(
         id,
         vaultId: ctx.vaultId,
         grantId,
-        name,
+        ...sealedTokenName(ctx, id, name),
         prefix: "",
         allowAllServers: input.allowAllServers,
         manageEndpoints: input.manageEndpoints ?? false,
@@ -405,7 +441,7 @@ export async function updateApiToken(
     db().apiToken.update({
       where: { id },
       data: {
-        name,
+        ...sealedTokenName(ctx, id, name),
         allowAllServers: input.allowAllServers,
         ...(input.manageEndpoints !== undefined
           ? { manageEndpoints: input.manageEndpoints }
@@ -424,6 +460,9 @@ export async function updateApiToken(
         ...(input.shareFiles !== undefined
           ? { shareFiles: input.shareFiles }
           : {}),
+        ...(input.clientProfile !== undefined
+          ? { clientProfile: checkedProfile(input.clientProfile) }
+          : {}),
         ...(input.expiresAt !== undefined
           ? { expiresAt: input.expiresAt }
           : {}),
@@ -438,6 +477,32 @@ export async function updateApiToken(
         ]
       : []),
   ])
+}
+
+/** A client profile the owner chose, checked: an unknown id is refused. */
+function checkedProfile(profile: string | null): ClientProfileId | null {
+  if (profile !== null && !isClientProfileId(profile)) {
+    throw invalid("That is not a client profile PCP knows.")
+  }
+
+  return profile
+}
+
+/**
+ * Sets the client profile a token is answered with (clients/profiles.ts),
+ * or null to detect it per request again. The owner's alone: nothing an
+ * assistant sends reaches it.
+ */
+export async function setTokenClientProfile(
+  ctx: VaultContext,
+  id: string,
+  profile: string | null,
+): Promise<void> {
+  await requireLiveToken(ctx, id)
+  await db().apiToken.update({
+    where: { id },
+    data: { clientProfile: checkedProfile(profile) },
+  })
 }
 
 /**
@@ -513,7 +578,7 @@ function resolved(record: TokenRecord, dek: Buffer): ResolvedToken {
   return {
     ctx: { vaultId: record.vaultId, dek },
     tokenId: record.id,
-    tokenName: record.name,
+    tokenName: tokenName({ vaultId: record.vaultId, dek }, record),
     serverIds: record.allowAllServers
       ? null
       : record.servers.map((link) => link.serverId),
@@ -528,6 +593,9 @@ function resolved(record: TokenRecord, dek: Buffer): ResolvedToken {
     manageWrappers: record.manageWrappers,
     shareFiles: record.shareFiles,
     instructions: openInstructions(dek, record.id, record.instructions),
+    clientProfile: chosenProfile(record.clientProfile),
+    oauthClientName: record.oauthClientName,
+    clientSeen: parseClientSeen(record.clientSeen),
   }
 }
 

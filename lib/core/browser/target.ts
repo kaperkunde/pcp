@@ -2,12 +2,16 @@ import type { Locator, Page } from "patchright-core"
 
 import { MAX_TARGET_CANDIDATES } from "./limits"
 import {
+  missingRefMessage,
+  resolveTabRef,
+  tabSnapshot,
+  type RefHolder,
+} from "./refs"
+import {
   allNodes,
   describeNode,
   nodeByRef,
   parseSnapshot,
-  resolveRef,
-  snapshotTree,
   type ElementMatch,
   type SnapshotNode,
 } from "./snapshot"
@@ -99,21 +103,23 @@ export function targetRefusal(
 }
 
 /**
- * The one element a target names, or why not. `within` must be an element
- * of the page now, as any ref must.
+ * The one element a target names in a tab, or why not. `within` must be an
+ * element of the page now, as any ref must. A refusal's snapshot is the
+ * tab's (refs.ts), so it takes no ref from an element still there.
  */
 export async function resolveTarget(
-  page: Page,
+  tab: RefHolder,
   target: Target,
 ): Promise<Resolved> {
+  const page = tab.page
   let scope: Locator | null = null
 
   if (target.within) {
-    scope = await resolveRef(page, target.within)
+    scope = await resolveTabRef(tab, target.within)
 
     if (!scope) {
       return {
-        refusal: `There is no element ${target.within} on the page now (within): refs hold until the next snapshot. Take a new snapshot and use its refs.`,
+        refusal: `${missingRefMessage(tab, target.within)} (It was the target's within.)`,
       }
     }
   }
@@ -133,7 +139,7 @@ export async function resolveTarget(
     return { locator: all.nth(target.nth) }
   }
 
-  const tree = parseSnapshot(await snapshotTree(page).catch(() => ""))
+  const tree = parseSnapshot(await tabSnapshot(tab).catch(() => ""))
   const within = target.within ? nodeByRef(tree, target.within) : null
 
   return {

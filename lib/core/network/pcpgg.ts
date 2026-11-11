@@ -1,15 +1,17 @@
 import { isIP } from "node:net"
 
+import { DEFAULT_RELAY_URL } from "@kaperkunde/pcpgg-protocol"
+
 import { invalid } from "../errors"
 import { getHostJson, setHostJson } from "../host-settings"
 import { normalizeHostname } from "./ddns"
-import { DEFAULT_RELAY_URL } from "./pcpgg/control"
 import { clearTlsConfig, getTlsConfig, getTlsStatus } from "./tls"
 
 /**
  * The connection to pcp.gg: a name of the owner's (you.pcp.gg) whose
  * connections pcp.gg carries to this computer over one connection PCP
- * opens itself (pcpgg/connector.ts), so nothing on the router has to change.
+ * opens itself (@kaperkunde/pcpgg-protocol/connector), so nothing on the
+ * router has to change.
  * HTTPS still ends in PCP: it gets its own certificate for the name (tls.ts),
  * and pcp.gg passes on bytes it cannot read.
  *

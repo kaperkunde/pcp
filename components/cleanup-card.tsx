@@ -4,13 +4,13 @@ import { Eraser } from "lucide-react"
 import Link from "next/link"
 import { useActionState, useState } from "react"
 
-import { FormError, FormNote } from "@/components/form-status"
+import { FormError, FormNote } from "@kaperkunde/ui/form-status"
 import { LocalDate } from "@/components/local-date"
 import { SettingsItem } from "@/components/settings-item"
-import { SubmitButton } from "@/components/submit-button"
-import { Badge } from "@/components/ui/badge"
-import { Input, Select } from "@/components/ui/input"
-import { Field } from "@/components/ui/label"
+import { SubmitButton } from "@kaperkunde/ui/submit-button"
+import { Badge } from "@kaperkunde/ui/badge"
+import { Input, Select } from "@kaperkunde/ui/input"
+import { Field } from "@kaperkunde/ui/label"
 import {
   cleanUpNowAction,
   type CleanupResult,
@@ -46,7 +46,9 @@ export function CleanupCard({ overview }: { overview: CleanupOverview }) {
         <>
           PCP removes what it keeps only for a while: sign-ins that ended (yours
           and apps&apos;), results kept for a day, permission requests a week
-          after they expired, and days of the{" "}
+          after they expired, search vectors no search used for a month, what
+          PCP&apos;s own store left behind (files a write never finished), and
+          days of the{" "}
           <Link
             href="/log"
             className="text-primary underline-offset-4 hover:underline"
@@ -76,7 +78,7 @@ function CleanupStatusLine({ overview }: { overview: CleanupOverview }) {
         ) : status.lastRunAt ? (
           <Badge>Healthy</Badge>
         ) : (
-          <Badge variant="outline">Not run yet</Badge>
+          <Badge variant="secondary">Not run yet</Badge>
         )}
         {status.lastRunAt ? (
           <span>
@@ -91,6 +93,9 @@ function CleanupStatusLine({ overview }: { overview: CleanupOverview }) {
               ? `, and gave ${size(status.freedBytes)} of disk back`
               : ""}
             .
+            {status.storeBytes
+              ? ` PCP's own store takes ${size(status.storeBytes)}.`
+              : ""}
           </span>
         ) : null}
       </div>

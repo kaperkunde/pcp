@@ -28,7 +28,7 @@ export function PermissionLines({ lines }: { lines: string[] }) {
             className={cn(
               "px-4 py-3 break-words whitespace-pre-wrap",
               match
-                ? "grid gap-1 sm:grid-cols-[150px_minmax(0,1fr)] sm:items-baseline sm:gap-4"
+                ? "grid grid-cols-[minmax(0,1fr)] gap-1 sm:grid-cols-[150px_minmax(0,1fr)] sm:items-baseline sm:gap-4"
                 : asker && "text-[13px] text-muted-foreground",
             )}
           >

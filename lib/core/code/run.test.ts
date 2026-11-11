@@ -1,4 +1,5 @@
 import { spawn, spawnSync } from "node:child_process"
+import { editTools } from "../test-servers"
 import { randomBytes, randomUUID } from "node:crypto"
 import { mkdtempSync, readFileSync, rmSync } from "node:fs"
 import { connect as connectSocket, type Socket } from "node:net"
@@ -19,19 +20,34 @@ import {
   loadGatewayServers,
   type GatewayScope,
 } from "../gateway"
-import type { PermissionExecutor } from "../permissions"
+import { setDuplicateCallWindow } from "../calls/config"
+import { decidePermission, type PermissionExecutor } from "../permissions"
+import { withCallHandle, entryCall, listEveryTool } from "../test-handles"
 import { appendRequestLog } from "../request-log"
 import { createServer } from "../servers"
 import { scratchDatabase } from "../test-db"
 import { EMPTY_CONFIG, saveResourceConfig } from "../resources/state"
-import { keepBytes, keepResult, openResult } from "../tool-results"
+import {
+  keepBytes,
+  keepResult,
+  openResult,
+  resultName,
+  resultTool,
+} from "../tool-results"
 import { writeToolAccess } from "../tool-access"
 import { setupVault } from "../vault"
-import { MAX_CALLS_PER_RUN, MAX_MEDIA_PER_RUN } from "./limits"
+import {
+  MAX_CALLS_PER_RUN,
+  MAX_MEDIA_PER_RUN,
+  MAX_SLEEP_MS,
+  MAX_WAITS_PER_RUN,
+} from "./limits"
 import { checkRun, runCode, runProgram } from "./run"
 import { javaScriptExecutor } from "./quickjs"
 import { MAY_HAVE_TAKEN_EFFECT } from "./runs"
 import { sandboxLanguages, startSandbox, stopSandbox } from "./sandbox"
+import { serverSlugWhere } from "../server-meta"
+import { recordedTool } from "../calls/guard"
 
 // run_code as an assistant meets it, through the gateway's MCP interface,
 // with the upstream replaced by a stub that records what actually ran: the
@@ -51,6 +67,11 @@ const PDF = Buffer.concat([
 
 let cleanup: () => Promise<void>
 let ctx: VaultContext
+
+/** A kept result's row, the tool it came from opened (#96). */
+function keptRow<T extends { id: string; toolName: string }>(row: T): T {
+  return { ...row, toolName: resultTool(ctx, row) }
+}
 let scope: GatewayScope
 let client: Client
 let ran: Array<{ tool: string; args: Record<string, unknown> }>
@@ -89,6 +110,15 @@ const executor: PermissionExecutor = {
         return { content: [{ type: "text", text: "sent slowly" }] }
       case "flaky":
         throw new PcpError("upstream", "Postcards could not be reached.")
+      case "busy_tab":
+        // A family's tool error with a code of its own (tools/outcome.ts).
+        return {
+          content: [{ type: "text", text: "The tab is busy." }],
+          isError: true,
+          _meta: {
+            "gg.pcp/error": { code: "browser_busy", retryAfterMs: 1200 },
+          },
+        }
       default:
         return { content: [{ type: "text", text: `ran ${tool}` }] }
     }
@@ -115,14 +145,15 @@ async function connect(
     "archive",
     "slow_send",
     "flaky",
+    "busy_tab",
   ]) {
     await db().mcpTool.create({
       data: {
         id: randomUUID(),
         serverId,
-        name,
-        description: `${name} does one thing.`,
-        inputSchema: JSON.stringify({ type: "object" }),
+        plainName: name,
+        plainDescription: `${name} does one thing.`,
+        plainInputSchema: JSON.stringify({ type: "object" }),
         // list_cards only reads, as its server says; the others may not.
         ...(name === "list_cards"
           ? { annotations: JSON.stringify({ readOnlyHint: true }) }
@@ -144,6 +175,7 @@ async function connect(
     "archive",
     "slow_send",
     "flaky",
+    "busy_tab",
   ]) {
     await writeToolAccess(tokenId, serverId, name, "allowed")
   }
@@ -175,9 +207,13 @@ afterEach(async () => {
   await cleanup()
 })
 
-async function run(code: string, extra: Record<string, unknown> = {}) {
+async function run(
+  code: string,
+  extra: Record<string, unknown> = {},
+  entry = "run_destructive",
+) {
   const result = await client.callTool({
-    name: "run_code",
+    name: entry,
     arguments: { code, ...extra },
   })
   const text = (result.content as Array<{ type: string; text?: string }>)
@@ -201,8 +237,8 @@ function logLines(): Array<Record<string, unknown>> {
 describe("the token right", () => {
   it("is off unless the owner turns it on, and only then is there a tool", async () => {
     await connect(false)
-    const { tools } = await client.listTools()
-    expect(tools.map((tool) => tool.name)).not.toContain("run_code")
+    const { tools } = await listEveryTool(client)
+    expect(tools.map((tool) => tool.name)).not.toContain("run_destructive")
     expect(scope.runCode).toBe(false)
 
     await updateApiToken(ctx, scope.tokenId, {
@@ -217,8 +253,10 @@ describe("the token right", () => {
   })
 
   it("is in the instructions of a token that has it, and no other", () => {
-    expect(buildInstructions([])).not.toContain("run_code")
-    expect(buildInstructions([], { runCode: true })).toContain("run_code")
+    expect(buildInstructions([])).not.toContain("run_destructive")
+    expect(buildInstructions([], { runCode: true })).toContain(
+      "run_destructive",
+    )
   })
 })
 
@@ -254,8 +292,8 @@ describe("a program's calls", () => {
         .filter((line) => line.upstreamTool)
         .map((line) => [line.tool, line.server, line.upstreamTool, line.ok]),
     ).toEqual([
-      ["run_code", "postcards", "list_cards", true],
-      ["run_code", "postcards", "broken", false],
+      ["run_destructive", "postcards", "list_cards", true],
+      ["run_destructive", "postcards", "broken", false],
     ])
     expect(JSON.stringify(lines)).not.toContain("catch")
   })
@@ -304,7 +342,7 @@ describe("a program's calls", () => {
     expect(text).toContain(MAY_HAVE_TAKEN_EFFECT)
     expect(text).toContain("It printed:\nsending")
     expect(text).toContain("Not done yet")
-    expect(text.trimEnd()).toMatch(/\/permissions\/[\w-]+$/)
+    expect(text.trimEnd()).toMatch(/\]\(\S+\/permissions\/[\w-]+\)$/)
     expect(ran).toEqual([{ tool: "archive", args: { all: true } }])
 
     const request = await db().permissionRequest.findFirstOrThrow()
@@ -319,9 +357,15 @@ describe("a program's calls", () => {
     const lines = logLines()
     expect(
       lines.find((line) => line.upstreamTool === "send_postcard"),
-    ).toMatchObject({ tool: "run_code", asked: true, request: request.id })
+    ).toMatchObject({
+      tool: "run_destructive",
+      asked: true,
+      request: request.id,
+    })
     expect(
-      lines.find((line) => line.tool === "run_code" && !line.upstreamTool),
+      lines.find(
+        (line) => line.tool === "run_destructive" && !line.upstreamTool,
+      ),
     ).toMatchObject({ asked: true, request: request.id })
     expect(
       lines.find((line) => line.upstreamTool === "archive"),
@@ -383,9 +427,11 @@ describe("a program's calls", () => {
     )
     expect(value.refused).not.toContain(theirs.id)
 
-    const row = await db().toolResult.findUniqueOrThrow({
-      where: { id: value.handle.$result },
-    })
+    const row = keptRow(
+      await db().toolResult.findUniqueOrThrow({
+        where: { id: value.handle.$result },
+      }),
+    )
     expect(row).toMatchObject({ tokenId: scope.tokenId, toolName: "run_code" })
   })
 
@@ -424,9 +470,11 @@ describe("a program's calls", () => {
     })
     expect(value.notBase64).toContain("is not")
 
-    const row = await db().toolResult.findUniqueOrThrow({
-      where: { id: value.copy.$result },
-    })
+    const row = keptRow(
+      await db().toolResult.findUniqueOrThrow({
+        where: { id: value.copy.$result },
+      }),
+    )
     expect(row).toMatchObject({
       tokenId: scope.tokenId,
       kind: "bytes",
@@ -462,6 +510,43 @@ describe("a program's calls", () => {
     )
   })
 
+  it("reads a part of a kept file or text with offset and length", async () => {
+    const bytes = Buffer.from([0, 1, 2, 3, 4, 5, 6, 7, 8, 9])
+    const file = await keepBytes(ctx, {
+      tokenId: scope.tokenId,
+      serverId: null,
+      toolName: "get_file",
+      bytes,
+      mediaType: "application/octet-stream",
+      name: "data.bin",
+    })
+    const text = await keepResult(ctx, {
+      tokenId: scope.tokenId,
+      serverId: null,
+      toolName: "read_result",
+      text: "hello, world",
+      mediaType: "text/plain",
+    })
+
+    const read = await run(`
+      const middle = await pcp.read("${file.id}", { as: "bytes", offset: 3, length: 4 })
+      const tail = await pcp.read("${file.id}", { as: "base64", offset: 8 })
+      const past = await pcp.read("${file.id}", { as: "bytes", offset: 20, length: 5 })
+      const word = await pcp.read("${text.id}", { offset: 7, length: 5 })
+      let refused
+      try { await pcp.read("${file.id}", { as: "bytes", offset: -1 }) } catch (error) { refused = error.message }
+      return [Array.from(middle), tail, past.length, word, refused]
+    `)
+
+    expect(returned(read.text)).toEqual([
+      [3, 4, 5, 6],
+      Buffer.from([8, 9]).toString("base64"),
+      0,
+      "world",
+      "pcp.read's offset is a whole number, 0 or more.",
+    ])
+  })
+
   it("lists the token's servers and the tools it can see, as list_tools does", async () => {
     const { text } = await run(`
       const servers = await pcp.tools()
@@ -477,12 +562,13 @@ describe("a program's calls", () => {
           server: "postcards",
           name: "Postcards",
           description: "",
-          tools: 7,
+          tools: 8,
         },
       ],
       tools: [
         ["archive", "allowed"],
         ["broken", "allowed"],
+        ["busy_tab", "allowed"],
         ["flaky", "allowed"],
         ["list_cards", "allowed"],
         ["scan_card", "allowed"],
@@ -494,16 +580,143 @@ describe("a program's calls", () => {
     expect(ran).toEqual([])
   })
 
+  it("describes a tool it can see as describe does, without a call_handle, and nothing else", async () => {
+    const schema = {
+      type: "object",
+      properties: { to: { type: "string", description: "Who it goes to." } },
+      required: ["to"],
+      additionalProperties: false,
+    }
+    await editTools(
+      ctx,
+      { name: "send_postcard" },
+      {
+        inputSchema: JSON.stringify(schema),
+        output: "{ sent: boolean }",
+      },
+    )
+
+    const { text } = await run(`
+      const tool = await pcp.describe("postcards", "send_postcard")
+      const refused = []
+      for (const [server, name] of [["postcards", "burn_cards"], ["postcards", "nope"], ["nowhere", "list_cards"], ["postcards"]]) {
+        try { await pcp.describe(server, name) } catch (error) { refused.push(error.message) }
+      }
+      return { tool, refused }
+    `)
+    const { tool, refused } = returned(text) as {
+      tool: Record<string, unknown>
+      refused: string[]
+    }
+
+    expect(tool).toMatchObject({
+      server: "postcards",
+      serverName: "Postcards",
+      tool: "send_postcard",
+      description: "send_postcard does one thing.",
+      access: "ask",
+      inputSchema: schema,
+      returns: "{ sent: boolean }",
+    })
+    expect(tool).not.toHaveProperty("call_handle")
+    // A blocked tool is no more there than one that does not exist.
+    expect(refused).toEqual([
+      "postcards has no tool called burn_cards. Use search to find the right name.",
+      "postcards has no tool called nope. Use search to find the right name.",
+      "No server called nowhere. Servers: postcards.",
+      expect.stringContaining(
+        "pcp.describe takes a server's name and a tool's",
+      ),
+    ])
+    expect(ran).toEqual([])
+    expect(await db().permissionRequest.count()).toBe(0)
+  })
+
+  it("refuses pcp.tools and pcp.describe where no lister is given, as in a wrapper's program", async () => {
+    const run = await runProgram(
+      scope,
+      {
+        code: `
+          const said = []
+          for (const ask of [() => pcp.tools(), () => pcp.describe("postcards", "list_cards")]) {
+            try { await ask() } catch (error) { said.push(error.message) }
+          }
+          return said
+        `,
+        label: "wrapper",
+      },
+      { call: async () => ({ ok: true, value: null }) },
+    )
+
+    expect(run).toMatchObject({ state: "finished" })
+    expect(
+      JSON.parse((run as { result: { returned: string } }).result.returned),
+    ).toEqual([
+      "PCP cannot list tools here.",
+      "PCP cannot describe tools here.",
+    ])
+  })
+
+  it("checks a call's arguments against its schema before anything runs or the owner is asked", async () => {
+    await editTools(
+      ctx,
+      { name: { in: ["send_postcard", "archive"] } },
+      {
+        inputSchema: JSON.stringify({
+          type: "object",
+          properties: { to: { type: "string", maxLength: 5 } },
+          required: ["to"],
+          additionalProperties: false,
+        }),
+      },
+    )
+
+    const { text } = await run(`
+      const said = []
+      for (const tool of ["send_postcard", "archive"]) {
+        try {
+          await pcp.call("postcards", tool, { to: "Grace Hopper", all: true })
+        } catch (error) {
+          said.push(error.message)
+        }
+      }
+      return said
+    `)
+    const [ask, allowed] = returned(text) as string[]
+
+    // send_postcard asks the owner and archive runs at once: neither did.
+    for (const said of [ask, allowed]) {
+      expect(said).toContain("do not fit postcards/")
+      expect(said).toContain(
+        '"to" is 12 characters long, but the inputSchema says at most 5.',
+      )
+      expect(said).toContain('"all" is not an argument of this tool')
+    }
+    expect(ask).toContain(
+      'pcp.describe("postcards", "send_postcard") gives its inputSchema',
+    )
+    expect(await db().permissionRequest.count()).toBe(0)
+    expect(ran).toEqual([])
+  })
+
   it("says in its description what the program has, and that no sandbox runs", async () => {
-    const { tools } = await client.listTools()
-    const description =
-      tools.find((tool) => tool.name === "run_code")?.description ?? ""
+    const { tools } = await listEveryTool(client)
+    const tool = tools.find((entry) => entry.name === "run_destructive")
+    const code = (
+      tool?.inputSchema.properties as Record<string, { description?: string }>
+    ).code
+    // What a program has is in the code argument's description; the tool's
+    // own stays short.
+    const description = `${tool?.description ?? ""}\n${code?.description ?? ""}`
+
+    expect((tool?.description ?? "").length).toBeLessThan(3_000)
 
     for (const part of [
       "crypto.getRandomValues",
       'as: "base64"',
       'encoding: "base64"',
       "pcp.tools()",
+      "pcp.describe(server, tool)",
       'keep: ["password"]',
       "not running on this PCP",
       "pcp.image.compress(handle",
@@ -522,10 +735,9 @@ describe("a program's calls", () => {
 
     const id = text.match(/kept the value as result ([\w-]+)/)?.[1]
     expect(id).toBeDefined()
-    const read = await client.callTool({
-      name: "read_result",
-      arguments: { id, length: 20 },
-    })
+    const read = await client.callTool(
+      entryCall("read_result", { id, length: 20 }),
+    )
     expect(JSON.stringify(read.content)).toContain('[{\\"id\\":0')
   })
 
@@ -577,9 +789,9 @@ describe("a server the owner has to connect", () => {
       data: {
         id: randomUUID(),
         serverId,
-        name: "list_events",
-        description: "Lists events.",
-        inputSchema: JSON.stringify({ type: "object" }),
+        plainName: "list_events",
+        plainDescription: "Lists events.",
+        plainInputSchema: JSON.stringify({ type: "object" }),
       },
     })
     await connect()
@@ -672,9 +884,11 @@ describe("images and videos", () => {
     expect(value.bytes).toBe(value.handle.size)
     expect(value.bytes).toBeLessThan(original.length / 4)
 
-    const row = await db().toolResult.findUniqueOrThrow({
-      where: { id: value.handle.$result },
-    })
+    const row = keptRow(
+      await db().toolResult.findUniqueOrThrow({
+        where: { id: value.handle.$result },
+      }),
+    )
     expect(row).toMatchObject({
       tokenId: scope.tokenId,
       kind: "bytes",
@@ -693,7 +907,7 @@ describe("images and videos", () => {
     // The run is in the request log, as every run is; the image is not, as
     // a kept result is not.
     expect(logLines()).toEqual([
-      expect.objectContaining({ tool: "run_code", ok: true }),
+      expect.objectContaining({ tool: "run_destructive", ok: true }),
     ])
     expect(logLines()[0]).not.toHaveProperty("server")
   })
@@ -995,9 +1209,11 @@ describe("images and videos", () => {
         expect(value.frames.map((frame) => frame.t)).toEqual([1, 3])
 
         for (const frame of value.frames) {
-          const row = await db().toolResult.findUniqueOrThrow({
-            where: { id: frame.handle.$result },
-          })
+          const row = keptRow(
+            await db().toolResult.findUniqueOrThrow({
+              where: { id: frame.handle.$result },
+            }),
+          )
           expect(row).toMatchObject({
             tokenId: scope.tokenId,
             mediaType: "image/jpeg",
@@ -1070,8 +1286,9 @@ describe("the sandbox's languages", () => {
   it("offers bash and Python only while a runner is connected, and runs them there", async () => {
     await connect()
     const schema = async () =>
-      (await client.listTools()).tools.find((tool) => tool.name === "run_code")!
-        .inputSchema.properties as Record<string, { enum?: string[] }>
+      (await listEveryTool(client)).tools.find(
+        (tool) => tool.name === "run_destructive",
+      )!.inputSchema.properties as Record<string, { enum?: string[] }>
 
     expect(Object.keys(await schema())).toEqual(["code", "rerun"])
 
@@ -1097,7 +1314,7 @@ describe("the sandbox's languages", () => {
       ])
 
       const result = await client.callTool({
-        name: "run_code",
+        name: "run_destructive",
         arguments: { code: "echo hi", language: "bash" },
       })
       const text = JSON.stringify(result.content)
@@ -1287,6 +1504,174 @@ describe("how a run says it ended", () => {
 
     expect(run).toMatchObject({ state: "failed", reason: "gone" })
   })
+
+  it("takes pcp.call's pace only in a wrapper's program, and hands it to the call as given", async () => {
+    await connect()
+    const paces: unknown[] = []
+    const call: Parameters<typeof runProgram>[2]["call"] = async ({ pace }) => {
+      paces.push(pace)
+      return { ok: true, value: null }
+    }
+    const code = `
+      const out = []
+      for (const pace of [{ min_ms: 50, max_ms: 90 }, { min: 1 }, "fast"]) {
+        try { await pcp.call("browser", "click", {}, { pace }); out.push("ok") }
+        catch (error) { out.push(error.message) }
+      }
+      return out`
+
+    const inWrapper = await runProgram(
+      scope,
+      { code, label: "wrapper" },
+      { call, takesPace: true },
+    )
+    expect(inWrapper).toMatchObject({ state: "finished" })
+    expect(paces).toEqual([{ min_ms: 50, max_ms: 90 }])
+    const returned = JSON.parse(
+      (inWrapper as { result: { returned: string } }).result.returned,
+    ) as string[]
+    expect(returned[0]).toBe("ok")
+    expect(returned[1]).toContain("pace is { min_ms, max_ms }")
+    expect(returned[2]).toContain("pace is { min_ms, max_ms }")
+
+    paces.length = 0
+    const inRunCode = await runProgram(scope, { code }, { call })
+    expect(paces).toEqual([])
+    expect(
+      JSON.parse(
+        (inRunCode as { result: { returned: string } }).result.returned,
+      )[0],
+    ).toContain("pcp.call's pace is for a wrapper's program")
+  })
+
+  it("hands each call the run's deadline, its caller's run's when that ends first", async () => {
+    await connect()
+    const deadlines: number[] = []
+    const call: Parameters<typeof runProgram>[2]["call"] = async ({ run }) => {
+      deadlines.push(run.deadline)
+      return { ok: true, value: null }
+    }
+    const code = `await pcp.call("a", "b"); return 1`
+
+    const before = Date.now()
+    await runProgram(scope, { code }, { call, timeoutMs: 60_000 })
+    const after = Date.now()
+    expect(deadlines[0]).toBeGreaterThanOrEqual(before + 60_000)
+    expect(deadlines[0]).toBeLessThanOrEqual(after + 60_000)
+
+    const outer = Date.now() + 10_000
+    await runProgram(
+      scope,
+      { code, label: "wrapper" },
+      { call, timeoutMs: 60_000, deadline: outer },
+    )
+    expect(deadlines[1]).toBe(outer)
+  })
+
+  it("throws a paced call's error with its code and when to try again", async () => {
+    await connect()
+    const run = await runProgram(
+      scope,
+      {
+        code: `try { await pcp.call("a", "b") } catch (error) { return [error.code, error.retryAfterMs, error.message] }`,
+      },
+      {
+        call: async () => ({
+          ok: false,
+          refused: true,
+          error: "Paced: A takes its next action in 47 s.",
+          code: "paced",
+          retryAfterMs: 47_000,
+        }),
+      },
+    )
+
+    expect("busy" in run).toBe(false)
+    expect(run).toMatchObject({
+      result: {
+        kind: "done",
+        returned: JSON.stringify([
+          "paced",
+          47_000,
+          "Paced: A takes its next action in 47 s.",
+        ]),
+      },
+    })
+  })
+
+  it("throws a tool error's own code, and when to try again, as the tool said", async () => {
+    await connect()
+    const { isError, text } = await run(`
+      try {
+        await pcp.call("postcards", "busy_tab")
+      } catch (error) {
+        return [error.code, error.retryAfterMs, error.message]
+      }
+    `)
+
+    expect(isError).toBe(false)
+    expect(returned(text)).toEqual(["browser_busy", 1200, "The tab is busy."])
+
+    const timedOut = await runProgram(
+      scope,
+      {
+        code: `try { await pcp.call("browser", "navigate") } catch (error) { return [error.code, "retryAfterMs" in error] }`,
+      },
+      {
+        call: async () => ({
+          ok: false,
+          error: "navigate took longer than 10 s.",
+          code: "timeout",
+        }),
+      },
+    )
+    expect(timedOut).toMatchObject({
+      result: { kind: "done", returned: JSON.stringify(["timeout", false]) },
+    })
+  })
+
+  it("prints a call's note about an old argument name once, beside the value", async () => {
+    await connect()
+    const run = await runProgram(
+      scope,
+      {
+        code: `await pcp.call("mail", "search_emails", { hasAttachment: true }); return (await pcp.call("mail", "search_emails", { hasAttachment: true })).total`,
+      },
+      {
+        call: async () => ({
+          ok: true,
+          value: { total: 2 },
+          notes: [
+            "hasAttachment was renamed to has_attachment; use has_attachment.",
+          ],
+        }),
+      },
+    )
+
+    expect(run).toMatchObject({
+      result: {
+        kind: "done",
+        returned: "2",
+        output:
+          "[PCP] mail/search_emails: hasAttachment was renamed to has_attachment; use has_attachment.\n",
+      },
+    })
+  })
+
+  it("throws a tool's own error with no code", async () => {
+    await connect()
+    const run = await runProgram(
+      scope,
+      {
+        code: `try { await pcp.call("a", "b") } catch (error) { return [error.code ?? null, error.retryAfterMs ?? null] }`,
+      },
+      { call: async () => ({ ok: false, error: "No." }) },
+    )
+
+    expect(run).toMatchObject({
+      result: { kind: "done", returned: JSON.stringify([null, null]) },
+    })
+  })
 })
 
 describe("a run that outlives its call", () => {
@@ -1311,10 +1696,7 @@ describe("a run that outlives its call", () => {
       `Call check_run with this id (${id}) for how it ends; don't start it again.`,
     )
 
-    const checked = await client.callTool({
-      name: "check_run",
-      arguments: { id },
-    })
+    const checked = await client.callTool(entryCall("check_run", { id }))
     const text = JSON.stringify(checked.content)
     expect(checked.isError).not.toBe(true)
     expect(text).toContain(`Run ${id}: finished`)
@@ -1324,10 +1706,16 @@ describe("a run that outlives its call", () => {
     expect(ran.map((call) => call.tool)).toEqual(["archive", "slow_send"])
 
     // Kept as a result of the token's own, encrypted.
-    const row = await db().toolResult.findFirstOrThrow({
-      where: { name: `${id}.txt` },
+    const row = keptRow(
+      (await db().toolResult.findMany()).find(
+        (kept) => resultName(ctx, kept) === `${id}.txt`,
+      )!,
+    )
+    expect(row).toMatchObject({
+      tokenId: scope.tokenId,
+      toolName: "run_code",
+      plainName: null,
     })
-    expect(row).toMatchObject({ tokenId: scope.tokenId, toolName: "run_code" })
     expect(Buffer.from(row.ciphertext).toString("utf8")).not.toContain(
       "It returned",
     )
@@ -1364,7 +1752,7 @@ describe("a run that outlives its call", () => {
 
     await client.callTool(
       {
-        name: "run_code",
+        name: "run_destructive",
         arguments: { code: `await pcp.call("postcards", "slow_send")` },
       },
       { onprogress: (progress) => seen.push(progress) },
@@ -1406,9 +1794,78 @@ describe("a run that outlives its call", () => {
   })
 })
 
+describe("a program's tier", () => {
+  it("lets run_read call Read tools only, and refuses the rest as an error the program catches, before asking", async () => {
+    await connect()
+    const result = await run(
+      `await pcp.call("postcards", "list_cards")
+      let refused = null
+      try {
+        await pcp.call("postcards", "archive")
+      } catch (error) {
+        refused = error.message
+      }
+      return refused`,
+      {},
+      "run_read",
+    )
+
+    expect(result.isError).toBe(false)
+    expect(result.text).toContain("postcards/archive is a Destructive tool")
+    expect(result.text).toContain("run the program with run_destructive")
+    expect(ran.map((call) => call.tool)).toEqual(["list_cards"])
+    expect(await db().permissionRequest.count()).toBe(0)
+    // Its calls are logged under the entry it came through.
+    expect(logLines().map((line) => line.tool)).toContain("run_read")
+  })
+
+  it("is a run of its own per tier: the same program through another entry runs again", async () => {
+    await connect()
+    const program = `return await pcp.call("postcards", "list_cards")`
+
+    expect((await run(program, {}, "run_read")).text).toContain("finished")
+    const again = await run(program, {}, "run_destructive")
+    expect(again.text).not.toContain("PCP did not start it again")
+    expect(ran).toHaveLength(2)
+  })
+
+  it("advertises each entry's tier in its annotations", async () => {
+    await connect()
+    const { tools } = await listEveryTool(client)
+    const hints = (name: string) =>
+      tools.find((tool) => tool.name === name)?.annotations
+
+    expect(hints("run_read")).toMatchObject({
+      readOnlyHint: true,
+      destructiveHint: false,
+    })
+    expect(hints("run_write")).toMatchObject({
+      readOnlyHint: false,
+      destructiveHint: false,
+    })
+    expect(hints("run_destructive")).toMatchObject({
+      readOnlyHint: false,
+      destructiveHint: true,
+    })
+    expect(tools.map((tool) => tool.name)).not.toContain("run_code")
+  })
+})
+
 describe("the same program again", () => {
   it("is answered with the run that just ended, unless rerun is true", async () => {
     await connect()
+    // Its call is one the owner keeps out of the duplicate guard, which
+    // would otherwise hold back each run's archive after the first.
+    await setDuplicateCallWindow(
+      ctx,
+      (
+        await db().mcpServer.findFirstOrThrow({
+          where: serverSlugWhere(ctx, "postcards"),
+        })
+      ).id,
+      "archive",
+      "exempt",
+    )
     const program = `return await pcp.call("postcards", "archive")`
 
     const first = await run(program)
@@ -1432,12 +1889,9 @@ describe("the same program again", () => {
     expect(runIdOf(rerun.text)).not.toBe(id)
     expect(ran).toHaveLength(3)
 
-    const checked = await client.callTool({
-      name: "check_run",
-      arguments: { id },
-    })
+    const checked = await client.callTool(entryCall("check_run", { id }))
     expect(JSON.stringify(checked.content)).toContain(
-      "run_code's own answer carried its outcome",
+      "The run's own answer carried its outcome",
     )
   })
 
@@ -1457,11 +1911,88 @@ describe("the same program again", () => {
 
     expect(
       JSON.stringify(
-        (await client.callTool({ name: "check_run", arguments: { id } }))
-          .content,
+        (await client.callTool(entryCall("check_run", { id }))).content,
       ),
     ).toContain('It returned:\\n\\"sent\\"')
     expect(ran.map((call) => call.tool)).toEqual(["slow_send"])
+  })
+
+  it("gets the call the owner allowed once, run again, from that run, and asks nothing new", async () => {
+    await connect()
+    const program = `return await pcp.call("postcards", "send_postcard", { to: "Grace" })`
+
+    const first = await run(program)
+    expect(first.text).toContain("stopped at postcards/send_postcard")
+    expect(first.text).toContain(
+      "If the owner allows it once, that one call runs right then: don't run the program again for it — on the owner's next message, whatever it says, call check_permission with the id below for its answer (an identical call within 15 minutes also gets that answer instead of a new ask). For the program to make the call itself, they choose Always allow or Allow for; once they have, run the program again.",
+    )
+    const request = await db().permissionRequest.findFirstOrThrow()
+    await decidePermission(
+      ctx,
+      request.id,
+      "allow_once",
+      { publicUrl: PUBLIC_URL },
+      executor,
+    )
+    expect(ran).toEqual([{ tool: "send_postcard", args: { to: "Grace" } }])
+
+    const again = await run(program)
+    expect(again.text).toContain("finished")
+    expect(returned(again.text)).toBe("ran send_postcard")
+    expect(ran).toHaveLength(1)
+    expect(await db().permissionRequest.count()).toBe(1)
+
+    // Once: the next run is not asked about it again unaware, but held
+    // back by the duplicate guard with how the allowed run went (#115).
+    const third = await run(program, { rerun: true })
+    expect(third.text).toContain("Not run again: postcards/send_postcard")
+    expect(third.text).toContain("The owner allowed it and it ran")
+    expect(await db().permissionRequest.count()).toBe(1)
+    expect(ran).toHaveLength(1)
+  })
+
+  it("asks about a call with a handle as call_tool asks about it, the handle as PCP wrote it or bare", async () => {
+    await connect()
+    const note = await keepResult(ctx, {
+      tokenId: scope.tokenId,
+      serverId: null,
+      toolName: "list_cards",
+      text: "dear Grace",
+      mediaType: "text/plain",
+    })
+    const written = {
+      $result: note.id,
+      type: "text/plain",
+      length: 10,
+      readableUntil: note.expiresAt.toISOString(),
+    }
+
+    expect(
+      (
+        await run(
+          `await pcp.call("postcards", "send_postcard", { text: ${JSON.stringify(written)} })`,
+        )
+      ).text,
+    ).toContain("stopped at")
+    const request = await db().permissionRequest.findFirstOrThrow()
+
+    const described = await client.callTool(
+      entryCall("describe", { server: "postcards", tool: "send_postcard" }),
+    )
+    const handle = /"call_handle": "(ch_[a-z0-9_]+)"/.exec(
+      (described.content as Array<{ text?: string }>)
+        .map((part) => part.text ?? "")
+        .join(""),
+    )![1]!
+
+    for (const text of [written, { $result: note.id }]) {
+      const asked = await client.callTool({
+        name: "execute_destructive",
+        arguments: { call_handle: handle, arguments: { text } },
+      })
+      expect(JSON.stringify(asked.content)).toContain(request.id)
+    }
+    expect(await db().permissionRequest.count()).toBe(1)
   })
 
   it("runs again after it stopped for the owner, as that answer says to", async () => {
@@ -1470,5 +2001,338 @@ describe("the same program again", () => {
 
     expect((await run(program)).text).toContain("stopped at")
     expect((await run(program)).text).toContain("stopped at")
+  })
+})
+
+describe("the same call again (#115)", () => {
+  beforeEach(async () => {
+    await connect()
+  })
+
+  async function callTool(
+    tool: string,
+    args: Record<string, unknown> = {},
+    extra: Record<string, unknown> = {},
+  ) {
+    const result = await client.callTool({
+      name: "execute_destructive",
+      arguments: {
+        ...(await withCallHandle(client, {
+          server: "postcards",
+          tool,
+          arguments: args,
+        })),
+        ...extra,
+      },
+    })
+    const text = (result.content as Array<{ type: string; text?: string }>)
+      .map((part) => part.text ?? "")
+      .join("")
+
+    return {
+      isError: result.isError === true,
+      text,
+      code: (result._meta?.["gg.pcp/error"] as { code?: string } | undefined)
+        ?.code,
+    }
+  }
+
+  const postcards = async () =>
+    (
+      await db().mcpServer.findFirstOrThrow({
+        where: serverSlugWhere(ctx, "postcards"),
+      })
+    ).id
+
+  it("answers a Write call made again with how the first went, and runs it once", async () => {
+    const first = await callTool("archive", { id: 7 })
+    expect(first.isError).toBe(false)
+    expect(ran).toHaveLength(1)
+
+    const again = await callTool("archive", { id: 7 })
+    expect(again.isError).toBe(true)
+    expect(again.code).toBe("duplicate_call")
+    expect(again.text).toContain(
+      "Not run again: postcards/archive was called with these same arguments",
+    )
+    expect(again.text).toContain("It succeeded")
+    expect(again.text).toContain("rerun: true and a reason")
+    expect(ran).toHaveLength(1)
+
+    // A short answer comes back with it, and no result is kept for it.
+    expect(again.text).toContain("It answered:\nran archive")
+    expect(await db().toolResult.count()).toBe(0)
+
+    // Only a keyed hash of the arguments is kept.
+    const [row] = await db().callRecord.findMany()
+    // The tool, as a keyed hash too (#96).
+    expect(row).toMatchObject({
+      toolName: recordedTool(ctx.dek, row!.serverId, "archive"),
+      status: "succeeded",
+    })
+    expect(row!.argsHash).toMatch(/^[0-9a-f]{64}$/)
+  })
+
+  it("makes it again with rerun and a reason, and logs only that it was a rerun", async () => {
+    await callTool("archive", { id: 7 })
+
+    const refused = await callTool("archive", { id: 7 }, { rerun: true })
+    expect(refused.isError).toBe(true)
+    expect(refused.text).toContain("reason")
+
+    const again = await callTool(
+      "archive",
+      { id: 7 },
+      { rerun: true, reason: "The first archive went to the wrong box." },
+    )
+    expect(again.isError).toBe(false)
+    expect(ran).toHaveLength(2)
+
+    const line = logLines().at(-1)!
+    expect(line).toMatchObject({ upstreamTool: "archive", rerun: true })
+    expect(JSON.stringify(line)).not.toContain("wrong box")
+  })
+
+  it("runs the same tool with other arguments, with no note once the first one answered", async () => {
+    await callTool("archive", { id: 7 })
+
+    const other = await callTool("archive", { id: 8 })
+    expect(other.isError).toBe(false)
+    expect(other.text).not.toContain("with other arguments")
+    expect(ran).toHaveLength(2)
+  })
+
+  it("leaves Read tools and the tools the owner exempted alone", async () => {
+    await callTool("list_cards")
+    expect((await callTool("list_cards")).isError).toBe(false)
+
+    await setDuplicateCallWindow(ctx, await postcards(), "archive", "exempt")
+    await callTool("archive", { id: 7 })
+    expect((await callTool("archive", { id: 7 })).isError).toBe(false)
+    expect(ran).toHaveLength(4)
+    expect(await db().callRecord.count()).toBe(0)
+  })
+
+  it("says whether a call that failed may have happened", async () => {
+    await callTool("broken")
+    const broken = await callTool("broken")
+    expect(broken.code).toBe("duplicate_call")
+    expect(broken.text).toContain(
+      "the tool answered with an error, so most likely nothing happened",
+    )
+
+    await expect(callTool("flaky")).resolves.toMatchObject({ isError: true })
+    const flaky = await callTool("flaky")
+    expect(flaky.code).toBe("duplicate_call")
+    expect(flaky.text).toContain("It failed on its way")
+    expect(flaky.text).toContain("may have gone through")
+  })
+
+  it("answers with the owner's request while it waits, once the tool no longer asks", async () => {
+    const asked = await callTool("send_postcard", { to: "Ada" })
+    expect(asked.text).toContain("Not done yet")
+    const request = await db().permissionRequest.findFirstOrThrow()
+
+    // Asked again, the request it already has (the permission flow's own).
+    expect((await callTool("send_postcard", { to: "Ada" })).text).toContain(
+      "Not done yet",
+    )
+    expect(await db().permissionRequest.count()).toBe(1)
+
+    await writeToolAccess(
+      scope.tokenId,
+      await postcards(),
+      "send_postcard",
+      "allowed",
+    )
+    // A new connection reads the levels anew, as a new request would.
+    await client.close()
+    const [clientSide, serverSide] = InMemoryTransport.createLinkedPair()
+    await buildGatewayServer(scope, await loadGatewayServers(scope), {
+      executor,
+    }).connect(serverSide)
+    client = new Client({ name: "test", version: "1.0.0" })
+    await client.connect(clientSide)
+    const again = await callTool("send_postcard", { to: "Ada" })
+    expect(again.code).toBe("duplicate_call")
+    expect(again.text).toContain(
+      `waiting for their answer: call check_permission with id "${request.id}"`,
+    )
+    expect(ran).toHaveLength(0)
+  })
+
+  it("holds back the third call once the owner's allow-once answer was used", async () => {
+    const asked = await callTool("send_postcard", { to: "Grace" })
+    expect(asked.text).toContain("Not done yet")
+    const request = await db().permissionRequest.findFirstOrThrow()
+    await decidePermission(
+      ctx,
+      request.id,
+      "allow_once",
+      { publicUrl: PUBLIC_URL },
+      executor,
+    )
+    expect(ran).toHaveLength(1)
+
+    // The second is answered with that run, by the permission flow.
+    const second = await callTool("send_postcard", { to: "Grace" })
+    expect(second.text).toContain("it already ran")
+    expect(ran).toHaveLength(1)
+
+    // The third neither runs nor asks the owner again unaware.
+    const third = await callTool("send_postcard", { to: "Grace" })
+    expect(third.code).toBe("duplicate_call")
+    expect(third.text).toContain("The owner allowed it and it ran")
+    expect(await db().permissionRequest.count()).toBe(1)
+    expect(ran).toHaveLength(1)
+  })
+
+  it("holds back a program's pcp.call made again, as an error it may catch", async () => {
+    await callTool("archive", { id: 7 })
+
+    const { text } = await run(`
+      try {
+        await pcp.call("postcards", "archive", { id: 7 })
+      } catch (error) {
+        return error.code
+      }
+    `)
+    expect(returned(text)).toBe("duplicate_call")
+    expect(ran).toHaveLength(1)
+
+    const rerun = await run(
+      `return await pcp.call("postcards", "archive", { id: 7 }, { rerun: true, reason: "again" })`,
+    )
+    expect(returned(rerun.text)).toBe("ran archive")
+    expect(ran).toHaveLength(2)
+
+    const unreasoned = await run(
+      `return await pcp.call("postcards", "archive", { id: 7 }, { rerun: true })`,
+    )
+    expect(unreasoned.text).toContain("pcp.call's rerun needs a reason")
+  })
+})
+
+describe("waits", () => {
+  beforeEach(async () => {
+    await connect()
+  })
+
+  const quick: Parameters<typeof runProgram>[2]["call"] = async () => ({
+    ok: true,
+    value: "done",
+  })
+
+  async function program(
+    code: string,
+    options: Partial<Parameters<typeof runProgram>[2]> = {},
+  ) {
+    return runProgram(scope, { code }, { call: quick, ...options })
+  }
+
+  it("sleeps on PCP's clock, which counts against the run's wall clock", async () => {
+    const run = await program(
+      `const at = Date.now(); await pcp.sleep(150); return Date.now() - at`,
+    )
+
+    expect(run).toMatchObject({ state: "finished" })
+    if ("busy" in run) throw new Error("busy")
+    expect(
+      Number(run.result.kind === "done" && run.result.returned),
+    ).toBeGreaterThanOrEqual(140)
+    expect(run.took).toBeGreaterThanOrEqual(140)
+  })
+
+  it("refuses a sleep past its cap, or past what is left of the run, as an error the program catches", async () => {
+    const run = await program(
+      `const said = []
+       for (const ms of [${MAX_SLEEP_MS + 1}, 5000, -1]) {
+         try { await pcp.sleep(ms) } catch (error) { said.push(error.message) }
+       }
+       try { await pcp.sleep("1s") } catch (error) { said.push(error.name) }
+       return said`,
+      { timeoutMs: 2000 },
+    )
+
+    if ("busy" in run || run.result.kind !== "done") throw new Error("failed")
+    const said = JSON.parse(run.result.returned!) as string[]
+    expect(said[0]).toMatch(/waits 60 seconds at most at once/)
+    expect(said[1]).toMatch(/The run has \d+(\.\d+)? ?s(econds)? left/)
+    expect(said[2]).toMatch(/number of milliseconds/)
+    expect(said[3]).toBe("TypeError")
+  })
+
+  it("ends a sleep with the run when its request goes away", async () => {
+    const signal = AbortSignal.timeout(100)
+    const at = Date.now()
+    const run = await program(`await pcp.sleep(30000); return 1`, { signal })
+
+    expect(run).toMatchObject({ state: "failed", reason: "gone" })
+    expect(Date.now() - at).toBeLessThan(5000)
+  })
+
+  it("counts every wait against the run's waits", async () => {
+    const run = await program(
+      `let n = 0
+       try { for (;;) { await pcp.sleep(0); n++ } } catch (error) { return [n, error.message] }`,
+    )
+
+    if ("busy" in run || run.result.kind !== "done") throw new Error("failed")
+    const [count, message] = JSON.parse(run.result.returned!) as [
+      number,
+      string,
+    ]
+    expect(count).toBe(MAX_WAITS_PER_RUN)
+    expect(message).toMatch(/waits at most/)
+  })
+
+  it("answers withTimeout with the function's value when it is in time", async () => {
+    const at = Date.now()
+    const run = await program(
+      `return await pcp.withTimeout(20000, () => pcp.call("a", "b"))`,
+    )
+
+    expect(run).toMatchObject({
+      state: "finished",
+      result: { returned: JSON.stringify("done") },
+    })
+    // The timer was cancelled, not waited for.
+    expect(Date.now() - at).toBeLessThan(5000)
+  })
+
+  it("passes on the function's own error", async () => {
+    const run = await program(
+      `try { await pcp.withTimeout(5000, async () => { throw new RangeError("nope") }) } catch (error) { return [error.name, error.message] }`,
+    )
+
+    expect(run).toMatchObject({
+      result: { returned: JSON.stringify(["RangeError", "nope"]) },
+    })
+  })
+
+  it("rejects withTimeout past its time with a catchable timeout error, the call left to finish", async () => {
+    let finished = false
+    const slow: Parameters<typeof runProgram>[2]["call"] = async () => {
+      await new Promise((resolve) => setTimeout(resolve, 400))
+      finished = true
+      return { ok: true, value: "late" }
+    }
+    const run = await program(
+      `try {
+         await pcp.withTimeout(50, () => pcp.call("a", "b"))
+         return "no timeout"
+       } catch (error) {
+         return [error.name, error.code, error.message]
+       }`,
+      { call: slow },
+    )
+
+    if ("busy" in run || run.result.kind !== "done") throw new Error("failed")
+    const [name, code, message] = JSON.parse(run.result.returned!) as string[]
+    expect(name).toBe("TimeoutError")
+    expect(code).toBe("timeout")
+    expect(message).toMatch(/no result within 50 ms/)
+    expect(message).toMatch(/may have gone through/)
+    expect(finished).toBe(false)
   })
 })

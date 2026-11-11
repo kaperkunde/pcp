@@ -1,7 +1,7 @@
 import type { Metadata } from "next"
 
-import { PageColumn } from "@/components/page-column"
-import { PageHeader } from "@/components/page-header"
+import { PageColumn } from "@kaperkunde/ui/page"
+import { PageHeader } from "@kaperkunde/ui/page"
 import { EMPTY_SERVER, ServerForm } from "@/components/server-form"
 import { IconTile } from "@/components/ui/icon-tile"
 import { oauthRedirectUrl } from "@/lib/core/oauth-client"

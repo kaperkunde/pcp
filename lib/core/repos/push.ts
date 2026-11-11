@@ -31,6 +31,7 @@ const NOUN: Record<ItemKind, string> = {
   flow: "browser flow",
   endpoint: "API endpoint",
   server: "MCP server",
+  service: "service",
 }
 
 /** Who a change is from, as the commit says it. */

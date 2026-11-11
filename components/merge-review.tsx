@@ -2,12 +2,12 @@
 
 import { useActionState, useState } from "react"
 
-import { FormError } from "@/components/form-status"
-import { SubmitButton } from "@/components/submit-button"
-import { Button } from "@/components/ui/button"
-import { Input } from "@/components/ui/input"
-import { Field } from "@/components/ui/label"
-import { List, ListSection } from "@/components/ui/list"
+import { FormError } from "@kaperkunde/ui/form-status"
+import { SubmitButton } from "@kaperkunde/ui/submit-button"
+import { Button } from "@kaperkunde/ui/button"
+import { Input } from "@kaperkunde/ui/input"
+import { Field } from "@kaperkunde/ui/label"
+import { List, ListSection } from "@kaperkunde/ui/list"
 import {
   dismissMergeAction,
   mergeDefinitionsAction,

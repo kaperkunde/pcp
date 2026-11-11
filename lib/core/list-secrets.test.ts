@@ -2,6 +2,7 @@ import { Client, InMemoryTransport } from "@modelcontextprotocol/client"
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
 
 import { createApiToken, resolveApiToken } from "./api-tokens"
+import { bindOrigin } from "./browser-secrets"
 import type { VaultContext } from "./context"
 import { db } from "./db"
 import { buildGatewayServer, type GatewayScope } from "./gateway"
@@ -9,8 +10,10 @@ import { newId } from "./ids"
 import { MAX_LISTED_SECRETS, secretUses } from "./secret-uses"
 import { createSecret, writeManagedSecret } from "./secrets"
 import { createServer } from "./servers"
+import { serverCreateData } from "./server-meta"
 import { scratchDatabase } from "./test-db"
 import { setupVault } from "./vault"
+import { entryCall, listEveryTool } from "./test-handles"
 
 // list_secrets as an assistant meets it: only for a token that may manage
 // endpoints, with every secret's name and what uses it, never a value.
@@ -57,10 +60,7 @@ async function connect(manageEndpoints: boolean): Promise<Client> {
 }
 
 async function listSecrets(args: Record<string, unknown> = {}) {
-  const result = await client!.callTool({
-    name: "list_secrets",
-    arguments: args,
-  })
+  const result = await client!.callTool(entryCall("list_secrets", args))
   const text = (result.content as Array<{ type: string; text?: string }>)
     .map((part) => part.text ?? "")
     .join("")
@@ -88,7 +88,7 @@ async function wrapperBinding(secretId: string, serverId: string) {
   }
 
   await db().mcpServer.create({
-    data: {
+    data: serverCreateData(ctx, {
       id,
       vaultId: ctx.vaultId,
       kind: "wrapper",
@@ -96,19 +96,19 @@ async function wrapperBinding(secretId: string, serverId: string) {
       slug: "linear-lookup",
       url: "pcp:wrapper",
       wrapperSpec: {
-        create: { definition: JSON.stringify(definition), hash: "x" },
+        create: { plainDefinition: JSON.stringify(definition), hash: "x" },
       },
-    },
+    }),
   })
 }
 
 describe("list_secrets", () => {
   it("is offered only to a token that may manage endpoints, and says it only reads", async () => {
-    const without = await (await connect(false)).listTools()
+    const without = await listEveryTool(await connect(false))
     expect(without.tools.map((tool) => tool.name)).not.toContain("list_secrets")
     await client!.close()
 
-    const { tools } = await (await connect(true)).listTools()
+    const { tools } = await listEveryTool(await connect(true))
     const tool = tools.find((each) => each.name === "list_secrets")
     expect(tool?.annotations?.readOnlyHint).toBe(true)
 
@@ -199,6 +199,43 @@ describe("list_secrets", () => {
 
     expect(listed.secrets).toHaveLength(MAX_LISTED_SECRETS)
     expect(listed.more).toContain("3 more")
+  })
+})
+
+describe("list_secrets and a secret's sign-in", () => {
+  it("names its sites, login name, note and one-time codes, never a value", async () => {
+    const codes = await createSecret(ctx, {
+      name: "Shop code",
+      value: "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ",
+      kind: "totp",
+    })
+    const shop = await createSecret(ctx, {
+      name: "Shop password",
+      value: SPARE_VALUE,
+      loginName: "ada@example.com",
+      note: "The family account",
+      totpCompanionId: codes.id,
+    })
+    await bindOrigin(ctx, shop.id, "https://shop.example/login")
+    await bindOrigin(ctx, shop.id, "https://account.shop.example")
+
+    await connect(true)
+    const listed = await listSecrets({ query: "shop password" })
+
+    expect(listed.text).not.toContain(SPARE_VALUE)
+    expect(JSON.parse(listed.text).secrets).toEqual([
+      {
+        name: "Shop password",
+        description: "",
+        kind: "text",
+        reusable: true,
+        usedBy: [],
+        sites: ["https://account.shop.example", "https://shop.example"],
+        login_name: "ada@example.com",
+        note: "The family account",
+        totp: "Shop code",
+      },
+    ])
   })
 })
 

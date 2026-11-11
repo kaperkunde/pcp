@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import { PcpError } from "@/lib/core/errors"
-import { resetRateLimits } from "@/lib/core/rate-limit"
+import { resetRateLimits } from "@kaperkunde/security"
 import type { ResolvedSession } from "@/lib/core/sessions"
 
 vi.mock("server-only", () => ({}))

@@ -3,10 +3,13 @@ import { describe, expect, it } from "vitest"
 import type {
   EndpointDocument,
   ServerDocument,
+  ServiceDocument,
   SkillDocument,
   WrapperDocument,
 } from "./documents"
 import { reviewItem, type FlagKind } from "./review"
+import { parseServiceDefinition } from "../services/definition"
+import { DOCLING } from "./test-vault"
 
 // What the owner is shown before an item from a repository is applied: one
 // case for each thing that would reach further, and the text-only change
@@ -193,6 +196,27 @@ describe("reviewing an item", () => {
     ).toEqual(["call_levels"])
   })
 
+  it("flags a pace of its own, outside the owner's bounds in so many words, and never applies it by itself", () => {
+    const paced = {
+      ...WRAPPER,
+      pace: {
+        actions: { min_ms: 20, max_ms: 60 },
+        tools: [{ tool: "click", min_ms: 100, max_ms: 200 }],
+      },
+    } as WrapperDocument
+    // Against PCP's own bounds unless the owner's are given.
+    const review = reviewItem(WRAPPER, paced)
+
+    expect(kinds(review.flags)).toEqual(["pace"])
+    expect(review.flags[0]!.message).toBe(
+      "Its browser calls would go at a pace of their own: before actions in a page 0.02 to 0.06 s; before click 0.1 to 0.2 s. Outside what you let assistants set without asking: before actions in a page 0.02 to 0.06 s (assistants may set 0.05 to 5 s).",
+    )
+    expect(review.textOnly).toBe(false)
+    expect(review.same).toBe(false)
+    // The same pace again is no change.
+    expect(reviewItem(paced, paced).flags).toEqual([])
+  })
+
   it("flags a new or changed secret binding", () => {
     expect(
       kinds(
@@ -311,5 +335,92 @@ describe("reviewing an item", () => {
     expect(() =>
       reviewItem(WRAPPER, { ...WRAPPER, kind: "flow" }),
     ).not.toThrow()
+  })
+})
+
+describe("reviewing a service", () => {
+  const SERVICE: ServiceDocument = {
+    kind: "service",
+    name: "docling",
+    version: 1,
+    displayName: "Docling",
+    description: "Documents to Markdown.",
+    definition: parseServiceDefinition(DOCLING),
+  }
+
+  it("lists all of a new service: its image, ports, variables, health and what it registers", () => {
+    const review = reviewItem(null, SERVICE)
+    const messages = review.flags.map((flag) => flag.message)
+
+    expect(review.isNew).toBe(true)
+    expect(review.textOnly).toBe(false)
+    expect(review.files.map((file) => file.path)).toEqual([
+      "services/docling.yaml",
+    ])
+    expect(messages).toEqual(
+      expect.arrayContaining([
+        `It runs the image ${DOCLING.image}.`,
+        "An update pulls ghcr.io/docling-project/docling-serve-cpu:latest.",
+        "It listens on port 5001.",
+        "Its variables: DOCLING_SERVE_API_KEY (needed), DOCLING_SERVE_ENABLE_UI=false.",
+        "Its health check is GET /health on port 5001.",
+        "PCP adds an API endpoint from /openapi.json on port 5001, sending DOCLING_SERVE_API_KEY's secret in X-Api-Key.",
+      ]),
+    )
+  })
+
+  it("flags only what changes, and never calls a service's change text", () => {
+    expect(reviewItem(SERVICE, SERVICE)).toMatchObject({
+      same: true,
+      flags: [],
+    })
+
+    const image = `ghcr.io/docling-project/docling-serve-cpu@sha256:${"d".repeat(64)}`
+    const newer = reviewItem(SERVICE, {
+      ...SERVICE,
+      version: 2,
+      definition: { ...SERVICE.definition, image },
+    })
+    expect(kinds(newer.flags)).toEqual(["service_image"])
+    expect(newer.flags[0]!.message).toContain(`(was ${DOCLING.image})`)
+    expect(newer.textOnly).toBe(false)
+
+    const volumes = reviewItem(SERVICE, {
+      ...SERVICE,
+      definition: {
+        ...SERVICE.definition,
+        volumes: [{ name: "cache", path: "/opt/cache" }],
+      },
+    })
+    expect(volumes.flags.map((flag) => flag.message)).toEqual([
+      "It keeps data in named volumes: cache at /opt/cache.",
+    ])
+
+    const mcp = reviewItem(SERVICE, {
+      ...SERVICE,
+      definition: {
+        ...SERVICE.definition,
+        registers: {
+          kind: "mcp",
+          port: 5001,
+          path: "/mcp",
+          auth: {
+            env: "DOCLING_SERVE_API_KEY",
+            header: "Authorization",
+            template: "Bearer {{secret}}",
+          },
+        },
+      },
+    })
+    expect(mcp.flags.map((flag) => flag.message)).toEqual([
+      "PCP adds an MCP server at /mcp on port 5001, sending DOCLING_SERVE_API_KEY's secret in Authorization.",
+    ])
+
+    const described = reviewItem(SERVICE, {
+      ...SERVICE,
+      description: "Other words.",
+    })
+    expect(described.flags).toEqual([])
+    expect(described.textOnly).toBe(false)
   })
 })

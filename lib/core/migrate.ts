@@ -55,20 +55,31 @@ export function listMigrations(dir = migrationsDir()): string[] {
     .sort()
 }
 
+/**
+ * The connection migrations run on. WAL lets the web UI read while the
+ * gateway writes; a busy timeout covers the rare write/write overlap instead
+ * of failing it; secure_delete zeroes what a migration removes, as db()'s
+ * connections do (lib/core/db.ts).
+ */
+export function openDatabase(file: string): Database.Database {
+  mkdirSync(path.dirname(file), { recursive: true })
+
+  const sqlite = new Database(file)
+  sqlite.pragma("journal_mode = WAL")
+  sqlite.pragma("busy_timeout = 5000")
+  sqlite.pragma("foreign_keys = ON")
+  sqlite.pragma("secure_delete = ON")
+
+  return sqlite
+}
+
 export function applyMigrations({
   file = databaseFile(),
   dir = migrationsDir(),
 }: { file?: string; dir?: string } = {}): MigrationResult {
-  mkdirSync(path.dirname(file), { recursive: true })
-
-  const sqlite = new Database(file)
+  const sqlite = openDatabase(file)
 
   try {
-    // WAL lets the web UI read while the gateway writes; a busy timeout
-    // covers the rare write/write overlap instead of failing it.
-    sqlite.pragma("journal_mode = WAL")
-    sqlite.pragma("busy_timeout = 5000")
-    sqlite.pragma("foreign_keys = ON")
     sqlite.exec(MIGRATIONS_TABLE)
 
     const history = sqlite

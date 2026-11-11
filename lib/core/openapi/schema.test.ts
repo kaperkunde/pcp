@@ -26,6 +26,39 @@ describe("toJsonSchema", () => {
     })
   })
 
+  it("writes a tuple as 2020-12 has it: prefixItems, the rest under items", () => {
+    expect(
+      toJsonSchema(
+        {
+          items: [{ type: "number" }, { type: "string" }],
+          additionalItems: false,
+        },
+        "3.1.0",
+      ),
+    ).toEqual({
+      type: "array",
+      prefixItems: [{ type: "number" }, { type: "string" }],
+      items: false,
+    })
+    expect(
+      toJsonSchema(
+        {
+          type: "array",
+          items: [{ type: "number" }],
+          additionalItems: { type: "boolean" },
+        },
+        "3.1.0",
+      ),
+    ).toEqual({
+      type: "array",
+      prefixItems: [{ type: "number" }],
+      items: { type: "boolean" },
+    })
+    expect(
+      toJsonSchema({ type: "array", items: [{ type: "number" }] }, "3.1.0"),
+    ).toEqual({ type: "array", prefixItems: [{ type: "number" }] })
+  })
+
   it("turns 3.0 nullable into a null type", () => {
     expect(toJsonSchema({ type: "string", nullable: true }, "3.0.3")).toEqual({
       type: ["string", "null"],

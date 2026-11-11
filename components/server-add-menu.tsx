@@ -2,7 +2,7 @@
 
 import { Plus } from "lucide-react"
 
-import { buttonVariants } from "@/components/ui/button"
+import { buttonVariants } from "@kaperkunde/ui/button"
 import { IconTile } from "@/components/ui/icon-tile"
 import {
   Menu,
@@ -11,7 +11,7 @@ import {
   MenuNote,
   MenuSeparator,
   MenuTrigger,
-} from "@/components/ui/menu"
+} from "@kaperkunde/ui/menu"
 import type { ServerKind } from "@/lib/core/servers"
 
 const CHOICES: Array<{
@@ -49,6 +49,12 @@ const CHOICES: Array<{
     href: "/servers/ssh/new",
     title: "SSH server",
     caption: "Run commands on a machine of yours",
+  },
+  {
+    kind: "service",
+    href: "/servers/services/new",
+    title: "Service",
+    caption: "A container on one of your SSH servers",
   },
   {
     kind: "wrapper",

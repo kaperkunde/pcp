@@ -1,6 +1,7 @@
 import type { CallToolResult } from "@modelcontextprotocol/server"
 
 import { PcpError } from "../errors"
+import { ExitAddressError, type ExitDialer } from "../exits/dial"
 import {
   AddressBlockedError,
   isOwnAddress,
@@ -72,9 +73,15 @@ export type FetchOptions = Pick<SendOptions, "addressCheck"> & {
   /**
    * Waits for the site's turn before each request it sends, every redirect
    * followed on the site included (lib/core/pacing/), and answers the
-   * refusal to give when that turn is too far off; null to go ahead.
+   * tool error to give when that turn is too far off; null to go ahead.
    */
-  pace?: (site: string) => Promise<string | null>
+  pace?: (site: string) => Promise<CallToolResult | null>
+  /**
+   * The exit the request leaves through (lib/core/exits/), its redirects
+   * on the site included: the name is looked up and every address checked
+   * from the exit's side, with the token's private line.
+   */
+  exit?: ExitDialer
 }
 
 /** The check every address a request connects to passes. */
@@ -164,13 +171,24 @@ function headersFor(args: FetchArgs): Record<string, string> {
 
 export async function fetchWeb(
   args: FetchArgs,
-  { addressCheck, allowPrivate = false, publicUrl, pace }: FetchOptions = {},
+  {
+    addressCheck,
+    allowPrivate = false,
+    publicUrl,
+    pace,
+    exit,
+  }: FetchOptions = {},
 ): Promise<FetchAnswer> {
   // Started once the first request may go: a wait for the site's turn is
   // not the site being slow.
   let signal: AbortSignal | undefined
   const site = siteKey(new URL(args.url))
   const check = addressCheck ?? addressCheckFor(allowPrivate)
+  const dial = exit
+    ? (host: string, port: number, abort?: AbortSignal) =>
+        exit.dial(host, port, { allowPrivate, signal: abort })
+    : undefined
+  const through = exit ? ` through the exit ${exit.name}` : ""
 
   if (isPcpSite(new URL(args.url), publicUrl)) {
     throw new PcpError(
@@ -188,7 +206,7 @@ export async function fetchWeb(
     const paced = pace ? await pace(site) : null
 
     if (paced) {
-      return answer(paced, true)
+      return { result: paced, challenged: false }
     }
 
     signal ??= AbortSignal.timeout(FETCH_TIMEOUT_MS)
@@ -197,9 +215,13 @@ export async function fetchWeb(
       response = await send(
         url.toString(),
         { method, headers, body, signal },
-        { publicOnly: true, addressCheck: check },
+        { publicOnly: true, addressCheck: check, dial },
       )
     } catch (error) {
+      if (error instanceof ExitAddressError) {
+        throw new PcpError("forbidden", error.message)
+      }
+
       if (error instanceof AddressBlockedError) {
         throw new PcpError(
           "forbidden",
@@ -211,7 +233,7 @@ export async function fetchWeb(
 
       throw new PcpError(
         "upstream",
-        `${url.host} could not be reached: ${describeFetchError(error, FETCH_TIMEOUT_MS)}.`,
+        `${url.host} could not be reached${through}: ${describeFetchError(error, FETCH_TIMEOUT_MS)}.`,
       )
     }
 

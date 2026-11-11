@@ -3,14 +3,14 @@
 import { KeyRound, Link2, Lock, MonitorSmartphone } from "lucide-react"
 import { useActionState, useEffect, useState, type FormEvent } from "react"
 
-import { CopyableValue } from "@/components/copyable-value"
-import { FormError, FormNote } from "@/components/form-status"
+import { CopyableValue } from "@kaperkunde/ui/copy-button"
+import { FormError, FormNote } from "@kaperkunde/ui/form-status"
 import { OwnerConfirmFields } from "@/components/owner-confirm-fields"
 import { SettingsItem } from "@/components/settings-item"
-import { SubmitButton } from "@/components/submit-button"
-import { Button } from "@/components/ui/button"
-import { Checkbox, Input } from "@/components/ui/input"
-import { Field, Label } from "@/components/ui/label"
+import { SubmitButton } from "@kaperkunde/ui/submit-button"
+import { Button } from "@kaperkunde/ui/button"
+import { Checkbox, Input } from "@kaperkunde/ui/input"
+import { Field, Label } from "@kaperkunde/ui/label"
 import { UsernameField } from "@/components/username-field"
 import {
   changePasswordAction,

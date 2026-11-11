@@ -9,7 +9,7 @@ import {
   SETTING_PUBLIC_URL,
 } from "@/lib/core/settings"
 import { ownerVault } from "@/lib/core/vault"
-import { originFromHeaders } from "@/lib/server/same-origin"
+import { originFromHeaders } from "@kaperkunde/security"
 
 /**
  * Where PCP is reachable from outside, for OAuth redirect URIs and the

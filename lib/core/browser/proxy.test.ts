@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it } from "vitest"
 
 import { startTestApi, type TestApi } from "../openapi/test-api"
 import {
+  siteOfAuthority,
   startBrowserProxy,
   type AddressVerdict,
   type BrowserProxy,
@@ -163,5 +164,98 @@ describe("the browser's proxy", () => {
   it("refuses a tunnel to something that is not host:port", async () => {
     proxy = await startBrowserProxy({ check: () => "ok" })
     expect(await tunnel("user:pass@example.com:443")).toMatch(/^HTTP\/1\.1 400/)
+  })
+})
+
+describe("an exit's proxy (connect)", () => {
+  it("dials every request through connect, never PCP's own lookup", async () => {
+    api = await startTestApi((_, res) => res.end("from the exit"))
+    const port = Number(new URL(api.origin).port)
+    const dialed: Array<[string, number]> = []
+    proxy = await startBrowserProxy({
+      check: () => "private",
+      connect: async (host, to) => {
+        dialed.push([host, to])
+        const socket = net.connect(port, "127.0.0.1")
+        await new Promise((resolve) => socket.once("connect", resolve))
+        return socket
+      },
+    })
+
+    const answer = await viaProxy("http://site.example/page")
+    expect(answer).toEqual({ status: 200, body: "from the exit" })
+    expect(await tunnel("site.example:443")).toBe(
+      "HTTP/1.1 200 Connection Established",
+    )
+    expect(dialed).toEqual([
+      ["site.example", 80],
+      ["site.example", 443],
+    ])
+  })
+
+  it("answers 403 and remembers a refusal from the exit's side", async () => {
+    const refused = Object.assign(new Error("refused"), { verdict: "own" })
+    proxy = await startBrowserProxy({
+      check: () => "ok",
+      connect: async () => {
+        throw refused
+      },
+    })
+
+    expect(await tunnel("intranet.example:443")).toBe("HTTP/1.1 403 Forbidden")
+    expect((await viaProxy("http://intranet.example/")).status).toBe(403)
+    expect(proxy.refusal("intranet.example")).toBe("own")
+  })
+
+  it("answers 502 when the exit cannot connect", async () => {
+    proxy = await startBrowserProxy({
+      check: () => "ok",
+      connect: async () => {
+        throw new Error("could not connect")
+      },
+    })
+
+    expect(await tunnel("down.example:443")).toBe("HTTP/1.1 502 Bad Gateway")
+    expect(proxy.refusal("down.example")).toBeNull()
+  })
+
+  it("holds a connection while a script runs, then lets it go or refuses it", async () => {
+    api = await startTestApi((_, res) => res.end("held"))
+    const site = new URL(api.origin).host
+    let release: (admitted: boolean) => void = () => {}
+    const asked: string[] = []
+    proxy = await startBrowserProxy({
+      check: () => "ok",
+      admit: (at) => {
+        asked.push(at)
+        return new Promise<boolean>((resolve) => {
+          release = resolve
+        })
+      },
+    })
+
+    let settled = false
+    const plain = viaProxy(`${api.origin}/later`).then((answer) => {
+      settled = true
+      return answer
+    })
+    await new Promise((resolve) => setTimeout(resolve, 100))
+    expect(settled).toBe(false)
+    expect(api.requests).toHaveLength(0)
+    release(true)
+    expect(await plain).toEqual({ status: 200, body: "held" })
+
+    const refused = tunnel(site)
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    release(false)
+    expect(await refused).toBe("HTTP/1.1 403 Forbidden")
+    expect(asked).toEqual([site, site])
+  })
+
+  it("names the site a connection is for as siteKey does", () => {
+    expect(siteOfAuthority("Example.com.", 443)).toBe("example.com")
+    expect(siteOfAuthority("example.com", 80)).toBe("example.com")
+    expect(siteOfAuthority("127.0.0.1", 8080)).toBe("127.0.0.1:8080")
+    expect(siteOfAuthority("[::1]", 8443)).toBe("[::1]:8443")
   })
 })

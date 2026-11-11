@@ -1,8 +1,20 @@
 import type { VaultContext } from "./context"
 import { asBytes, decryptString, encryptString } from "./crypto"
 import { db } from "./db"
+import { MAX_PERSONAL_NOTE } from "./constants"
 import { invalid, notFound, PcpError } from "./errors"
 import { newId } from "./ids"
+import { hiddenCharacter } from "./memories"
+import {
+  byName,
+  openSecretMeta,
+  SECRET_META_SELECT,
+  sealedSecretMeta,
+  secretName,
+  secretNameWhere,
+} from "./secret-meta"
+import { SERVER_META_SELECT, serverName, writeServer } from "./server-meta"
+import { readEnvBindings } from "./services/definition"
 import { parseTotpSeed, totpCode, totpSeedProblem } from "./totp"
 
 /**
@@ -13,13 +25,22 @@ import { parseTotpSeed, totpCode, totpSeedProblem } from "./totp"
  * server needs to be sent. `totp` secrets are the owner's too: the seed of
  * a site's one-time codes, of which only the code of the moment ever goes
  * anywhere (typed into a page by the browser, lib/core/browser-secrets.ts).
- * `oauth` and `ssh_key` secrets are managed: the
- * token set PCP obtained for a server through OAuth, or the private key PCP
- * made for an SSH server (lib/core/ssh/), kept here so they are encrypted
- * like everything else and show up in the same list.
+ * `oauth`, `ssh_key` and `proxy_password` secrets are managed: the
+ * token set PCP obtained for a server through OAuth, the private key PCP
+ * made for an SSH server (lib/core/ssh/), or the password PCP made for a
+ * VPN service's proxy (an exit, lib/core/exits/), kept here so they are
+ * encrypted like everything else and show up in the same list.
+ *
+ * One of the owner's secrets can also say what sign-in it belongs to: a
+ * login name (the email or user name it is the password of) and a one-line
+ * note, neither of them secret but both the owner's, so encrypted too (as
+ * "secret:<id>:login" and "secret:<id>:note"), and the TOTP secret whose code
+ * goes with it. Assistants see those with the secret's name (list_secrets,
+ * and the browser's note of the sign-ins at a page's site), never its value.
  */
 
-export type SecretKind = "text" | "totp" | "oauth" | "ssh_key"
+export type SecretKind =
+  "text" | "totp" | "oauth" | "ssh_key" | "proxy_password"
 
 /** The kinds the owner enters themselves. */
 export type OwnerSecretKind = "text" | "totp"
@@ -38,14 +59,144 @@ export type SecretSummary = {
   lastUsedAt: Date | null
   /** Servers that send this secret, or hold their OAuth tokens in it. */
   usedBy: Array<{ id: string; name: string }>
+} & SecretSignIn
+
+/**
+ * The sign-in one of the owner's secrets belongs to, opened: what an
+ * assistant may see of it beside its name. Never the value.
+ */
+export type SecretSignIn = {
+  loginName: string | null
+  note: string | null
+  /** The TOTP secret whose code goes with this one. */
+  totpCompanion: { id: string; name: string } | null
 }
 
+export const MAX_LOGIN_NAME = 200
 const MAX_NAME = 100
 const MAX_DESCRIPTION = 500
 const MAX_VALUE = 64 * 1024
 
 function aad(secretId: string): string {
   return `secret:${secretId}`
+}
+
+function detailAad(secretId: string, part: "login" | "note"): string {
+  return `secret:${secretId}:${part}`
+}
+
+/**
+ * A login name or note as it is saved: trimmed, on one line, with nothing
+ * in it that does not show on screen, at most `max` characters. Empty is
+ * none.
+ */
+function checkLine(
+  what: "login name" | "note",
+  input: string | null | undefined,
+  max: number,
+): string | null {
+  const line = (input ?? "").trim()
+
+  if (!line) {
+    return null
+  }
+
+  if (/[\r\n\u2028\u2029]/u.test(line)) {
+    throw invalid(`Keep the ${what} on one line.`)
+  }
+
+  const hidden = line.includes("\t") ? "U+0009" : hiddenCharacter(line)
+
+  if (hidden) {
+    throw invalid(
+      `The ${what} holds a character that does not show on screen (${hidden}). Take it out.`,
+    )
+  }
+
+  if ([...line].length > max) {
+    throw invalid(`Keep the ${what} to ${max} characters.`)
+  }
+
+  return line
+}
+
+export function checkLoginName(input: string | null | undefined) {
+  return checkLine("login name", input, MAX_LOGIN_NAME)
+}
+
+export function checkSecretNote(input: string | null | undefined) {
+  return checkLine("note", input, MAX_PERSONAL_NOTE)
+}
+
+function sealDetail(
+  ctx: VaultContext,
+  id: string,
+  part: "login" | "note",
+  value: string | null,
+): Uint8Array<ArrayBuffer> | null {
+  return value === null
+    ? null
+    : asBytes(encryptString(ctx.dek, value, detailAad(id, part)))
+}
+
+function openDetail(
+  ctx: VaultContext,
+  id: string,
+  part: "login" | "note",
+  sealed: Uint8Array | null,
+): string | null {
+  if (!sealed) {
+    return null
+  }
+
+  try {
+    return decryptString(ctx.dek, Buffer.from(sealed), detailAad(id, part))
+  } catch {
+    // One that does not open is not worth failing a request for.
+    return null
+  }
+}
+
+/** A secret row's login name and note, opened. */
+export function openSecretDetails(
+  ctx: VaultContext,
+  row: { id: string; loginName: Uint8Array | null; note: Uint8Array | null },
+): { loginName: string | null; note: string | null } {
+  return {
+    loginName: openDetail(ctx, row.id, "login", row.loginName),
+    note: openDetail(ctx, row.id, "note", row.note),
+  }
+}
+
+/**
+ * The TOTP companion a text secret may name: one of the vault's TOTP
+ * secrets, by id. Null for none.
+ */
+async function checkTotpCompanion(
+  ctx: VaultContext,
+  secret: { id: string | null; kind: string },
+  companionId: string | null | undefined,
+): Promise<string | null> {
+  if (!companionId) {
+    return null
+  }
+
+  if (secret.kind !== "text") {
+    throw invalid(
+      "Only a text secret names the one-time codes that go with it.",
+    )
+  }
+
+  const companion = await db().secret.findFirst({
+    where: { id: companionId, vaultId: ctx.vaultId, kind: "totp" },
+    select: { id: true },
+  })
+
+  if (!companion || companion.id === secret.id) {
+    throw invalid("Choose one of your one-time code secrets.")
+  }
+
+  return companion.id
 }
 
 export function validateSecretName(name: string): string | null {
@@ -68,17 +219,18 @@ export async function listSecrets(ctx: VaultContext): Promise<SecretSummary[]> {
   const rows = await db().secret.findMany({
     where: { vaultId: ctx.vaultId },
     include: {
-      authFor: { select: { id: true, name: true } },
+      authFor: { select: SERVER_META_SELECT },
       authHeaderFor: {
-        select: { server: { select: { id: true, name: true } } },
+        select: { server: { select: SERVER_META_SELECT } },
       },
-      oauthClientFor: { select: { id: true, name: true } },
-      oauthTokensFor: { select: { id: true, name: true } },
+      oauthClientFor: { select: SERVER_META_SELECT },
+      oauthTokensFor: { select: SERVER_META_SELECT },
+      totpCompanion: { select: SECRET_META_SELECT },
     },
-    orderBy: [{ kind: "asc" }, { name: "asc" }],
+    orderBy: { kind: "asc" },
   })
 
-  return rows.map((row) => {
+  const summaries = rows.map((row) => {
     const usedBy = new Map<string, { id: string; name: string }>()
 
     for (const server of [
@@ -87,20 +239,31 @@ export async function listSecrets(ctx: VaultContext): Promise<SecretSummary[]> {
       ...row.oauthClientFor,
       ...row.oauthTokensFor,
     ]) {
-      usedBy.set(server.id, server)
+      usedBy.set(server.id, { id: server.id, name: serverName(ctx, server) })
     }
 
     return {
       id: row.id,
-      name: row.name,
-      description: row.description,
+      ...openSecretMeta(ctx, row),
       kind: row.kind as SecretKind,
       createdAt: row.createdAt,
       updatedAt: row.updatedAt,
       lastUsedAt: row.lastUsedAt,
       usedBy: [...usedBy.values()],
+      ...openSecretDetails(ctx, row),
+      totpCompanion: row.totpCompanion
+        ? {
+            id: row.totpCompanion.id,
+            name: secretName(ctx, row.totpCompanion),
+          }
+        : null,
     }
   })
+
+  // By kind, then name, as the rows came before their names were sealed.
+  return summaries.sort((a, b) =>
+    a.kind === b.kind ? byName(a, b) : a.kind < b.kind ? -1 : 1,
+  )
 }
 
 /** A secret the owner entered, found by its name (for register_server). */
@@ -108,10 +271,12 @@ export async function findTextSecretByName(
   ctx: VaultContext,
   name: string,
 ): Promise<{ id: string; name: string } | null> {
-  return db().secret.findFirst({
-    where: { vaultId: ctx.vaultId, name: name.trim(), kind: "text" },
-    select: { id: true, name: true },
+  const row = await db().secret.findFirst({
+    where: { ...secretNameWhere(ctx, name.trim()), kind: "text" },
+    select: SECRET_META_SELECT,
   })
+
+  return row ? { id: row.id, name: secretName(ctx, row) } : null
 }
 
 /**
@@ -122,13 +287,13 @@ export async function findOwnerSecretByName(
   ctx: VaultContext,
   name: string,
 ): Promise<{ id: string; name: string; kind: OwnerSecretKind } | null> {
-  const row = await db().secret.findUnique({
-    where: { vaultId_name: { vaultId: ctx.vaultId, name: name.trim() } },
-    select: { id: true, name: true, kind: true },
+  const row = await db().secret.findFirst({
+    where: secretNameWhere(ctx, name.trim()),
+    select: { ...SECRET_META_SELECT, kind: true },
   })
 
   return row && isOwnerSecretKind(row.kind)
-    ? { id: row.id, name: row.name, kind: row.kind }
+    ? { id: row.id, name: secretName(ctx, row), kind: row.kind }
     : null
 }
 
@@ -165,14 +330,26 @@ export async function checkNewSecret(
     throw invalid(problem)
   }
 
-  const existing = await db().secret.findUnique({
-    where: { vaultId_name: { vaultId: ctx.vaultId, name } },
+  if (await secretNameTaken(ctx, name)) {
+    throw new PcpError("conflict", `A secret named "${name}" already exists.`)
+  }
+}
+
+/** Whether one of the vault's secrets has this name (but `except`). */
+export async function secretNameTaken(
+  ctx: VaultContext,
+  name: string,
+  except?: string,
+): Promise<boolean> {
+  const row = await db().secret.findFirst({
+    where: {
+      ...secretNameWhere(ctx, name),
+      ...(except ? { id: { not: except } } : {}),
+    },
     select: { id: true },
   })
 
-  if (existing) {
-    throw new PcpError("conflict", `A secret named "${name}" already exists.`)
-  }
+  return row !== null
 }
 
 export async function createSecret(
@@ -182,6 +359,9 @@ export async function createSecret(
     value: string
     description?: string
     kind?: OwnerSecretKind
+    loginName?: string | null
+    note?: string | null
+    totpCompanionId?: string | null
   },
 ): Promise<{ id: string }> {
   await checkNewSecret(ctx, input)
@@ -189,15 +369,24 @@ export async function createSecret(
 
   const name = input.name.trim()
   const description = (input.description ?? "").trim().slice(0, MAX_DESCRIPTION)
+  const loginName = checkLoginName(input.loginName)
+  const note = checkSecretNote(input.note)
+  const totpCompanionId = await checkTotpCompanion(
+    ctx,
+    { id: null, kind },
+    input.totpCompanionId,
+  )
   const id = newId()
 
   await db().secret.create({
     data: {
       id,
       vaultId: ctx.vaultId,
-      name,
-      description,
+      ...sealedSecretMeta(ctx, id, { name, description }),
       kind,
+      loginName: sealDetail(ctx, id, "login", loginName),
+      note: sealDetail(ctx, id, "note", note),
+      totpCompanionId,
       ciphertext: asBytes(
         encryptString(
           ctx.dek,
@@ -230,12 +419,7 @@ export async function createSecretNamedAfter(
 
   for (let n = 1; ; n++) {
     const name = n === 1 ? base : `${base} ${n}`
-    const taken = await db().secret.findUnique({
-      where: { vaultId_name: { vaultId: ctx.vaultId, name } },
-      select: { id: true },
-    })
-
-    if (!taken) {
+    if (!(await secretNameTaken(ctx, name))) {
       const { id } = await createSecret(ctx, {
         name,
         value: input.value,
@@ -250,7 +434,15 @@ export async function createSecretNamedAfter(
 export async function updateSecret(
   ctx: VaultContext,
   id: string,
-  input: { name?: string; description?: string; value?: string },
+  input: {
+    name?: string
+    description?: string
+    value?: string
+    /** The sign-in it belongs to: each left out stays, empty takes it away. */
+    loginName?: string | null
+    note?: string | null
+    totpCompanionId?: string | null
+  },
 ): Promise<void> {
   const row = await db().secret.findFirst({
     where: { id, vaultId: ctx.vaultId },
@@ -260,11 +452,48 @@ export async function updateSecret(
     throw notFound("That secret")
   }
 
+  const meta = openSecretMeta(ctx, row)
+  let metaChanged = false
   const data: {
-    name?: string
-    description?: string
+    meta?: Uint8Array<ArrayBuffer>
+    nameKey?: string
+    plainName?: string
+    plainDescription?: string
     ciphertext?: Uint8Array<ArrayBuffer>
+    loginName?: Uint8Array<ArrayBuffer> | null
+    note?: Uint8Array<ArrayBuffer> | null
+    totpCompanionId?: string | null
   } = {}
+
+  if (
+    (input.loginName !== undefined ||
+      input.note !== undefined ||
+      input.totpCompanionId !== undefined) &&
+    !isOwnerSecretKind(row.kind)
+  ) {
+    throw invalid("Managed secrets belong to no sign-in of yours.")
+  }
+
+  if (input.loginName !== undefined) {
+    data.loginName = sealDetail(
+      ctx,
+      id,
+      "login",
+      checkLoginName(input.loginName),
+    )
+  }
+
+  if (input.note !== undefined) {
+    data.note = sealDetail(ctx, id, "note", checkSecretNote(input.note))
+  }
+
+  if (input.totpCompanionId !== undefined) {
+    data.totpCompanionId = await checkTotpCompanion(
+      ctx,
+      row,
+      input.totpCompanionId,
+    )
+  }
 
   if (input.name !== undefined) {
     if (!isOwnerSecretKind(row.kind)) {
@@ -278,25 +507,21 @@ export async function updateSecret(
       throw invalid(nameProblem)
     }
 
-    if (name !== row.name) {
-      const clash = await db().secret.findUnique({
-        where: { vaultId_name: { vaultId: ctx.vaultId, name } },
-        select: { id: true },
-      })
-
-      if (clash) {
-        throw new PcpError(
-          "conflict",
-          `A secret named "${name}" already exists.`,
-        )
-      }
+    if (name !== meta.name && (await secretNameTaken(ctx, name, id))) {
+      throw new PcpError("conflict", `A secret named "${name}" already exists.`)
     }
 
-    data.name = name
+    meta.name = name
+    metaChanged = true
   }
 
   if (input.description !== undefined) {
-    data.description = input.description.trim().slice(0, MAX_DESCRIPTION)
+    meta.description = input.description.trim().slice(0, MAX_DESCRIPTION)
+    metaChanged = true
+  }
+
+  if (metaChanged) {
+    Object.assign(data, sealedSecretMeta(ctx, id, meta))
   }
 
   if (input.value !== undefined) {
@@ -326,10 +551,10 @@ export async function deleteSecret(ctx: VaultContext, id: string) {
   const row = await db().secret.findFirst({
     where: { id, vaultId: ctx.vaultId },
     include: {
-      authFor: { select: { name: true } },
-      authHeaderFor: { select: { server: { select: { name: true } } } },
-      oauthClientFor: { select: { name: true } },
-      oauthTokensFor: { select: { name: true } },
+      authFor: { select: SERVER_META_SELECT },
+      authHeaderFor: { select: { server: { select: SERVER_META_SELECT } } },
+      oauthClientFor: { select: SERVER_META_SELECT },
+      oauthTokensFor: { select: SERVER_META_SELECT },
     },
   })
 
@@ -337,13 +562,21 @@ export async function deleteSecret(ctx: VaultContext, id: string) {
     throw notFound("That secret")
   }
 
+  // A service's variables name secrets in its spec, by id.
+  const services = (
+    await db().serviceSpec.findMany({
+      where: { server: { vaultId: ctx.vaultId }, env: { contains: id } },
+      select: { env: true, server: { select: SERVER_META_SELECT } },
+    })
+  ).filter((spec) => Object.values(readEnvBindings(spec.env)).includes(id))
   const users = [
     ...new Set(
       [
         ...row.authFor,
         ...row.authHeaderFor.map((header) => header.server),
         ...row.oauthClientFor,
-      ].map((server) => server.name),
+        ...services.map((spec) => spec.server),
+      ].map((server) => serverName(ctx, server)),
     ),
   ]
 
@@ -356,10 +589,18 @@ export async function deleteSecret(ctx: VaultContext, id: string) {
 
   if (row.kind === "oauth") {
     // The server that held its tokens here is no longer connected.
-    await db().mcpServer.updateMany({
+    const connected = await db().mcpServer.findMany({
       where: { vaultId: ctx.vaultId, oauthTokensId: id },
-      data: { oauthConnectedAt: null, status: "unknown", statusMessage: "" },
+      select: { id: true },
     })
+
+    for (const server of connected) {
+      await writeServer(ctx, server.id, {
+        oauthConnectedAt: null,
+        status: "unknown",
+        statusMessage: "",
+      })
+    }
   }
 
   await db().secret.delete({ where: { id } })
@@ -437,6 +678,41 @@ export async function readTypedValue(
   return totpCode(seed, now).code
 }
 
+/**
+ * The login name the owner keeps with one of their secrets, for the browser
+ * to type ({"$secret": name, "part": "username"}): opened here, as every
+ * detail of a secret is. Refused when it has none.
+ */
+export async function readTypedLogin(
+  ctx: VaultContext,
+  id: string,
+): Promise<string> {
+  const row = await db().secret.findFirst({
+    where: { id, vaultId: ctx.vaultId },
+    select: {
+      ...SECRET_META_SELECT,
+      kind: true,
+      loginName: true,
+      note: true,
+    },
+  })
+
+  if (!row || !isOwnerSecretKind(row.kind)) {
+    throw notFound("That secret")
+  }
+
+  const { loginName } = openSecretDetails(ctx, row)
+
+  if (!loginName) {
+    throw new PcpError(
+      "not_found",
+      `The owner keeps no login name with the secret "${secretName(ctx, row)}", so nothing was typed. Type the login name as plain text, or ask the owner to add it to the secret on the Secrets page.`,
+    )
+  }
+
+  return loginName
+}
+
 /** A TOTP secret's code of the moment, for the owner's own screen. */
 export async function revealTotpCode(
   ctx: VaultContext,
@@ -476,8 +752,8 @@ export async function writeManagedSecret(
   },
 ): Promise<{ id: string }> {
   const kind = input.kind ?? "oauth"
-  const existing = await db().secret.findUnique({
-    where: { vaultId_name: { vaultId: ctx.vaultId, name: input.name } },
+  const existing = await db().secret.findFirst({
+    where: secretNameWhere(ctx, input.name),
     select: { id: true, kind: true },
   })
 
@@ -492,7 +768,10 @@ export async function writeManagedSecret(
     await db().secret.update({
       where: { id: existing.id },
       data: {
-        description: input.description,
+        ...sealedSecretMeta(ctx, existing.id, {
+          name: input.name,
+          description: input.description,
+        }),
         ciphertext: asBytes(
           encryptString(ctx.dek, input.value, aad(existing.id)),
         ),
@@ -508,8 +787,10 @@ export async function writeManagedSecret(
     data: {
       id,
       vaultId: ctx.vaultId,
-      name: input.name,
-      description: input.description,
+      ...sealedSecretMeta(ctx, id, {
+        name: input.name,
+        description: input.description,
+      }),
       kind,
       ciphertext: asBytes(encryptString(ctx.dek, input.value, aad(id))),
     },
@@ -523,6 +804,10 @@ export async function deleteManagedSecret(
   id: string,
 ): Promise<void> {
   await db().secret.deleteMany({
-    where: { id, vaultId: ctx.vaultId, kind: { in: ["oauth", "ssh_key"] } },
+    where: {
+      id,
+      vaultId: ctx.vaultId,
+      kind: { in: ["oauth", "ssh_key", "proxy_password"] },
+    },
   })
 }

@@ -1,5 +1,5 @@
-import { Input } from "@/components/ui/input"
-import { Field } from "@/components/ui/label"
+import { Input } from "@kaperkunde/ui/input"
+import { Field } from "@kaperkunde/ui/label"
 
 /**
  * The account a password belongs to, for password managers. PCP has one

@@ -3,8 +3,8 @@ import Link from "next/link"
 import type { Metadata } from "next"
 
 import { RelativeDate } from "@/components/local-date"
-import { PageColumn } from "@/components/page-column"
-import { PageHeader } from "@/components/page-header"
+import { PageColumn } from "@kaperkunde/ui/page"
+import { PageHeader } from "@kaperkunde/ui/page"
 import {
   ExcludeButton,
   ItemSyncForm,
@@ -12,12 +12,12 @@ import {
   RepoSettingsForm,
   SyncRepoButton,
 } from "@/components/repo-forms"
-import { Badge } from "@/components/ui/badge"
-import { Button, ButtonLink } from "@/components/ui/button"
-import { Disclosure } from "@/components/ui/disclosure"
+import { Badge } from "@kaperkunde/ui/badge"
+import { Button, ButtonLink } from "@kaperkunde/ui/button"
+import { Disclosure } from "@kaperkunde/ui/disclosure"
 import { IconTile } from "@/components/ui/icon-tile"
-import { Checkbox } from "@/components/ui/input"
-import { List, ListRow, ListSection } from "@/components/ui/list"
+import { Checkbox } from "@kaperkunde/ui/input"
+import { List, ListRow, ListSection } from "@kaperkunde/ui/list"
 import { isPcpError } from "@/lib/core/errors"
 import { repoChangeHref } from "@/lib/core/repos/notices"
 import {
@@ -48,10 +48,12 @@ const KIND: Record<string, string> = {
   flow: "Browser flow",
   endpoint: "API endpoint",
   server: "MCP server",
+  service: "Service",
 }
 
 const GROUP: Record<ItemGroup, string> = {
   servers: "Servers and APIs",
+  services: "Services",
   wrappers: "Wrappers",
   skills: "Skills",
   flows: "Browser flows",
@@ -327,7 +329,7 @@ function ItemsTable({
   }
 
   return (
-    <div className="overflow-x-auto rounded-xl bg-card">
+    <div className="relative overflow-x-auto rounded-xl bg-card">
       <table className="w-full min-w-[40rem] text-sm" data-testid="repo-table">
         <thead className="sr-only">
           <tr>

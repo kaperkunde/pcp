@@ -1,4 +1,4 @@
-import { Badge } from "@/components/ui/badge"
+import { Badge } from "@kaperkunde/ui/badge"
 import type { DiffLine } from "@/lib/core/line-merge"
 import type { SkillShown } from "@/lib/core/skills"
 import { cn } from "@/lib/utils"
@@ -20,15 +20,22 @@ export function SkillReview({ skill }: { skill: SkillShown }) {
   return (
     <div className="flex flex-col gap-4">
       <div className="flex flex-wrap items-center gap-2 text-sm text-muted-foreground">
-        <code className="break-all">/skills/{skill.name}/SKILL.md</code>
-        {skill.newName ? (
+        <code className="break-all">
+          /skills/{skill.sharing ? "mine/" : ""}
+          {skill.name}/SKILL.md
+        </code>
+        {skill.newName || skill.sharing ? (
           <>
             <span aria-hidden>→</span>
             <span className="sr-only">moves to</span>
-            <code className="break-all">/skills/{skill.newName}/SKILL.md</code>
+            <code className="break-all">
+              /skills/{skill.newName ?? skill.name}/SKILL.md
+            </code>
           </>
         ) : null}
-        {skill.deleting ? (
+        {skill.sharing ? (
+          <Badge variant="secondary">Shared with your assistants</Badge>
+        ) : skill.deleting ? (
           <Badge variant="destructive">Deleted</Badge>
         ) : skill.basis === null ? (
           <Badge variant="secondary">New skill</Badge>
@@ -95,7 +102,12 @@ export function SkillReview({ skill }: { skill: SkillShown }) {
   )
 }
 
-/** Lines in and out, each marked with + or − as well as its colour. */
+/**
+ * Lines in and out, each marked with + or − as well as its colour. The box
+ * is `relative` so the words each line carries for a screen reader (`sr-only`,
+ * positioned absolutely) are clipped by its scroll: positioned against the
+ * page instead, they stretch it by the whole diff, below the footer (#50).
+ */
 export function Diff({
   lines,
   testId,
@@ -105,7 +117,7 @@ export function Diff({
 }) {
   return (
     <div
-      className="max-h-[28rem] overflow-auto rounded-xl bg-field py-2 font-mono text-[12px] leading-relaxed"
+      className="relative max-h-[28rem] overflow-auto rounded-xl bg-field py-2 font-mono text-[12px] leading-relaxed"
       data-testid={testId}
     >
       {lines.map((line, index) => (

@@ -2,15 +2,15 @@ import { isIP } from "node:net"
 
 import type { CallToolResult } from "@modelcontextprotocol/server"
 
-import type { McpServer } from "@/lib/generated/prisma/client"
-
 import { storeTools, type SyncResult } from "../catalogue"
 import type { VaultContext } from "../context"
 import { db } from "../db"
 import { invalid, isPcpError, PcpError } from "../errors"
 import { newId } from "../ids"
 import { errorToolResult, jsonToolResult } from "../json-result"
+import { argumentsResult, familyError, withNotes } from "../tools/family"
 import { makeRedactor } from "../openapi/redact"
+import { markdownLink } from "../owner-link"
 import {
   getServer,
   kindNoun,
@@ -21,6 +21,7 @@ import {
 } from "../servers"
 import { deleteManagedSecret, writeManagedSecret } from "../secrets"
 import {
+  closeSshConnections,
   SshAuthError,
   SshHostKeyError,
   sshCheck,
@@ -31,7 +32,13 @@ import {
 } from "./client"
 import { fingerprint, generateOwnKey, keyType } from "./keys"
 import { MAX_OUTPUT_BYTES, MAX_USERNAME_CHARS } from "./limits"
-import { parseRunCommand, RUN_COMMAND, sshTools } from "./tools"
+import { readRunCommand, RUN_COMMAND, sshTools } from "./tools"
+import {
+  findServer,
+  type OpenServer,
+  serverCreateData,
+  writeServer,
+} from "../server-meta"
 
 /**
  * SSH servers: servers of kind "ssh", which an assistant runs commands on.
@@ -183,7 +190,7 @@ export async function createSshServer(
 ): Promise<{ id: string }> {
   const data = normalize(input)
   const id = newId()
-  const slug = await uniqueSlug(ctx.vaultId, slugify(data.name))
+  const slug = await uniqueSlug(ctx, slugify(data.name))
   const key = generateOwnKey(`pcp-${slug}`)
   const secret = await writeManagedSecret(ctx, {
     name: sshKeySecretName(id),
@@ -194,7 +201,7 @@ export async function createSshServer(
 
   try {
     await db().mcpServer.create({
-      data: {
+      data: serverCreateData(ctx, {
         id,
         vaultId: ctx.vaultId,
         kind: "ssh",
@@ -203,7 +210,7 @@ export async function createSshServer(
         authType: "key",
         authSecretId: secret.id,
         sshPublicKey: key.publicKey,
-      },
+      }),
     })
   } catch (error) {
     await deleteManagedSecret(ctx, secret.id)
@@ -239,10 +246,12 @@ export async function updateSshServer(
   const data = normalize(input)
   const moved = data.url !== existing.url
 
-  await db().mcpServer.update({
-    where: { id },
-    data: { ...data, ...(moved ? { sshHostKey: null } : {}) },
+  await writeServer(ctx, id, {
+    ...data,
+    ...(moved ? { sshHostKey: null } : {}),
   })
+  // An exit's connection is to the server as it was.
+  closeSshConnections(id)
 
   return { reconnect: moved || data.authUsername !== existing.authUsername }
 }
@@ -256,10 +265,12 @@ export async function forgetSshHostKey(
   id: string,
 ): Promise<void> {
   await sshServer(ctx, id)
-  await db().mcpServer.update({
-    where: { id },
-    data: { sshHostKey: null, status: "unknown", statusMessage: "" },
+  await writeServer(ctx, id, {
+    sshHostKey: null,
+    status: "unknown",
+    statusMessage: "",
   })
+  closeSshConnections(id)
 }
 
 /**
@@ -279,15 +290,14 @@ export async function replaceSshKey(
     kind: "ssh_key",
   })
 
-  await db().mcpServer.update({
-    where: { id },
-    data: {
-      authSecretId: secret.id,
-      sshPublicKey: key.publicKey,
-      status: "auth_required",
-      statusMessage: addKeyNote(existing.authUsername ?? ""),
-    },
+  await writeServer(ctx, id, {
+    authSecretId: secret.id,
+    sshPublicKey: key.publicKey,
+    status: "auth_required",
+    statusMessage: addKeyNote(existing.authUsername ?? ""),
   })
+  // Signed in with the old key: the next use signs in with the new one.
+  closeSshConnections(id)
 }
 
 /** What the server's page shows: nothing of it is secret. */
@@ -303,7 +313,7 @@ export type SshServerView = {
 
 export function sshServerView(
   server: Pick<
-    McpServer,
+    OpenServer,
     "url" | "authUsername" | "sshPublicKey" | "sshHostKey"
   >,
 ): SshServerView {
@@ -327,7 +337,7 @@ export function sshServerView(
 }
 
 /** Where to connect, as whom, and the host key to expect. */
-export function sshTarget(server: McpServer): SshTarget {
+export function sshTarget(server: OpenServer): SshTarget {
   return {
     ...parseSshAddress(server.url),
     username: server.authUsername ?? "",
@@ -342,26 +352,39 @@ export function sshTarget(server: McpServer): SshTarget {
  * a connection the owner started uses it: whoever answers first on an
  * address would otherwise be the key every later call trusts.
  */
-function pinner(server: McpServer) {
+function pinner(ctx: VaultContext, server: OpenServer) {
   return async (seen: HostSeen) => {
     if (server.sshHostKey || !seen.hostKey) {
       return
     }
 
-    await db().mcpServer.updateMany({
-      where: { id: server.id, sshHostKey: null, url: server.url },
-      data: { sshHostKey: seen.hostKey },
+    const hostKey = seen.hostKey
+
+    // The key and the address are sealed: compared opened, in the same
+    // transaction as the write.
+    await db().$transaction(async (tx) => {
+      const now = await findServer(ctx, { id: server.id }, tx)
+
+      if (now && now.sshHostKey === null && now.url === server.url) {
+        await writeServer(ctx, server.id, { sshHostKey: hostKey }, tx)
+      }
     })
   }
 }
 
-/** The server's page in PCP, where its key and host key are. */
-function pageOf(server: McpServer, publicUrl: string): string {
-  return `${publicUrl.replace(/\/+$/, "")}/servers/${server.id}`
+/**
+ * The server's page in PCP, where its key and host key are, as a markdown
+ * link: an app that reads the answer aloud says the label, not the address.
+ */
+function pageOf(server: OpenServer, publicUrl: string): string {
+  return markdownLink(
+    `Open ${server.name}'s page in PCP`,
+    `${publicUrl.replace(/\/+$/, "")}/servers/${server.id}`,
+  )
 }
 
 /** Why PCP does not connect to a server whose host key the owner never pinned. */
-function unpinnedMessage(server: McpServer, publicUrl: string): string {
+function unpinnedMessage(server: OpenServer, publicUrl: string): string {
   return `PCP has not pinned ${server.name}'s host key yet, so it does not connect: only the owner pins a key, by checking the server on its page and comparing the fingerprint with the server's own.\n${pageOf(server, publicUrl)}`
 }
 
@@ -372,7 +395,8 @@ function seconds(ms: number): string {
 
 /** The status and the words for the assistant, from a failure. */
 async function fail(
-  server: McpServer,
+  ctx: VaultContext,
+  server: OpenServer,
   error: unknown,
   { publicUrl, redact }: { publicUrl: string; redact: string[] },
 ): Promise<{ status: "auth_required" | "error"; message: string }> {
@@ -382,7 +406,7 @@ async function fail(
     .slice(0, 400)
 
   if (error instanceof SshAuthError) {
-    await setServerStatus(server.id, "auth_required", reason)
+    await setServerStatus(ctx, server.id, "auth_required", reason)
     return {
       status: "auth_required",
       message: `${server.name} did not let PCP sign in. ${reason} The owner finds PCP's key on its page:\n${pageOf(server, publicUrl)}`,
@@ -390,7 +414,7 @@ async function fail(
   }
 
   if (error instanceof SshHostKeyError) {
-    await setServerStatus(server.id, "error", reason)
+    await setServerStatus(ctx, server.id, "error", reason)
     return {
       status: "error",
       message: `PCP did not connect. ${reason} Its page:\n${pageOf(server, publicUrl)}`,
@@ -398,7 +422,7 @@ async function fail(
   }
 
   const message = `${server.name} could not be reached: ${reason}`
-  await setServerStatus(server.id, "error", message)
+  await setServerStatus(ctx, server.id, "error", message)
   return { status: "error", message }
 }
 
@@ -409,12 +433,14 @@ async function fail(
  * no pinned key is not connected to, and its status is left as it is.
  */
 export async function syncSshTools(
-  server: McpServer,
+  ctx: VaultContext,
+  server: OpenServer,
   identity: SshIdentity,
   { publicUrl, byOwner = false }: { publicUrl: string; byOwner?: boolean },
 ): Promise<SyncResult> {
   const target = sshTarget(server)
   const toolCount = await storeTools(
+    ctx,
     server.id,
     sshTools({ host: target.host, username: target.username }),
   )
@@ -428,8 +454,14 @@ export async function syncSshTools(
   }
 
   try {
-    await sshCheck(target, identity, byOwner ? pinner(server) : async () => {})
-    await setServerStatus(server.id, "ok", "", { lastSyncedAt: new Date() })
+    await sshCheck(
+      target,
+      identity,
+      byOwner ? pinner(ctx, server) : async () => {},
+    )
+    await setServerStatus(ctx, server.id, "ok", "", {
+      lastSyncedAt: new Date(),
+    })
     return { status: "ok", message: "", toolCount }
   } catch (error) {
     if (isPcpError(error)) {
@@ -438,12 +470,12 @@ export async function syncSshTools(
 
     if (error instanceof SshAuthError) {
       const message = `${server.name} turned down PCP's key. ${addKeyNote(target.username)}`
-      await setServerStatus(server.id, "auth_required", message)
+      await setServerStatus(ctx, server.id, "auth_required", message)
       return { status: "auth_required", message, toolCount }
     }
 
     return {
-      ...(await fail(server, error, { publicUrl, redact: [] })),
+      ...(await fail(ctx, server, error, { publicUrl, redact: [] })),
       toolCount,
     }
   }
@@ -456,7 +488,8 @@ export async function syncSshTools(
  * anything in `redact` (a wrapper's secret placed in the call) taken out.
  */
 export async function callSshTool(
-  server: McpServer,
+  ctx: VaultContext,
+  server: OpenServer,
   toolName: string,
   args: Record<string, unknown>,
   {
@@ -470,10 +503,21 @@ export async function callSshTool(
   },
 ): Promise<CallToolResult> {
   if (toolName !== RUN_COMMAND) {
-    throw invalid(`${server.name} has no tool called ${toolName}.`)
+    return familyError(
+      `${server.name} has no tool called ${toolName}.`,
+      "not_found",
+    )
   }
 
-  const call = parseRunCommand(args)
+  const read = readRunCommand(args)
+
+  if (!read.fits) {
+    return argumentsResult(`${server.slug}/${toolName}`, read.problems, {
+      notes: read.notes,
+    })
+  }
+
+  const { call } = read
   const target = sshTarget(server)
 
   // The first key to answer is trusted only when the owner has seen it.
@@ -496,34 +540,39 @@ export async function callSshTool(
     )
 
     if (server.status !== "ok") {
-      await setServerStatus(server.id, "ok", "", { lastSyncedAt: new Date() })
+      await setServerStatus(ctx, server.id, "ok", "", {
+        lastSyncedAt: new Date(),
+      })
     }
 
-    return jsonToolResult(
-      {
-        exit_code: result.exitCode,
-        ...(result.signal ? { signal: result.signal } : {}),
-        stdout: result.stdout.toString("utf8"),
-        stderr: result.stderr.toString("utf8"),
-        ...(result.truncated
-          ? {
-              truncated: `The command wrote more than ${MAX_OUTPUT_BYTES / 1024 / 1024} MB: PCP asked the server to end it and disconnected. This is what it wrote first.`,
-            }
-          : {}),
-        ...(result.timedOut
-          ? {
-              timed_out: `The command ran past its ${seconds(call.timeoutMs)}: PCP asked the server to end it and disconnected.`,
-            }
-          : {}),
-      },
-      { redact },
+    return withNotes(
+      jsonToolResult(
+        {
+          exit_code: result.exitCode,
+          ...(result.signal ? { signal: result.signal } : {}),
+          stdout: result.stdout.toString("utf8"),
+          stderr: result.stderr.toString("utf8"),
+          ...(result.truncated
+            ? {
+                truncated: `The command wrote more than ${MAX_OUTPUT_BYTES / 1024 / 1024} MB: PCP asked the server to end it and disconnected. This is what it wrote first.`,
+              }
+            : {}),
+          ...(result.timedOut
+            ? {
+                timed_out: `The command ran past its ${seconds(call.timeoutMs)}: PCP asked the server to end it and disconnected.`,
+              }
+            : {}),
+        },
+        { redact },
+      ),
+      read.notes,
     )
   } catch (error) {
     if (isPcpError(error)) {
       throw error
     }
 
-    const failure = await fail(server, error, { publicUrl, redact })
+    const failure = await fail(ctx, server, error, { publicUrl, redact })
 
     // What the owner has to fix (PCP's key, a changed host key) is answered
     // with their page's link; a server PCP could not reach is an error.

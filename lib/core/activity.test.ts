@@ -8,6 +8,7 @@ import { createApiToken } from "./api-tokens"
 import type { VaultContext } from "./context"
 import { logDir } from "./data-dir"
 import { db } from "./db"
+import { requestHash } from "./permission-rules"
 import { scratchDatabase } from "./test-db"
 import { setupVault } from "./vault"
 
@@ -64,7 +65,7 @@ async function request(id: string, status: string, expiresAt: Date) {
       kind: "call",
       toolName: "send",
       argsCiphertext: new Uint8Array([1]),
-      argsHash: id,
+      argsHash: requestHash(ctx.dek, "call", "s/send", { id }),
       status,
       expiresAt,
     },
@@ -73,13 +74,13 @@ async function request(id: string, status: string, expiresAt: Date) {
 
 describe("activityLog", () => {
   it("names each token, and says a deleted one is gone", async () => {
-    writeLog([{ tool: "search_tools" }, { tokenId: "gone", tool: "memory" }])
+    writeLog([{ tool: "search" }, { tokenId: "gone", tool: "memory" }])
 
     const { entries, tokens } = await activityLog(ctx, {})
 
     expect(entries.map((entry) => [entry.tool, entry.tokenName])).toEqual([
       ["memory", null],
-      ["search_tools", "Claude"],
+      ["search", "Claude"],
     ])
     expect(tokens).toEqual([{ id: tokenId, name: "Claude", revoked: false }])
   })

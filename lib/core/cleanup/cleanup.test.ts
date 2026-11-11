@@ -1,9 +1,19 @@
-import { mkdirSync, readdirSync, statSync, writeFileSync } from "node:fs"
+import {
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  rmSync,
+  statSync,
+  utimesSync,
+  writeFileSync,
+} from "node:fs"
+import os from "node:os"
 import path from "node:path"
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import { createApiToken } from "../api-tokens"
+import { CALL_RECORD_KEEP_MS } from "../calls/limits"
 import type { VaultContext } from "../context"
 import { databaseFile, logDir } from "../data-dir"
 import { db } from "../db"
@@ -18,6 +28,10 @@ import { registerClient } from "../oauth-server/clients"
 import { scratchDatabase } from "../test-db"
 import { EMPTY_CONFIG, saveResourceConfig } from "../resources/state"
 import { keepBytes, keepResult, RESULT_TTL_MS } from "../tool-results"
+import { createUploadLink, UPLOAD_LINK_TTL_MS } from "../upload-links"
+import { localStoreDir } from "../storage/local"
+import { linkCopiesDir } from "../store-links"
+import { ensureOwnStore } from "../storage/roots"
 import { setupVault } from "../vault"
 import { DEFAULT_CLEANUP_CRON, DEFAULT_LOG_DAYS } from "./limits"
 import { runCleanup } from "./run"
@@ -190,6 +204,47 @@ describe("a run", () => {
     expect(await db().toolResult.count()).toBe(1)
   })
 
+  it("removes the copies share_file made once no link names them (#90)", async () => {
+    const now = new Date()
+    const bucket = path.join(linkCopiesDir(), ".pcp-store", "ab")
+    const orphan = path.join(bucket, "ab".padEnd(32, "0"))
+    const fresh = path.join(bucket, "ab".padEnd(32, "1"))
+    const part = path.join(bucket, `${"ab".padEnd(32, "2")}.x.pcp-part`)
+    mkdirSync(bucket, { recursive: true })
+    for (const file of [orphan, fresh, part])
+      writeFileSync(file, "x".repeat(10))
+    const hourAgo = new Date(now.getTime() - 60 * 60_000)
+    utimesSync(orphan, hourAgo, hourAgo)
+
+    const status = await runCleanup("owner", now)
+
+    // The orphan goes; one just written (a share under way) and a part
+    // file younger than a day stay.
+    expect(status.removed?.results).toBe(1)
+    expect(existsSync(orphan)).toBe(false)
+    expect(existsSync(fresh)).toBe(true)
+    expect(existsSync(part)).toBe(true)
+  })
+
+  it("removes upload links a day after they stop taking files, with their empty places", async () => {
+    const now = new Date()
+    const link = { tokenId, publicUrl: "https://pcp.example", purpose: "x" }
+    await createUploadLink(ctx, link)
+    // One that stopped taking files a day and a minute ago.
+    await createUploadLink(
+      ctx,
+      { ...link, maxFiles: 2 },
+      new Date(now.getTime() - UPLOAD_LINK_TTL_MS - RESULT_TTL_MS - 60_000),
+    )
+
+    const status = await runCleanup("owner", now)
+
+    // The old link and its two places.
+    expect(status.removed?.results).toBe(3)
+    expect(await db().uploadLink.count()).toBe(1)
+    expect(await db().fileLink.count()).toBe(5)
+  })
+
   it("removes kept results past their day and the days of log not kept, and says so", async () => {
     const now = new Date()
     const made = new Date(now.getTime() - RESULT_TTL_MS - 60_000)
@@ -222,6 +277,39 @@ describe("a run", () => {
     })
     expect(describeRemoved(status.removed!)).toBe(
       "1 kept result past its day and 2 days of log",
+    )
+  })
+
+  it("removes what PCP's own store left behind, and the folders of stores that are gone", async () => {
+    const own = await ensureOwnStore(ctx)
+    const dir = localStoreDir(own)
+    const objects = path.join(dir, ".pcp-store", "ab")
+    mkdirSync(objects, { recursive: true })
+    // An object let go of, a part file a write left a day and more ago,
+    // and a fresh one still being written.
+    const object = "ab".repeat(16)
+    writeFileSync(path.join(objects, object), "x".repeat(100))
+    await db().storagePending.create({
+      data: { objectId: object, serverId: own, createdAt: new Date(0) },
+    })
+    const old = path.join(objects, `${"cd".repeat(16)}.1234.pcp-part`)
+    writeFileSync(old, "half")
+    utimesSync(old, new Date(0), new Date(0))
+    writeFileSync(path.join(objects, `${"ef".repeat(16)}.5678.pcp-part`), "now")
+    // A store whose row is gone.
+    const gone = localStoreDir("gone-store")
+    mkdirSync(gone, { recursive: true })
+    writeFileSync(path.join(gone, "file"), "x")
+
+    const status = await runCleanup("owner")
+
+    expect(status.removed?.storage).toBe(3)
+    expect(readdirSync(objects)).toEqual([`${"ef".repeat(16)}.5678.pcp-part`])
+    expect(await db().storagePending.count()).toBe(0)
+    expect(existsSync(gone)).toBe(false)
+    expect(status.storeBytes).toBe(3)
+    expect(describeRemoved(status.removed!)).toContain(
+      "3 leftover stored files",
     )
   })
 
@@ -267,6 +355,88 @@ describe("a run", () => {
       used.client_id,
     ])
     expect(describeRemoved(status.removed!)).toContain("2 expired app sign-ins")
+  })
+
+  it("removes search vectors no search used for a month (#61)", async () => {
+    const now = new Date("2026-11-03T12:00:00Z")
+    const day = 24 * 60 * 60 * 1000
+
+    for (const [id, age] of [
+      ["old", 31],
+      ["recent", 2],
+    ] as const) {
+      await db().embeddingVector.create({
+        data: {
+          id,
+          vaultId: ctx.vaultId,
+          hash: id,
+          dimensions: 1,
+          ciphertext: new Uint8Array([1]),
+          usedAt: new Date(now.getTime() - age * day),
+        },
+      })
+    }
+
+    const status = await runCleanup("owner", now)
+
+    expect(status.removed?.vectors).toBe(1)
+    expect(
+      (await db().embeddingVector.findMany()).map((row) => row.id),
+    ).toEqual(["recent"])
+    expect(describeRemoved(status.removed!)).toContain("1 unused search vector")
+  })
+
+  it("removes the browser's temporary folders a crashed PCP left behind (#100)", async () => {
+    // A process id no process has: the PCP that made it is gone.
+    const left = path.join(os.tmpdir(), "pcp-chromium-999999999-Cl3an0")
+    mkdirSync(path.join(left, "downloads"), { recursive: true })
+    writeFileSync(path.join(left, "downloads", "file"), "x")
+    const theirs = path.join(os.tmpdir(), "playwright-artifacts-Cl3an0")
+    mkdirSync(theirs, { recursive: true })
+
+    try {
+      const status = await runCleanup("start")
+
+      expect(existsSync(left)).toBe(false)
+      expect(existsSync(theirs)).toBe(true)
+      expect(status.removed?.browser).toBeGreaterThanOrEqual(1)
+      expect(describeRemoved({ ...status.removed!, browser: 1 })).toContain(
+        "1 leftover browser folder",
+      )
+    } finally {
+      rmSync(left, { recursive: true, force: true })
+      rmSync(theirs, { recursive: true, force: true })
+    }
+  })
+
+  it("removes the calls the duplicate guard remembers once past its longest window (#115)", async () => {
+    const now = new Date("2026-11-03T12:00:00Z")
+
+    for (const [id, ago] of [
+      ["old", CALL_RECORD_KEEP_MS + 60_000],
+      ["recent", 60_000],
+    ] as const) {
+      await db().callRecord.create({
+        data: {
+          id,
+          vaultId: ctx.vaultId,
+          tokenId,
+          serverId: "s",
+          toolName: "send",
+          argsHash: id,
+          tier: "write",
+          status: "succeeded",
+          startedAt: new Date(now.getTime() - ago),
+        },
+      })
+    }
+
+    const status = await runCleanup("owner", now)
+
+    expect(status.removed?.requests).toBe(1)
+    expect((await db().callRecord.findMany()).map((row) => row.id)).toEqual([
+      "recent",
+    ])
   })
 
   it("runs every part when one fails, and names the one that did", async () => {

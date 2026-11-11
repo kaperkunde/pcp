@@ -67,9 +67,7 @@ export async function writeSessionCookie(
 
 /** Signs the browser in: a session for the vault, its secret in the cookie. */
 export async function signIn(ctx: VaultContext): Promise<void> {
-  const { cookieValue, expiresAt } = await createSession(ctx, {
-    userAgent: (await headers()).get("user-agent"),
-  })
+  const { cookieValue, expiresAt } = await createSession(ctx)
   await writeSessionCookie(cookieValue, expiresAt)
 }
 

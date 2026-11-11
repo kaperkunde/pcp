@@ -1,9 +1,9 @@
 import type { Metadata } from "next"
 
-import { PageColumn } from "@/components/page-column"
-import { PageHeader } from "@/components/page-header"
+import { PageColumn } from "@kaperkunde/ui/page"
+import { PageHeader } from "@kaperkunde/ui/page"
 import { InstructionsUpdate } from "@/components/token-instructions"
-import { Card, CardDescription, CardTitle } from "@/components/ui/card"
+import { Card, CardDescription, CardTitle } from "@kaperkunde/ui/card"
 import { outdatedInstructions } from "@/lib/core/instructions"
 import { requireContext } from "@/lib/server/session"
 

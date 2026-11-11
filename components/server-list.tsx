@@ -3,10 +3,10 @@
 import { useState } from "react"
 
 import { ServerStatusBadge } from "@/components/server-status-badge"
-import { Badge } from "@/components/ui/badge"
+import { Badge } from "@kaperkunde/ui/badge"
 import { IconTile } from "@/components/ui/icon-tile"
-import { List, ListRow } from "@/components/ui/list"
-import { SegmentedControl } from "@/components/ui/segmented-control"
+import { List, ListRow } from "@kaperkunde/ui/list"
+import { SegmentedControl } from "@kaperkunde/ui/segmented-control"
 import type { ServerKind, ServerSummary } from "@/lib/core/servers"
 
 export type ServerListItem = Pick<
@@ -28,7 +28,16 @@ export type ServerListItem = Pick<
 }
 
 type Filter =
-  "all" | "mcp" | "api" | "mail" | "calendar" | "ssh" | "wrapper" | "browser"
+  | "all"
+  | "mcp"
+  | "api"
+  | "mail"
+  | "calendar"
+  | "ssh"
+  | "storage"
+  | "service"
+  | "wrapper"
+  | "browser"
 
 const FILTERS: Array<{
   value: Exclude<Filter, "all">
@@ -40,6 +49,8 @@ const FILTERS: Array<{
   { value: "mail", label: "Mail", kinds: ["jmap", "imap"] },
   { value: "calendar", label: "Calendars", kinds: ["caldav"] },
   { value: "ssh", label: "SSH", kinds: ["ssh"] },
+  { value: "storage", label: "Folders", kinds: ["storage"] },
+  { value: "service", label: "Services", kinds: ["service"] },
   { value: "wrapper", label: "Wrappers", kinds: ["wrapper"] },
   { value: "browser", label: "Browser", kinds: ["browser"] },
 ]

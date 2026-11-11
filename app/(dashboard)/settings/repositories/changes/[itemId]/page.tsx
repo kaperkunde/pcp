@@ -3,11 +3,11 @@ import Link from "next/link"
 import type { Metadata } from "next"
 
 import { AllClearAfter, AnsweredBefore } from "@/components/answer-queue"
-import { PageColumn } from "@/components/page-column"
-import { PageHeader } from "@/components/page-header"
+import { PageColumn } from "@kaperkunde/ui/page"
+import { PageHeader } from "@kaperkunde/ui/page"
 import { ChangeAnswer } from "@/components/repo-forms"
 import { RepoFilesReview } from "@/components/repo-review"
-import { Card } from "@/components/ui/card"
+import { Card } from "@kaperkunde/ui/card"
 import { isPcpError } from "@/lib/core/errors"
 import { REPO_REF } from "@/lib/core/repos/assist"
 import { pendingChange, type ChangeShown } from "@/lib/core/repos/sync"
@@ -159,6 +159,7 @@ export default async function ChangePage({
             itemId={item.id}
             sha={pending.sha}
             hash={pending.hash}
+            flags={review.flags.length}
             conflict={conflict}
           />
         ) : conflict ? (
@@ -166,6 +167,7 @@ export default async function ChangePage({
             itemId={item.id}
             sha={pending.sha}
             hash={pending.hash}
+            flags={review.flags.length}
             conflict
           />
         ) : null}

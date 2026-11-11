@@ -28,7 +28,18 @@ describe("what a program can reach", () => {
     expect(result.kind).toBe("done")
     expect(JSON.parse((result as { returned: string }).returned)).toEqual({
       node: Array(8).fill("undefined"),
-      pcp: ["call", "image", "keep", "read", "step", "tools", "video"],
+      pcp: [
+        "call",
+        "describe",
+        "image",
+        "keep",
+        "read",
+        "sleep",
+        "step",
+        "tools",
+        "video",
+        "withTimeout",
+      ],
       frozen: true,
     })
   })
@@ -451,7 +462,7 @@ describe("how a run ends", () => {
     )
     expect(capped).toMatchObject({ kind: "error", reason: "calls" })
     expect((capped as { message: string }).message).toContain(
-      "at most 220 things",
+      "at most 620 things",
     )
 
     const thrown = await run(`throw new Error("mine")`)

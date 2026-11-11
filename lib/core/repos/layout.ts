@@ -25,14 +25,22 @@ import {
  *   endpoints/<name>/openapi.yaml     PCP holds it, JSON or YAML
  *   endpoints/<name>/pcp.yaml       what PCP adds to it
  *   servers/<name>.yaml             an MCP server
+ *   services/<name>.yaml            a service: a container's definition
+ *                                   (image by digest, ports, variable
+ *                                   names, volumes, health, what it
+ *                                   registers); format 3 and later. An
+ *                                   older PCP knows no services/ folder
+ *                                   and leaves it alone, as any other.
  *
  * Anything else in the repository (a README, a licence, CI) is no item's
  * and is left alone. Names are slugs: lower-case letters, digits and single
- * dashes. Wrappers, flows, endpoints and servers are all servers in a vault,
+ * dashes. Wrappers, flows, endpoints, servers and services are all servers
+ * in a vault,
  * where a slug names one, so one name is one of them only.
  */
 
-export type ItemKind = "skill" | "wrapper" | "flow" | "endpoint" | "server"
+export type ItemKind =
+  "skill" | "wrapper" | "flow" | "endpoint" | "server" | "service"
 
 /** An item in a repository: its kind and its name (a slug). */
 export type ItemRef = { kind: ItemKind; name: string }
@@ -46,6 +54,7 @@ export const ITEM_DIRS: Record<ItemKind, string> = {
   flow: "flows",
   endpoint: "endpoints",
   server: "servers",
+  service: "services",
 }
 
 export const SKILL_MD = "SKILL.md"
@@ -100,16 +109,21 @@ export function itemKey(ref: ItemRef): string {
   return `${ref.kind}:${ref.name}`
 }
 
-/** An item's folder, or a server's one file. */
+/** The kinds whose item is one file, `<dir>/<name>.yaml`, not a folder. */
+export function isOneFileKind(kind: ItemKind): kind is "server" | "service" {
+  return kind === "server" || kind === "service"
+}
+
+/** An item's folder, or a server's or service's one file. */
 export function itemRoot(ref: ItemRef): string {
-  return ref.kind === "server"
-    ? `${ITEM_DIRS.server}/${ref.name}.yaml`
+  return isOneFileKind(ref.kind)
+    ? `${ITEM_DIRS[ref.kind]}/${ref.name}.yaml`
     : `${ITEM_DIRS[ref.kind]}/${ref.name}`
 }
 
 /** The path of one of an item's files, from the repository's root. */
 export function itemPath(ref: ItemRef, file: string): string {
-  return ref.kind === "server" ? itemRoot(ref) : `${itemRoot(ref)}/${file}`
+  return isOneFileKind(ref.kind) ? itemRoot(ref) : `${itemRoot(ref)}/${file}`
 }
 
 /**
@@ -177,10 +191,10 @@ export function itemOfPath(
     return null
   }
 
-  if (kind === "server") {
+  if (isOneFileKind(kind)) {
     if (rest.length > 0 || !second.endsWith(".yaml")) {
       throw invalid(
-        `${path}: an MCP server is one file, ${ITEM_DIRS.server}/<name>.yaml.`,
+        `${path}: ${kind === "server" ? "an MCP server" : "a service"} is one file, ${ITEM_DIRS[kind]}/<name>.yaml.`,
       )
     }
 
@@ -212,7 +226,7 @@ export type ItemShape =
   | { kind: "skill"; name: string; files: string[] }
   | { kind: "wrapper" | "flow"; name: string; tools: string[] }
   | { kind: "endpoint"; name: string; spec: "json" | "yaml" }
-  | { kind: "server"; name: string }
+  | { kind: "server" | "service"; name: string }
 
 /** The file a wrapper tool's program is in. */
 export function programFile(tool: string): string {
@@ -242,6 +256,7 @@ export function itemPaths(shape: ItemShape): string[] {
         (file) => itemPath(ref, file),
       )
     case "server":
+    case "service":
       return [itemRoot(ref)]
   }
 }

@@ -3,8 +3,8 @@
 import Link from "next/link"
 import { useState } from "react"
 
-import { Input, Select } from "@/components/ui/input"
-import { Field } from "@/components/ui/label"
+import { Input, Select } from "@kaperkunde/ui/input"
+import { Field } from "@kaperkunde/ui/label"
 import { NEW_SECRET } from "@/lib/core/constants"
 
 export type SecretOption = { id: string; name: string }

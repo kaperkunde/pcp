@@ -15,7 +15,7 @@ import {
 } from "react"
 
 import { PermissionOutcome } from "@/components/permission-outcome"
-import { StatusDot } from "@/components/ui/badge"
+import { StatusDot } from "@kaperkunde/ui/badge"
 import {
   pendingRequestsAction,
   type PendingRequestsState,

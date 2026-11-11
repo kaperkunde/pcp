@@ -1,6 +1,6 @@
 import { z } from "zod"
 
-import { MAX_HEADER_VALUE } from "./limits"
+import { MAX_FILE_ANSWER_TYPES, MAX_HEADER_VALUE } from "./limits"
 
 /**
  * The call plan stored with each generated tool (mcp_tool.operation): what
@@ -55,6 +55,16 @@ export const callPlanSchema = z.object({
     })
     .nullable(),
   accept: z.string(),
+  /**
+   * Success answers' media types the schema declares as a file (a schema of
+   * `format: binary`), kept as one even when the type reads as text. Any
+   * type that is not JSON or text is a file anyway. Added later: a plan
+   * without it is read as declaring none.
+   */
+  fileAnswers: z
+    .array(z.string().max(200))
+    .max(MAX_FILE_ANSWER_TYPES)
+    .optional(),
 })
 
 export type CallPlan = z.infer<typeof callPlanSchema>

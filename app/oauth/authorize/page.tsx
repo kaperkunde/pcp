@@ -4,7 +4,7 @@ import { redirect } from "next/navigation"
 
 import { AuthShell } from "@/components/auth-shell"
 import { SignInConsent } from "@/components/sign-in-consent"
-import { Card, CardContent } from "@/components/ui/card"
+import { Card, CardContent } from "@kaperkunde/ui/card"
 import {
   checkAuthorizationRequest,
   consentQuery,

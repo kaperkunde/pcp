@@ -1,6 +1,6 @@
 "use client"
 
-import { Checkbox } from "@/components/ui/input"
+import { Checkbox } from "@kaperkunde/ui/input"
 
 /**
  * The "All tokens" box beside one of a token's levels (a tool, a web fetch

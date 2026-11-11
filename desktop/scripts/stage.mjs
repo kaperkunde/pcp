@@ -3,7 +3,11 @@
 // migrations), with better-sqlite3's native binary swapped for one built for
 // Electron's Node. Nothing of the app changes; the wrapper is a second host
 // for the same build. The image's entry point (docker/start.cjs) is not
-// staged: it only picks HOSTNAME, which the wrapper sets itself.
+// staged: it picks HOSTNAME, which the wrapper sets itself; what else it does
+// (the peer stamp) is docker/peer-stamp.cjs, staged with server-entry.cjs.
+//
+// Nor is install.sh, which the image carries only for the Linux installer on
+// the host to read when it updates a container: the app has no installer.
 //
 // Chromium, which the Dockerfile installs for the browser, is not staged:
 // the app looks for one on the machine (PCP_BROWSER_EXECUTABLE, or where
@@ -117,6 +121,17 @@ function copyServer() {
   copy(
     path.join(rootDir, "prisma", "migrations"),
     path.join(serverDir, "prisma", "migrations"),
+  )
+
+  // The Dockerfile's start.cjs stamps each request with the address that
+  // connected; here the entry the app forks does, with the same helper.
+  copy(
+    path.join(rootDir, "docker", "peer-stamp.cjs"),
+    path.join(serverDir, "peer-stamp.cjs"),
+  )
+  copy(
+    path.join(desktopDir, "server-entry.cjs"),
+    path.join(serverDir, "server-entry.cjs"),
   )
 
   assertNoSymlinks(serverDir)

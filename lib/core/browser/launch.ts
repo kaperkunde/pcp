@@ -74,9 +74,11 @@ export function wantedMode(
 export function launchArgs(
   mode: BrowserMode,
   renderer: Renderer = "software",
+  languages: string[] = browserLanguages(),
 ): string[] {
   return [
     "--disable-blink-features=AutomationControlled",
+    ...languageSwitches(languages),
     // The renderer is the virtual display's alone. With a window of its own
     // (the desktop app) Chromium draws with the machine's graphics card by
     // itself, and headless as Chromium decides.
@@ -90,11 +92,62 @@ export function launchArgs(
     "--disable-popup-blocking",
     "--disable-back-forward-cache",
     "--disable-dev-shm-usage",
+    // The contexts are off the record (newBrowserContext), so their cache
+    // is in memory; this keeps the one of Chromium's own profile, in
+    // Playwright's folder under the temporary folder, from holding pages
+    // a crash would leave on disk (#100). No --media-cache-size: Chromium
+    // no longer has it.
+    "--disk-cache-size=1",
     // UDP would go around the proxy: no QUIC, and WebRTC only through it.
     "--disable-quic",
     "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
     "--webrtc-ip-handling-policy=disable_non_proxied_udp",
   ]
+}
+
+/** The locale of the machine PCP runs on, as its own Intl reads it. */
+export function hostLocale(): string {
+  return Intl.DateTimeFormat().resolvedOptions().locale
+}
+
+const FALLBACK_LANGUAGES = ["en-US", "en"]
+
+/**
+ * The browser's languages, from the host's locale: the locale with its
+ * region, then its language alone, as a person's Chrome lists them
+ * ("en-US", "en"). Anything else in the tag (a script, a calendar) is left
+ * out; a tag that does not read as one is American English.
+ */
+export function browserLanguages(locale: string = hostLocale()): string[] {
+  let tag: Intl.Locale
+
+  try {
+    tag = new Intl.Locale(locale)
+  } catch {
+    return [...FALLBACK_LANGUAGES]
+  }
+
+  const { language, region } = tag
+  const first = region ? `${language}-${region}` : language
+
+  if (language === "und" || !/^[a-z]{2,3}(-([A-Z]{2}|\d{3}))?$/.test(first)) {
+    return [...FALLBACK_LANGUAGES]
+  }
+
+  return first === language ? [language] : [first, language]
+}
+
+/**
+ * The languages as Chromium's own setting rather than Playwright's locale
+ * emulation: Playwright's `locale` sends the bare locale as Accept-Language
+ * ("en-US") and navigator.languages with it alone, which no person's Chrome
+ * does. Started with its languages, Chromium sends "en-US,en;q=0.9" and
+ * lists ["en-US", "en"], in every page and worker, in every mode. --lang is
+ * the interface's language (Linux takes it from the environment's LANG as
+ * well, which also sets the pages' Intl locale, as Node's).
+ */
+function languageSwitches(languages: string[]): string[] {
+  return [`--lang=${languages[0]}`, `--accept-lang=${languages.join(",")}`]
 }
 
 /**
@@ -127,6 +180,7 @@ export function launchOptions({
   scratchDir,
   display,
   renderer = "software",
+  languages = browserLanguages(),
   env = process.env,
 }: {
   mode: BrowserMode
@@ -137,6 +191,8 @@ export function launchOptions({
   display: VirtualDisplay | null
   /** How Chromium draws on the virtual display (displayRenderer). */
   renderer?: Renderer
+  /** The browser's languages (browserLanguages, from the host's locale). */
+  languages?: string[]
   env?: Environment
 }): LaunchOptions {
   return {
@@ -154,7 +210,7 @@ export function launchOptions({
     // What tells a page it is being driven: the automation switch and the
     // webdriver flag. The rest of Chromium is as it is.
     ignoreDefaultArgs: ["--enable-automation"],
-    args: launchArgs(mode, renderer),
+    args: launchArgs(mode, renderer, languages),
   }
 }
 
@@ -181,7 +237,8 @@ function platformToken(platform: NodeJS.Platform): string {
 /**
  * What every context starts with, the vault's and web_fetch's alike: a
  * desktop Chrome's user agent without "Headless", a screen larger than the
- * viewport as a desktop's is, the host's locale and time zone.
+ * viewport as a desktop's is, the host's time zone. The host's locale is
+ * Chromium's own languages (launchArgs), not a context's `locale`.
  *
  * With a window (on the virtual display or of its own) the browser keeps
  * its own user agent: overriding it makes Playwright send client hints
@@ -201,7 +258,7 @@ export function contextOptions(
   platform: NodeJS.Platform = process.platform,
 ): BrowserContextOptions {
   const major = browserVersion.split(".")[0] || "141"
-  const { locale, timeZone } = Intl.DateTimeFormat().resolvedOptions()
+  const { timeZone } = Intl.DateTimeFormat().resolvedOptions()
 
   return {
     viewport: { ...VIEWPORT },
@@ -212,9 +269,26 @@ export function contextOptions(
           userAgent: `Mozilla/5.0 (${platformToken(platform)}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${major}.0.0.0 Safari/537.36`,
         }
       : {}),
-    locale,
     timezoneId: timeZone,
     acceptDownloads: false,
+  }
+}
+
+/**
+ * The options of a context whose tabs go out through an exit
+ * (lib/core/exits/): the tabs' own, with a proxy of its own (PCP's, for
+ * that exit, on loopback) in place of the browser's, and no storage state:
+ * it starts from none of the vault's sign-ins, and nothing of it is saved.
+ */
+export function exitContextOptions(
+  browserVersion: string,
+  mode: BrowserMode,
+  proxyPort: number,
+  platform: NodeJS.Platform = process.platform,
+): BrowserContextOptions {
+  return {
+    ...contextOptions(browserVersion, mode, platform),
+    proxy: { server: `http://127.0.0.1:${proxyPort}`, bypass: "<-loopback>" },
   }
 }
 

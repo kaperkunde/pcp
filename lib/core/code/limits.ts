@@ -43,6 +43,17 @@ export const DUPLICATE_RUN_MS = 5 * 60_000
 export const REMEMBERED_RUN_MS = 24 * 60 * 60_000
 /** Runs remembered at most, the oldest ended ones forgotten first. */
 export const MAX_REMEMBERED_RUNS = 2_000
+/**
+ * The longest one pcp.sleep waits. Every wait is PCP's, in the bridge
+ * (run.ts), and counts against RUN_TIMEOUT_MS: a sleep longer than what is
+ * left of the run is refused rather than cut off by the run's end.
+ */
+export const MAX_SLEEP_MS = 60_000
+/**
+ * Waits one run may start: pcp.sleep's and pcp.withTimeout's together, so a
+ * polling loop has room without a program that waits for nothing.
+ */
+export const MAX_WAITS_PER_RUN = 200
 /** Time the program itself spends computing, waiting on calls not counted. */
 export const RUN_CPU_MS = 15_000
 /** How deep the program's own calls may nest. */
@@ -78,6 +89,13 @@ export const MAX_VIDEO_FRAMES = 30
 export const DEFAULT_VIDEO_FRAMES = 5
 /** A frame's width when the program names none, in pixels. */
 export const DEFAULT_FRAME_WIDTH = 1280
+/**
+ * The longest side of a picture view_image shows (view-image.ts), in
+ * pixels, unless max_width asks for less: what vision models take in
+ * without scaling it down themselves. It is made smaller still when it does
+ * not fit in an answer (browser/screenshot.ts INLINE_IMAGE_BYTES).
+ */
+export const VIEW_IMAGE_SIDE = 1568
 /** Random bytes one crypto.getRandomValues fills, as the web allows. */
 export const MAX_RANDOM_BYTES = 65_536
 /** What the program prints, in characters; the rest is dropped and counted. */

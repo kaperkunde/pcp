@@ -81,7 +81,7 @@ test("an assistant plans a day and keeps reminders through the gateway", async (
   await allowAllTools(page, TOKEN_NAME, SLUG)
 
   const call = (tool: string, args: Record<string, unknown> = {}) =>
-    callTool(baseURL!, token, "call_tool", {
+    callTool(baseURL!, token, "execute_destructive", {
       server: SLUG,
       tool,
       arguments: args,

@@ -8,9 +8,12 @@ import {
 import type { VaultContext } from "./context"
 import { asBytes, decryptString, encryptString } from "./crypto"
 import { db } from "./db"
-import { invalid, notFound, PcpError } from "./errors"
+import { invalid, isPcpError, notFound, PcpError } from "./errors"
 import { instructionsBlock } from "./instructions-block"
 import { newId } from "./ids"
+import { openRequestFor, type OpenRequest } from "./permission-fold"
+import { canonicalJson } from "./permission-rules"
+import { TOKEN_NAME_SELECT, tokenName } from "./token-names"
 
 /**
  * Memories: notes an assistant keeps for the owner through the gateway's
@@ -109,9 +112,13 @@ export type MemoryChangeAsk = {
   always?: boolean
 }
 
+/**
+ * `fold`: the token's own request still waiting on this memory, which the
+ * change was made on top of and replaces (permissions.ts withPermission).
+ */
 export type MemoryAsk =
-  | { kind: "memory_share"; input: MemoryShareAsk }
-  | { kind: "memory_change"; input: MemoryChangeAsk }
+  | { kind: "memory_share"; input: MemoryShareAsk; fold?: string }
+  | { kind: "memory_change"; input: MemoryChangeAsk; fold?: string }
 
 /** What a command did, or what it needs the owner to agree to first. */
 export type MemoryOutcome = { text: string } | { ask: MemoryAsk; lead: string }
@@ -173,7 +180,7 @@ export const MEMORY_MIGRATION_STEPS = [
   "1. Look for what this client keeps for the owner outside PCP: its own memory or saved preferences, a memory snapshot in your context, the owner's personal instruction files (a user-level CLAUDE.md or the like), skills of their own. Leave what belongs to a project, such as a repository's CLAUDE.md or skills, where it is. If you can see none, call migration_done and stop here.",
   "2. Tell the owner briefly what you found and ask whether to move it into PCP. Move nothing until they say yes; if they say no, call migration_done.",
   `3. Move each with the memory tool, keeping its structure: a memory per file or topic under ${MEMORY_ROOT}/…, what every assistant should read under ${MEMORY_ROOT}/${SHARED}/… (which asks the owner), a skill as /skills/<name>/SKILL.md (which asks the owner). Never a secret or a password.`,
-  "4. Read each one back with read_memory and check it says what the original did.",
+  "4. Read each one back (search with its path as ref) and check it says what the original did.",
   "5. Ask the owner again before deleting the originals, and delete nothing without that second yes.",
   "6. Then delete the client's copies if this client lets you; if it does not, tell the owner exactly what to remove, and where.",
   `7. Call memory with command "migration_done": it turns this off for this token, and only the owner can turn it on again.`,
@@ -301,7 +308,14 @@ function seal(ctx: VaultContext, id: string, body: MemoryBody) {
   )
 }
 
-type Row = Memory & { token: { name: string; revokedAt: Date | null } | null }
+type Row = Memory & {
+  token: {
+    id: string
+    plainName: string
+    sealedName: Uint8Array | null
+    revokedAt: Date | null
+  } | null
+}
 
 function unseal(ctx: VaultContext, row: Row): Entry {
   const body = JSON.parse(
@@ -313,7 +327,7 @@ function unseal(ctx: VaultContext, row: Row): Entry {
     path: body.path,
     text: body.text,
     tokenId: row.tokenId,
-    tokenName: row.token?.name ?? null,
+    tokenName: row.token ? tokenName(ctx, row.token) : null,
     tokenRevoked: row.token?.revokedAt != null,
     author: row.author === "owner" ? "owner" : "assistant",
     visibility: row.visibility === "shared" ? "shared" : "private",
@@ -334,7 +348,7 @@ async function load(ctx: VaultContext, tokenId?: string): Promise<Entry[]> {
           }
         : {}),
     },
-    include: { token: { select: { name: true, revokedAt: true } } },
+    include: { token: { select: { ...TOKEN_NAME_SELECT, revokedAt: true } } },
   })
 
   return rows
@@ -1052,6 +1066,25 @@ export async function runMemoryCommand(
       return { text: search(entries, scope, args) }
 
     case "create":
+    case "str_replace":
+    case "insert":
+    case "delete":
+    case "rename":
+      return writeMemory(scope, entries, args)
+
+    default:
+      throw invalid("Unknown command.")
+  }
+}
+
+/** The commands that write; what they do to a shared memory asks first. */
+async function write(
+  scope: MemoryScope,
+  entries: Entry[],
+  args: MemoryCommand,
+): Promise<MemoryOutcome> {
+  switch (args.command) {
+    case "create":
       return create(scope, entries, args)
 
     case "str_replace": {
@@ -1115,6 +1148,232 @@ export async function runMemoryCommand(
 }
 
 /**
+ * The token's own request still waiting on a shared memory: a change to
+ * one that exists (while the memory is still as that request was made on,
+ * and the request keeps it), or the sharing of a new one at that path.
+ */
+type MemoryFold =
+  | { kind: "memory_change"; open: OpenRequest<MemoryChangeAsk>; entry: Entry }
+  | { kind: "memory_share"; open: OpenRequest<MemoryShareAsk>; path: string }
+
+async function openFold(
+  scope: MemoryScope,
+  entries: Entry[],
+  args: MemoryCommand,
+): Promise<MemoryFold | null> {
+  let target: { visibility: MemoryVisibility; path: string }
+
+  try {
+    target = fileTarget(args.path ?? "")
+  } catch {
+    return null
+  }
+
+  if (target.visibility !== "shared") {
+    return null
+  }
+
+  const entry = entries.find((item) => same(item, "shared", target.path))
+
+  if (entry) {
+    const open = await openRequestFor<MemoryChangeAsk>(
+      scope.ctx,
+      scope.tokenId,
+      "memory_change",
+      `memory:${entry.id}`,
+    )
+
+    return open &&
+      open.args.memoryId === entry.id &&
+      open.args.after &&
+      open.args.before.path === entry.path &&
+      open.args.before.text === entry.text
+      ? { kind: "memory_change", open, entry }
+      : null
+  }
+
+  const open = await openRequestFor<MemoryShareAsk>(
+    scope.ctx,
+    scope.tokenId,
+    "memory_share",
+    `memory:${target.path}`,
+  )
+
+  return open && !open.args.memoryId && open.args.path === target.path
+    ? { kind: "memory_share", open, path: target.path }
+    : null
+}
+
+/**
+ * The memory as the waiting request would make it, in place of what is
+ * stored (or, for one not shared yet, beside the rest), to change further.
+ */
+function foldedEntries(entries: Entry[], fold: MemoryFold): Entry[] {
+  if (fold.kind === "memory_change") {
+    const after = fold.open.args.after!
+
+    return entries.map((item) =>
+      item === fold.entry
+        ? { ...item, path: after.path, text: after.text }
+        : item,
+    )
+  }
+
+  const now = new Date()
+
+  return [
+    ...entries,
+    {
+      id: "",
+      tokenId: null,
+      tokenName: null,
+      tokenRevoked: false,
+      author: "assistant",
+      visibility: "shared",
+      path: fold.path,
+      text: fold.open.args.text,
+      always: false,
+      createdAt: now,
+      updatedAt: now,
+    },
+  ]
+}
+
+/**
+ * What a change made on top of a waiting request asks: everything against
+ * the memory as it is (`before`), into that request.
+ */
+function foldOutcome(fold: MemoryFold, outcome: MemoryOutcome): MemoryOutcome {
+  if ("text" in outcome) {
+    return outcome.text.startsWith("Nothing changed")
+      ? {
+          text: `Nothing changed: your open request ${fold.open.id} already makes the memory that.`,
+        }
+      : outcome
+  }
+
+  if (fold.kind === "memory_change") {
+    if (outcome.ask.kind !== "memory_change") {
+      return outcome
+    }
+
+    return {
+      ask: {
+        kind: "memory_change",
+        input: { ...outcome.ask.input, before: fold.open.args.before },
+        fold: fold.open.id,
+      },
+      lead: outcome.lead,
+    }
+  }
+
+  // The memory is not shared yet: still a request to share it, with the
+  // text (and path) the change makes.
+  const after =
+    outcome.ask.kind === "memory_change"
+      ? outcome.ask.input.after
+      : outcome.ask.input
+
+  if (!after) {
+    throw new PcpError(
+      "conflict",
+      `${toolPath("shared", fold.path)} is not shared yet: your open request ${fold.open.id} proposes it. Take that back with withdraw_request instead.`,
+    )
+  }
+
+  const always =
+    fold.open.args.always === true ||
+    (outcome.ask.kind === "memory_share" && outcome.ask.input.always === true)
+
+  return {
+    ask: {
+      kind: "memory_share",
+      input: {
+        path: after.path,
+        text: after.text,
+        ...(always ? { always: true } : {}),
+      },
+      fold: fold.open.id,
+    },
+    lead:
+      outcome.ask.kind === "memory_share"
+        ? outcome.lead
+        : `Sharing a memory asks the owner. ${ASKS_FIRST}`,
+  }
+}
+
+/**
+ * A write. While the token has a request waiting on the shared memory it
+ * names, the change is made on top of what that request would make and
+ * folds into it (one request, showing the memory as it is and as every
+ * change together would leave it), so two edits in one turn are not two
+ * requests of which the second would fail. The same change asked again is
+ * the request it made.
+ */
+async function writeMemory(
+  scope: MemoryScope,
+  entries: Entry[],
+  args: MemoryCommand,
+): Promise<MemoryOutcome> {
+  const fold = await openFold(scope, entries, args)
+
+  if (!fold) {
+    return write(scope, entries, args)
+  }
+
+  // Asked again as it was: only these read without writing, since the path
+  // is shared (or not there at all).
+  if (
+    args.command === "create" ||
+    args.command === "str_replace" ||
+    args.command === "insert"
+  ) {
+    const again = await write(scope, entries, args).catch(() => null)
+
+    if (
+      again &&
+      "ask" in again &&
+      again.ask.kind === fold.kind &&
+      canonicalJson(again.ask.input) === canonicalJson(fold.open.args)
+    ) {
+      return again
+    }
+  }
+
+  // Asking for every conversation goes with creating; on a memory that is
+  // still to be shared it goes with the request.
+  const folded =
+    fold.kind === "memory_share" && args.command === "create" && args.every
+      ? { ...args, every: undefined }
+      : args
+
+  try {
+    const outcome = foldOutcome(
+      fold,
+      await write(scope, foldedEntries(entries, fold), folded),
+    )
+
+    return folded !== args && "ask" in outcome
+      ? {
+          ...outcome,
+          ask: {
+            ...outcome.ask,
+            input: { ...outcome.ask.input, always: true },
+          } as MemoryAsk,
+        }
+      : outcome
+  } catch (error) {
+    if (isPcpError(error) && error.code === "validation") {
+      throw invalid(
+        `${error.message} Your open request ${fold.open.id} holds your earlier changes to this memory, and this one applies on top of them.`,
+      )
+    }
+
+    throw error
+  }
+}
+
+/**
  * The owner's answer to a memory request, from permissions.ts once the row
  * is claimed. Re-reads everything: what is written is what the owner read,
  * and a memory that changed since they were asked is left as it is.
@@ -1150,15 +1409,17 @@ export async function decideMemoryAsk(
 
   const entry = entries.find((item) => item.id === memoryId)
 
-  if (
-    !entry ||
-    entry.visibility !== "shared" ||
-    entry.path !== before.path ||
-    entry.text !== before.text
-  ) {
+  if (!entry || entry.visibility !== "shared") {
     return {
       status: "failed",
-      text: "The memory changed after the owner was asked, so nothing was written. Read it again and ask anew.",
+      text: `${toolPath("shared", before.path)} was deleted or stopped being shared after the owner was asked, so nothing was written.`,
+    }
+  }
+
+  if (entry.path !== before.path || entry.text !== before.text) {
+    return {
+      status: "failed",
+      text: `${toolPath("shared", before.path)} changed after the owner was asked (another change to it was saved first), so nothing was written. View ${toolPath("shared", entry.path)} again and propose your change anew on the text it has now.`,
     }
   }
 
@@ -1345,7 +1606,7 @@ export async function instructionMemories(
         { visibility: "private", tokenId, always: true },
       ],
     },
-    include: { token: { select: { name: true, revokedAt: true } } },
+    include: { token: { select: { ...TOKEN_NAME_SELECT, revokedAt: true } } },
   })
   const entries = rows
     .map((row) => unseal(ctx, row))
@@ -1594,13 +1855,13 @@ export async function setMemoriesAccess(
       (token.expiresAt !== null && token.expiresAt.getTime() < Date.now())
     ) {
       throw invalid(
-        `The token ${token.name} is revoked or expired, so it reads nothing.`,
+        `The token ${tokenName(ctx, token)} is revoked or expired, so it reads nothing.`,
       )
     }
 
     if (!token.keepMemories) {
       throw invalid(
-        `The token ${token.name} cannot keep memories, so it would never read these. Turn that on for the token first.`,
+        `The token ${tokenName(ctx, token)} cannot keep memories, so it would never read these. Turn that on for the token first.`,
       )
     }
   }

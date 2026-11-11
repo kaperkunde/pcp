@@ -1,21 +1,40 @@
-import { mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs"
+import {
+  appendFileSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs"
 import path from "node:path"
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
 
+import { randomBytes } from "node:crypto"
+
 import { logDir } from "./data-dir"
 import { LOG_SCAN_LINES } from "./log-limits"
 import {
+  appendKeylessLog,
   appendRequestLog,
+  deleteRequestLog,
+  logUsage,
+  noteExitUsed,
   noteOwnerAsked,
   pruneRequestLog,
   readRequestLog,
+  sealRequestLogDay,
+  unsealedLogDays,
   withLogNote,
   type RequestLogEntry,
 } from "./request-log"
 import { scratchDatabase } from "./test-db"
 
 let cleanup: () => Promise<void>
+
+/** The vault's id and key, as the Log page reads with. */
+const reader = { vaultId: "v", dek: randomBytes(32) }
 
 beforeEach(async () => {
   ;({ cleanup } = await scratchDatabase())
@@ -50,6 +69,7 @@ describe("appendRequestLog", () => {
   it("cuts the names a caller chose, so a request cannot grow the log at will", async () => {
     await appendRequestLog({
       vaultId: "v",
+      dek: reader.dek,
       tokenId: "t",
       tool: "get_endpoint",
       server: "s".repeat(5000),
@@ -58,16 +78,10 @@ describe("appendRequestLog", () => {
       ms: 1,
     })
 
-    const file = readdirSync(logDir())[0]!
-    const entry = JSON.parse(
-      readFileSync(path.join(logDir(), file), "utf8"),
-    ) as {
-      server: string
-      upstreamTool: string
-    }
+    const [entry] = (await readRequestLog(reader)).entries
 
-    expect(entry.server).toHaveLength(80)
-    expect(entry.upstreamTool).toHaveLength(80)
+    expect(entry!.server).toHaveLength(80)
+    expect(entry!.upstreamTool).toHaveLength(80)
   })
 })
 
@@ -92,20 +106,20 @@ describe("a call's note", () => {
 
 describe("readRequestLog", () => {
   it("reads a vault's own lines, newest first across days, and skips what is not a line", async () => {
-    day("2026-09-30", [line({ tool: "search_tools" })])
+    day("2026-09-30", [line({ tool: "search" })])
     day("2026-10-01", [
-      line({ tool: "describe_tool" }),
+      line({ tool: "describe" }),
       line({ tool: "web_fetch", vaultId: "someone-else" }),
       "{not json",
       line({ tool: "call_tool", server: "gmail", upstreamTool: "send" }),
     ])
 
-    const { entries, next } = await readRequestLog("v")
+    const { entries, next } = await readRequestLog(reader)
 
     expect(entries.map((entry) => entry.tool)).toEqual([
       "call_tool",
-      "describe_tool",
-      "search_tools",
+      "describe",
+      "search",
     ])
     expect(entries[0]).toMatchObject({
       server: "gmail",
@@ -118,19 +132,19 @@ describe("readRequestLog", () => {
 
   it("filters by token, outcome and tool or server", async () => {
     day("2026-10-01", [
-      line({ tokenId: "a", tool: "search_tools" }),
+      line({ tokenId: "a", tool: "search" }),
       line({ tokenId: "b", tool: "call_tool", server: "Gmail", ok: false }),
       line({ tokenId: "a", tool: "call_tool", asked: true, request: "r1" }),
     ])
 
     const tools = async (query: Parameters<typeof readRequestLog>[1]) =>
-      (await readRequestLog("v", query)).entries.map(
+      (await readRequestLog(reader, query)).entries.map(
         (entry) => `${entry.tokenId}:${entry.tool}:${entry.outcome}`,
       )
 
     expect(await tools({ tokenId: "a" })).toEqual([
       "a:call_tool:asked",
-      "a:search_tools:ok",
+      "a:search:ok",
     ])
     expect(await tools({ outcome: "error" })).toEqual(["b:call_tool:error"])
     expect(await tools({ outcome: "asked" })).toEqual(["a:call_tool:asked"])
@@ -141,7 +155,7 @@ describe("readRequestLog", () => {
     day("2026-09-30", [line({ tool: "one" }), line({ tool: "two" })])
     day("2026-10-01", [line({ tool: "three" }), line({ tool: "four" })])
 
-    const first = await readRequestLog("v", { limit: 3 })
+    const first = await readRequestLog(reader, { limit: 3 })
     expect(first.entries.map((entry) => entry.tool)).toEqual([
       "four",
       "three",
@@ -156,7 +170,10 @@ describe("readRequestLog", () => {
       line({ tool: "five" }),
     ])
 
-    const second = await readRequestLog("v", { limit: 3, cursor: first.next! })
+    const second = await readRequestLog(reader, {
+      limit: 3,
+      cursor: first.next!,
+    })
     expect(second.entries.map((entry) => entry.tool)).toEqual(["one"])
     expect(second.next).toBeNull()
   })
@@ -169,7 +186,7 @@ describe("readRequestLog", () => {
       ),
     )
 
-    const page = await readRequestLog("v")
+    const page = await readRequestLog(reader)
     expect(page.entries).toEqual([])
     expect(page.next).toBe("2026-10-01:5")
   })
@@ -177,7 +194,7 @@ describe("readRequestLog", () => {
   it("ignores a cursor that is not one", async () => {
     day("2026-10-01", [line({ tool: "one" })])
 
-    const page = await readRequestLog("v", { cursor: "../../etc:1" })
+    const page = await readRequestLog(reader, { cursor: "../../etc:1" })
     expect(page.entries.map((entry) => entry.tool)).toEqual(["one"])
   })
 })
@@ -209,5 +226,300 @@ describe("pruneRequestLog", () => {
 
     expect(await pruneRequestLog(1, new Date("2026-10-06T00:00:01Z"))).toBe(1)
     expect(readdirSync(logDir())).toEqual(["mcp-2026-10-06.jsonl"])
+  })
+})
+
+describe("noteExitUsed", () => {
+  it("names the exit on the call's line, or on a line of its own outside a call", async () => {
+    const note = await withLogNote(async (current) => {
+      noteExitUsed({
+        vaultId: "v",
+        dek: reader.dek,
+        tokenId: "t",
+        tool: "web_fetch",
+        exit: "us-vps",
+      })
+      return current
+    })
+    expect(note).toEqual({ exit: "us-vps" })
+
+    noteExitUsed({
+      vaultId: "v",
+      dek: reader.dek,
+      tokenId: "t",
+      tool: "tabs",
+      exit: "eu-vps",
+    })
+    await expect
+      .poll(async () => (await readRequestLog(reader, {})).entries)
+      .toMatchObject([{ tool: "tabs", exit: "eu-vps", ok: true }])
+  })
+})
+
+describe("a line's names", () => {
+  it("are sealed under the vault's key: the file holds none of them", async () => {
+    await appendRequestLog({
+      vaultId: "v",
+      dek: reader.dek,
+      tokenId: "t",
+      tool: "execute_write",
+      server: "SERVER-SLUG-MARKER",
+      upstreamTool: "TOOL-NAME-MARKER",
+      ok: false,
+      ms: 4,
+      error: "ERROR-MARKER failed",
+      secret: "SECRET-NAME-MARKER",
+      origin: "https://origin-marker.example",
+      exit: "EXIT-MARKER",
+      asked: true,
+      request: "req-1",
+    })
+
+    const raw = readdirSync(logDir())
+      .map((name) => readFileSync(path.join(logDir(), name), "utf8"))
+      .join("")
+    for (const marker of [
+      "execute_write",
+      "SERVER-SLUG-MARKER",
+      "TOOL-NAME-MARKER",
+      "ERROR-MARKER",
+      "SECRET-NAME-MARKER",
+      "origin-marker",
+      "EXIT-MARKER",
+    ]) {
+      expect(raw).not.toContain(marker)
+    }
+    // What paging and the cleanup need stays plain.
+    expect(JSON.parse(raw)).toMatchObject({
+      vaultId: "v",
+      tokenId: "t",
+      ok: false,
+      asked: true,
+      request: "req-1",
+    })
+
+    expect((await readRequestLog(reader)).entries).toMatchObject([
+      {
+        tool: "execute_write",
+        server: "SERVER-SLUG-MARKER",
+        upstreamTool: "TOOL-NAME-MARKER",
+        error: "ERROR-MARKER failed",
+        secret: "SECRET-NAME-MARKER",
+        origin: "https://origin-marker.example",
+        exit: "EXIT-MARKER",
+        outcome: "asked",
+      },
+    ])
+    // Searched by name once opened.
+    expect(
+      (await readRequestLog(reader, { text: "tool-name-marker" })).entries,
+    ).toHaveLength(1)
+  })
+
+  it("open only under the vault's key, and only on their own line", async () => {
+    await appendRequestLog({
+      vaultId: "v",
+      dek: reader.dek,
+      tokenId: "t",
+      tool: "search",
+      ok: true,
+      ms: 1,
+    })
+    await appendRequestLog({
+      vaultId: "v",
+      dek: reader.dek,
+      tokenId: "t2",
+      tool: "execute_read",
+      ok: true,
+      ms: 1,
+    })
+
+    expect(
+      (await readRequestLog({ vaultId: "v", dek: randomBytes(32) })).entries,
+    ).toEqual([])
+
+    // A sealed part moved onto the other line opens on neither.
+    const [name] = readdirSync(logDir())
+    const file = path.join(logDir(), name!)
+    const [first, second] = readFileSync(file, "utf8")
+      .trim()
+      .split("\n")
+      .map((text) => JSON.parse(text) as Record<string, unknown>)
+    writeFileSync(
+      file,
+      `${JSON.stringify({ ...second, sealed: first!.sealed })}\n`,
+    )
+    expect((await readRequestLog(reader)).entries).toEqual([])
+  })
+
+  it("from before are read as they are, and sealed where they are", async () => {
+    day("2026-10-01", [
+      line({ tool: "describe", server: "OLD-SLUG-MARKER" }),
+      line({ tool: "web_fetch", vaultId: "someone-else" }),
+      line({ tool: "search" }),
+    ])
+    const before = (await readRequestLog(reader)).entries
+
+    expect(await unsealedLogDays("v")).toEqual(["2026-10-01"])
+    expect(await sealRequestLogDay(reader, "2026-10-01")).toBe(true)
+    expect(await unsealedLogDays("v")).toEqual([])
+    expect(await sealRequestLogDay(reader, "2026-10-01")).toBe(false)
+
+    const raw = readFileSync(
+      path.join(logDir(), "mcp-2026-10-01.jsonl"),
+      "utf8",
+    )
+    expect(raw).not.toContain("OLD-SLUG-MARKER")
+    // Another vault's line is left as it is.
+    expect(raw).toContain("someone-else")
+    // Each line where it was, so the Log page's places hold.
+    expect((await readRequestLog(reader)).entries).toEqual(before)
+  })
+
+  it("of a link's use, which holds no key, are PCP's own and stay plain", async () => {
+    await appendKeylessLog({
+      vaultId: "v",
+      tokenId: "t",
+      tool: "file_link/download",
+      ok: true,
+      ms: 2,
+    })
+
+    expect((await readRequestLog(reader)).entries).toMatchObject([
+      { tool: "file_link/download", ok: true },
+    ])
+    expect(await unsealedLogDays("v")).toEqual([])
+  })
+
+  it("leave the cleanup nothing to open: it deletes old days by their names", async () => {
+    await appendRequestLog({
+      vaultId: "v",
+      dek: reader.dek,
+      tokenId: "t",
+      tool: "search",
+      ok: true,
+      ms: 1,
+    })
+    day("2020-01-01", [line({})])
+
+    expect(await pruneRequestLog(7)).toBe(1)
+    expect((await readRequestLog(reader)).entries).toHaveLength(1)
+  })
+})
+
+describe("a line's outcome", () => {
+  it("is bound to its sealed names: one changed in the file reads as no line", async () => {
+    await appendRequestLog({
+      vaultId: "v",
+      dek: reader.dek,
+      tokenId: "t",
+      tool: "execute_write",
+      ok: false,
+      ms: 4,
+      asked: true,
+      request: "req-1",
+    })
+    const [name] = readdirSync(logDir())
+    const file = path.join(logDir(), name!)
+    const written = JSON.parse(readFileSync(file, "utf8")) as Record<
+      string,
+      unknown
+    >
+
+    for (const changed of [
+      { ok: true },
+      { asked: undefined },
+      { request: "req-2" },
+      { ms: 1 },
+      { rerun: true },
+      { v: undefined },
+    ]) {
+      writeFileSync(file, `${JSON.stringify({ ...written, ...changed })}\n`)
+      expect((await readRequestLog(reader)).entries).toEqual([])
+    }
+
+    writeFileSync(file, `${JSON.stringify(written)}\n`)
+    expect((await readRequestLog(reader)).entries).toMatchObject([
+      { tool: "execute_write", outcome: "asked", request: "req-1", ms: 4 },
+    ])
+  })
+})
+
+describe("writing a day again", () => {
+  it("carries over lines another process appended meanwhile", async () => {
+    day("2026-10-01", [line({ tool: "describe", server: "OLD-MARKER" })])
+    const appended = line({ tool: "search", tokenId: "other-process" })
+
+    expect(
+      await sealRequestLogDay(reader, "2026-10-01", {
+        written: async () => {
+          appendFileSync(
+            path.join(logDir(), "mcp-2026-10-01.jsonl"),
+            `${appended}\n`,
+          )
+        },
+      }),
+    ).toBe(true)
+
+    const raw = readFileSync(
+      path.join(logDir(), "mcp-2026-10-01.jsonl"),
+      "utf8",
+    )
+    expect(raw).not.toContain("OLD-MARKER")
+    expect(raw).toContain("other-process")
+    expect(
+      (await readRequestLog(reader)).entries.map((entry) => entry.tool),
+    ).toEqual(["search", "describe"])
+    expect(readdirSync(logDir()).filter((n) => n.endsWith(".part"))).toEqual([])
+  })
+
+  it("does not bring back a day deleted meanwhile", async () => {
+    day("2026-10-01", [line({ tool: "describe" })])
+
+    expect(
+      await sealRequestLogDay(reader, "2026-10-01", {
+        written: async () => {
+          rmSync(path.join(logDir(), "mcp-2026-10-01.jsonl"))
+        },
+      }),
+    ).toBe(false)
+    expect(readdirSync(logDir())).toEqual([])
+  })
+
+  it("leaves out the days the cleanup is about to delete", async () => {
+    day("2026-10-01", [line({ tool: "describe" })])
+    day("2026-10-05", [line({ tool: "describe" })])
+    day("2026-10-06", [line({ tool: "describe" })])
+
+    expect(
+      await unsealedLogDays("v", {
+        keepDays: 2,
+        now: new Date("2026-10-06T10:00:00Z"),
+      }),
+    ).toEqual(["2026-10-06"])
+    expect(await unsealedLogDays("v")).toEqual([
+      "2026-10-01",
+      "2026-10-05",
+      "2026-10-06",
+    ])
+  })
+
+  it("leaves no part a crash left behind past the cleanup or a deleted vault", async () => {
+    day("2026-10-06", [line({})])
+    const part = (hex: string) =>
+      path.join(logDir(), `mcp-2026-10-06.jsonl.${hex}.part`)
+
+    writeFileSync(part("a1b2c3"), line({ server: "PLAIN-MARKER" }))
+    await pruneRequestLog(7, new Date("2026-10-06T10:00:00Z"))
+    expect(existsSync(part("a1b2c3"))).toBe(false)
+
+    writeFileSync(part("d4e5f6"), line({}))
+    await logUsage()
+    expect(existsSync(part("d4e5f6"))).toBe(false)
+
+    writeFileSync(part("0a0b0c"), line({}))
+    writeFileSync(path.join(logDir(), "mine.part"), "not the log's")
+    await deleteRequestLog()
+    expect(readdirSync(logDir())).toEqual(["mine.part"])
   })
 })

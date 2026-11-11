@@ -7,7 +7,9 @@ import {
   ListChecks,
   Server,
   SlidersHorizontal,
+  SquareCode,
   StickyNote,
+  Timer,
   TriangleAlert,
 } from "lucide-react"
 import type { Metadata } from "next"
@@ -18,19 +20,22 @@ import { AccessReview } from "@/components/access-review"
 import { AllClearAfter, AnsweredBefore } from "@/components/answer-queue"
 import { RelativeDate } from "@/components/local-date"
 import { MemoryReview } from "@/components/memory-review"
-import { PageHeader } from "@/components/page-header"
-import { PageColumn } from "@/components/page-column"
+import { PageHeader } from "@kaperkunde/ui/page"
+import { PageColumn } from "@kaperkunde/ui/page"
+import { PermissionConflicts } from "@/components/permission-conflicts"
 import { PermissionDecision } from "@/components/permission-decision"
+import { PermissionFiles } from "@/components/permission-files"
 import { PermissionLines } from "@/components/permission-lines"
 import { PermissionOutcome } from "@/components/permission-outcome"
 import { RepoReview } from "@/components/repo-review"
-import { ButtonLink, buttonVariants } from "@/components/ui/button"
-import { Card } from "@/components/ui/card"
+import { ButtonLink, buttonVariants } from "@kaperkunde/ui/button"
+import { Card } from "@kaperkunde/ui/card"
 import { IconTile } from "@/components/ui/icon-tile"
 import { ShownInFull } from "@/components/shown-in-full"
 import { SkillReview } from "@/components/skill-review"
 import { WrapperReview } from "@/components/wrapper-review"
 import { tabFor } from "@/lib/core/browser/owner"
+import { listOwnToolTiers } from "@/lib/core/own-tool-tiers"
 import { getAccessProposal, getPermissionView } from "@/lib/core/permissions"
 import type { PermissionView } from "@/lib/core/permissions"
 import type { ServerKind } from "@/lib/core/servers"
@@ -57,9 +62,11 @@ const STATUS: Record<string, string> = {
 
 /** The same, for tool levels an assistant proposed. */
 const ACCESS_STATUS: Record<string, string> = {
-  executed: "You saved these levels.",
+  // The same words the save itself shows (access-review.tsx): the page
+  // re-renders as answered right after, and the two must not differ.
+  executed: "You saved these levels and tiers.",
   running: "Saving now.",
-  failed: "You saved, but the levels were not written.",
+  failed: "You saved, but the levels and tiers were not written.",
   declined: "You said no, so no tool's level changed.",
   withdrawn: "Withdrawn by the assistant, so no tool's level changed.",
   expired: "This expired without an answer, so no tool's level changed.",
@@ -129,10 +136,15 @@ export default async function PermissionPage({
     redirect(`/browser?tab=${encodeURIComponent(view.browserTabId)}`)
   }
 
-  const proposal = access && pending ? await getAccessProposal(ctx, id) : null
-  // A long list of levels, a wrapper's programs or a skill want room.
+  const proposal =
+    access && pending
+      ? await getAccessProposal(ctx, id, await listOwnToolTiers(ctx))
+      : null
+  // A long list of levels (an access request's, or a new server's beside
+  // its approval), a wrapper's programs or a skill want room.
   const roomy = Boolean(
     (access && pending) ||
+    view.proposedAccess !== null ||
     view.wrapper !== null ||
     view.skill !== null ||
     view.repo !== null,
@@ -188,8 +200,17 @@ export default async function PermissionPage({
         ) : (
           <PermissionLines lines={view.lines} />
         )}
+        {view.files.length > 0 ? (
+          <PermissionFiles
+            requestId={view.id}
+            files={view.files}
+            pending={pending}
+          />
+        ) : null}
         {view.skill ? <SkillReview skill={view.skill} /> : null}
-        {view.full ? <ShownInFull parts={view.full} /> : null}
+        {view.full ? (
+          <ShownInFull parts={view.full} open={view.kind === "script_use"} />
+        ) : null}
         {view.warning && view.memory ? (
           // The text is what to check; the warning says what to look for,
           // under it, without drawing the eye away from it.
@@ -216,9 +237,10 @@ export default async function PermissionPage({
         {pending && proposal ? (
           <>
             <p className="text-muted-foreground">
-              The assistant&apos;s levels are filled in below and every change
-              is marked. Change any of them, then save; you can change them
-              again on the token&apos;s page.
+              The assistant&apos;s levels and tiers are filled in below and
+              every change is marked. Change any of them, then save; you can
+              change levels again on the token&apos;s page, and tiers on each
+              server&apos;s.
               {proposal.gone > 0
                 ? ` ${proposal.gone} of the proposed tools are no longer on this token and are left out.`
                 : null}
@@ -227,10 +249,15 @@ export default async function PermissionPage({
               id={view.id}
               servers={proposal.servers}
               proposed={proposal.proposed}
+              tiers={proposal.tiers}
+              proposedTiers={proposal.proposedTiers}
+              ownTools={proposal.ownTools}
+              sharedWith={proposal.sharedWith}
             />
           </>
         ) : pending ? (
           <>
+            <PermissionConflicts conflicts={view.conflicts} />
             <PendingNote view={view} />
             {view.shareHref ? (
               // A push is agreed to on its review, after every file.
@@ -242,6 +269,7 @@ export default async function PermissionPage({
             ) : null}
             <PermissionDecision
               id={view.id}
+              revision={view.revision}
               decisions={view.decisions}
               secret={view.secretToEnter}
               allowForFixed={
@@ -252,6 +280,9 @@ export default async function PermissionPage({
                   ? { asked: view.memory.always }
                   : null
               }
+              privateAddresses={view.offersPrivateAddresses}
+              access={view.proposedAccess}
+              sites={view.secretSites}
             />
           </>
         ) : (
@@ -316,15 +347,23 @@ function RequestTile({ view }: { view: PermissionView }) {
       return <IconTile size="lg" icon={FolderGit2} className={tile} />
     case "note_change":
       return <IconTile size="lg" icon={StickyNote} className={tile} />
+    case "service_change":
+      return <IconTile size="lg" kind="service" className={tile} />
     case "access":
       return <IconTile size="lg" icon={SlidersHorizontal} className={tile} />
     case "fetch":
     case "browse":
     case "browser_handover":
+    case "exit_use":
       return <IconTile size="lg" icon={Globe} className={tile} />
     case "secret_use":
     case "secret_request":
+    case "secret_sites_change":
       return <IconTile size="lg" icon={KeyRound} className={tile} />
+    case "script_use":
+      return <IconTile size="lg" icon={SquareCode} className={tile} />
+    case "tab_pace":
+      return <IconTile size="lg" icon={Timer} className={tile} />
     default:
       return <IconTile size="lg" icon={Server} className={tile} />
   }
@@ -371,6 +410,19 @@ function PendingNote({ view }: { view: PermissionView }) {
           .
         </p>
       )
+    case "exit_use":
+      return (
+        <p className={note}>
+          Allow once sends this one through the exit. Always allow this exit and
+          Block this exit decide for the token&apos;s later requests that name
+          the exit, in web fetch and the browser; sites are still decided on
+          their own, as on{" "}
+          <Link href={`/tokens/${view.tokenId}`} className="underline">
+            the token&apos;s page
+          </Link>
+          .
+        </p>
+      )
     case "browser_handover":
       // Its tab is open no longer: an open one is answered on the tab.
       return (
@@ -397,6 +449,30 @@ function PendingNote({ view }: { view: PermissionView }) {
           name] and gets no screenshots of the tab.
         </p>
       )
+    case "script_use":
+      return (
+        <p className={note}>
+          Run it once runs this script, in this tab. Allow scripts at this site
+          and Block scripts at this site decide this token&apos;s later scripts
+          there without asking you; you can take either back on{" "}
+          <Link href={`/tokens/${view.tokenId}`} className="underline">
+            the token&apos;s page
+          </Link>
+          . A script is never run while a field holds a secret PCP typed.
+        </p>
+      )
+    case "tab_pace":
+      return (
+        <p className={note}>
+          Use this pace in the tab sets it for that tab alone, until it closes;
+          nothing else changes. What assistants may set without asking you is
+          under{" "}
+          <Link href="/settings#pacing" className="underline">
+            Settings → Pacing
+          </Link>
+          .
+        </p>
+      )
     case "secret_request":
       return (
         <p className={note}>
@@ -407,6 +483,19 @@ function PendingNote({ view }: { view: PermissionView }) {
           with these sites. Allow one use lets this token have it typed once;
           the others let it, at these sites, for an hour or until you end it.
           Any other use asks you first.
+        </p>
+      )
+    case "secret_sites_change":
+      return (
+        <p className={note}>
+          Applying makes only the changes you ticked, to the sites as shown
+          here; the secret&apos;s value stays as it is. A site you take away
+          ends every token&apos;s allowance there. You can change its sites any
+          time under{" "}
+          <Link href="/secrets" className="underline">
+            Secrets
+          </Link>
+          .
         </p>
       )
     case "skill_change":
@@ -453,6 +542,19 @@ function PendingNote({ view }: { view: PermissionView }) {
           Saving it writes the note exactly as shown above, and only if your
           note did not change since the assistant asked. It is yours from then
           on: you can change it on the item&apos;s page.
+        </p>
+      )
+    case "service_change":
+      return (
+        <p className={note}>
+          Launching or updating it pulls the image exactly as shown above, by
+          its digest, and runs it on that SSH server with the secrets named
+          there; nothing runs until you agree. You can stop, update or remove it
+          on its page under{" "}
+          <Link href="/servers" className="underline">
+            Servers
+          </Link>
+          .
         </p>
       )
     case "memory_share":

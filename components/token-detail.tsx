@@ -4,8 +4,9 @@ import Link from "next/link"
 import { useRouter } from "next/navigation"
 import { useState, useTransition } from "react"
 
-import { FormError, FormNote } from "@/components/form-status"
+import { FormError, FormNote } from "@kaperkunde/ui/form-status"
 import { LocalDate } from "@/components/local-date"
+import { PermissionConflicts } from "@/components/permission-conflicts"
 import { PermissionDecision } from "@/components/permission-decision"
 import { ServerScopeFields } from "@/components/server-scope-fields"
 import { ShownInFull } from "@/components/shown-in-full"
@@ -14,18 +15,21 @@ import {
   TokenSettingsForm,
   type TokenSettings,
 } from "@/components/token-settings-form"
-import { CountBadge } from "@/components/ui/badge"
-import { Button, ButtonLink } from "@/components/ui/button"
-import { Select } from "@/components/ui/input"
-import { SwitchRow } from "@/components/ui/switch"
-import { List, ListRow, ListSection } from "@/components/ui/list"
+import { CountBadge } from "@kaperkunde/ui/badge"
+import { Button, ButtonLink } from "@kaperkunde/ui/button"
+import { Select } from "@kaperkunde/ui/input"
+import { SwitchRow } from "@kaperkunde/ui/switch"
+import { List, ListRow, ListSection } from "@kaperkunde/ui/list"
 import {
   copyTokenAccessAction,
   deleteTokenAction,
   endAllowanceAction,
   revokeTokenAction,
 } from "@/lib/actions/tokens"
-import type { PermissionDecision as Decision } from "@/lib/core/constants"
+import type {
+  PasswordRecipe,
+  PermissionDecision as Decision,
+} from "@/lib/core/constants"
 import type { ShownText } from "@/lib/core/permission-rules"
 import type { ServerKind } from "@/lib/core/servers"
 import type { ActionState } from "@/lib/server/action-state"
@@ -37,6 +41,10 @@ export type WaitingRequest = {
    * page: the button's words that lead there, or null to answer here.
    */
   review: string | null
+  /** The request as shown here, for the answer to name. */
+  revision: string
+  /** Other requests waiting on the same item. */
+  conflicts: Array<{ id: string; tokenName: string }>
   title: string
   lines: string[]
   /** Everything it carries, when the lines cut it short. */
@@ -52,11 +60,15 @@ export type WaitingRequest = {
     login?: string | null
     kind?: "text" | "totp"
     origins?: string[]
+    username?: string | null
+    generate?: PasswordRecipe | null
   } | null
   /** "Allow for" has one length (a secret the browser types: an hour). */
   allowForFixed?: boolean
   /** A memory to share: the toggle for reading it in every conversation. */
   every: { asked: boolean } | null
+  /** A proposed server at a private address: "Allow private addresses". */
+  privateAddresses: boolean
 }
 
 /** A tool or a site allowed for a while, as the page is handed it. */
@@ -127,6 +139,7 @@ export function TokenWaiting({ waiting }: { waiting: WaitingRequest[] }) {
                 {item.warning}
               </p>
             ) : null}
+            <PermissionConflicts conflicts={item.conflicts} />
             {item.review ? (
               <div>
                 <ButtonLink href={`/permissions/${item.id}`}>
@@ -136,9 +149,11 @@ export function TokenWaiting({ waiting }: { waiting: WaitingRequest[] }) {
             ) : (
               <PermissionDecision
                 id={item.id}
+                revision={item.revision}
                 decisions={item.decisions}
                 secret={item.secret}
                 every={item.every}
+                privateAddresses={item.privateAddresses}
                 // The page lists them all: answered, the owner stays here.
                 advance={false}
                 allowForFixed={item.allowForFixed}

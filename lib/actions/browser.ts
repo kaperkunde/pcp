@@ -18,6 +18,11 @@ import {
   type BrowserOverview,
 } from "@/lib/core/browser/owner"
 import {
+  importSignIns,
+  previewSignInImport,
+  type ImportPreview,
+} from "@/lib/core/browser/sign-in-import"
+import {
   createBrowserServer,
   updateBrowserServer,
 } from "@/lib/core/browser/server"
@@ -29,7 +34,8 @@ import { requireContext } from "@/lib/server/session"
 /**
  * What the owner does with the browser on its pages: add it, open and
  * close tabs, take one over and hand it back, move it along while it is
- * theirs, close the browser, forget its sign-ins, and install Chromium.
+ * theirs, close the browser, import or forget its sign-ins, and install
+ * Chromium.
  */
 
 function revalidateBrowser() {
@@ -88,19 +94,27 @@ export async function openTabAction(
   return result
 }
 
-/** A tab's buttons: each one thing to the tab, answered with an ActionState. */
-async function onTab(run: () => Promise<void>): Promise<ActionState> {
+/**
+ * A tab's buttons: each one thing to the tab, answered with an ActionState.
+ * Taking over, handing back, back, reload and navigate leave the page alone (`revalidate: false`):
+ * the live view shows the change itself and the tab list polls, so the
+ * answer never waits on the page being drawn again.
+ */
+async function onTab(
+  run: () => Promise<void>,
+  { revalidate = true }: { revalidate?: boolean } = {},
+): Promise<ActionState> {
   const result = await guarded(async () => {
     await run()
     return {}
   })
-  revalidateBrowser()
+  if (revalidate) revalidateBrowser()
   return result
 }
 
 export async function takeOverTabAction(tabId: string): Promise<ActionState> {
   const ctx = await requireContext()
-  return onTab(() => takeOverTab(ctx, tabId))
+  return onTab(() => takeOverTab(ctx, tabId), { revalidate: false })
 }
 
 /** Hands the tab to the token chosen; lib/core checks the token itself. */
@@ -109,7 +123,9 @@ export async function handBackTabAction(
   tokenId: string,
 ): Promise<ActionState> {
   const ctx = await requireContext()
-  return onTab(() => handBackTab(ctx, tabId, String(tokenId)))
+  return onTab(() => handBackTab(ctx, tabId, String(tokenId)), {
+    revalidate: false,
+  })
 }
 
 export async function closeTabAction(tabId: string): Promise<ActionState> {
@@ -123,17 +139,19 @@ export async function navigateTabAction(
 ): Promise<ActionState> {
   const ctx = await requireContext()
   const publicUrl = await publicUrlFor(ctx)
-  return onTab(() => ownerNavigate(ctx, tabId, { url, publicUrl }))
+  return onTab(() => ownerNavigate(ctx, tabId, { url, publicUrl }), {
+    revalidate: false,
+  })
 }
 
 export async function backTabAction(tabId: string): Promise<ActionState> {
   const ctx = await requireContext()
-  return onTab(() => ownerBack(ctx, tabId))
+  return onTab(() => ownerBack(ctx, tabId), { revalidate: false })
 }
 
 export async function reloadTabAction(tabId: string): Promise<ActionState> {
   const ctx = await requireContext()
-  return onTab(() => ownerReload(ctx, tabId))
+  return onTab(() => ownerReload(ctx, tabId), { revalidate: false })
 }
 
 export async function closeBrowserAction(): Promise<ActionState> {
@@ -144,6 +162,36 @@ export async function closeBrowserAction(): Promise<ActionState> {
 export async function forgetSitesAction(): Promise<ActionState> {
   const ctx = await requireContext()
   return onTab(() => forgetSites(ctx))
+}
+
+/**
+ * The preview of a sign-in import: sites and counts, what is left out and
+ * replaced. Nothing is written.
+ */
+export async function previewSignInImportAction(
+  text: string,
+): Promise<ActionState<{ preview: ImportPreview }>> {
+  const ctx = await requireContext()
+  return guarded(async () => ({
+    preview: await previewSignInImport(ctx, String(text), {
+      publicUrl: await publicUrlFor(ctx),
+    }),
+  }))
+}
+
+/** Imports what the preview showed (`basis`) into the browser's profile. */
+export async function importSignInsAction(
+  text: string,
+  basis: string,
+): Promise<ActionState<{ sites: number; cookies: number }>> {
+  const ctx = await requireContext()
+  const result = await guarded(async () =>
+    importSignIns(ctx, String(text), String(basis), {
+      publicUrl: await publicUrlFor(ctx),
+    }),
+  )
+  revalidateBrowser()
+  return result
 }
 
 /** Starts it and returns: the page follows it through the overview. */

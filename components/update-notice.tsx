@@ -1,7 +1,7 @@
 import { CircleArrowUp } from "lucide-react"
 import Link from "next/link"
 
-import { Badge } from "@/components/ui/badge"
+import { Badge } from "@kaperkunde/ui/badge"
 
 /**
  * The header's note that a newer PCP is out, beside the version. It leads

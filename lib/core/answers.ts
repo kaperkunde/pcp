@@ -2,8 +2,10 @@ import type { CallToolResult } from "@modelcontextprotocol/server"
 
 import { invalid, isPcpError } from "./errors"
 import { isTextBytes, sniffMediaType } from "./media-types"
+import { pacedRetryAfter } from "./pacing/pace"
 import { canonicalJson } from "./permission-rules"
 import { handleOf, type KeptResult, type ResultHandle } from "./tool-results"
+import { ERROR_META_KEY } from "./tools/outcome"
 
 /**
  * What an assistant reads of a tool's answer. An API can answer with far
@@ -23,7 +25,7 @@ import { handleOf, type KeptResult, type ResultHandle } from "./tool-results"
  *   short) with a note on how to ask for less, rather than JSON cut off
  *   mid-string.
  * - JSON is passed on compact, once: structuredContent that repeats the text
- *   is dropped, since the gateway's call_tool declares no output schema and
+ *   is dropped, since the gateway's execute declares no output schema and
  *   a client that shows both would count it twice.
  *
  * Text that is not JSON is cut at MAX_ANSWER_CHARS, as before.
@@ -67,7 +69,7 @@ const MAX_PARSE_CHARS = 5_000_000
 /** How deep into an answer decode looks. */
 const MAX_DECODE_DEPTH = 64
 
-/** How the assistant asked for an answer to be shaped (call_tool's options). */
+/** How the assistant asked for an answer to be shaped (execute's options). */
 export type AnswerShape = {
   /** The parts to keep. */
   fields?: string[]
@@ -79,7 +81,7 @@ export type AnswerShape = {
 
 const CUT = "\n… (truncated by PCP)"
 
-/** call_tool's fields, checked: a list of dotted paths. */
+/** execute's fields, checked: a list of dotted paths. */
 export function readFields(
   value: unknown,
   name = "fields",
@@ -546,10 +548,11 @@ function prepareAnswer(
     }
 
     sawJson = true
-    // An API's answer that is not an object is passed as { value } there.
+    // An older client's SDK wraps a value that is not an object as
+    // { result }; either way it is the same answer.
     repeatsStructured ||=
       structured !== undefined &&
-      [parsed.value, { value: parsed.value }].some(
+      [parsed.value, { result: parsed.value }].some(
         (candidate) => canonicalJson(candidate) === canonicalJson(structured),
       )
     parts.push({
@@ -752,6 +755,38 @@ function sizeOf(handle: ResultHandle): string {
   return handle.size !== undefined
     ? `${handle.size.toLocaleString("en")} bytes`
     : `${(handle.length ?? 0).toLocaleString("en")} characters`
+}
+
+/**
+ * The name an embedded file is kept under: the last part of its URI's path
+ * (its scheme, query and fragment left out), URL-decoded (`my%20file.pdf`
+ * is `my file.pdf`; a malformed escape is kept as written). A separator the
+ * decoding brought in (`%2F`, `%5C`) does not make a path: only what follows
+ * the last one counts. Null when nothing is left, or only `.` or `..`.
+ */
+export function resourceFileName(uri: string): string | null {
+  const segment = uri
+    .replace(/[?#][\s\S]*$/, "")
+    .replace(/^[a-z][a-z0-9+.-]*:/i, "")
+    .split("/")
+    .filter(Boolean)
+    .pop()
+
+  if (!segment) {
+    return null
+  }
+
+  let decoded = segment
+
+  try {
+    decoded = decodeURIComponent(segment)
+  } catch {
+    // A malformed escape: the segment as it is.
+  }
+
+  const name = decoded.split(/[/\\]/).filter(Boolean).pop()
+
+  return name && name !== "." && name !== ".." ? name : null
 }
 
 /** Makes the handles of one answer, and says what it made. */
@@ -994,8 +1029,7 @@ class Handles {
           ? {
               data: block.resource.blob,
               type: block.resource.mimeType ?? null,
-              name:
-                block.resource.uri.split(/[/?#]/).filter(Boolean).pop() ?? null,
+              name: resourceFileName(block.resource.uri),
               what: "file",
             }
           : null
@@ -1182,9 +1216,40 @@ export async function shapeAnswerKeeping(
 const MAX_CODE_ERROR_CHARS = 4_000
 
 /**
+ * The code a failed result carries in `_meta["gg.pcp/error"]`, and when to
+ * try again where it says: a word of lower-case letters, digits and
+ * underscores, and a wait of whole milliseconds; anything else is no code.
+ */
+export function errorCodeOf(
+  result: CallToolResult,
+): { code: string; retryAfterMs?: number } | null {
+  const meta = (result._meta as Record<string, unknown> | undefined)?.[
+    ERROR_META_KEY
+  ] as { code?: unknown; retryAfterMs?: unknown } | undefined
+  const code = meta?.code
+
+  if (
+    result.isError !== true ||
+    typeof code !== "string" ||
+    !/^[a-z][a-z0-9_]{0,39}$/.test(code)
+  ) {
+    return null
+  }
+
+  const wait = meta?.retryAfterMs
+
+  return {
+    code,
+    ...(typeof wait === "number" && Number.isFinite(wait)
+      ? { retryAfterMs: Math.max(0, Math.round(wait)) }
+      : {}),
+  }
+}
+
+/**
  * A tool's answer as a program run by run_code gets it (lib/core/code/):
  * the value itself rather than text to read, so the program can filter it.
- * `fields` and `decode` shape it as for call_tool, and `keep` makes handles
+ * `fields` and `decode` shape it as for execute, and `keep` makes handles
  * of the parts it names; files (base64 that decodes to one, and image,
  * audio and file blocks) become handles on sight, so their bytes never
  * enter the program. Nothing is cut to a preview: an answer up to `max`
@@ -1193,23 +1258,43 @@ const MAX_CODE_ERROR_CHARS = 4_000
  *
  * The value is the answer's JSON when it has some (its structuredContent
  * when only that is JSON), its text when it is only text, and a list of
- * its parts otherwise. A tool's error is an error, with its text.
+ * its parts otherwise. A tool's error is an error, with its text, and with
+ * code "paced" and retryAfterMs when PCP's pacing refused the call.
  */
 export async function answerValue(
   result: CallToolResult,
   shape: AnswerShape,
   keepers: AnswerKeepers,
   { max }: { max: number },
-): Promise<{ ok: true; value: unknown } | { ok: false; error: string }> {
+): Promise<
+  | { ok: true; value: unknown }
+  | { ok: false; error: string; code?: string; retryAfterMs?: number }
+> {
   if (result.isError) {
     const text = (result.content ?? [])
       .flatMap((block) => (block.type === "text" ? [block.text] : []))
       .join("\n")
       .trim()
+    // PCP's own pacing refused it (pacing/pace.ts pacedResult): the program
+    // is told when to try again, as fields it can read.
+    const retryAfterMs = pacedRetryAfter(result)
+    // Otherwise the tool error's own code (tools/outcome.ts), as it is:
+    // "timeout", "browser_busy" and whatever a family adds later.
+    const coded = retryAfterMs === null ? errorCodeOf(result) : null
 
     return {
       ok: false,
       error: clip(text || "The tool reported an error.", MAX_CODE_ERROR_CHARS),
+      ...(retryAfterMs !== null
+        ? { code: "paced", retryAfterMs }
+        : coded
+          ? {
+              code: coded.code,
+              ...(coded.retryAfterMs !== undefined
+                ? { retryAfterMs: coded.retryAfterMs }
+                : {}),
+            }
+          : {}),
     }
   }
 

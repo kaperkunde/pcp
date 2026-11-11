@@ -19,12 +19,23 @@ PCP holds credentials for other services and uses them on your behalf. The
 things it defends against, and the things it does not:
 
 **Someone with a copy of the disk or the database** sees AES-256-GCM
-ciphertext and SHA-256 hashes. The vault's data key is stored only wrapped
+ciphertext and hashes. The vault's data key is stored only wrapped
 under keys derived from your password (scrypt, 64 MiB), the recovery key, a
 session cookie, an API token or what an app that signed in holds (its access
 and refresh tokens) — none of which are on the disk. The browser's
 sign-ins, kept results and your notes on servers and skills are in the vault
-too, encrypted the same way. See
+too, encrypted the same way, and so are the names and descriptions of your
+secrets, your API tokens' names, the sites your secrets are typed at and the
+sites web fetch keeps levels for, your settings (but the public address),
+your servers' names, short names, addresses, descriptions, logins and
+status, their tools' names, descriptions and schemas, API endpoints'
+schemas, wrappers' and services' definitions, the names of kept files, and
+the tools, servers, secrets and sites each line of the request log names.
+What is compared or looked up without being read (a schema's or a
+definition's fingerprint, a secret's name, a server's short name, a tool's
+name) is a hash keyed under the vault's key, not a plain one. The vault's
+own name is still in plain text: the sign-in page shows it before you
+unlock. See
 [ARCHITECTURE.md](ARCHITECTURE.md#encryption). In the Mac app, the window's
 session cookie and the Touch ID key do sit in the app's folder, but encrypted
 under a key in your login keychain, which a copy of the disk does not open.
@@ -132,6 +143,31 @@ your secrets or any Authorization or Cookie header, and a redirect to another
 site is reported to it rather than followed. The right is off unless you
 tick it when you make the token or on its page.
 
+**An assistant with a token that reaches an SSH server** can run one
+command per call there with `run_command`, as far as you allowed the tool,
+as the login you gave PCP and nothing more: PCP signs in with a key of its
+own (never a password), only to a host whose key you pinned, and opens no
+terminal, agent, file transfer or forwarding of its own. The one forwarding
+PCP does is for an **exit** you add on the server's page: web fetch and a new
+browser tab can then go out from that server instead of from PCP's own
+address, for the tokens you allow on their pages (blocked unless you do, or
+asking you first when you set it so). The assistant names the exit, never
+where it connects to: PCP looks every name up itself (over HTTPS, through the
+exit) and connects only to addresses it checked from the exit's side, never
+the server's own loopback or own address, never a link-local or cloud
+metadata address (169.254.169.254 and its kind, where a cloud server keeps
+its own credentials) for any token, and its private network only for a
+token you allowed private addresses. A tab through an exit has none of the
+browser's sign-ins and saves nothing. A **VPN exit** is a VPN client
+(gluetun, from PCP's common items) that PCP runs as a service on that
+server: the only container PCP ever gives more than the engine's default,
+and only the NET_ADMIN capability and the /dev/net/tun device its tunnel
+needs. Its proxy listens on the server's 127.0.0.1 alone, signed in with a
+random password PCP makes for it and keeps among your secrets, and PCP
+reaches it through the SSH connection; an assistant cannot propose one. PCP never asks the server to forward
+connections back to it, to a Unix socket, or for an agent or X11. The request
+log says which exit a call used, never the site.
+
 **An assistant with a token that reaches the browser** (a server you add on
 the Browser page, whose tools ask you first like any other's) drives a
 Chromium on PCP's machine, and acts as you on every site you signed in to
@@ -209,13 +245,18 @@ password gives its try back, since it is no guess and only someone who knows
 it can type it, so you never lock yourself out by signing in. Recovery keys
 and export passwords are counted the same way, each on its own, and Touch ID
 has a budget of its own rather than spending the password's. scrypt makes
-each guess expensive. The address is the one the proxy in front of PCP
-reports (`X-Forwarded-For`), which a client reaching port 3000 directly can
-set to anything; the 60 for the whole instance holds either way. PCP takes
-the left-most address in that header, which behind a proxy that appends to
-it (most do) is whatever the client sent: set `PCP_TRUSTED_PROXIES` to your
-proxies' addresses, and PCP reads the header from the right, past them and
-loopback, to the client they saw (see
+each guess expensive. The address is the one that connected to PCP,
+unless that is a proxy: PCP's server stamps the connecting address on every
+request itself (a client's own stamp is removed), and reads `X-Forwarded-For`
+only from loopback or from an address in `PCP_TRUSTED_PROXIES`. A client that
+reaches port 3000 directly cannot choose its own address that way. A proxy PCP
+was not told about is counted as one address for all its clients (the 60 for
+the whole instance holds either way), and PCP says so once in its log. Behind
+a reverse proxy, set `PCP_TRUSTED_PROXIES` to its own address, or the
+subnet of the Docker network you share with it, and keep port 3000 reachable
+from your proxies alone: PCP then
+reads the header from the right, past your proxies and loopback, to the client
+they saw (see
 [docs/self-hosting.md](docs/self-hosting.md#i-already-have-a-proxy)). The counts
 are kept in memory, so a restart starts them again.
 
@@ -404,9 +445,38 @@ Not defended against:
   your address and PCP's version, which is all it sends. The answer is read as
   untrusted text: the version, date, notes and file names, never a link. In a
   container or a checkout PCP never updates itself. The Linux installer's
-  daily update (`PCP_AUTO_UPDATE=1`, by its own timer or Podman's) starts PCP
-  again from whatever image is published as `ghcr.io/kaperkunde/pcp:latest`,
-  with no step for you to look first.
+  daily update (`PCP_AUTO_UPDATE=1`, by its own timer) starts PCP again from
+  the image published as `ghcr.io/kaperkunde/pcp:latest`, with no step for
+  you to look first, once its signature checks out (below).
+- Every image PCP publishes (`pcp` and `pcp-sandbox`, releases and develop's
+  builds) is signed with cosign, keyless, by the workflow that built it
+  (`build-images.yml`, run from `main` or `develop`, with GitHub Actions'
+  OIDC token; the signature is in Sigstore's public log), and attested by
+  GitHub's build provenance; each release's notes list both digests. The
+  installer checks the signature of every image it pulls before it starts
+  it or reads its installer, with cosign's own image pinned by digest, and
+  then runs that digest, never the tag; one that does not check out is not
+  started, and PCP goes on running as it was. So a push to the registry
+  alone (a leaked package token, say) reaches no installer's PCP: it takes
+  a run of that workflow from `main` or `develop`, which takes a push there.
+  `PCP_INSECURE_SKIP_VERIFY=1` turns the check off for one run, never
+  remembered. Compose checks nothing by itself: pin the digests you checked
+  (`PCP_TAG`, `PCP_SANDBOX_TAG`; [self-hosting](docs/self-hosting.md)).
+  Podman's own `podman-auto-update.timer` checks no signature either, so
+  the installer no longer uses it: under Quadlet its own timer updates, and
+  PCP's unit runs the digest. (A `policy.json` rule could make Podman check
+  it, but Podman reads one such file for every image a user runs, so it
+  cannot be added for PCP's image without rewriting the host's policy for
+  all the others.) A Quadlet install from before this keeps Podman's timer
+  and the label on its unit until the installer runs again (the install
+  line, or Install and restart).
+- What the signature does not say, by design: which channel or version an
+  image is. The installer accepts an image signed from `develop` on the
+  stable channel too (both are PCP's own workflow on a branch only its
+  maintainers push to), and nothing ties a digest to a version, so an older
+  signed image, pushed back under `latest` by someone who can push to the
+  registry, passes the check: a rollback to a release PCP once published,
+  never to an image PCP did not build.
 - **Install and restart** under the Linux installer does the same when you
   choose it: PCP writes the request (an id and a time, nothing else) in its
   data folder, and the installer's watcher on the host reads it through
@@ -415,11 +485,37 @@ Not defended against:
   untrusted, so even a PCP that was taken over could do no more than have
   the published image pulled again, at most once every five minutes.
   `PCP_UPDATE_BUTTON=0` turns it off.
+- The installer's own updates (its daily timer, and Install and restart)
+  run the installer the image carries (`/app/install.sh`) once it differs
+  from the copy the installer saved: read out of the image just pulled, by
+  the digest whose signature checked out, in a throwaway container with no
+  network and nothing mounted, never out of the running PCP. So the host runs what it trusts as
+  much as the image it is about to start, and a PCP that was taken over still
+  cannot change what the host runs. It replaces the saved copy, so the unit
+  follows the version installed (the graphics card, for one). A file that is
+  not an installer that copy takes (no `#!/bin/sh`, no format line it knows,
+  one `sh -n` refuses, over 256 KB), or none at all, leaves the update to the
+  saved copy, with a note.
 - The desktop app installs an update only when you choose **Install and
   restart**, downloading it from PCP's GitHub releases over HTTPS. On a Mac,
   the updater takes only an app signed with the same Developer ID; the
   Windows app is not signed yet, so there the download is checked against
   the checksum published beside it, and no more.
+- What you delete does not linger in the database file: every connection
+  has SQLite write zeros over deleted rows (`secure_delete`), removing a
+  server or a secret truncates the write-ahead log, and deleting the vault
+  or restoring over it rebuilds the file. A copy of the data volume taken
+  before the delete, a backup or a snapshot of the disk, keeps what it had.
+- While PCP's browser runs, it keeps a few things in clear in the system's
+  temporary folder: a file a `download` call waits for (read and removed
+  before the call answers), Chromium's crash reporter and cache folders, and
+  the virtual display's cookie. Its sign-ins are not among them (the
+  browser's contexts are off the record, in memory; the saved copy is in the
+  vault). A PCP that crashes or is killed leaves these folders behind; the
+  cleanup removes them when PCP starts and on its schedule. In the container
+  image (the installer, `docker-compose.yaml`) `/tmp` is a tmpfs of at most
+  1 GB, so none of it is ever on the disk; that memory counts against the
+  machine's.
 - Back up the data volume, or export from Settings. Losing both loses the
   vault.
 - An export file (Settings → Export) holds the vault's rows as they are: the
@@ -434,9 +530,11 @@ Not defended against:
   data; that is the design.
 - The request log (`logs/*.jsonl` in the data directory) records which tools
   were called, by which token, and whether they worked, never their
-  arguments or results. The Log page shows it to the signed-in owner, and the
-  cleanup deletes the days older than the owner keeps (Settings → Cleanup, 90
-  by default).
+  arguments or results. The names on each line are encrypted under the
+  vault's key; the times, token ids and outcomes are not. The Log page shows
+  it to the signed-in owner, and the cleanup deletes the days older than the
+  owner keeps (Settings → Cleanup, 90 by default) by their dates, without
+  reading them.
 - An answer too long to pass on in one piece (a large API response, a long
   email), and a file or value handed back as a handle (an attachment, an
   image), is kept for a day: encrypted under the vault's key, readable and

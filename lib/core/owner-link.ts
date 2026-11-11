@@ -1,0 +1,76 @@
+/**
+ * How an assistant hands the owner a link to PCP's page: a markdown link
+ * with a few words naming the action, last in its reply. It may keep
+ * working first and hand over several, each on a line of its own at the end.
+ * Last, because some apps fold away what an assistant wrote before a tool
+ * call, and the owner never sees it; a markdown link, because an app that
+ * reads the reply aloud says the label and not a long address of ids.
+ *
+ * Pure: the instructions, tool descriptions and every answer that asks the
+ * owner use it, so nothing here may import more than this and
+ * @kaperkunde/mcp/owner, whose label and link rules these are; the words
+ * are PCP's.
+ */
+
+import {
+  linkLabel as kitLinkLabel,
+  markdownLink as kitMarkdownLink,
+} from "@kaperkunde/mcp/owner"
+
+/** The rule, in the words instructions and tool descriptions use. */
+export const OWNER_LINK_RULE =
+  "You may keep working and gather several links to PCP: end your reply with every one of them, each as a markdown link with a short label naming the action, on a line of its own; never paste the bare address, and call no tool after them in this reply, as some apps hide the text written before a tool call."
+
+/**
+ * When to check on what the owner was handed a link for: on their next
+ * message, whatever it says. Their words rarely say whether they answered
+ * (an "ok", a new question, nothing about it at all), and an assistant that
+ * waits to be told sends the link again for something already decided.
+ * `call` is the check with its argument (`check_permission with id "…"`),
+ * `open` what the assistant would otherwise assume.
+ */
+export function nextMessageCheck(
+  call: string,
+  open = "the request is still open",
+): string {
+  return `On the owner's next message, whatever it says, call ${call} before you send the link again or assume ${open}.`
+}
+
+/** nextMessageCheck for a permission request, in tool descriptions. */
+export const CHECK_PERMISSION_NEXT = nextMessageCheck(
+  "check_permission with its id",
+)
+
+export { MAX_LINK_LABEL } from "@kaperkunde/mcp/owner"
+
+/** What a link is called when its label has nothing left to show. */
+const FALLBACK_LABEL = "Open in PCP"
+
+/**
+ * A label fit for a markdown link: one line, nothing that would end the
+ * link's text or start markup (brackets, backslashes, backticks, angle
+ * brackets), no characters that do not show, and at most MAX_LINK_LABEL
+ * characters; "Open in PCP" when nothing is left.
+ */
+export function linkLabel(label: string): string {
+  return kitLinkLabel(label, { fallback: FALLBACK_LABEL })
+}
+
+/**
+ * `[label](url)`. The address is PCP's own; the few characters that would
+ * end a markdown link's address are escaped, which a browser reads back the
+ * same.
+ */
+export function markdownLink(label: string, url: string): string {
+  return kitMarkdownLink(label, url, { fallback: FALLBACK_LABEL })
+}
+
+/**
+ * What an answer that needs the owner ends with: PCP's rule (several links
+ * may wait for the end of a reply, which the package's own rule does not
+ * say), then the link itself as the last line, labelled with what the owner
+ * does there.
+ */
+export function linkLastText(url: string, label: string): string {
+  return `${OWNER_LINK_RULE} Hand this one over as it is below.\n${markdownLink(label, url)}`
+}

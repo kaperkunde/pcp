@@ -1,0 +1,61 @@
+pcp_format: 3
+version: 1
+name: Gluetun
+description: "Gluetun: a VPN client for OpenVPN or WireGuard, with most VPN providers or a WireGuard server of your own. PCP adds its HTTP proxy as an exit, so web fetch and the browser can go out through your VPN. It needs the NET_ADMIN capability and /dev/net/tun on the SSH server."
+image: docker.io/qmcgaw/gluetun@sha256:fa19cc76b2af13d57a8d3dc3066f2ada061b1c761b8aecf989b3877c0486e027
+source: docker.io/qmcgaw/gluetun:v3.41
+ports:
+  - container: 8888
+env:
+  - name: VPN_SERVICE_PROVIDER
+    description: "Your VPN provider, as Gluetun names it: mullvad, protonvpn, nordvpn, surfshark, ivpn, windscribe and many more; custom for a WireGuard server of your own."
+    required: true
+    plain: true
+  - name: VPN_TYPE
+    description: "openvpn or wireguard: which of the two your provider gives you credentials for."
+    plain: true
+    value: openvpn
+  - name: SERVER_COUNTRIES
+    description: "Where it comes out: one or more countries, comma-separated, as your provider names them (Netherlands, United States). Empty for any."
+    plain: true
+  - name: SERVER_CITIES
+    description: "Optional: one or more cities, comma-separated, within those countries."
+    plain: true
+  - name: OPENVPN_USER
+    description: "OpenVPN: your provider's OpenVPN user name (for some, the account number)."
+  - name: OPENVPN_PASSWORD
+    description: "OpenVPN: your provider's OpenVPN password."
+  - name: WIREGUARD_PRIVATE_KEY
+    description: "WireGuard: the private key your provider (or your own server's peer) gave you, base64."
+  - name: WIREGUARD_ADDRESSES
+    description: "WireGuard: the address of this peer in the tunnel, like 10.64.222.21/32."
+  - name: WIREGUARD_PRESHARED_KEY
+    description: "WireGuard: the preshared key, if your provider or server uses one."
+  - name: WIREGUARD_PUBLIC_KEY
+    description: "WireGuard with custom: your server's public key, base64."
+    plain: true
+  - name: WIREGUARD_ENDPOINT_IP
+    description: "WireGuard with custom: your server's IP address."
+    plain: true
+  - name: WIREGUARD_ENDPOINT_PORT
+    description: "WireGuard with custom: your server's port, like 51820."
+    plain: true
+  - name: HTTPPROXY
+    description: Gluetun's HTTP proxy, which PCP adds as the exit.
+    value: on
+  - name: HTTPPROXY_LISTENING_ADDRESS
+    value: :8888
+  - name: HTTPPROXY_STEALTH
+    description: Adds no proxy headers to what passes through it.
+    value: on
+cap_add:
+  - NET_ADMIN
+devices:
+  - /dev/net/tun
+registers:
+  kind: exit
+  port: 8888
+  protocol: http
+  auth:
+    user_env: HTTPPROXY_USER
+    password_env: HTTPPROXY_PASSWORD

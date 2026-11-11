@@ -2,6 +2,7 @@
 
 import {
   BookOpen,
+  FolderOpen,
   Globe,
   House,
   KeyRound,
@@ -19,7 +20,7 @@ import { usePathname } from "next/navigation"
 import { usePendingRequests } from "@/components/answer-queue"
 import { PcpMark } from "@/components/pcp-mark"
 import { PendingRequests } from "@/components/pending-requests"
-import { CountBadge } from "@/components/ui/badge"
+import { CountBadge } from "@kaperkunde/ui/badge"
 import { UpdateNotice } from "@/components/update-notice"
 import { logoutAction } from "@/lib/actions/auth"
 import { cn } from "@/lib/utils"
@@ -34,7 +35,7 @@ type NavItem = {
 
 /**
  * Where the owner goes every day. DESIGN.md › Navigation. The browser has
- * an item of its own, below Skills, while it is added and enabled, so its
+ * an item of its own, below Files, while it is added and enabled, so its
  * tabs are one click away; before that its page (where it is added) belongs
  * to Servers.
  */
@@ -50,6 +51,7 @@ function primaryItems(browser: boolean): NavItem[] {
     { href: "/tokens", label: "Assistants", icon: UserRound },
     { href: "/memories", label: "Memories", icon: BookOpen },
     { href: "/skills", label: "Skills", icon: ListChecks },
+    { href: "/files", label: "Files", icon: FolderOpen },
     ...(browser ? [{ href: "/browser", label: "Browser", icon: Globe }] : []),
   ]
 }

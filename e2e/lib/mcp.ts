@@ -25,6 +25,8 @@ export type McpResponse = {
       // What PCP says in fields as well as text (lib/core/connect.ts).
       structuredContent?: {
         kind?: string
+        reason?: string
+        request?: string
         permission?: {
           id: string
           status: string
@@ -85,8 +87,24 @@ async function parseResponse(response: Response): Promise<McpResponse> {
   }
 }
 
+/**
+ * How the note of the owner's answers a session has not heard of starts
+ * (permissions.ts answeredNote): put in front of any answer of PCP's own
+ * tools, so the helpers below read past it.
+ */
+const ANSWERED_NOTE = "Answered by the owner since PCP last told you"
+
+/** A result's blocks without that note. */
+function answerBlocks(
+  response: McpResponse,
+): Array<{ type: string; text?: string; uri?: string }> {
+  return (response.body.result?.content ?? []).filter(
+    (block) => !(block.text ?? "").startsWith(ANSWERED_NOTE),
+  )
+}
+
 export function toolText(response: McpResponse): string {
-  return response.body.result?.content?.[0]?.text ?? ""
+  return answerBlocks(response)[0]?.text ?? ""
 }
 
 /** Every text block of a result: a notice (a kept answer's) is a block of its own. */
@@ -99,18 +117,65 @@ export function allToolText(response: McpResponse): string {
 /** The last text block of a tool's answer: its JSON, after any notes. */
 export function lastToolText(response: McpResponse): string {
   return (
-    (response.body.result?.content ?? [])
+    answerBlocks(response)
       .filter((block) => block.type === "text")
       .at(-1)?.text ?? ""
   )
 }
 
 /** The gateway's tools that take a call_handle rather than a name. */
-const HANDLED = new Set(["call_tool", "call_read_only_tool"])
+const HANDLED = new Set([
+  "execute_read",
+  "execute_write",
+  "execute_destructive",
+])
+
+/** The tools a client lists (#113); everything else of PCP's is behind them. */
+const ENTRIES = new Set([
+  "search",
+  ...["read", "write", "destructive"].flatMap((tier) => [
+    `execute_${tier}`,
+    `run_${tier}`,
+  ]),
+])
 
 /**
- * The call_handle describe gives for server/tool, or describe's
- * answer when it gives none (no such tool, or one the token cannot see).
+ * A call of one of PCP's tools by the name it had before #113, as an
+ * assistant makes it now: one of PCP's own tools through
+ * execute_destructive by name (which runs every tier), describe as search's
+ * ref, an entry as it is.
+ */
+export function entryCall(
+  name: string,
+  args: Record<string, unknown>,
+): { name: string; arguments: Record<string, unknown> } {
+  if (ENTRIES.has(name)) {
+    return { name, arguments: args }
+  }
+
+  if (name === "describe") {
+    const { server, tool, ref } = args
+
+    return {
+      name: "search",
+      arguments: {
+        ref:
+          typeof server === "string" && typeof tool === "string"
+            ? `${server}/${tool}`
+            : ref,
+      },
+    }
+  }
+
+  return {
+    name: "execute_destructive",
+    arguments: { tool: name, arguments: args },
+  }
+}
+
+/**
+ * The call_handle search gives for server/tool's ref, or search's answer
+ * when it gives none (no such tool, or one the token cannot see).
  */
 export async function describeForCall(
   baseURL: string,
@@ -119,8 +184,8 @@ export async function describeForCall(
   tool: string,
 ): Promise<{ handle: string } | { refused: McpResponse }> {
   const described = await mcpRequest(baseURL, token, "tools/call", {
-    name: "describe",
-    arguments: { server, tool },
+    name: "search",
+    arguments: { ref: `${server}/${tool}` },
   })
 
   if (described.body.result?.isError || !described.body.result) {
@@ -134,10 +199,10 @@ export async function describeForCall(
 }
 
 /**
- * A tool's arguments as an assistant sends them: call_tool and
- * call_read_only_tool written with a server and a tool name describe the
- * tool first and pass its call_handle in their place, as the gateway's
- * instructions say. When describe refuses, its answer is the result.
+ * A tool's arguments as an assistant sends them: an execute_<tier>
+ * written with a server and a tool name looks the tool up with search's
+ * ref first and passes its call_handle in their place, as the gateway's
+ * instructions say. When search refuses, its answer is the result.
  */
 async function withHandle(
   baseURL: string,
@@ -178,7 +243,7 @@ export async function callTool(
 
   return isResponse(sent)
     ? sent
-    : mcpRequest(baseURL, token, "tools/call", { name, arguments: sent })
+    : mcpRequest(baseURL, token, "tools/call", entryCall(name, sent))
 }
 
 /** Reads the server's `instructions` through the initialize handshake. */
@@ -187,6 +252,9 @@ export async function initialize(
   token: string,
 ): Promise<{
   instructions: string
+  /** What a client lists: search, execute_<tier> and run_<tier> (#113). */
+  listed: string[]
+  /** Those, and PCP's own tools the token has behind them (search kind pcp). */
   tools: string[]
   serverInfo: NonNullable<McpResponse["body"]["result"]>["serverInfo"]
 }> {
@@ -196,10 +264,22 @@ export async function initialize(
     clientInfo: { name: "e2e", version: "0" },
   })
   const list = await mcpRequest(baseURL, token, "tools/list")
+  const listed = (list.body.result?.tools ?? []).map((tool) => tool.name)
+  const own = await mcpRequest(baseURL, token, "tools/call", {
+    name: "search",
+    arguments: { query: "", kind: "pcp", limit: 50 },
+  })
 
   return {
     instructions: String(init.body.result?.instructions ?? ""),
-    tools: (list.body.result?.tools ?? []).map((tool) => tool.name),
+    listed,
+    tools: [
+      ...listed,
+      ...allToolText(own)
+        .split("\n")
+        .filter((line) => line.startsWith("pcp "))
+        .map((line) => line.split(" ")[1]!),
+    ],
     serverInfo: init.body.result?.serverInfo,
   }
 }
@@ -231,6 +311,7 @@ export async function mcpToolCall2026(
     return sent
   }
 
+  const call = entryCall(name, sent)
   const response = await fetch(`${baseURL}/mcp`, {
     method: "POST",
     headers: {
@@ -238,7 +319,7 @@ export async function mcpToolCall2026(
       accept: "application/json, text/event-stream",
       "mcp-protocol-version": "2026-07-28",
       "mcp-method": "tools/call",
-      "mcp-name": name,
+      "mcp-name": call.name,
       authorization: `Bearer ${token}`,
     },
     body: JSON.stringify({
@@ -246,8 +327,8 @@ export async function mcpToolCall2026(
       id: 1,
       method: "tools/call",
       params: {
-        name,
-        arguments: sent,
+        name: call.name,
+        arguments: call.arguments,
         _meta: {
           "io.modelcontextprotocol/protocolVersion": "2026-07-28",
           "io.modelcontextprotocol/clientCapabilities": capabilities,

@@ -1,4 +1,5 @@
 import { invalid } from "../errors"
+import { parseExitName } from "../exits/names"
 import { isBlockedHeader } from "../openapi/headers"
 import { MAX_HEADER_VALUE } from "../openapi/limits"
 import {
@@ -24,6 +25,7 @@ export type FetchInput = {
   raw?: boolean
   max_length?: number
   start_index?: number
+  exit?: string
 }
 
 /** A checked request. Kept on a permission request as it is, encrypted. */
@@ -37,6 +39,8 @@ export type FetchArgs = {
   raw?: boolean
   maxLength?: number
   startIndex?: number
+  /** The exit it leaves through, by name (lib/core/exits/); PCP's own address without. */
+  exit?: string
 }
 
 const HEADER_NAME = /^[A-Za-z0-9!#$%&'*+.^_`|~-]{1,100}$/
@@ -186,5 +190,8 @@ export function prepareFetch(input: FetchInput): FetchArgs {
     ...(input.raw ? { raw: true } : {}),
     ...(maxLength !== undefined ? { maxLength } : {}),
     ...(startIndex ? { startIndex } : {}),
+    ...(input.exit !== undefined && input.exit !== ""
+      ? { exit: parseExitName(String(input.exit)) }
+      : {}),
   }
 }

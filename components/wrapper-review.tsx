@@ -1,7 +1,12 @@
 import { Globe, KeyRound } from "lucide-react"
 import type { ReactNode } from "react"
 
-import { Badge } from "@/components/ui/badge"
+import { Badge } from "@kaperkunde/ui/badge"
+import {
+  TOOL_TIER_HINTS,
+  TOOL_TIER_LABELS,
+  type ToolTier,
+} from "@/lib/core/constants"
 import type { WrapperShown, WrapperShownTool } from "@/lib/core/wrappers/admin"
 import { cn } from "@/lib/utils"
 
@@ -143,6 +148,15 @@ function SiteList({
   )
 }
 
+/** What a program types of a secret it was found to, in the owner's words. */
+function typedLabel(parts: Array<"username" | "password">): string {
+  return parts.length === 2
+    ? "Its login name and password"
+    : parts[0] === "username"
+      ? "Its login name"
+      : "Its password"
+}
+
 function SecretPlaces({ shown }: { shown: WrapperShown }) {
   return (
     <section
@@ -176,12 +190,21 @@ function SecretPlaces({ shown }: { shown: WrapperShown }) {
                       New: type its value in below
                     </span>
                   ) : null}
+                  {binding.found ? (
+                    <span className="block text-xs text-muted-foreground">
+                      Found in the program
+                    </span>
+                  ) : null}
                 </td>
                 <td className="py-2 pr-4 break-all">
                   <code>{binding.tool}</code> <code>{binding.argument}</code>
                 </td>
                 <td className="py-2 pr-4 break-all">
-                  <code>{binding.template}</code>
+                  {binding.found ? (
+                    typedLabel(binding.found.parts)
+                  ) : (
+                    <code>{binding.template}</code>
+                  )}
                 </td>
                 <td className="py-2 break-all">
                   <code>{binding.url}</code>
@@ -197,6 +220,9 @@ function SecretPlaces({ shown }: { shown: WrapperShown }) {
       <p className="text-xs leading-relaxed text-muted-foreground">
         PCP writes each value in at these places only, for the server at that
         address. Neither the program nor the assistant ever sees it.
+        {shown.secrets.some((binding) => binding.found)
+          ? " A secret found in a program is typed into a page only at the sites you bound it to, or after asking you."
+          : null}
       </p>
     </section>
   )
@@ -226,7 +252,8 @@ function ToolReview({ tool }: { tool: WrapperShownTool }) {
             {STATUS[tool.status]}
           </Badge>
           {tool.flow ? <Badge variant="secondary">Browser flow</Badge> : null}
-          <Hints annotations={tool.annotations} />
+          {tool.tier ? <TierBadge tier={tool.tier} /> : null}
+          <Hints annotations={tool.annotations} tiered={!!tool.tier} />
         </div>
         <p className="leading-relaxed break-words whitespace-pre-wrap">
           {tool.description}
@@ -331,7 +358,32 @@ function Code({
   )
 }
 
-function Hints({ annotations }: { annotations: string | null }) {
+/**
+ * A tool's tier: the highest of the tools it calls, which decides over what
+ * its hints propose.
+ */
+function TierBadge({ tier }: { tier: ToolTier }) {
+  return (
+    <Badge
+      variant={tier === "read" ? "secondary" : "warning"}
+      title={`${TOOL_TIER_LABELS[tier]}, from the tools it calls: ${TOOL_TIER_HINTS[tier]}`}
+    >
+      {TOOL_TIER_LABELS[tier]}
+    </Badge>
+  )
+}
+
+/** The hints a tier stands for, which its badge shows in their place. */
+const TIER_HINTS = new Set(["readOnlyHint", "destructiveHint"])
+
+function Hints({
+  annotations,
+  tiered = false,
+}: {
+  annotations: string | null
+  /** The tool's tier is shown: its read-only and destructive hints are not. */
+  tiered?: boolean
+}) {
   if (!annotations) {
     return null
   }
@@ -344,10 +396,16 @@ function Hints({ annotations }: { annotations: string | null }) {
     hints = {}
   }
 
-  const entries = Object.entries(hints)
+  const entries = Object.entries(hints).filter(
+    ([key]) => !(tiered && TIER_HINTS.has(key)),
+  )
   const known = entries.every(
     ([key, value]) => key in HINTS && typeof value === "boolean",
   )
+
+  if (tiered && entries.length === 0) {
+    return null
+  }
 
   if (!known || entries.length === 0) {
     // Not the four hints the definition allows: shown as given.

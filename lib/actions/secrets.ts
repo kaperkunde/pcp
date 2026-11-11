@@ -1,6 +1,7 @@
 "use server"
 
 import { revalidatePath } from "next/cache"
+import { after } from "next/server"
 
 import {
   bindOrigin,
@@ -8,6 +9,7 @@ import {
   parseOrigins,
   unbindOrigin,
 } from "@/lib/core/browser-secrets"
+import { scrubFreedPages } from "@/lib/core/cleanup/runtime"
 import {
   createSecret,
   deleteSecret,
@@ -15,10 +17,13 @@ import {
   revealTotpCode,
   updateSecret,
 } from "@/lib/core/secrets"
+import { servicesUsingSecret } from "@/lib/core/services/services"
+import { restartServicesUsingSecret } from "@/lib/core/upstream"
 import { type ActionState, field, guarded } from "@/lib/server/action-state"
+import { publicUrlFor } from "@/lib/server/public-url"
 import { requireContext } from "@/lib/server/session"
 
-export type SecretActionResult = ActionState<{ id?: string }>
+export type SecretActionResult = ActionState<{ id?: string; message?: string }>
 
 export async function createSecretAction(
   _previous: SecretActionResult,
@@ -35,6 +40,7 @@ export async function createSecretAction(
       value: field(formData, "value"),
       description: field(formData, "description"),
       kind,
+      loginName: field(formData, "loginName"),
     })
 
     for (const origin of origins) {
@@ -56,17 +62,48 @@ export async function updateSecretAction(
   const ctx = await requireContext()
   const value = field(formData, "value")
 
+  const id = field(formData, "id")
+
   const result = await guarded(async () => {
-    await updateSecret(ctx, field(formData, "id"), {
+    await updateSecret(ctx, id, {
       name: field(formData, "name"),
       description: field(formData, "description"),
       ...(value ? { value } : {}),
+      // The sign-in it belongs to, on the form of one of the owner's own.
+      ...(formData.has("loginName")
+        ? {
+            loginName: field(formData, "loginName"),
+            note: field(formData, "note"),
+          }
+        : {}),
+      ...(formData.has("totpCompanionId")
+        ? { totpCompanionId: field(formData, "totpCompanionId") || null }
+        : {}),
     })
 
-    return {}
+    if (!value) {
+      return {}
+    }
+
+    // A service keeps the value it was started with: each one whose
+    // variables take this secret is made again with the new one, once this
+    // answer is sent, while the request still holds the key.
+    const services = await servicesUsingSecret(ctx, id)
+
+    if (services.length === 0) {
+      return {}
+    }
+
+    const publicUrl = await publicUrlFor(ctx)
+    after(() => restartServicesUsingSecret(ctx, id, { publicUrl }))
+
+    return {
+      message: `Saved. ${services.length === 1 ? "The service that uses it is" : `The ${services.length} services that use it are`} being restarted with the new value; their pages show how that went.`,
+    }
   })
 
   revalidatePath("/secrets")
+  revalidatePath("/servers")
 
   return result
 }
@@ -78,6 +115,9 @@ export async function deleteSecretAction(
 
   const result = await guarded(async () => {
     await deleteSecret(ctx, id)
+    // Its rows are zeroed in the file as they go; the log's older copy of
+    // their pages goes once the answer is sent.
+    after(() => scrubFreedPages({ rebuild: false }))
     return {}
   })
 
@@ -106,7 +146,9 @@ export async function addSecretOriginAction(
   const ctx = await requireContext()
 
   const result = await guarded(async () => {
-    await bindOrigin(ctx, field(formData, "id"), field(formData, "origin"))
+    await bindOrigin(ctx, field(formData, "id"), field(formData, "origin"), {
+      subdomains: formData.get("subdomains") === "on",
+    })
     return {}
   })
 

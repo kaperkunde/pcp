@@ -1,0 +1,83 @@
+/**
+ * Bounds on a service: what its definition may hold, and how long and how
+ * much PCP waits for and reads from the engine on the SSH server.
+ */
+
+/** Ports a service may publish. */
+export const MAX_SERVICE_PORTS = 8
+/** Environment variables a definition may name. */
+export const MAX_SERVICE_ENV = 64
+/** Named volumes a service may mount. */
+export const MAX_SERVICE_VOLUMES = 8
+/** Arguments after the image, and the length of each. */
+export const MAX_SERVICE_ARGS = 32
+export const MAX_SERVICE_ARG_CHARS = 1000
+/** An image reference, as Docker allows it (255 for the name, plus tag or digest). */
+export const MAX_IMAGE_CHARS = 400
+/** An environment variable's description, and a fixed value in a definition. */
+export const MAX_ENV_DESCRIPTION_CHARS = 300
+export const MAX_ENV_VALUE_CHARS = 4000
+/** A path in the container, or on the service's HTTP side. */
+export const MAX_PATH_CHARS = 400
+/** A definition as JSON. */
+export const MAX_SERVICE_DEFINITION_BYTES = 64 * 1024
+/** Build arguments a definition built from a repository may name. */
+export const MAX_BUILD_ARGS = 32
+/** One environment variable's value, from a secret. */
+export const MAX_ENV_SECRET_BYTES = 32 * 1024
+
+/** Reading the engine's version, inspecting, starting, stopping. */
+export const ENGINE_COMMAND_TIMEOUT_MS = 60_000
+/** Pulling an image. */
+export const ENGINE_PULL_TIMEOUT_MS = 10 * 60_000
+/** Building one from a repository: the download, the build and its checks. */
+export const BUILD_TIMEOUT_MS = 30 * 60_000
+/** The repository's tarball at the commit, as GitHub serves it. */
+export const MAX_BUILD_SOURCE_BYTES = 256 * 1024 * 1024
+/** The image a build makes; a larger one is removed again. */
+export const MAX_BUILT_IMAGE_BYTES = 8 * 1024 * 1024 * 1024
+/** The build's last lines PCP keeps for an error. */
+export const BUILD_LOG_TAIL_BYTES = 3000
+/** What PCP reads back from one engine command. */
+export const ENGINE_OUTPUT_BYTES = 256 * 1024
+/** How long `stop` gives the container before the engine kills it. */
+export const STOP_GRACE_SECONDS = 30
+
+/** Log lines an assistant or the owner may ask for at once. */
+export const MAX_LOG_LINES = 500
+export const DEFAULT_LOG_LINES = 100
+/** How far back `logs` may look, in minutes (a week). */
+export const MAX_LOG_SINCE_MINUTES = 7 * 24 * 60
+/** What PCP keeps of the logs it reads. */
+export const MAX_LOG_BYTES = 128 * 1024
+
+/** How long a launch, update or restart waits for the service to be healthy. */
+export const HEALTH_WAIT_MS = 90_000
+/** Between two health checks while waiting. */
+export const HEALTH_INTERVAL_MS = 1_500
+/** One health check. */
+export const HEALTH_REQUEST_TIMEOUT_MS = 5_000
+/** What PCP reads of a health check's answer before it lets go of it. */
+export const HEALTH_BODY_BYTES = 64 * 1024
+/**
+ * How long a call to what a stopped service serves waits for it to start
+ * and be healthy before it gives up (services.ts startOnDemand).
+ */
+export const START_ON_DEMAND_WAIT_MS = 45_000
+/** The reconcile pass looks at a vault's services at most this often. */
+export const SERVICE_RECONCILE_INTERVAL_MS = 10 * 60_000
+/** And stops starting more once this long has gone. */
+export const SERVICE_RECONCILE_BUDGET_MS = 2 * 60_000
+
+/** A file's name in a service's files folder, and each folder or name in it. */
+export const MAX_FILE_NAME_CHARS = 200
+export const MAX_FILE_NAME_PART_CHARS = 100
+/** Copying one file into or out of a container (put_file, get_file). */
+export const FILE_COPY_TIMEOUT_MS = 5 * 60_000
+/** What PCP reads of a name's tar stream to see whether it is there, and what it is. */
+export const FILE_PROBE_BYTES = 8 * 1024
+/**
+ * The tar stream's own bytes around a file get_file reads (its headers,
+ * padding and end): the most read back is the largest file plus these.
+ */
+export const FILE_TAR_OVERHEAD_BYTES = 64 * 1024

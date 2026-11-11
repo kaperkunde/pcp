@@ -1,7 +1,5 @@
 import type { CallToolResult } from "@modelcontextprotocol/server"
 
-import type { McpServer } from "@/lib/generated/prisma/client"
-
 import { afterAnswer } from "../after-answer"
 import { storeTools, type SyncResult } from "../catalogue"
 import type { VaultContext } from "../context"
@@ -9,6 +7,12 @@ import { db } from "../db"
 import { invalid, isPcpError, PcpError } from "../errors"
 import { newId } from "../ids"
 import { errorToolResult, jsonToolResult } from "../json-result"
+import {
+  argumentsResult,
+  familyError,
+  refusalOf,
+  withNotes,
+} from "../tools/family"
 import { makeRedactor } from "../openapi/redact"
 import {
   getServer,
@@ -63,12 +67,7 @@ import {
   MAX_SEND_ATTACHMENT_BYTES,
   MAX_FULL_BODY_BYTES,
 } from "./limits"
-import {
-  mailToolSpec,
-  mailTools,
-  parseMailArgs,
-  parseRecipients,
-} from "./tools"
+import { mailTool, mailToolSpec, mailTools, parseRecipients } from "./tools"
 import {
   MAIL_SAVE_SENT,
   MailAuthError,
@@ -80,6 +79,7 @@ import {
   type SearchQuery,
   type SendInput,
 } from "./types"
+import { type OpenServer, serverCreateData, writeServer } from "../server-meta"
 
 /**
  * Mail accounts: servers of kind "jmap" and "imap". The owner adds one in
@@ -247,18 +247,18 @@ export async function createMailAccount(
 
   const { data, newSecret } = await normalizeMailAccount(ctx, input)
   const id = newId()
-  const slug = await uniqueSlug(ctx.vaultId, slugify(data.name))
+  const slug = await uniqueSlug(ctx, slugify(data.name))
 
   await withNewSecret(ctx, newSecret, async (secretId) => {
     await db().mcpServer.create({
-      data: {
+      data: serverCreateData(ctx, {
         id,
         vaultId: ctx.vaultId,
         kind: input.protocol,
         slug,
         ...data,
         ...secretColumns(data, secretId),
-      },
+      }),
     })
   })
 
@@ -312,26 +312,23 @@ export async function updateMailAccount(
   const relearn = SENDING_FIELDS.some((key) => data[key] !== existing[key])
 
   await withNewSecret(ctx, newSecret, (secretId) =>
-    db().mcpServer.update({
-      where: { id },
-      data: {
-        ...data,
-        ...secretColumns(data, secretId),
-        // What the last session said belongs to the old address or sign-in.
-        ...(reconnect
-          ? {
-              mailApiUrl: null,
-              mailDownloadUrl: null,
-              mailUploadUrl: null,
-              mailAccountId: null,
-              mailSubmission: false,
-            }
-          : {}),
-        ...(dropTokens
-          ? { oauthTokensId: null, oauthConnectedAt: null, status: "unknown" }
-          : {}),
-        ...(relearn ? { mailServerFilesSent: null } : {}),
-      },
+    writeServer(ctx, id, {
+      ...data,
+      ...secretColumns(data, secretId),
+      // What the last session said belongs to the old address or sign-in.
+      ...(reconnect
+        ? {
+            mailApiUrl: null,
+            mailDownloadUrl: null,
+            mailUploadUrl: null,
+            mailAccountId: null,
+            mailSubmission: false,
+          }
+        : {}),
+      ...(dropTokens
+        ? { oauthTokensId: null, oauthConnectedAt: null, status: "unknown" }
+        : {}),
+      ...(relearn ? { mailServerFilesSent: null } : {}),
     }),
   )
 
@@ -342,7 +339,7 @@ export async function updateMailAccount(
   return { reconnect }
 }
 
-function imapConfig(server: McpServer): ImapConfig {
+function imapConfig(server: OpenServer): ImapConfig {
   return {
     imap: parseImapAddress(server.url),
     smtp: server.smtpUrl ? parseSmtpAddress(server.smtpUrl) : null,
@@ -371,7 +368,7 @@ async function learnServerFilesSent(
   })
 }
 
-function loginOf(server: McpServer, credential: MailCredential) {
+function loginOf(server: OpenServer, credential: MailCredential) {
   if (!credential.login) {
     throw new PcpError(
       "state",
@@ -384,7 +381,8 @@ function loginOf(server: McpServer, credential: MailCredential) {
 
 /** The account's status and what the gateway is told, from a failure. */
 async function fail(
-  server: McpServer,
+  ctx: VaultContext,
+  server: OpenServer,
   error: unknown,
   credential: MailCredential,
 ): Promise<{ status: "auth_required" | "error"; message: string }> {
@@ -395,7 +393,7 @@ async function fail(
       server.authType === "oauth"
         ? `${server.name} needs to be connected: open it in PCP and choose Connect.`
         : `${server.name} refused the credentials PCP sent: ${scrub.text(error.message)}`
-    await setServerStatus(server.id, "auth_required", message)
+    await setServerStatus(ctx, server.id, "auth_required", message)
     return { status: "auth_required", message }
   }
 
@@ -406,7 +404,7 @@ async function fail(
         : `${server.name} could not be reached.`,
     )
     .slice(0, 500)
-  await setServerStatus(server.id, "error", message)
+  await setServerStatus(ctx, server.id, "error", message)
   return { status: "error", message }
 }
 
@@ -415,7 +413,8 @@ async function fail(
  * writes its tools into the catalogue. A failure keeps the tools it had.
  */
 export async function syncMailTools(
-  server: McpServer,
+  ctx: VaultContext,
+  server: OpenServer,
   credential: MailCredential,
   { imap = defaultImapDeps }: { imap?: ImapDeps } = {},
 ): Promise<SyncResult> {
@@ -427,15 +426,12 @@ export async function syncMailTools(
 
     if (kind === "jmap") {
       const session = await fetchJmapSession(server.url, credential)
-      await db().mcpServer.update({
-        where: { id: server.id },
-        data: {
-          mailApiUrl: session.apiUrl,
-          mailDownloadUrl: session.downloadUrl,
-          mailUploadUrl: session.uploadUrl,
-          mailAccountId: session.accountId,
-          mailSubmission: session.submission,
-        },
+      await writeServer(ctx, server.id, {
+        mailApiUrl: session.apiUrl,
+        mailDownloadUrl: session.downloadUrl,
+        mailUploadUrl: session.uploadUrl,
+        mailAccountId: session.accountId,
+        mailSubmission: session.submission,
       })
       canSend = session.submission
       canVacation = session.vacation
@@ -449,24 +445,28 @@ export async function syncMailTools(
     }
 
     const toolCount = await storeTools(
+      ctx,
       server.id,
       mailTools({ kind, readOnly: server.readOnly, canSend, canVacation }),
     )
-    await setServerStatus(server.id, "ok", "", { lastSyncedAt: new Date() })
+    await setServerStatus(ctx, server.id, "ok", "", {
+      lastSyncedAt: new Date(),
+    })
 
     return { status: "ok", message: "", toolCount }
   } catch (error) {
     if (isPcpError(error)) {
-      await setServerStatus(server.id, "error", error.message)
+      await setServerStatus(ctx, server.id, "error", error.message)
       return { status: "error", message: error.message, toolCount: 0 }
     }
 
-    return { ...(await fail(server, error, credential)), toolCount: 0 }
+    return { ...(await fail(ctx, server, error, credential)), toolCount: 0 }
   }
 }
 
 async function openBackend(
-  server: McpServer,
+  ctx: VaultContext,
+  server: OpenServer,
   credential: MailCredential,
   imap: ImapDeps,
   defer: ImapSendHooks["defer"],
@@ -498,15 +498,12 @@ async function openBackend(
   // Not read since the address or sign-in changed: read it now.
   if (!session) {
     session = await fetchJmapSession(server.url, credential)
-    await db().mcpServer.update({
-      where: { id: server.id },
-      data: {
-        mailApiUrl: session.apiUrl,
-        mailDownloadUrl: session.downloadUrl,
-        mailUploadUrl: session.uploadUrl,
-        mailAccountId: session.accountId,
-        mailSubmission: session.submission,
-      },
+    await writeServer(ctx, server.id, {
+      mailApiUrl: session.apiUrl,
+      mailDownloadUrl: session.downloadUrl,
+      mailUploadUrl: session.uploadUrl,
+      mailAccountId: session.accountId,
+      mailSubmission: session.submission,
     })
   }
 
@@ -520,7 +517,7 @@ async function firstChars(
     keep,
     server,
     toolName,
-  }: { keep?: ResultKeeper; server: McpServer; toolName: string },
+  }: { keep?: ResultKeeper; server: OpenServer; toolName: string },
 ): Promise<{ text: string; truncated: boolean; result?: ResultHandle }> {
   if (text.length <= MAX_BODY_CHARS) {
     return { text, truncated: false }
@@ -544,7 +541,7 @@ async function firstChars(
 
 async function runTool(
   backend: MailBackend,
-  server: McpServer,
+  server: OpenServer,
   toolName: string,
   args: Record<string, unknown>,
   {
@@ -566,7 +563,7 @@ async function runTool(
 
     case "search_emails": {
       const query: SearchQuery = {
-        ...(args as Partial<SearchQuery>),
+        ...searchQuery(args),
         offset: (args.offset as number | undefined) ?? 0,
         limit: (args.limit as number | undefined) ?? DEFAULT_SEARCH_LIMIT,
       }
@@ -650,7 +647,7 @@ async function runTool(
         result: handleOf(kept),
         ...(text === null
           ? {
-              note: `PCP keeps this file for you: pass {"$result": "${kept.id}"} where a tool wants it (send_email's or create_draft's attachments, the browser's upload_file, or a field that takes base64), or get it onto your own computer with share_result's link where this token has it.`,
+              note: `PCP keeps this file for you: pass this answer's "result" handle, {"$result": "${kept.id}"}, never the whole answer, where a tool wants it (send_email's or create_draft's attachments, the browser's upload_file, or a field that takes base64), or get it onto your own computer with share_result's link where this token has it.`,
             }
           : {
               text: text.slice(0, MAX_ATTACHMENT_TEXT_CHARS),
@@ -662,8 +659,8 @@ async function runTool(
     case "get_thread": {
       if (!backend.getThread) break
       return {
-        threadId: args.threadId,
-        emails: await backend.getThread(String(args.threadId)),
+        threadId: args.thread_id,
+        emails: await backend.getThread(String(args.thread_id)),
       }
     }
 
@@ -695,11 +692,11 @@ async function runTool(
           ...(args.answered !== undefined
             ? { answered: Boolean(args.answered) }
             : {}),
-          ...(Array.isArray(args.addKeywords)
-            ? { addKeywords: args.addKeywords.map(String) }
+          ...(Array.isArray(args.add_keywords)
+            ? { addKeywords: args.add_keywords.map(String) }
             : {}),
-          ...(Array.isArray(args.removeKeywords)
-            ? { removeKeywords: args.removeKeywords.map(String) }
+          ...(Array.isArray(args.remove_keywords)
+            ? { removeKeywords: args.remove_keywords.map(String) }
             : {}),
         }),
       )
@@ -779,6 +776,27 @@ async function oneOrMany<T>(
   return done[0]
 }
 
+/** search_emails' arguments as the backends take a query. */
+function searchQuery(args: Record<string, unknown>): Partial<SearchQuery> {
+  const {
+    all_mailboxes: allMailboxes,
+    has_attachment: hasAttachment,
+    not_keyword: notKeyword,
+    ...rest
+  } = args
+
+  return {
+    ...(rest as Partial<SearchQuery>),
+    ...(allMailboxes !== undefined
+      ? { allMailboxes: allMailboxes as boolean }
+      : {}),
+    ...(hasAttachment !== undefined
+      ? { hasAttachment: hasAttachment as boolean }
+      : {}),
+    ...(notKeyword !== undefined ? { notKeyword: notKeyword as string } : {}),
+  }
+}
+
 /** The email send_email and create_draft write, from their arguments. */
 function composed(
   args: Record<string, unknown>,
@@ -790,7 +808,7 @@ function composed(
     bcc: parseRecipients(args.bcc, "bcc"),
     subject: String(args.subject ?? ""),
     text: String(args.text ?? ""),
-    ...(args.inReplyTo ? { inReplyTo: String(args.inReplyTo) } : {}),
+    ...(args.in_reply_to ? { inReplyTo: String(args.in_reply_to) } : {}),
     ...(args.identity ? { identity: String(args.identity) } : {}),
     ...(attachments?.length ? { attachments } : {}),
   }
@@ -872,7 +890,8 @@ async function openAttachments(
 
 /** Runs one mail tool for an assistant. */
 export async function callMailTool(
-  server: McpServer,
+  ctx: VaultContext,
+  server: OpenServer,
   toolName: string,
   rawArgs: Record<string, unknown>,
   {
@@ -899,35 +918,57 @@ export async function callMailTool(
 ): Promise<CallToolResult> {
   const kind = server.kind as MailKind
   const spec = mailToolSpec(toolName)
+  const tool = mailTool(kind, toolName)
 
-  if (!spec || !spec.kinds.includes(kind)) {
-    throw new PcpError(
-      "state",
+  if (!spec || !tool) {
+    return familyError(
       `${server.name} has no tool called ${toolName}.`,
+      "not_found",
     )
   }
 
   if (server.readOnly && spec.writes) {
-    throw new PcpError(
-      "forbidden",
+    return familyError(
       `${server.name} is read-only in PCP; ${toolName} would change mail.`,
+      "forbidden",
     )
   }
 
   // Checked before anything is opened: a bad argument never reaches the
   // server. A handle is replaced by what it stands for first, so the limits
   // apply to the real text; an attachment is resolved as bytes, later.
-  const args = parseMailArgs(
-    spec,
-    kind,
+  const checked = tool.check(
     open
       ? await resolveHandles(rawArgs, open, { skip: ["attachments"] })
       : rawArgs,
   )
 
+  if (!checked.fits) {
+    return argumentsResult(`${server.slug}/${toolName}`, checked.problems, {
+      notes: checked.notes,
+    })
+  }
+
+  const args = checked.args
+
   if (COMPOSES.has(toolName)) {
-    for (const key of ["to", "cc", "bcc"] as const) {
-      parseRecipients(args[key], key)
+    const problems = (["to", "cc", "bcc"] as const).flatMap((key) => {
+      try {
+        parseRecipients(args[key], key)
+        return []
+      } catch (error) {
+        if (isPcpError(error) && error.code === "validation") {
+          return [error.message]
+        }
+
+        throw error
+      }
+    })
+
+    if (problems.length > 0) {
+      return argumentsResult(`${server.slug}/${toolName}`, problems, {
+        notes: checked.notes,
+      })
     }
   }
 
@@ -938,7 +979,7 @@ export async function callMailTool(
   let backend: MailBackend | null = null
 
   try {
-    backend = await openBackend(server, credential, imap, defer)
+    backend = await openBackend(ctx, server, credential, imap, defer)
     const scrub = makeRedactor(credential.redact)
     const value = await runTool(backend, server, toolName, args, {
       keep,
@@ -947,17 +988,30 @@ export async function callMailTool(
       scrub,
     })
 
-    return jsonToolResult(value, { redact: credential.redact })
+    return withNotes(
+      jsonToolResult(value, { redact: credential.redact }),
+      checked.notes,
+    )
   } catch (error) {
     if (error instanceof MailRequestError) {
       return errorToolResult(error.message, { redact: credential.redact })
+    }
+
+    const refused = refusalOf(
+      error,
+      `${server.slug}/${toolName}`,
+      checked.notes,
+    )
+
+    if (refused) {
+      return refused
     }
 
     if (isPcpError(error)) {
       throw error
     }
 
-    const failure = await fail(server, error, credential)
+    const failure = await fail(ctx, server, error, credential)
     throw new PcpError(
       failure.status === "auth_required" ? "unauthorized" : "upstream",
       failure.message,

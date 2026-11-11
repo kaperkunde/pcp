@@ -1,5 +1,7 @@
+import { safeEqual } from "@kaperkunde/security"
+
 import type { VaultContext } from "./context"
-import { randomSecret, safeEqual, sha256Hex } from "./crypto"
+import { randomSecret, sha256Hex } from "./crypto"
 import { db } from "./db"
 import { newId } from "./ids"
 import { createCredentialGrant, unlockWithCredential } from "./keys"
@@ -22,7 +24,6 @@ export type ResolvedSession = {
 
 export async function createSession(
   ctx: VaultContext,
-  { userAgent }: { userAgent?: string | null } = {},
 ): Promise<{ cookieValue: string; expiresAt: Date }> {
   const secret = randomSecret()
   const grant = await createCredentialGrant(
@@ -40,7 +41,6 @@ export async function createSession(
       vaultId: ctx.vaultId,
       grantId: grant.id,
       expiresAt,
-      userAgent: userAgent?.slice(0, 300) ?? null,
     },
   })
 

@@ -2,12 +2,23 @@ import { describe, expect, it } from "vitest"
 
 import { replyTarget } from "./addresses"
 import { encodeImapId } from "./imap"
-import {
-  mailTools,
-  mailToolSpec,
-  parseMailArgs,
-  parseRecipients,
-} from "./tools"
+import type { MailKind } from "../servers"
+import { mailTools, mailToolSpec, parseRecipients } from "./tools"
+
+/** A tool's arguments through its check: the parsed ones, or every problem. */
+function parseMailArgs(
+  spec: NonNullable<ReturnType<typeof mailToolSpec>>,
+  kind: MailKind,
+  args: unknown,
+) {
+  const checked = spec.tool[kind]!.check(args)
+
+  if (!checked.fits) {
+    throw new Error(`${spec.name}: ${checked.problems.join(" ")}`)
+  }
+
+  return checked.args
+}
 
 function names(options: Parameters<typeof mailTools>[0]): string[] {
   return mailTools(options).map((tool) => tool.name)
@@ -218,7 +229,7 @@ describe("parseMailArgs", () => {
     ).toThrow(/2026-10-01/)
     expect(() =>
       parseMailArgs(mailToolSpec("mark_email")!, "imap", { id: "1" }),
-    ).toThrow(/read, flagged, answered, addKeywords/)
+    ).toThrow(/read, flagged, answered, add_keywords/)
     expect(() =>
       parseMailArgs(mailToolSpec("send_email")!, "imap", {
         to: ["a@example.com"],
@@ -249,7 +260,7 @@ describe("parseMailArgs", () => {
         text: "t",
         attachments: [{ $result: "r1", name: "../evil" }],
       }),
-    ).toThrow(/file name/)
+    ).toThrow(/"attachments\/0\/name" does not match/)
     expect(() =>
       parseMailArgs(spec, "imap", { subject: "x".repeat(501), text: "" }),
     ).toThrow(/create_draft/)
@@ -358,10 +369,10 @@ describe("recipients", () => {
   })
 })
 
-describe("inReplyTo", () => {
+describe("in_reply_to", () => {
   const draft = mailToolSpec("create_draft")!
-  const reply = (inReplyTo: unknown) =>
-    parseMailArgs(draft, "imap", { subject: "s", text: "t", inReplyTo })
+  const reply = (in_reply_to: unknown) =>
+    parseMailArgs(draft, "imap", { subject: "s", text: "t", in_reply_to })
 
   it("takes an email's id or its Message-ID, with or without brackets", () => {
     for (const value of [
@@ -371,7 +382,7 @@ describe("inReplyTo", () => {
       "engine-1@example.com",
       "CAF=x+y_z.1@mail.gmail.com",
     ]) {
-      expect(reply(value)).toMatchObject({ inReplyTo: value })
+      expect(reply(value)).toMatchObject({ in_reply_to: value })
     }
   })
 
@@ -385,7 +396,7 @@ describe("inReplyTo", () => {
       "a@example.com\r\nBcc: eve@example.com",
       "",
     ]) {
-      expect(() => reply(value)).toThrow(/create_draft: .*inReplyTo/)
+      expect(() => reply(value)).toThrow(/create_draft: .*in_reply_to/)
     }
   })
 
@@ -415,7 +426,7 @@ describe("inReplyTo", () => {
         tool.inputSchema as {
           properties: Record<string, { description?: string }>
         }
-      ).properties.inReplyTo!.description,
+      ).properties.in_reply_to!.description,
     ).toBe(
       "The email this replies to: its id as search_emails returns it, or its Message-ID header (as get_email's messageId).",
     )
@@ -478,14 +489,14 @@ describe("keywords", () => {
       parseMailArgs(mark, "jmap", {
         id: "e1",
         answered: true,
-        addKeywords: ["Invoices", "$label1"],
-        removeKeywords: ["todo"],
+        add_keywords: ["Invoices", "$label1"],
+        remove_keywords: ["todo"],
       }),
     ).toEqual({
       id: "e1",
       answered: true,
-      addKeywords: ["Invoices", "$label1"],
-      removeKeywords: ["todo"],
+      add_keywords: ["Invoices", "$label1"],
+      remove_keywords: ["todo"],
     })
   })
 
@@ -500,20 +511,20 @@ describe("keywords", () => {
       "",
     ]) {
       expect(() =>
-        parseMailArgs(mark, "imap", { id: "1", addKeywords: [bad] }),
+        parseMailArgs(mark, "imap", { id: "1", add_keywords: [bad] }),
       ).toThrow(/mark_email/)
     }
 
     for (const flag of ["$seen", "$Flagged", "$answered", "$draft"]) {
       expect(() =>
-        parseMailArgs(mark, "jmap", { id: "1", removeKeywords: [flag] }),
+        parseMailArgs(mark, "jmap", { id: "1", remove_keywords: [flag] }),
       ).toThrow(/read, flagged or answered/)
     }
 
     expect(() =>
       parseMailArgs(mark, "jmap", {
         id: "1",
-        addKeywords: Array.from({ length: 21 }, (_, n) => `k${n}`),
+        add_keywords: Array.from({ length: 21 }, (_, n) => `k${n}`),
       }),
     ).toThrow(/mark_email/)
     expect(() =>
@@ -528,11 +539,11 @@ describe("searching", () => {
   it("searches every mailbox or one, never both", () => {
     const spec = mailToolSpec("search_emails")!
 
-    expect(parseMailArgs(spec, "jmap", { allMailboxes: true })).toEqual({
-      allMailboxes: true,
+    expect(parseMailArgs(spec, "jmap", { all_mailboxes: true })).toEqual({
+      all_mailboxes: true,
     })
     expect(() =>
-      parseMailArgs(spec, "jmap", { allMailboxes: true, mailbox: "inbox" }),
+      parseMailArgs(spec, "jmap", { all_mailboxes: true, mailbox: "inbox" }),
     ).toThrow(/not both/)
   })
 })
@@ -580,5 +591,47 @@ describe("mailbox tools", () => {
     expect(() =>
       parseMailArgs(set, "jmap", { enabled: true, from: "someday" }),
     ).toThrow(/2026-10-01/)
+  })
+})
+
+describe("renamed arguments", () => {
+  it("take the old camelCase names for a release, with a note", () => {
+    const search = mailToolSpec("search_emails")!.tool.imap!
+
+    expect(
+      search.check({ hasAttachment: true, allMailboxes: true }),
+    ).toMatchObject({
+      fits: true,
+      args: { has_attachment: true, all_mailboxes: true },
+      notes: [
+        "allMailboxes was renamed to all_mailboxes; use all_mailboxes.",
+        "hasAttachment was renamed to has_attachment; use has_attachment.",
+      ],
+    })
+    expect(
+      search.check({ hasAttachment: true, has_attachment: false }),
+    ).toMatchObject({
+      fits: false,
+      problems: [
+        "hasAttachment was renamed to has_attachment: pass only has_attachment.",
+      ],
+    })
+  })
+
+  it("publish the rules across arguments in the schema", () => {
+    const mark = mailToolSpec("mark_email")!.tool.jmap!.inputSchema()
+
+    expect(mark.allOf).toEqual([
+      { oneOf: [{ required: ["id"] }, { required: ["ids"] }] },
+      {
+        anyOf: [
+          { required: ["read"] },
+          { required: ["flagged"] },
+          { required: ["answered"] },
+          { required: ["add_keywords"] },
+          { required: ["remove_keywords"] },
+        ],
+      },
+    ])
   })
 })

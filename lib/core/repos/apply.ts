@@ -1,6 +1,17 @@
 import type { VaultContext } from "../context"
 import { db } from "../db"
-import { shareDescription, uniqueDefinitionSlug } from "../definition-rows"
+import {
+  openTools,
+  TOOL_OVERRIDE_SELECT,
+  TOOL_NAME_SELECT,
+  TOOL_ABOUT_SELECT,
+  toolName,
+} from "../tool-rows"
+import {
+  shareDescription,
+  uniqueDefinitionSlug,
+  writeDefinition,
+} from "../definition-rows"
 import type { CloneInput } from "../definitions"
 import {
   changeEndpoint,
@@ -12,6 +23,13 @@ import { invalid, PcpError } from "../errors"
 import { checkPersonalNote, setPersonalNote } from "../personal-notes"
 import { findTextSecretByName } from "../secrets"
 import {
+  writeServer,
+  openServers,
+  SERVER_META_SELECT,
+  serverSlugsWhere,
+  serverSlugTaken,
+} from "../server-meta"
+import {
   createServer,
   getServer,
   normalizeNameAndDescription,
@@ -20,6 +38,8 @@ import {
   type ExtraAuthHeaderInput,
   type ServerInput,
 } from "../servers"
+import type { ServiceLaunchInput } from "../services/services"
+import { writeServiceDefinition } from "../services/services"
 import { saveSkillByOwner } from "../skills"
 import { saveWrapperByOwner } from "../wrappers/admin"
 import {
@@ -33,6 +53,7 @@ import type {
   EndpointDocument,
   ItemDocument,
   ServerDocument,
+  ServiceDocument,
   SkillDocument,
   WrapperDocument,
 } from "./documents"
@@ -43,7 +64,8 @@ import { findLocalItem } from "./local"
  * An item from a repository, once the owner approved it, written with the
  * owner's own paths: skills.ts for a skill, wrappers/admin.ts
  * saveWrapperByOwner for a wrapper or flow, endpoints.ts for an API
- * endpoint, servers.ts for an MCP server. Nothing here asks anyone: the
+ * endpoint, servers.ts for an MCP server, services/services.ts for a
+ * service. Nothing here asks anyone: the
  * review and the owner's answer come first (review.ts; the request is sync's).
  *
  * A server's item is its definition (definitions.ts). Onto a server the
@@ -54,7 +76,13 @@ import { findLocalItem } from "./local"
  * whether it is on, its pace, levels or note. A new one is the definition
  * and its first instance, whose own part the owner gave on the page that
  * adds it (`InstanceInput`, as cloning asks for it); without one, what a
- * format-1 document said of its server (`instance`) fills it in.
+ * format-1 document said of its server (`instance`) fills it in. A new
+ * service is launched (the owner's page gives where it runs, where it is
+ * published and the secret each variable takes, `ServiceInstance`); onto
+ * one the vault has, only its definition and description are written, never
+ * its SSH server, publish address, secrets, container, what it registered
+ * or note, and the containers keep running what they were made with until
+ * the owner updates each.
  *
  * A secret is found by its name in this vault. One the vault does not have
  * is never made up: the item is saved without it (a wrapper without that
@@ -86,12 +114,26 @@ export type InstanceInput = CloneInput & {
   publicOnly?: boolean
 }
 
+/**
+ * A new service's own part, as the owner gave it on the page that adds it,
+ * and the launch that runs it (upstream.ts launchService, with the request's
+ * address; a test's stand-in otherwise).
+ */
+export type ServiceInstance = {
+  input: Omit<ServiceLaunchInput, "definition" | "definitionId" | "description">
+  launch: (
+    ctx: VaultContext,
+    input: ServiceLaunchInput,
+  ) => Promise<{ id: string; message?: string }>
+}
+
 /** A wrapper document as resolveDefinition takes it: other tools by short name. */
 export function wrapperInput(document: WrapperDocument): WrapperInput {
   return {
     name: document.displayName,
     description: document.description,
     callLevels: document.callLevels,
+    pace: document.pace ?? null,
     tools: document.tools.map((tool) => ({
       name: tool.name,
       title: tool.title,
@@ -143,6 +185,9 @@ function secretsNamed(document: ItemDocument): string[] {
     case "endpoint":
     case "server":
       return authSecrets(document.auth)
+    // A service's variables take the owner's secrets on its own page.
+    case "service":
+      return []
   }
 }
 
@@ -181,16 +226,21 @@ async function wrapperProblems(
       }),
     ),
   ]
-  const servers = await db().mcpServer.findMany({
-    where: { vaultId: ctx.vaultId, slug: { in: slugs } },
-    select: { id: true, slug: true, kind: true },
-  })
+  const servers = openServers(
+    ctx,
+    await db().mcpServer.findMany({
+      where: serverSlugsWhere(ctx, slugs),
+      select: { ...SERVER_META_SELECT, kind: true },
+    }),
+  )
   const bySlug = new Map(servers.map((server) => [server.slug, server]))
   const tools = await db().mcpTool.findMany({
     where: { serverId: { in: servers.map((server) => server.id) } },
-    select: { serverId: true, name: true },
+    select: TOOL_NAME_SELECT,
   })
-  const has = new Set(tools.map((tool) => `${tool.serverId}\n${tool.name}`))
+  const has = new Set(
+    tools.map((tool) => `${tool.serverId}\n${toolName(ctx, tool)}`),
+  )
   const problems: string[] = []
 
   for (const ref of [...refs].sort()) {
@@ -292,6 +342,7 @@ async function target(
     flow: "wrapper",
     endpoint: "openapi",
     server: "mcp",
+    service: "service",
   }
 
   if (row.kind !== kinds[document.kind]) {
@@ -317,17 +368,15 @@ async function settle(
     const free =
       (await uniqueDefinitionSlug(
         db(),
+        ctx,
         ctx.vaultId,
         document.name,
         row.definitionId,
       )) === document.name
 
-    await db().serverDefinition.update({
-      where: { id: row.definitionId },
-      data: {
-        name: document.displayName,
-        ...(free ? { slug: document.name } : {}),
-      },
+    await writeDefinition(ctx, row.definitionId, {
+      name: document.displayName,
+      ...(free ? { slug: document.name } : {}),
     })
   }
 
@@ -349,12 +398,7 @@ async function firstName(
   const row = await getServer(ctx, id)
 
   if (!named && row.slug !== document.name) {
-    const taken = await db().mcpServer.findUnique({
-      where: { vaultId_slug: { vaultId: ctx.vaultId, slug: document.name } },
-      select: { id: true },
-    })
-
-    if (!taken) {
+    if (!(await serverSlugTaken(ctx, document.name))) {
       await renameServerSlug(ctx, id, document.name)
     }
   }
@@ -373,10 +417,10 @@ async function writeDescription(
   }).description
 
   if (row.description !== text) {
-    await db().mcpServer.update({ where: { id }, data: { description: text } })
+    await writeServer(ctx, id, { description: text })
   }
 
-  await shareDescription(id)
+  await shareDescription(ctx, id)
 }
 
 async function applySkill(
@@ -590,10 +634,13 @@ async function setToolDescriptions(
   id: string,
   wanted: Record<string, string>,
 ): Promise<void> {
-  const tools = await db().mcpTool.findMany({
-    where: { serverId: id },
-    select: { name: true, descriptionOverride: true },
-  })
+  const tools = openTools(
+    ctx,
+    await db().mcpTool.findMany({
+      where: { serverId: id },
+      select: { ...TOOL_OVERRIDE_SELECT, ...TOOL_ABOUT_SELECT },
+    }),
+  )
 
   for (const tool of tools) {
     const description = wanted[tool.name] ?? null
@@ -648,7 +695,7 @@ async function applyEndpoint(
   } else {
     // What the definition holds, and nothing of the instance's own.
     const existing = await getServer(ctx, id)
-    const stored = await storedSpec(id)
+    const stored = await storedSpec(ctx, id)
     const newText = stored?.text !== document.spec.text
 
     await changeEndpoint(ctx, id, {
@@ -725,11 +772,54 @@ async function applyServer(
   return { id: serverId, notes }
 }
 
+async function applyService(
+  ctx: VaultContext,
+  document: ServiceDocument,
+  id: string | null,
+  service: ServiceInstance | undefined,
+): Promise<AppliedItem> {
+  if (id === null) {
+    if (!service) {
+      throw invalid(
+        `${itemRoot(document)} is a service: it is added by launching it, on one of your SSH servers.`,
+      )
+    }
+
+    const launched = await service.launch(ctx, {
+      ...service.input,
+      name: service.input.name.trim() || document.displayName,
+      description: document.description,
+      definition: document.definition,
+    })
+
+    // The service keeps its own short name (<name>-service): the item's
+    // goes to its definition, and the server it registers may want it.
+    await settle(ctx, launched.id, document)
+
+    return {
+      id: launched.id,
+      notes: launched.message ? [launched.message] : [],
+    }
+  }
+
+  // What the definition holds, and nothing of the instance's own.
+  await writeServiceDefinition(ctx, id, document.definition)
+  await writeDescription(ctx, id, document.description)
+  await settle(ctx, id, document)
+
+  return {
+    id,
+    notes: [
+      "Its containers keep running what they were made with: update each on its page to run the new definition.",
+    ],
+  }
+}
+
 /**
  * Applies an item the owner approved: onto the vault's item `id` (its
  * skill's id, or the server row standing for its definition), or as a new
  * one when `id` is null, with `instance` the first instance of a new server
- * or endpoint. Refused, with nothing written, when a name in it is nothing
+ * or endpoint (`service`, of a new service). Refused, with nothing written, when a name in it is nothing
  * in this vault (resolveItem), when a new item's name is taken, or when
  * `id` is something else. The item's version goes with it: a skill's own,
  * a server's syncVersion on every instance.
@@ -737,7 +827,11 @@ async function applyServer(
 export async function applyItem(
   ctx: VaultContext,
   document: ItemDocument,
-  { id, instance }: { id: string | null; instance?: InstanceInput },
+  {
+    id,
+    instance,
+    service,
+  }: { id: string | null; instance?: InstanceInput; service?: ServiceInstance },
 ): Promise<AppliedItem> {
   const { problems, missingSecrets } = await resolveItem(ctx, document, {
     onto: id !== null,
@@ -759,5 +853,7 @@ export async function applyItem(
       return applyEndpoint(ctx, document, into, instance)
     case "server":
       return applyServer(ctx, document, into, instance)
+    case "service":
+      return applyService(ctx, document, into, service)
   }
 }

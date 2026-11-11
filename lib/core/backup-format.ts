@@ -20,8 +20,13 @@ import type {
   SecretBrowserOrigin,
   ServerAuthHeader,
   ServerDefinition,
+  ServiceSpec,
+  StorageEntry,
+  StorageRoot,
+  Exit,
   Setting,
   Skill,
+  ToolTier,
   Vault,
   VaultToolAccess,
   WebFetchRule,
@@ -32,6 +37,7 @@ import { asBytes } from "./crypto"
 import { invalid } from "./errors"
 import { DDNS_CONFIG_KEY, ddnsHostname, type DdnsConfig } from "./network/ddns"
 import { TLS_CONFIG_KEY } from "./network/tls"
+import { tokenName } from "./token-names"
 import { UPDATE_CONFIG_KEY } from "./updates/state"
 
 /**
@@ -80,11 +86,39 @@ const bytes = z
 const bytesOrNull = bytes.nullable()
 
 /**
+ * A row whose columns were renamed in PCP when their values were sealed
+ * (#96): an older file names them by their old names, which are read as
+ * the new ones. The column itself is the same.
+ */
+function renamedFrom<T extends z.ZodType>(
+  names: Record<string, string>,
+  schema: T,
+): T {
+  // Typed as the row it reads into: what a file of this PCP holds.
+  return z.preprocess((value) => {
+    if (typeof value !== "object" || value === null || Array.isArray(value)) {
+      return value
+    }
+
+    const row: Record<string, unknown> = { ...value }
+
+    for (const [old, now] of Object.entries(names)) {
+      if (old in row && !(now in row)) {
+        row[now] = row[old]
+        delete row[old]
+      }
+    }
+
+    return row
+  }, schema) as unknown as T
+}
+
+/**
  * The scrypt parameters a file may ask for. `deriveKek` sizes its memory
  * from them, so a hostile file could otherwise ask for gigabytes; these
  * bounds allow a quarter of one.
  */
-const ScryptParamsSchema = z
+export const ScryptParamsSchema = z
   .strictObject({
     kdf: z.literal("scrypt"),
     salt: z.base64().min(1),
@@ -131,39 +165,50 @@ const KeyGrantRow = z.strictObject({
   lastUsedAt: dateOrNull,
 })
 
-const ApiTokenRow = z.strictObject({
-  id,
-  vaultId: id,
-  grantId: id,
-  name: str,
-  prefix: str,
-  allowAllServers: z.boolean(),
-  // Skills, added in 0.4: an older file's tokens see every skill (it has none).
-  allSkills: z.boolean().default(true),
-  manageEndpoints: z.boolean(),
-  keepMemories: z.boolean(),
-  // Memory migration, added in 0.5: an older file's tokens make the offer
-  // once, as the tokens of a vault that updated do.
-  memoryMigration: z.boolean().default(true),
-  webFetch: z.boolean(),
-  runCode: z.boolean().default(false),
-  manageWrappers: z.boolean().default(false),
-  shareFiles: z.boolean().default(false),
-  expiresAt: dateOrNull,
-  revokedAt: dateOrNull,
-  createdAt: date,
-  lastUsedAt: dateOrNull,
-  // A token an assistant got by signing in with OAuth. Its credentials
-  // (oauth_credential) are not exported, as a session's are not: after a
-  // restore the assistant signs in again.
-  oauthClientId: str.nullable().default(null),
-  oauthClientName: str.nullable().default(null),
-  // The owner's instructions for the assistant, as ciphertext under the
-  // vault's key, and the suggested instructions' version they came from.
-  // An older file has neither: the token shows them as not set yet.
-  instructions: bytesOrNull.default(null),
-  instructionsBase: z.number().int().positive().nullable().default(null),
-})
+const ApiTokenRow = renamedFrom(
+  { name: "plainName" },
+  z.strictObject({
+    id,
+    vaultId: id,
+    grantId: id,
+    // The name in plain text, from before it was sealed: "" once sealed into
+    // sealedName (absent from older files).
+    plainName: str,
+    sealedName: bytesOrNull.default(null),
+    prefix: str,
+    allowAllServers: z.boolean(),
+    // Skills, added in 0.4: an older file's tokens see every skill (it has none).
+    allSkills: z.boolean().default(true),
+    manageEndpoints: z.boolean(),
+    keepMemories: z.boolean(),
+    // Memory migration, added in 0.5: an older file's tokens make the offer
+    // once, as the tokens of a vault that updated do.
+    memoryMigration: z.boolean().default(true),
+    webFetch: z.boolean(),
+    runCode: z.boolean().default(false),
+    manageWrappers: z.boolean().default(false),
+    shareFiles: z.boolean().default(false),
+    expiresAt: dateOrNull,
+    revokedAt: dateOrNull,
+    createdAt: date,
+    lastUsedAt: dateOrNull,
+    // A token an assistant got by signing in with OAuth. Its credentials
+    // (oauth_credential) are not exported, as a session's are not: after a
+    // restore the assistant signs in again.
+    oauthClientId: str.nullable().default(null),
+    oauthClientName: str.nullable().default(null),
+    // The owner's instructions for the assistant, as ciphertext under the
+    // vault's key, and the suggested instructions' version they came from.
+    // An older file has neither: the token shows them as not set yet.
+    instructions: bytesOrNull.default(null),
+    instructionsBase: z.number().int().positive().nullable().default(null),
+    // Client profiles, added in 0.5: the owner's choice for the token (null
+    // detects it per request) and the client last seen using it. An older
+    // file has neither: the token detects its client again.
+    clientProfile: str.nullable().default(null),
+    clientSeen: str.nullable().default(null),
+  }),
+)
 
 const ApiTokenServerRow = z.strictObject({ tokenId: id, serverId: id })
 
@@ -193,6 +238,9 @@ const WebFetchRuleRow = z.strictObject({
   scope: str,
   kind: str,
   key: str,
+  // A site's host, sealed, with its keyed hash in key: absent from older
+  // files, whose sites are in key as they are.
+  sealed: bytesOrNull.default(null),
   access: str.nullable(),
   addedBy: str,
   createdAt: date,
@@ -209,6 +257,9 @@ const PermissionRequestRow = z.strictObject({
   toolName: str,
   argsCiphertext: bytes,
   argsHash: str,
+  // Added with folding changes to one skill or memory: absent from older
+  // files, whose requests then fold into nothing and conflict with nothing.
+  targetKey: str.nullable().default(null),
   fields: str.nullable(),
   decode: str.nullable(),
   // Added in 0.2: absent from older files.
@@ -217,6 +268,10 @@ const PermissionRequestRow = z.strictObject({
   via: str.nullable(),
   resultCiphertext: bytesOrNull,
   resultIsError: z.boolean(),
+  // Added with answering an identical call from a run allowed once: absent
+  // from older files, whose calls then answer nothing again.
+  resultJsonCiphertext: bytesOrNull.default(null),
+  reuseUntil: dateOrNull.default(null),
   createdAt: date,
   expiresAt: date,
   decidedAt: dateOrNull,
@@ -239,6 +294,10 @@ const SkillRow = z.strictObject({
   id,
   vaultId: id,
   author: str,
+  // A token's own skill, added with private skills: an older file's are all
+  // shared.
+  visibility: str.default("shared"),
+  tokenId: id.nullable().default(null),
   ciphertext: bytes,
   // The owner's note, added with definitions: absent from older files.
   personalNote: bytesOrNull.default(null),
@@ -246,18 +305,30 @@ const SkillRow = z.strictObject({
   updatedAt: date,
 })
 
-const SecretRow = z.strictObject({
-  id,
-  vaultId: id,
-  name: str,
-  description: str,
-  kind: str,
-  ciphertext: bytes,
-  keyVersion: z.number().int(),
-  createdAt: date,
-  updatedAt: date,
-  lastUsedAt: dateOrNull,
-})
+const SecretRow = renamedFrom(
+  { name: "plainName", description: "plainDescription" },
+  z.strictObject({
+    id,
+    vaultId: id,
+    // The name and description in plain text, from before they were sealed:
+    // "" once sealed into meta, with the name's keyed hash in nameKey.
+    plainName: str,
+    plainDescription: str,
+    meta: bytesOrNull.default(null),
+    nameKey: str.nullable().default(null),
+    kind: str,
+    ciphertext: bytes,
+    keyVersion: z.number().int(),
+    createdAt: date,
+    updatedAt: date,
+    lastUsedAt: dateOrNull,
+    // The owner's login name and note (encrypted) and the TOTP secret that goes
+    // with the sign-in, added with sign-in hints: absent from older files.
+    loginName: bytesOrNull.default(null),
+    note: bytesOrNull.default(null),
+    totpCompanionId: id.nullable().default(null),
+  }),
+)
 
 // The sites a secret is typed at in the browser, added with typed secrets:
 // absent from older files. A token's allowances to have one typed are not
@@ -265,82 +336,128 @@ const SecretRow = z.strictObject({
 const SecretBrowserOriginRow = z.strictObject({
   secretId: id,
   origin: str,
+  // The origin, sealed, with its keyed hash in origin: absent from older
+  // files, whose origins are in origin as they are.
+  sealed: bytesOrNull.default(null),
+  // "This domain and its subdomains": absent from older files.
+  includeSubdomains: z.boolean().default(false),
   createdAt: date,
 })
 
-const McpServerRow = z.strictObject({
-  id,
-  vaultId: id,
-  name: str,
-  slug: str,
-  description: str,
-  url: str,
-  enabled: z.boolean(),
-  authType: str,
-  authHeaderName: str.nullable(),
-  authValueTemplate: str.nullable(),
-  authSecretId: id.nullable(),
-  oauthClientId: str.nullable(),
-  oauthClientSecretId: id.nullable(),
-  oauthScope: str.nullable(),
-  oauthAuthorizeParams: str.nullable(),
-  oauthTokensId: id.nullable(),
-  oauthConnectedAt: dateOrNull,
-  oauthAuthorizationUrl: str.nullable(),
-  oauthTokenUrl: str.nullable(),
-  status: str,
-  statusMessage: str,
-  lastSyncedAt: dateOrNull,
-  createdAt: date,
-  updatedAt: date,
-  kind: str,
-  specSource: str.nullable(),
-  specUrl: str.nullable(),
-  readOnly: z.boolean(),
-  publicOnly: z.boolean(),
-  specUrlFromAssistant: z.boolean(),
-  // Mail accounts (kinds jmap and imap), added in 0.2: absent from older
-  // exports, which hold none.
-  authUsername: str.nullable().default(null),
-  mailApiUrl: str.nullable().default(null),
-  mailDownloadUrl: str.nullable().default(null),
-  mailUploadUrl: str.nullable().default(null),
-  mailAccountId: str.nullable().default(null),
-  mailSubmission: z.boolean().default(false),
-  smtpUrl: str.nullable().default(null),
-  mailFrom: str.nullable().default(null),
-  // Whether an IMAP account's sent email gets a copy in Sent from PCP, and
-  // what PCP learned of its server, added after 0.4.3: absent from older
-  // exports, whose accounts take the defaults.
-  mailSaveSent: str.default("auto"),
-  mailServerFilesSent: z.boolean().nullable().default(null),
-  // SSH servers, added in 0.3: absent from older exports, which hold none.
-  sshPublicKey: str.nullable().default(null),
-  sshHostKey: str.nullable().default(null),
-  // Calendar accounts (kind caldav), added in 0.4: absent from older
-  // exports, which hold none.
-  davHomeUrl: str.nullable().default(null),
-  // The version of its document in a linked repository, added with them:
-  // absent from older exports, which never synced one.
-  syncVersion: z.number().int().nullable().default(null),
-  // Definitions and the owner's note, added together: absent from older
-  // exports, whose servers each get a definition of their own on restore.
-  definitionId: id.nullable().default(null),
-  personalNote: bytesOrNull.default(null),
-})
+// A server's name, address and the rest of what it is were sealed into
+// meta (#96): an older file names their plain columns by their old names.
+const McpServerRow = renamedFrom(
+  {
+    name: "plainName",
+    slug: "plainSlug",
+    description: "plainDescription",
+    url: "plainUrl",
+    statusMessage: "plainStatusMessage",
+    authUsername: "plainAuthUsername",
+    oauthClientId: "plainOauthClientId",
+    oauthScope: "plainOauthScope",
+    oauthAuthorizeParams: "plainOauthAuthorizeParams",
+    oauthAuthorizationUrl: "plainOauthAuthorizationUrl",
+    oauthTokenUrl: "plainOauthTokenUrl",
+    specUrl: "plainSpecUrl",
+    mailApiUrl: "plainMailApiUrl",
+    mailDownloadUrl: "plainMailDownloadUrl",
+    mailUploadUrl: "plainMailUploadUrl",
+    mailAccountId: "plainMailAccountId",
+    smtpUrl: "plainSmtpUrl",
+    mailFrom: "plainMailFrom",
+    sshPublicKey: "plainSshPublicKey",
+    sshHostKey: "plainSshHostKey",
+    davHomeUrl: "plainDavHomeUrl",
+  },
+  z.strictObject({
+    id,
+    vaultId: id,
+    plainName: str,
+    // "" once sealed into meta (#96), with its keyed hash in slugKey.
+    plainSlug: str,
+    slugKey: str.nullable().default(null),
+    plainDescription: str,
+    plainUrl: str,
+    enabled: z.boolean(),
+    authType: str,
+    authHeaderName: str.nullable(),
+    authValueTemplate: str.nullable(),
+    authSecretId: id.nullable(),
+    plainOauthClientId: str.nullable(),
+    oauthClientSecretId: id.nullable(),
+    plainOauthScope: str.nullable(),
+    plainOauthAuthorizeParams: str.nullable(),
+    oauthTokensId: id.nullable(),
+    oauthConnectedAt: dateOrNull,
+    plainOauthAuthorizationUrl: str.nullable(),
+    plainOauthTokenUrl: str.nullable(),
+    status: str,
+    plainStatusMessage: str,
+    lastSyncedAt: dateOrNull,
+    createdAt: date,
+    updatedAt: date,
+    kind: str,
+    specSource: str.nullable(),
+    plainSpecUrl: str.nullable(),
+    readOnly: z.boolean(),
+    publicOnly: z.boolean(),
+    specUrlFromAssistant: z.boolean(),
+    // Mail accounts (kinds jmap and imap), added in 0.2: absent from older
+    // exports, which hold none.
+    plainAuthUsername: str.nullable().default(null),
+    plainMailApiUrl: str.nullable().default(null),
+    plainMailDownloadUrl: str.nullable().default(null),
+    plainMailUploadUrl: str.nullable().default(null),
+    plainMailAccountId: str.nullable().default(null),
+    mailSubmission: z.boolean().default(false),
+    plainSmtpUrl: str.nullable().default(null),
+    plainMailFrom: str.nullable().default(null),
+    // Whether an IMAP account's sent email gets a copy in Sent from PCP, and
+    // what PCP learned of its server, added after 0.4.3: absent from older
+    // exports, whose accounts take the defaults.
+    mailSaveSent: str.default("auto"),
+    mailServerFilesSent: z.boolean().nullable().default(null),
+    // SSH servers, added in 0.3: absent from older exports, which hold none.
+    plainSshPublicKey: str.nullable().default(null),
+    plainSshHostKey: str.nullable().default(null),
+    // Calendar accounts (kind caldav), added in 0.4: absent from older
+    // exports, which hold none.
+    plainDavHomeUrl: str.nullable().default(null),
+    // The version of its document in a linked repository, added with them:
+    // absent from older exports, which never synced one.
+    syncVersion: z.number().int().nullable().default(null),
+    // Definitions and the owner's note, added together: absent from older
+    // exports, whose servers each get a definition of their own on restore.
+    definitionId: id.nullable().default(null),
+    personalNote: bytesOrNull.default(null),
+    // Levels the owner saved with an approval, waiting for the server's first
+    // read of its tools: absent from older exports, which had none.
+    pendingAccess: str.nullable().default(null),
+    // The sealed values: absent from older files, whose servers hold them in
+    // the plain columns until the vault's rows are sealed.
+    meta: bytesOrNull.default(null),
+  }),
+)
 
 // Definitions, added with the owner's notes: absent from older exports.
-const ServerDefinitionRow = z.strictObject({
-  id,
-  vaultId: id,
-  kind: str,
-  slug: str,
-  name: str,
-  description: str,
-  formatVersion: z.number().int(),
-  createdAt: date,
-  updatedAt: date,
-})
+const ServerDefinitionRow = renamedFrom(
+  { name: "plainName", slug: "plainSlug", description: "plainDescription" },
+  z.strictObject({
+    id,
+    vaultId: id,
+    kind: str,
+    plainSlug: str,
+    slugKey: str.nullable().default(null),
+    plainName: str,
+    plainDescription: str,
+    // Sealed since (#96): absent from older files.
+    meta: bytesOrNull.default(null),
+    formatVersion: z.number().int(),
+    createdAt: date,
+    updatedAt: date,
+  }),
+)
 
 const ServerAuthHeaderRow = z.strictObject({
   id,
@@ -351,35 +468,149 @@ const ServerAuthHeaderRow = z.strictObject({
   secretId: id.nullable(),
 })
 
-const McpToolRow = z.strictObject({
-  id,
+// A tool's words and shapes were sealed (#96): an older file names their
+// plain columns by their old names.
+const McpToolRow = renamedFrom(
+  {
+    name: "plainName",
+    title: "plainTitle",
+    description: "plainDescription",
+    descriptionOverride: "plainDescriptionOverride",
+    inputSchema: "plainInputSchema",
+    operation: "plainOperation",
+    output: "plainOutput",
+    outputSchema: "plainOutputSchema",
+  },
+  z.strictObject({
+    id,
+    serverId: id,
+    // "" once sealed into about (#96), with its keyed hash in nameKey.
+    plainName: str,
+    nameKey: str.nullable().default(null),
+    plainTitle: str.nullable(),
+    plainDescription: str,
+    plainDescriptionOverride: str.nullable(),
+    plainInputSchema: str,
+    annotations: str.nullable(),
+    plainOperation: str.nullable(),
+    plainOutput: str.nullable(),
+    // Added after the rest: a tool from an older file declares none until
+    // its server is read again.
+    plainOutputSchema: str.nullable().default(null),
+    icons: str.nullable().default(null),
+    // The sealed values: absent from older files.
+    about: bytesOrNull.default(null),
+    schema: bytesOrNull.default(null),
+    override: bytesOrNull.default(null),
+    createdAt: date,
+    updatedAt: date,
+  }),
+)
+
+// The schema and its edits were sealed (#96): an older file names their
+// plain columns by their old names.
+const OpenApiSpecRow = renamedFrom(
+  { text: "plainText", patches: "plainPatches" },
+  z.strictObject({
+    serverId: id,
+    plainText: str,
+    plainPatches: str,
+    sealedText: bytesOrNull.default(null),
+    sealedPatches: bytesOrNull.default(null),
+    hash: str,
+    fetchedAt: date,
+    builtWith: str.nullable(),
+  }),
+)
+
+// Wrappers, added in 0.4: absent from older files.
+const WrapperSpecRow = renamedFrom(
+  { definition: "plainDefinition" },
+  z.strictObject({
+    serverId: id,
+    plainDefinition: str,
+    // Sealed since (#96): absent from older files.
+    sealedDefinition: bytesOrNull.default(null),
+    hash: str,
+    updatedAt: date,
+  }),
+)
+
+// Services, added with the service kind: absent from older files.
+const ServiceSpecRow = renamedFrom(
+  { definition: "plainDefinition" },
+  z.strictObject({
+    serverId: id,
+    plainDefinition: str,
+    // Sealed since (#96): absent from older files.
+    sealedDefinition: bytesOrNull.default(null),
+    hash: str,
+    hostId: id.nullable(),
+    engine: str,
+    engineVersion: str.default(""),
+    containerName: str,
+    publish: str.default("{}"),
+    env: str.default("{}"),
+    // Added with exits' VPN services: absent from older files.
+    plainValues: str.default("{}"),
+    registeredId: id.nullable(),
+    // Added with services reached through the SSH connection and started on
+    // demand: absent from older files, whose services are reached directly.
+    reach: str.default("direct"),
+    intendedState: str.default("running"),
+    createdAt: date,
+    updatedAt: date,
+  }),
+)
+
+/** A text column that holds one of a few words. */
+const oneOf = (words: string[]) =>
+  str.refine((value) => words.includes(value), {
+    message: `One of ${words.join(", ")}.`,
+  })
+
+// Storage roots, added with the storage kind: absent from older files.
+const StorageRootRow = z.strictObject({
   serverId: id,
-  name: str,
-  title: str.nullable(),
-  description: str,
-  descriptionOverride: str.nullable(),
-  inputSchema: str,
-  annotations: str.nullable(),
-  operation: str.nullable(),
-  output: str.nullable(),
+  hostId: id.nullable(),
+  path: str,
+  writeAs: str.default(""),
+  umask: z.number().int().min(0).max(0o777).default(2),
+  // Stores (#90): absent from older files, whose roots are plain folders
+  // over SFTP.
+  backend: oneOf(["sftp", "local"]).default("sftp"),
+  mode: oneOf(["plain", "encrypted"]).default("plain"),
+  storeKey: bytesOrNull.default(null),
+  converting: oneOf(["", "plain", "encrypted"]).default(""),
   createdAt: date,
   updatedAt: date,
 })
 
-const OpenApiSpecRow = z.strictObject({
+// An encrypted store's index, added with stores: absent from older files.
+// The objects themselves stay on the store's backend, never in a file.
+const StorageEntryRow = z.strictObject({
+  id,
   serverId: id,
-  text: str,
-  patches: str,
-  hash: str,
-  fetchedAt: date,
-  builtWith: str.nullable(),
+  parentId: z.string().max(200).default(""),
+  nameKey: str,
+  folder: z.boolean().default(false),
+  objectId: z.string().max(200).default(""),
+  fileKey: bytesOrNull.default(null),
+  meta: bytes,
+  storedBytes: z.number().min(0).default(0),
+  createdAt: date,
 })
 
-// Wrappers, added in 0.4: absent from older files.
-const WrapperSpecRow = z.strictObject({
+// Exits, added with exits: absent from older files.
+const ExitRow = z.strictObject({
+  id,
+  vaultId: id,
+  name: str,
+  label: str.default(""),
+  kind: str,
   serverId: id,
-  definition: str,
-  hash: str,
+  serviceId: id.nullable().default(null),
+  createdAt: date,
   updatedAt: date,
 })
 
@@ -421,6 +652,19 @@ const RepoExclusionRow = z.strictObject({
   skillId: id.nullable(),
   definitionId: id.nullable(),
   createdAt: date,
+})
+
+// The owner's tiers for tools (lib/core/tool-tiers.ts), added with tiers:
+// absent from older files.
+const ToolTierRow = z.strictObject({
+  id,
+  vaultId: id,
+  definitionId: id.nullable().default(null),
+  serverId: id.nullable().default(null),
+  toolName: str,
+  tier: str,
+  seenTier: str.nullable().default(null),
+  updatedAt: date,
 })
 
 const SettingRow = z.strictObject({ vaultId: id, key: str, value: str })
@@ -486,9 +730,14 @@ export const PayloadSchema = z.strictObject({
     tools: z.array(McpToolRow),
     openApiSpecs: z.array(OpenApiSpecRow),
     wrapperSpecs: z.array(WrapperSpecRow).default([]),
+    serviceSpecs: z.array(ServiceSpecRow).default([]),
+    storageRoots: z.array(StorageRootRow).default([]),
+    storageEntries: z.array(StorageEntryRow).default([]),
+    exits: z.array(ExitRow).default([]),
     repos: z.array(RepoRow).default([]),
     repoItems: z.array(RepoItemRow).default([]),
     repoExclusions: z.array(RepoExclusionRow).default([]),
+    toolTiers: z.array(ToolTierRow).default([]),
     settings: z.array(SettingRow),
     browserProfiles: z.array(BrowserProfileRow).default([]),
   }),
@@ -502,7 +751,11 @@ export type ExportPayload = z.output<typeof PayloadSchema>
 
 /** An API token in a file, as the owner is shown it before a restore. */
 export type ExportedToken = {
-  name: string
+  /**
+   * The name the owner gave it; null when it is sealed in the file and the
+   * password of the file's vault was not given (#96).
+   */
+  name: string | null
   /** The first characters of the token; empty for an assistant's OAuth sign-in. */
   prefix: string
   createdAt: string
@@ -525,6 +778,7 @@ export type ExportPreview = {
     endpoints: number
     mailAccounts: number
     sshServers: number
+    services: number
     calendarAccounts: number
     wrappers: number
     tools: number
@@ -624,6 +878,7 @@ export function checkReferences(payload: ExportPayload): void {
   const repos = idsOf(tables.repos, "repository")
   idsOf(tables.repoItems, "linked item")
   idsOf(tables.repoExclusions, "excluded item")
+  idsOf(tables.toolTiers, "tool's tier")
 
   for (const grant of tables.keyGrants) {
     if (!GRANT_KINDS.has(grant.kind)) {
@@ -658,6 +913,7 @@ export function checkReferences(payload: ExportPayload): void {
   ownedBy(tables.settings, "setting")
   ownedBy(tables.browserProfiles, "browser profile")
   ownedBy(tables.repos, "repository")
+  ownedBy(tables.toolTiers, "tool's tier")
 
   if (tables.browserProfiles.length > 1) {
     throw problem("it holds more than one browser profile")
@@ -711,6 +967,14 @@ export function checkReferences(payload: ExportPayload): void {
     pointsAt(memory.tokenId, tokens, "a token")
   }
 
+  for (const skill of tables.skills) {
+    pointsAt(skill.tokenId, tokens, "a token")
+
+    if (skill.visibility === "shared" && skill.tokenId !== null) {
+      throw problem("a shared skill names a token")
+    }
+  }
+
   for (const server of tables.servers) {
     pointsAt(server.authSecretId, secrets, "a server's secret")
     pointsAt(server.oauthClientSecretId, secrets, "a server's client secret")
@@ -735,8 +999,41 @@ export function checkReferences(payload: ExportPayload): void {
     pointsAt(spec.serverId, servers, "a server")
   }
 
+  for (const spec of tables.serviceSpecs) {
+    pointsAt(spec.serverId, servers, "a server")
+    pointsAt(spec.hostId, servers, "a service's SSH server")
+    pointsAt(spec.registeredId, servers, "the server a service registered")
+  }
+
+  for (const root of tables.storageRoots) {
+    pointsAt(root.serverId, servers, "a server")
+    pointsAt(root.hostId, servers, "a storage root's SSH server")
+  }
+
+  for (const entry of tables.storageEntries) {
+    pointsAt(entry.serverId, servers, "a stored file's store")
+  }
+
+  for (const exit of tables.exits) {
+    pointsAt(exit.serverId, servers, "an exit's SSH server")
+    pointsAt(exit.serviceId, servers, "an exit's service")
+  }
+
   for (const repo of tables.repos) {
     pointsAt(repo.secretId, secrets, "a repository's secret")
+  }
+
+  for (const tier of tables.toolTiers) {
+    pointsAt(tier.definitionId, definitions, "a tier's definition")
+    pointsAt(tier.serverId, servers, "a tier's server")
+
+    if ((tier.definitionId === null) === (tier.serverId === null)) {
+      throw problem("a tool's tier names neither or both of its places")
+    }
+  }
+
+  for (const secret of tables.secrets) {
+    pointsAt(secret.totpCompanionId, secrets, "a secret's one-time codes")
   }
 
   for (const site of tables.secretBrowserOrigins) {
@@ -768,15 +1065,33 @@ export function checkReferences(payload: ExportPayload): void {
  * `revoked` holds the tokens a restore keeps revoked though the file has
  * them live (`carriedRevocations` in lib/core/backup.ts).
  */
+/** A token's name in a file, or null when it does not open: shown hidden. */
+function openedName(
+  ctx: { vaultId: string; dek: Buffer },
+  row: { id: string; plainName: string; sealedName: Uint8Array | null },
+): string | null {
+  try {
+    return tokenName(ctx, row)
+  } catch {
+    return null
+  }
+}
+
 export function previewOf(
   payload: ExportPayload,
   revoked: ReadonlyMap<string, Date> = new Map(),
+  /**
+   * The file's vault key, unwrapped with the password of its vault: what
+   * opens the names sealed in it. Without it, sealed names are not shown.
+   */
+  dek: Buffer | null = null,
 ): ExportPreview {
   const { tables, host } = payload
+  const ctx = dek ? { vaultId: payload.vault.id, dek } : null
   const tokens = [...tables.apiTokens]
     .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime())
     .map((row): ExportedToken => ({
-      name: row.name,
+      name: ctx ? openedName(ctx, row) : row.sealedName ? null : row.plainName,
       prefix: row.prefix,
       createdAt: row.createdAt.toISOString(),
       status:
@@ -802,6 +1117,7 @@ export function previewOf(
         (row) => row.kind === "jmap" || row.kind === "imap",
       ).length,
       sshServers: tables.servers.filter((row) => row.kind === "ssh").length,
+      services: tables.servers.filter((row) => row.kind === "service").length,
       calendarAccounts: tables.servers.filter((row) => row.kind === "caldav")
         .length,
       wrappers: tables.servers.filter((row) => row.kind === "wrapper").length,
@@ -894,9 +1210,14 @@ export const FORMAT_COVERS_SCHEMA: {
   tool: Covers<McpTool, z.output<typeof McpToolRow>>
   openApiSpec: Covers<OpenApiSpec, z.output<typeof OpenApiSpecRow>>
   wrapperSpec: Covers<WrapperSpec, z.output<typeof WrapperSpecRow>>
+  serviceSpec: Covers<ServiceSpec, z.output<typeof ServiceSpecRow>>
+  storageRoot: Covers<StorageRoot, z.output<typeof StorageRootRow>>
+  storageEntry: Covers<StorageEntry, z.output<typeof StorageEntryRow>>
+  exit: Covers<Exit, z.output<typeof ExitRow>>
   repo: Covers<Repo, z.output<typeof RepoRow>>
   repoItem: Covers<RepoItem, z.output<typeof RepoItemRow>>
   repoExclusion: Covers<RepoExclusion, z.output<typeof RepoExclusionRow>>
+  toolTier: Covers<ToolTier, z.output<typeof ToolTierRow>>
   setting: Covers<Setting, z.output<typeof SettingRow>>
   browserProfile: Covers<BrowserProfile, z.output<typeof BrowserProfileRow>>
   hostSetting: Covers<HostSetting, z.output<typeof HostSettingRow>>
@@ -920,9 +1241,14 @@ export const FORMAT_COVERS_SCHEMA: {
   tool: true,
   openApiSpec: true,
   wrapperSpec: true,
+  serviceSpec: true,
+  storageRoot: true,
+  storageEntry: true,
+  exit: true,
   repo: true,
   repoItem: true,
   repoExclusion: true,
+  toolTier: true,
   setting: true,
   browserProfile: true,
   hostSetting: true,

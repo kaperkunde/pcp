@@ -13,11 +13,14 @@ import {
 import { json, startTestApi, type TestApi } from "../openapi/test-api"
 import { decidePermission } from "../permissions"
 import { scratchDatabase } from "../test-db"
-import { withCallHandle } from "../test-handles"
+import { withCallHandle, entryCall } from "../test-handles"
 import { writeToolAccess } from "../tool-access"
 import { setupVault } from "../vault"
 import { setFetchPrivate, setFetchSite } from "../web-fetch"
+import { setToolTier } from "../tool-tiers"
+import { browserTools } from "../browser/tools"
 import { setPacingClass, setPacingServer, setPacingSite } from "./config"
+import { browserPacingClass, PACING_CALL_WAIT_MS } from "./limits"
 import { resetPacing, setPacingClock } from "./pace"
 
 // Pacing holds whatever way a call comes in, because it sits where every
@@ -67,7 +70,8 @@ beforeEach(async () => {
   vi.stubEnv("PCP_PACING", "")
   resetPacing()
   waits = []
-  now = 1_000_000
+  // From the real time: a run's deadline is the real clock's (code/run.ts).
+  now = Date.now()
   setPacingClock({
     now: () => now,
     sleep: async (ms) => {
@@ -134,25 +138,32 @@ async function connect(): Promise<Client> {
 
 async function call(name: string, args: Record<string, unknown>) {
   const connected = await connect()
-  const result = await connected.callTool({
-    name,
-    arguments:
-      name === "call_tool" ? await withCallHandle(connected, args) : args,
-  })
+  const result = await connected.callTool(
+    entryCall(
+      name,
+      name === "execute_destructive"
+        ? await withCallHandle(connected, args)
+        : args,
+    ),
+  )
   const text = (result.content as Array<{ type: string; text?: string }>)
     .map((part) => part.text ?? "")
     .join("")
 
-  return { isError: result.isError === true, text }
+  return {
+    isError: result.isError === true,
+    text,
+    structured: result.structuredContent,
+  }
 }
 
 const COUNT = { server: "things", tool: "count", arguments: {} }
 
 describe("pacing, whatever the way in", () => {
   it("holds call_tool to the server's pace", async () => {
-    expect((await call("call_tool", COUNT)).isError).toBe(false)
+    expect((await call("execute_destructive", COUNT)).isError).toBe(false)
     expect(waits).toEqual([])
-    expect((await call("call_tool", COUNT)).isError).toBe(false)
+    expect((await call("execute_destructive", COUNT)).isError).toBe(false)
     expect(waits).toEqual([5_000])
     expect(api.requests).toHaveLength(2)
   })
@@ -163,18 +174,75 @@ describe("pacing, whatever the way in", () => {
       jitterMs: 0,
       burst: null,
     })
-    await call("call_tool", COUNT)
-    const second = await call("call_tool", COUNT)
+    await call("execute_destructive", COUNT)
+    const second = await call("execute_destructive", COUNT)
 
     expect(second.isError).toBe(true)
     expect(second.text).toContain(
-      "Paced: Things takes its next action in 90 s; try again then.",
+      "Paced: Things takes its next action in 90 s, longer than this call can wait (45 s). Nothing was sent and no turn was kept for it; try again in 90 s.",
     )
+    expect(second.structured).toEqual({
+      code: "paced",
+      retry_after_ms: 90_000,
+    })
+    expect(waits).toEqual([])
+    expect(api.requests).toHaveLength(1)
+  })
+
+  it("lets call_tool wait its whole budget, past the default longest wait", async () => {
+    await setPacingServer(ctx, endpointId, {
+      minIntervalMs: PACING_CALL_WAIT_MS,
+      jitterMs: 0,
+      burst: null,
+    })
+    await call("execute_destructive", COUNT)
+    const second = await call("execute_destructive", COUNT)
+
+    expect(second.isError).toBe(false)
+    expect(waits).toEqual([PACING_CALL_WAIT_MS])
+    expect(api.requests).toHaveLength(2)
+  })
+
+  it("lets run_code's pcp.call wait for its turn within the run, rather than fail half done", async () => {
+    await setPacingServer(ctx, endpointId, {
+      minIntervalMs: 90_000,
+      jitterMs: 0,
+      burst: null,
+    })
+    const result = await call("run_destructive", {
+      code: `await pcp.call("things", "count", {}); await pcp.call("things", "count", {}); return "done"`,
+    })
+
+    expect(result.text).toContain("done")
+    expect(waits).toEqual([90_000])
+    expect(api.requests).toHaveLength(2)
+  })
+
+  it("tells run_code's program a call past the run's end was paced, with when to try again", async () => {
+    await setPacingServer(ctx, endpointId, {
+      minIntervalMs: 10 * 60_000,
+      jitterMs: 0,
+      burst: null,
+    })
+    const result = await call("run_destructive", {
+      code: `await pcp.call("things", "count", {})
+try {
+  await pcp.call("things", "count", {})
+  return "sent"
+} catch (error) {
+  return { code: error.code, retryAfterMs: error.retryAfterMs, message: error.message }
+}`,
+    })
+
+    expect(result.text).toContain('"code":"paced"')
+    expect(result.text).toContain(`"retryAfterMs":${10 * 60_000}`)
+    expect(result.text).toContain("Nothing was sent")
+    expect(waits).toEqual([])
     expect(api.requests).toHaveLength(1)
   })
 
   it("holds run_code's pcp.call to it", async () => {
-    const result = await call("run_code", {
+    const result = await call("run_destructive", {
       code: `await pcp.call("things", "count", {}); await pcp.call("things", "count", {}); return "done"`,
     })
 
@@ -208,7 +276,7 @@ describe("pacing, whatever the way in", () => {
     })
     await writeToolAccess(scope.tokenId, wrapper.id, "count_twice", "allowed")
 
-    const result = await call("call_tool", {
+    const result = await call("execute_destructive", {
       server: "twice",
       tool: "count_twice",
       arguments: {},
@@ -220,8 +288,8 @@ describe("pacing, whatever the way in", () => {
   })
 
   it("holds a call the owner allowed to it", async () => {
-    await call("call_tool", COUNT)
-    const asked = await call("call_tool", {
+    await call("execute_destructive", COUNT)
+    const asked = await call("execute_destructive", {
       server: "things",
       tool: "echo",
       arguments: { q: "hi" },
@@ -268,13 +336,101 @@ describe("pacing, whatever the way in", () => {
     ])
   })
 
+  it("answers web_fetch past its budget with when to try again, and sends nothing", async () => {
+    const host = new URL(api.origin).host
+    await setFetchSite(ctx, scope.tokenId, host, "allowed")
+    await setFetchPrivate(ctx, scope.tokenId, "allowed")
+    await setPacingSite(ctx, {
+      site: host,
+      subdomains: false,
+      pace: { minIntervalMs: 60_000, jitterMs: 0, burst: null },
+    })
+
+    await call("web_fetch", { url: `${api.origin}/count` })
+    const second = await call("web_fetch", { url: `${api.origin}/count` })
+
+    expect(second.isError).toBe(true)
+    expect(second.text).toContain(
+      `Paced: ${host} takes its next action in 60 s, longer than this call can wait (45 s).`,
+    )
+    expect(second.structured).toEqual({
+      code: "paced",
+      retry_after_ms: 60_000,
+    })
+    expect(api.requests).toHaveLength(1)
+  })
+
   it("lets a class the owner left unpaced go at once", async () => {
     await setPacingServer(ctx, endpointId, null)
     await setPacingClass(ctx, "server_read", "unpaced")
     await setPacingClass(ctx, "server_change", "unpaced")
 
-    await call("call_tool", COUNT)
-    await call("call_tool", COUNT)
+    await call("execute_destructive", COUNT)
+    await call("execute_destructive", COUNT)
     expect(waits).toEqual([])
+  })
+  it("paces a call as a read or a change by the tool's tier, the owner's choice included", async () => {
+    await setPacingServer(ctx, endpointId, null)
+    await setPacingClass(ctx, "server_read", "unpaced")
+    await setPacingClass(ctx, "server_change", PAUSE)
+
+    // count is a GET: Read, so unpaced.
+    await call("execute_destructive", COUNT)
+    await call("execute_destructive", COUNT)
+    expect(waits).toEqual([])
+
+    // The owner says Write: paced as a change. The second is made again on
+    // purpose, past the duplicate guard (calls/guard.ts).
+    await setToolTier(ctx, endpointId, "count", "write")
+    await call("execute_destructive", COUNT)
+    await call("execute_destructive", {
+      ...COUNT,
+      rerun: true,
+      reason: "A second count is meant.",
+    })
+    expect(waits).toEqual([5_000])
+  })
+})
+
+describe("the browser's tools, each paced by its kind of action", () => {
+  it("pins every browser tool to its class, or to none", () => {
+    const classes = Object.fromEntries(
+      browserTools().map((tool) => [tool.name, browserPacingClass(tool.name)]),
+    )
+
+    expect(classes).toEqual({
+      tabs: null,
+      navigate: "browser_navigate",
+      back: "browser_navigate",
+      snapshot: null,
+      read_page: null,
+      find: null,
+      click: "browser_act",
+      drag: "browser_act",
+      type: "browser_act",
+      press_key: "browser_act",
+      select_option: "browser_act",
+      upload_file: "browser_act",
+      scroll: "browser_act",
+      wait_for: null,
+      screenshot: null,
+      print_pdf: null,
+      download: "browser_act",
+      handle_dialog: "browser_act",
+      hand_over: null,
+      request_secret: null,
+      update_secret_sites: null,
+      evaluate: "browser_act",
+      console_log: null,
+      network_log: null,
+    })
+    // A page opened through tabs, or a download by its address, opens a page.
+    expect(browserPacingClass("tabs", { action: "open" })).toBe(
+      "browser_navigate",
+    )
+    expect(browserPacingClass("tabs", { action: "pace" })).toBeNull()
+    expect(
+      browserPacingClass("download", { url: "https://example.com/a.pdf" }),
+    ).toBe("browser_navigate")
   })
 })

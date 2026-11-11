@@ -2,10 +2,10 @@ import {
   createCipheriv,
   createDecipheriv,
   createHash,
+  createHmac,
   hkdfSync,
   randomBytes,
   scrypt,
-  timingSafeEqual,
 } from "node:crypto"
 
 /**
@@ -56,6 +56,25 @@ export function sha256Hex(input: string | Buffer): string {
 }
 
 /**
+ * A key for one purpose, derived from `key` (the vault's data key) by HKDF
+ * with `label` as its info. Never stored: whoever lacks the vault key cannot
+ * make it, and a key for one label says nothing about another's.
+ */
+export function labelKey(key: Buffer, label: string): Buffer {
+  return Buffer.from(hkdfSync("sha256", key, Buffer.alloc(0), label, 32))
+}
+
+/**
+ * HMAC-SHA256 of `text` under `labelKey(key, label)`, in hex: what a column
+ * stores when equal values must compare equal (a request asked again, a
+ * call made again) and the column must say nothing without the vault key,
+ * not even to someone who can guess the value.
+ */
+export function keyedHash(key: Buffer, label: string, text: string): string {
+  return createHmac("sha256", labelKey(key, label)).update(text).digest("hex")
+}
+
+/**
  * A Buffer as the plain Uint8Array Prisma's Bytes columns take. Copies into
  * a fresh ArrayBuffer, which is also what keeps a slice of a pooled Buffer
  * from dragging its whole pool into the database driver.
@@ -64,18 +83,6 @@ export function asBytes(buffer: Buffer): Uint8Array<ArrayBuffer> {
   const bytes = new Uint8Array(new ArrayBuffer(buffer.length))
   bytes.set(buffer)
   return bytes
-}
-
-/** Constant-time comparison of two strings of possibly different length. */
-export function safeEqual(a: string, b: string): boolean {
-  const left = Buffer.from(a)
-  const right = Buffer.from(b)
-
-  if (left.length !== right.length) {
-    return false
-  }
-
-  return timingSafeEqual(left, right)
 }
 
 /** nonce || ciphertext || tag */
