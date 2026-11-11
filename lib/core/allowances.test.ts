@@ -46,7 +46,7 @@ async function setup() {
       id: randomUUID(),
       serverId,
       name: "send_postcard",
-      inputSchema: JSON.stringify({ type: "object" }),
+      plainInputSchema: JSON.stringify({ type: "object" }),
     },
   })
   const { id: tokenId } = await createApiToken(ctx, {

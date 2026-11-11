@@ -18,6 +18,7 @@ import {
   SERVER_META_SELECT,
   writeServer,
 } from "./server-meta"
+import { toolOverrides, writeToolOverride } from "./tool-rows"
 
 /**
  * The rows behind definitions and instances (lib/core/definitions.ts has the
@@ -377,13 +378,11 @@ export async function shareToolDescription(
     return
   }
 
-  await db().mcpTool.updateMany({
-    where: {
-      serverId: { in: siblings.map((sibling) => sibling.id) },
-      name: toolName,
-    },
-    data: { descriptionOverride: override },
-  })
+  await writeToolOverride(
+    ctx,
+    { serverId: { in: siblings.map((sibling) => sibling.id) }, name: toolName },
+    override,
+  )
 }
 
 /**
@@ -402,17 +401,13 @@ export async function inheritedToolDescriptions(
     return found
   }
 
-  const tools = await db().mcpTool.findMany({
-    where: {
-      serverId: { in: siblings.map((sibling) => sibling.id) },
-      descriptionOverride: { not: null },
-    },
-    select: { name: true, descriptionOverride: true },
+  const tools = await toolOverrides(ctx, {
+    serverId: { in: siblings.map((sibling) => sibling.id) },
   })
 
   for (const tool of tools) {
     if (!found.has(tool.name)) {
-      found.set(tool.name, tool.descriptionOverride!)
+      found.set(tool.name, tool.descriptionOverride)
     }
   }
 

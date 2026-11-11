@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest"
 
+import { openTool } from "../tool-rows"
 import { openDefinition } from "../definition-rows"
 import { createBrowserServer } from "../browser/server"
 import type { VaultContext } from "../context"
@@ -359,9 +360,12 @@ describe("applying an item", () => {
       ),
     ).toMatchObject({ name: "Pet shop" })
     expect(
-      await db().mcpTool.findFirstOrThrow({
-        where: { serverId: ids.pets, name: "list_pets" },
-      }),
+      openTool(
+        ctx,
+        await db().mcpTool.findFirstOrThrow({
+          where: { serverId: ids.pets, name: "list_pets" },
+        }),
+      ),
     ).toMatchObject({ descriptionOverride: "Every pet." })
   })
 
@@ -515,9 +519,12 @@ describe("applying an item", () => {
     })
     expect((await storedSpec(ctx, id))?.text).toBe(text)
     expect(
-      await db().mcpTool.findFirstOrThrow({
-        where: { serverId: id, name: "add_pet" },
-      }),
+      openTool(
+        ctx,
+        await db().mcpTool.findFirstOrThrow({
+          where: { serverId: id, name: "add_pet" },
+        }),
+      ),
     ).toMatchObject({ descriptionOverride: "Adds a pet." })
   })
 

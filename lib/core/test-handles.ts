@@ -2,6 +2,7 @@ import type { Client } from "@modelcontextprotocol/client"
 
 import { makeCallHandle } from "./call-handles"
 import { db } from "./db"
+import { openTool } from "./tool-rows"
 import type { GatewayScope } from "./gateway"
 
 /**
@@ -63,9 +64,12 @@ export async function catalogueHandle(
   slug: string,
   tool: string,
 ): Promise<string> {
-  const row = await db().mcpTool.findFirstOrThrow({
-    where: { name: tool, server: { slug, vaultId: scope.ctx.vaultId } },
-  })
+  const row = openTool(
+    scope.ctx,
+    await db().mcpTool.findFirstOrThrow({
+      where: { name: tool, server: { slug, vaultId: scope.ctx.vaultId } },
+    }),
+  )
 
   return makeCallHandle(scope.ctx.dek, {
     tokenId: scope.tokenId,

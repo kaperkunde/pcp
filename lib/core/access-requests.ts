@@ -789,7 +789,7 @@ export async function accessReview(
   const kept = proposed.filter((level) =>
     reachable.has(accessKey(level.serverId, level.tool)),
   )
-  const loaded = await loadToolTiers(ctx.vaultId, servers)
+  const loaded = await loadToolTiers(ctx, servers)
   const tiers: Record<string, ShownTierNow> = {}
 
   for (const [key, info] of loaded) {

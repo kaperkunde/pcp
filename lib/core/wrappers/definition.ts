@@ -6,6 +6,7 @@ import { checkSyntax } from "../code/quickjs"
 import type { VaultContext } from "../context"
 import { SECRET_PLACEHOLDER } from "../constants"
 import { db } from "../db"
+import { openTools, TOOL_SCHEMA_SELECT } from "../tool-rows"
 import { openServers, SERVER_NAME_SELECT } from "../server-meta"
 import { invalid } from "../errors"
 import { hiddenCharacter, withoutPresentation } from "../memories"
@@ -436,10 +437,13 @@ export async function resolveDefinition(
     }),
   ).map(({ id, slug, name, kind, url }) => ({ id, slug, name, kind, url }))
   const bySlug = new Map(servers.map((server) => [server.slug, server]))
-  const tools = await db().mcpTool.findMany({
-    where: { serverId: { in: servers.map((server) => server.id) } },
-    select: { serverId: true, name: true, inputSchema: true },
-  })
+  const tools = openTools(
+    ctx,
+    await db().mcpTool.findMany({
+      where: { serverId: { in: servers.map((server) => server.id) } },
+      select: { ...TOOL_SCHEMA_SELECT, serverId: true, name: true },
+    }),
+  )
   const toolKey = (serverId: string, tool: string) => `${serverId}\n${tool}`
   const schemas = new Map(
     tools.map((tool) => [toolKey(tool.serverId, tool.name), tool.inputSchema]),

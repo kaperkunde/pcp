@@ -5,6 +5,7 @@ import type { CallToolResult } from "@modelcontextprotocol/client"
 import { storeTools, type SyncResult } from "./catalogue"
 import type { VaultContext } from "./context"
 import { db } from "./db"
+import { openTool, TOOL_SCHEMA_SELECT } from "./tool-rows"
 import {
   contentInstance,
   definitionForNew,
@@ -1613,10 +1614,12 @@ export async function callEndpointTool(
     renew?: () => Promise<{ headers: Record<string, string>; redact: string[] }>
   },
 ): Promise<CallToolResult> {
-  const tool = await db().mcpTool.findUnique({
-    where: { serverId_name: { serverId: server.id, name: toolName } },
-    select: { operation: true },
-  })
+  const tool = await db()
+    .mcpTool.findUnique({
+      where: { serverId_name: { serverId: server.id, name: toolName } },
+      select: TOOL_SCHEMA_SELECT,
+    })
+    .then((row) => row && openTool(ctx, row))
   const plan = readCallPlan(tool?.operation ?? null)
 
   if (!plan) {

@@ -64,8 +64,8 @@ async function setup() {
       id: randomUUID(),
       serverId,
       name: "send_postcard",
-      description: "Sends a postcard.",
-      inputSchema: JSON.stringify({ type: "object" }),
+      plainDescription: "Sends a postcard.",
+      plainInputSchema: JSON.stringify({ type: "object" }),
       annotations: JSON.stringify({ destructiveHint: true }),
     },
   })

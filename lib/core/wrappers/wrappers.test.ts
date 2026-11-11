@@ -1153,7 +1153,7 @@ describe("levels and tiers proposed with a wrapper (tool_access)", () => {
       }),
     )
     expect(await levelsOf(wrapper.id)).toEqual([["how_many", "allowed"]])
-    expect(await toolTier(wrapper.id, "lookup")).toBe("write")
+    expect(await toolTier(ctx, wrapper.id, "lookup")).toBe("write")
     expect(JSON.stringify(result.content)).toContain(
       "The owner set this token's level for 1 tool",
     )
@@ -1287,7 +1287,7 @@ describe("a wrapper's tool's tier", () => {
     // An API's GET only reads, so the wrapper's tool does too.
     const read = await call("call_tool_read", args)
     expect(read.isError, read.text).toBe(false)
-    expect(await toolTier(wrapper.id, "lookup")).toBe("read")
+    expect(await toolTier(ctx, wrapper.id, "lookup")).toBe("read")
 
     // Once the tool it calls is Write, so is the wrapper's: worked out
     // when asked, never stored.
@@ -1303,12 +1303,12 @@ describe("a wrapper's tool's tier", () => {
     const refused = await call("call_tool_read", args)
     expect(refused.isError).toBe(true)
     expect(refused.text).toContain("run it with call_tool_write")
-    expect(await toolTier(wrapper.id, "lookup")).toBe("write")
+    expect(await toolTier(ctx, wrapper.id, "lookup")).toBe("write")
   })
 
   it("takes the owner's choice, and the bell says when its calls come to more since", async () => {
     const wrapper = await approvedWrapper(ECHO_TOOL)
-    expect(await toolTierInfo(wrapper.id, "lookup")).toMatchObject({
+    expect(await toolTierInfo(ctx, wrapper.id, "lookup")).toMatchObject({
       tier: "read",
       derived: "read",
       override: null,
@@ -1322,7 +1322,7 @@ describe("a wrapper's tool's tier", () => {
       where: { serverId: endpointId, name: "echo" },
       data: { annotations: null },
     })
-    expect(await toolTierInfo(wrapper.id, "lookup")).toMatchObject({
+    expect(await toolTierInfo(ctx, wrapper.id, "lookup")).toMatchObject({
       tier: "read",
       derived: "destructive",
       override: "read",
@@ -1341,7 +1341,7 @@ describe("a wrapper's tool's tier", () => {
     expect(await tierNotices(ctx)).toEqual([])
     // Back to the default: what its calls come to.
     await setToolTier(ctx, wrapper.id, "lookup", null)
-    expect(await toolTier(wrapper.id, "lookup")).toBe("destructive")
+    expect(await toolTier(ctx, wrapper.id, "lookup")).toBe("destructive")
   })
 })
 

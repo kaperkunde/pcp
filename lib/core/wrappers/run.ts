@@ -5,6 +5,7 @@ import type { VaultContext } from "../context"
 import { runProgram } from "../code/run"
 import type { Executor } from "../code/types"
 import { db } from "../db"
+import { openTool, TOOL_SCHEMA_SELECT } from "../tool-rows"
 import { notFound, PcpError } from "../errors"
 import { loadGatewayServers, type GatewayServer } from "../gateway-servers"
 import {
@@ -423,10 +424,12 @@ async function innerCall(
   // program that uses an old argument name is told how to change it, in
   // the wrapper's answer while the name still works, and in the refusal
   // once it does not.
-  const row = await db().mcpTool.findUnique({
-    where: { serverId_name: { serverId: target.id, name } },
-    select: { inputSchema: true },
-  })
+  const row = await db()
+    .mcpTool.findUnique({
+      where: { serverId_name: { serverId: target.id, name } },
+      select: TOOL_SCHEMA_SELECT,
+    })
+    .then((found) => found && openTool(env.ctx, found))
   const checked = await checkCallArguments(
     target,
     name,
@@ -454,7 +457,7 @@ async function innerCall(
   }
 
   notes.push(...fixes)
-  lookedUp?.(await markedReadOnly(target.id, name))
+  lookedUp?.(await markedReadOnly(env.ctx, target.id, name))
 
   // The same Write or Destructive call the token made a little while ago,
   // through this wrapper or any other way, is not made twice
@@ -463,7 +466,11 @@ async function innerCall(
     ? { ticket: null, warning: null }
     : await guardCall(
         env,
-        { server: target, tool: name, tier: await toolTier(target.id, name) },
+        {
+          server: target,
+          tool: name,
+          tier: await toolTier(env.ctx, target.id, name),
+        },
         checked.args,
         { rerun: rerun === true, again: RERUN_IN_CODE },
       )

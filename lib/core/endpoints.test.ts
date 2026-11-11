@@ -1,5 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
 
+import { readFileSync } from "node:fs"
+import { catchUpVault, forgetVaultUpkeeps } from "./vault-upkeep"
+import { editTools } from "./test-servers"
 import { createApiToken, resolveApiToken } from "./api-tokens"
 import { db } from "./db"
 import {
@@ -652,10 +655,11 @@ describe("tools an earlier PCP built", () => {
       input({ specText: JSON.stringify(described) }),
     )
 
-    await db().mcpTool.updateMany({
-      where: { serverId: id },
-      data: { description: "stale", output: null },
-    })
+    await editTools(
+      ctx,
+      { serverId: id },
+      { description: "stale", output: null },
+    )
     await db().openApiSpec.update({
       where: { serverId: id },
       data: { builtWith: "0.0.1" },
@@ -667,6 +671,33 @@ describe("tools an earlier PCP built", () => {
 
     return id
   }
+
+  it("are rebuilt by the vault's first request with its key, once per process, and never at boot", async () => {
+    const id = await builtByEarlierPcp()
+
+    // Boot holds no key: nothing there reads the sealed schemas.
+    const boot = readFileSync("instrumentation.ts", "utf8")
+    expect(boot).not.toMatch(/rebuildOutdatedEndpoints|syncAllBrowserTools/)
+
+    forgetVaultUpkeeps()
+    await catchUpVault(ctx)
+    const listPets = (await getServer(ctx, id)).tools.find(
+      (tool) => tool.name === "listPets",
+    )!
+    expect(listPets.description).not.toBe("stale")
+
+    // Once per process: a second request does not build it again.
+    await editTools(ctx, { serverId: id }, { description: "stale" })
+    await db().openApiSpec.update({
+      where: { serverId: id },
+      data: { builtWith: "0.0.1" },
+    })
+    await catchUpVault(ctx)
+    expect(
+      (await getServer(ctx, id)).tools.find((tool) => tool.name === "listPets")!
+        .description,
+    ).toBe("stale")
+  })
 
   it("are rebuilt from the kept copy once, and nothing else about the endpoint changes", async () => {
     const id = await builtByEarlierPcp()

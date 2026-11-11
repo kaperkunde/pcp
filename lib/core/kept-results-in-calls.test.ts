@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
 
+import { openTool } from "./tool-rows"
 import { createApiToken } from "./api-tokens"
 import type { VaultContext } from "./context"
 import { db } from "./db"
@@ -370,9 +371,12 @@ describe("a file an endpoint answers", () => {
       authType: "none",
     })
     const server = await getServer(ctx, id)
-    const tool = await db().mcpTool.findUniqueOrThrow({
-      where: { serverId_name: { serverId: id, name: "getInvoicePdf" } },
-    })
+    const tool = openTool(
+      ctx,
+      await db().mcpTool.findUniqueOrThrow({
+        where: { serverId_name: { serverId: id, name: "getInvoicePdf" } },
+      }),
+    )
     expect(tool.output).toMatch(/^\{file: \{\$result: string/)
 
     const answer = await runCall(

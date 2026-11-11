@@ -2,6 +2,7 @@ import {
   Client,
   StreamableHTTPClientTransport,
 } from "@modelcontextprotocol/client"
+import { openTool } from "./tool-rows"
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
 
 import { openServer } from "./server-meta"
@@ -331,7 +332,9 @@ describe("an MCP server that repeats its credential", () => {
       }),
     )
     expect(JSON.stringify(stored)).not.toContain(KEY)
-    expect(stored.tools[0]!.description).toBe("Says who [redacted] is.")
+    expect(openTool(ctx, stored.tools[0]!).description).toBe(
+      "Says who [redacted] is.",
+    )
 
     const result = await callServerTool(ctx, server, "whoami", {}, PUBLIC)
     expect(result.content).toEqual([
@@ -616,9 +619,12 @@ describe("an MCP server as it describes and answers its tools", () => {
     expect(sync.status).toBe("ok")
     expect(sync.toolCount).toBe(2)
     expect(sync.message).toContain('"has space"')
-    const count = await db().mcpTool.findFirstOrThrow({
-      where: { serverId: id, name: "count" },
-    })
+    const count = openTool(
+      ctx,
+      await db().mcpTool.findFirstOrThrow({
+        where: { serverId: id, name: "count" },
+      }),
+    )
     expect(count.title).toBe("Count things")
     expect(JSON.parse(count.outputSchema!)).toEqual({
       type: "object",

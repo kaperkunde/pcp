@@ -1,6 +1,7 @@
 import { TOOL_TIERS, type ToolTier } from "./constants"
 import type { VaultContext } from "./context"
 import { db } from "./db"
+import { openTools, TOOL_SCHEMA_SELECT } from "./tool-rows"
 import { ensureDefinition } from "./definition-rows"
 import { invalid, notFound } from "./errors"
 import { newId } from "./ids"
@@ -187,7 +188,7 @@ type ToolFacts = { annotations: string | null; operation: string | null }
  * Works out tiers for one vault, reading each server and tool once and the
  * owner's choices once: for a request's whole catalogue, or one call.
  */
-function tierResolver(overrides: OverrideRow[]) {
+function tierResolver(ctx: VaultContext, overrides: OverrideRow[]) {
   const byDefinition = new Map<string, OverrideRow>()
   const byServer = new Map<string, OverrideRow>()
 
@@ -218,10 +219,10 @@ function tierResolver(overrides: OverrideRow[]) {
       db().mcpTool.findMany({
         where: { serverId: { in: fresh } },
         select: {
+          ...TOOL_SCHEMA_SELECT,
           serverId: true,
           name: true,
           annotations: true,
-          operation: true,
         },
       }),
     ])
@@ -234,7 +235,7 @@ function tierResolver(overrides: OverrideRow[]) {
       places.set(server.id, server)
     }
 
-    for (const row of rows) {
+    for (const row of openTools(ctx, rows)) {
       tools.set(accessKey(row.serverId, row.name), row)
     }
   }
@@ -322,6 +323,7 @@ async function overridesOf(vaultId: string): Promise<OverrideRow[]> {
 
 /** One tool's tier and where it comes from. */
 export async function toolTierInfo(
+  ctx: VaultContext,
   serverId: string,
   toolName: string,
 ): Promise<TierInfo> {
@@ -339,7 +341,7 @@ export async function toolTierInfo(
     }
   }
 
-  return tierResolver(await overridesOf(server.vaultId)).tierOf(
+  return tierResolver(ctx, await overridesOf(server.vaultId)).tierOf(
     serverId,
     toolName,
   )
@@ -347,10 +349,11 @@ export async function toolTierInfo(
 
 /** One tool's effective tier. */
 export async function toolTier(
+  ctx: VaultContext,
   serverId: string,
   toolName: string,
 ): Promise<ToolTier> {
-  return (await toolTierInfo(serverId, toolName)).tier
+  return (await toolTierInfo(ctx, serverId, toolName)).tier
 }
 
 /**
@@ -358,10 +361,10 @@ export async function toolTier(
  * for a request's catalogue (gateway-servers.ts) and the owner's pages.
  */
 export async function loadToolTiers(
-  vaultId: string,
+  ctx: VaultContext,
   servers: Array<{ id: string; tools: Array<{ name: string }> }>,
 ): Promise<Map<string, TierInfo>> {
-  const resolver = tierResolver(await overridesOf(vaultId))
+  const resolver = tierResolver(ctx, await overridesOf(ctx.vaultId))
   await resolver.load(servers.map((server) => server.id))
   const found = new Map<string, TierInfo>()
 
@@ -385,7 +388,7 @@ export async function tierOfCalls(
   ctx: VaultContext,
   calls: Array<{ serverId: string; tool: string }>,
 ): Promise<ToolTier> {
-  const resolver = tierResolver(await overridesOf(ctx.vaultId))
+  const resolver = tierResolver(ctx, await overridesOf(ctx.vaultId))
   await resolver.load(calls.map((call) => call.serverId))
   const tiers: ToolTier[] = []
 
@@ -452,7 +455,7 @@ export async function setToolTier(
     throw notFound(`A tool called ${toolName}`)
   }
 
-  const info = await toolTierInfo(serverId, toolName)
+  const info = await toolTierInfo(ctx, serverId, toolName)
   const server = await db().mcpServer.findUnique({
     where: { id: serverId },
     select: { kind: true },
@@ -633,7 +636,7 @@ export async function wrapperTiersBelowCalls(
     },
     orderBy: { slug: "asc" },
   })
-  const resolver = tierResolver(overrides)
+  const resolver = tierResolver(ctx, overrides)
   const found: TierBelowCalls[] = []
 
   for (const wrapper of wrappers) {

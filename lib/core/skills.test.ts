@@ -120,8 +120,8 @@ beforeEach(async () => {
         id: randomUUID(),
         serverId,
         name,
-        description: `${name.replace("_", " ")}s for the owner.`,
-        inputSchema: JSON.stringify({ type: "object" }),
+        plainDescription: `${name.replace("_", " ")}s for the owner.`,
+        plainInputSchema: JSON.stringify({ type: "object" }),
       },
     })
   }

@@ -1,4 +1,5 @@
 import { spawn, spawnSync } from "node:child_process"
+import { editTools } from "../test-servers"
 import { randomBytes, randomUUID } from "node:crypto"
 import { mkdtempSync, readFileSync, rmSync } from "node:fs"
 import { connect as connectSocket, type Socket } from "node:net"
@@ -138,8 +139,8 @@ async function connect(
         id: randomUUID(),
         serverId,
         name,
-        description: `${name} does one thing.`,
-        inputSchema: JSON.stringify({ type: "object" }),
+        plainDescription: `${name} does one thing.`,
+        plainInputSchema: JSON.stringify({ type: "object" }),
         // list_cards only reads, as its server says; the others may not.
         ...(name === "list_cards"
           ? { annotations: JSON.stringify({ readOnlyHint: true }) }
@@ -569,13 +570,14 @@ describe("a program's calls", () => {
       required: ["to"],
       additionalProperties: false,
     }
-    await db().mcpTool.updateMany({
-      where: { name: "send_postcard" },
-      data: {
+    await editTools(
+      ctx,
+      { name: "send_postcard" },
+      {
         inputSchema: JSON.stringify(schema),
         output: "{ sent: boolean }",
       },
-    })
+    )
 
     const { text } = await run(`
       const tool = await pcp.describe("postcards", "send_postcard")
@@ -639,9 +641,10 @@ describe("a program's calls", () => {
   })
 
   it("checks a call's arguments against its schema before anything runs or the owner is asked", async () => {
-    await db().mcpTool.updateMany({
-      where: { name: { in: ["send_postcard", "archive"] } },
-      data: {
+    await editTools(
+      ctx,
+      { name: { in: ["send_postcard", "archive"] } },
+      {
         inputSchema: JSON.stringify({
           type: "object",
           properties: { to: { type: "string", maxLength: 5 } },
@@ -649,7 +652,7 @@ describe("a program's calls", () => {
           additionalProperties: false,
         }),
       },
-    })
+    )
 
     const { text } = await run(`
       const said = []
@@ -771,8 +774,8 @@ describe("a server the owner has to connect", () => {
         id: randomUUID(),
         serverId,
         name: "list_events",
-        description: "Lists events.",
-        inputSchema: JSON.stringify({ type: "object" }),
+        plainDescription: "Lists events.",
+        plainInputSchema: JSON.stringify({ type: "object" }),
       },
     })
     await connect()

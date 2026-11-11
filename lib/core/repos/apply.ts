@@ -1,5 +1,6 @@
 import type { VaultContext } from "../context"
 import { db } from "../db"
+import { openTools, TOOL_OVERRIDE_SELECT } from "../tool-rows"
 import {
   shareDescription,
   uniqueDefinitionSlug,
@@ -621,10 +622,13 @@ async function setToolDescriptions(
   id: string,
   wanted: Record<string, string>,
 ): Promise<void> {
-  const tools = await db().mcpTool.findMany({
-    where: { serverId: id },
-    select: { name: true, descriptionOverride: true },
-  })
+  const tools = openTools(
+    ctx,
+    await db().mcpTool.findMany({
+      where: { serverId: id },
+      select: { ...TOOL_OVERRIDE_SELECT, name: true },
+    }),
+  )
 
   for (const tool of tools) {
     const description = wanted[tool.name] ?? null

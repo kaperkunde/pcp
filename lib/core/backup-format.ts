@@ -464,24 +464,41 @@ const ServerAuthHeaderRow = z.strictObject({
   secretId: id.nullable(),
 })
 
-const McpToolRow = z.strictObject({
-  id,
-  serverId: id,
-  name: str,
-  title: str.nullable(),
-  description: str,
-  descriptionOverride: str.nullable(),
-  inputSchema: str,
-  annotations: str.nullable(),
-  operation: str.nullable(),
-  output: str.nullable(),
-  // Added after the rest: a tool from an older file declares none until
-  // its server is read again.
-  outputSchema: str.nullable().default(null),
-  icons: str.nullable().default(null),
-  createdAt: date,
-  updatedAt: date,
-})
+// A tool's words and shapes were sealed (#96): an older file names their
+// plain columns by their old names.
+const McpToolRow = renamedFrom(
+  {
+    title: "plainTitle",
+    description: "plainDescription",
+    descriptionOverride: "plainDescriptionOverride",
+    inputSchema: "plainInputSchema",
+    operation: "plainOperation",
+    output: "plainOutput",
+    outputSchema: "plainOutputSchema",
+  },
+  z.strictObject({
+    id,
+    serverId: id,
+    name: str,
+    plainTitle: str.nullable(),
+    plainDescription: str,
+    plainDescriptionOverride: str.nullable(),
+    plainInputSchema: str,
+    annotations: str.nullable(),
+    plainOperation: str.nullable(),
+    plainOutput: str.nullable(),
+    // Added after the rest: a tool from an older file declares none until
+    // its server is read again.
+    plainOutputSchema: str.nullable().default(null),
+    icons: str.nullable().default(null),
+    // The sealed values: absent from older files.
+    about: bytesOrNull.default(null),
+    schema: bytesOrNull.default(null),
+    override: bytesOrNull.default(null),
+    createdAt: date,
+    updatedAt: date,
+  }),
+)
 
 const OpenApiSpecRow = z.strictObject({
   serverId: id,

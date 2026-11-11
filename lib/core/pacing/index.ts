@@ -72,7 +72,11 @@ export async function paceServerCall(
     return null
   }
 
-  const pacingClass: PacingClass = (await markedReadOnly(server.id, toolName))
+  const pacingClass: PacingClass = (await markedReadOnly(
+    ctx,
+    server.id,
+    toolName,
+  ))
     ? "server_read"
     : "server_change"
   const policy = resolvePolicy(await readPacingConfig(ctx), pacingClass, {

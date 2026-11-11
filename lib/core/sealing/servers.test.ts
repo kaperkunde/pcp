@@ -15,6 +15,9 @@ import {
   setServerStatus,
 } from "../servers"
 import { writeServer } from "../server-meta"
+import { setToolDescription } from "../servers"
+import { storeTools } from "../catalogue"
+import { openTools } from "../tool-rows"
 import { scratchDatabase } from "../test-db"
 import { setupVault } from "../vault"
 import { forgetVaultUpkeeps } from "../vault-upkeep"
@@ -198,5 +201,110 @@ describe("servers", () => {
       { restoreHostSettings: false },
     )
     expect((await getServer(ctx, id)).name).toBe("SERVER-NAME-MARKER")
+  })
+})
+
+describe("tools", () => {
+  async function addTools(id: string) {
+    await storeTools(ctx, id, [
+      {
+        name: "lookup",
+        title: "TOOL-TITLE-MARKER",
+        description: "TOOL-DESCRIPTION-MARKER",
+        inputSchema: {
+          type: "object",
+          properties: {
+            word: { type: "string", description: "SCHEMA-MARKER" },
+          },
+        },
+        outputSchema: { type: "object", description: "OUTPUT-MARKER" },
+      },
+    ])
+  }
+
+  async function tools(id: string) {
+    return openTools(
+      ctx,
+      await db().mcpTool.findMany({ where: { serverId: id } }),
+    )
+  }
+
+  it("seals a tool's words and schemas, keeps its name plain, and reads them back", async () => {
+    const id = await addServer()
+    await addTools(id)
+    await setToolDescription(ctx, id, "lookup", "OVERRIDE-MARKER")
+
+    for (const marker of [
+      "TOOL-TITLE-MARKER",
+      "TOOL-DESCRIPTION-MARKER",
+      "SCHEMA-MARKER",
+      "OUTPUT-MARKER",
+      "OVERRIDE-MARKER",
+    ]) {
+      expect(await onDisk(marker)).toBe(false)
+    }
+
+    expect(await tools(id)).toMatchObject([
+      {
+        name: "lookup",
+        title: "TOOL-TITLE-MARKER",
+        description: "TOOL-DESCRIPTION-MARKER",
+        descriptionOverride: "OVERRIDE-MARKER",
+      },
+    ])
+    expect(
+      JSON.parse((await getServer(ctx, id)).tools[0]!.inputSchema),
+    ).toMatchObject({ properties: { word: { description: "SCHEMA-MARKER" } } })
+    expect(
+      await db().$queryRawUnsafe(
+        `SELECT "name", "description", "input_schema", "description_override" FROM "mcp_tool"`,
+      ),
+    ).toEqual([
+      {
+        name: "lookup",
+        description: "",
+        input_schema: "",
+        description_override: null,
+      },
+    ])
+  })
+
+  it("keeps a tool's id, and the owner's wording, when its server is read again", async () => {
+    const id = await addServer()
+    await addTools(id)
+    await setToolDescription(ctx, id, "lookup", "Mine")
+    const [before] = await tools(id)
+    await addTools(id)
+    const [after] = await tools(id)
+
+    expect(after).toMatchObject({ id: before!.id, descriptionOverride: "Mine" })
+  })
+
+  it("reads a tool from before, and seals it on a request", async () => {
+    const id = await addServer()
+    await addTools(id)
+    await db().$executeRawUnsafe(
+      `UPDATE "mcp_tool" SET "title" = 'Old title', "description" = 'OLD-TOOL-WORDS', "input_schema" = '{"type":"object"}', "description_override" = 'OLD-OVERRIDE', "about" = NULL, "schema" = NULL, "override" = NULL`,
+    )
+
+    expect(await tools(id)).toMatchObject([
+      {
+        title: "Old title",
+        description: "OLD-TOOL-WORDS",
+        inputSchema: '{"type":"object"}',
+        descriptionOverride: "OLD-OVERRIDE",
+      },
+    ])
+    expect(await ensureSealed(ctx)).toBe(true)
+    expect(await onDisk("OLD-TOOL-WORDS")).toBe(false)
+    expect(await onDisk("OLD-OVERRIDE")).toBe(false)
+    expect(await tools(id)).toMatchObject([
+      {
+        title: "Old title",
+        description: "OLD-TOOL-WORDS",
+        inputSchema: '{"type":"object"}',
+        descriptionOverride: "OLD-OVERRIDE",
+      },
+    ])
   })
 })

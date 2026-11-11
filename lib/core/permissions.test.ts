@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto"
 
+import { openTools } from "./tool-rows"
 import { firstServer } from "./test-servers"
 import type { CallToolResult } from "@modelcontextprotocol/server"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
@@ -126,8 +127,8 @@ async function setup(options: { allowAllServers?: boolean } = {}): Promise<{
         id: randomUUID(),
         serverId,
         name,
-        description: `${name} does one thing.`,
-        inputSchema: JSON.stringify({ type: "object" }),
+        plainDescription: `${name} does one thing.`,
+        plainInputSchema: JSON.stringify({ type: "object" }),
         annotations: JSON.stringify(annotations),
       },
     })
@@ -499,8 +500,8 @@ describe("asking the owner", () => {
         id: randomUUID(),
         serverId,
         name: "run_command",
-        description: "Runs one command.",
-        inputSchema: JSON.stringify({ type: "object" }),
+        plainDescription: "Runs one command.",
+        plainInputSchema: JSON.stringify({ type: "object" }),
         annotations: JSON.stringify({ destructiveHint: true }),
       },
     })
@@ -1805,10 +1806,13 @@ describe("a change to an API endpoint of the owner's", () => {
     })
     expect(textOf(done)).toBe("Changed Pets: 2 tools.")
 
-    const tools = await db().mcpTool.findMany({
-      where: { serverId: id },
-      orderBy: { name: "asc" },
-    })
+    const tools = openTools(
+      ctx,
+      await db().mcpTool.findMany({
+        where: { serverId: id },
+        orderBy: { name: "asc" },
+      }),
+    )
     expect(tools.map((tool) => [tool.name, tool.descriptionOverride])).toEqual([
       ["createPet", null],
       ["listPets", "Every pet in the shop."],

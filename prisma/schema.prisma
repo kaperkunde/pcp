@@ -929,33 +929,48 @@ model ServerAuthHeader {
 /// The catalogue of one server's tools, as last read from it. search_tools
 /// runs over these rows, so an assistant never needs the full list.
 model McpTool {
-  id                  String    @id
-  serverId            String    @map("server_id")
-  server              McpServer @relation(fields: [serverId], references: [id], onDelete: Cascade)
-  name                String
-  title               String?
-  description         String    @default("")
+  id                       String    @id
+  serverId                 String    @map("server_id")
+  server                   McpServer @relation(fields: [serverId], references: [id], onDelete: Cascade)
+  /// The tool's name: plain, as its server's short name is.
+  name                     String
+  /// From before descriptions were sealed (#96): the title, the
+  /// description and the owner's wording, the schemas, the call plan and
+  /// the outline of an answer, each in its plain column. A sealed row holds
+  /// blanks there ("" or null) and its values in about, schema and
+  /// override (lib/core/tool-rows.ts).
+  plainTitle               String?   @map("title")
+  plainDescription         String    @default("") @map("description")
   /// The owner's wording, when the upstream description is not good enough.
-  descriptionOverride String?   @map("description_override")
+  plainDescriptionOverride String?   @map("description_override")
   /// JSON Schema, as JSON text.
-  inputSchema         String    @map("input_schema")
+  plainInputSchema         String    @map("input_schema")
   /// JSON, when the server sent annotations (readOnlyHint and friends).
-  annotations         String?
+  annotations              String?
   /// openapi: the call plan (JSON) that turns the tool's arguments into an
   /// HTTP request. Null for MCP and mail tools.
-  operation           String?
+  plainOperation           String?   @map("operation")
   /// openapi: an outline of what a successful call answers, from the
   /// schema; describe_tool shows it. Null when the schema does not say.
-  output              String?
+  plainOutput              String?   @map("output")
   /// JSON Schema, as JSON text, of what a successful call answers as
   /// structuredContent, when the tool declares it: an MCP server's
   /// outputSchema, a family tool's (lib/core/tools/family.ts) or a wrapper
   /// tool's. describe shows it as outputSchema.
-  outputSchema        String?   @map("output_schema")
+  plainOutputSchema        String?   @map("output_schema")
+  /// The title and description, sealed: JSON, AES-256-GCM under the
+  /// vault's data key with "mcp_tool:<id>:about" as associated data. What
+  /// search and the catalogue read on every request.
+  about                    Bytes?
+  /// The input and output schemas, the call plan and the outline, sealed
+  /// as "mcp_tool:<id>:schema": read when a tool is described or called.
+  schema                   Bytes?
+  /// The owner's wording, sealed as "mcp_tool:<id>:override".
+  override                 Bytes?
   /// JSON: the icons an MCP server gave the tool (MCP's Icon objects).
-  icons               String?
-  createdAt           DateTime  @default(now()) @map("created_at")
-  updatedAt           DateTime  @updatedAt @map("updated_at")
+  icons                    String?
+  createdAt                DateTime  @default(now()) @map("created_at")
+  updatedAt                DateTime  @updatedAt @map("updated_at")
 
   @@unique([serverId, name])
   @@map("mcp_tool")

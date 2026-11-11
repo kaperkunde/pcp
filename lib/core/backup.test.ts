@@ -1,4 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
+import { openTool, TOOL_ABOUT, TOOL_OVERRIDE, TOOL_SCHEMA } from "./tool-rows"
+import type { SealedGroup } from "./sealed-fields"
 import { gunzipSync } from "node:zlib"
 
 import {
@@ -53,7 +55,6 @@ import {
   byServerName,
   openServer,
   SERVER_META,
-  serverName,
   writeServer,
 } from "./server-meta"
 import { readFields } from "./sealed-fields"
@@ -719,14 +720,16 @@ describe("restoring", { timeout: 60_000 }, () => {
       { into: "vault", ctx },
       { restoreHostSettings: false },
     )
-    const tool = await db().mcpTool.findFirstOrThrow({
-      where: { name: "alpha" },
-    })
+    const tool = openTool(
+      ctx,
+      await db().mcpTool.findFirstOrThrow({ where: { name: "alpha" } }),
+    )
     expect(JSON.parse(tool.outputSchema!)).toEqual(outputSchema)
     expect(JSON.parse(tool.icons!)).toEqual(icons)
 
     const older = structuredClone(await openRaw(file, EXPORT_PASSWORD))
     for (const row of older.tables.tools as Record<string, unknown>[]) {
+      unsealed(ctx, row, [TOOL_ABOUT, TOOL_SCHEMA, TOOL_OVERRIDE] as never)
       delete row.outputSchema
       delete row.icons
     }
@@ -740,7 +743,10 @@ describe("restoring", { timeout: 60_000 }, () => {
       { restoreHostSettings: false },
     )
     expect(
-      await db().mcpTool.findFirstOrThrow({ where: { name: "alpha" } }),
+      openTool(
+        ctx,
+        await db().mcpTool.findFirstOrThrow({ where: { name: "alpha" } }),
+      ),
     ).toMatchObject({ outputSchema: null, icons: null })
   })
 
@@ -933,7 +939,7 @@ describe("restoring", { timeout: 60_000 }, () => {
       { restoreHostSettings: false },
     )
     expect(await db().toolTier.findMany()).toEqual(before)
-    expect(await toolTier(serverId, "alpha")).toBe("read")
+    expect(await toolTier(ctx, serverId, "alpha")).toBe("read")
     expect(await readOwnToolTiers(ctx)).toEqual({ search: "write" })
 
     const older = structuredClone(await openRaw(file, EXPORT_PASSWORD))
@@ -948,7 +954,7 @@ describe("restoring", { timeout: 60_000 }, () => {
       { restoreHostSettings: false },
     )
     expect(await db().toolTier.count()).toBe(0)
-    expect(await toolTier(serverId, "alpha")).toBe("destructive")
+    expect(await toolTier(ctx, serverId, "alpha")).toBe("destructive")
   })
 
   it("carries a store's key and index but never its files, and restores a file from before stores", async () => {
@@ -1798,20 +1804,34 @@ describe("refusing a file", { timeout: 60_000 }, () => {
 })
 
 /**
- * A server row of a file as a PCP from before #96 wrote it: the sealed
- * values in their plain columns, by their old names, and no meta.
+ * A row of a file as a PCP from before #96 wrote it: each group's sealed
+ * values in their plain columns, by their old names, and nothing sealed.
  */
-function asBeforeSealing(ctx: VaultContext, row: Record<string, unknown>) {
-  const meta = readFields(ctx.dek, SERVER_META, {
-    ...row,
-    id: row.id as string,
-    meta: Buffer.from(row.meta as string, "base64"),
-  } as unknown as Parameters<typeof serverName>[1])
+function unsealed(
+  ctx: VaultContext,
+  row: Record<string, unknown>,
+  groups: Array<SealedGroup<Record<string, unknown>, string, string>>,
+) {
+  for (const group of groups) {
+    const sealed = row[group.column]
 
-  for (const [key, value] of Object.entries(meta)) {
-    delete row[`plain${key.charAt(0).toUpperCase()}${key.slice(1)}`]
-    row[key] = value
+    if (typeof sealed === "string") {
+      const values = readFields(ctx.dek, group, {
+        ...row,
+        [group.column]: Buffer.from(sealed, "base64"),
+      } as never)
+
+      for (const [key, value] of Object.entries(values)) {
+        delete row[`plain${key.charAt(0).toUpperCase()}${key.slice(1)}`]
+        row[key] = value
+      }
+    }
+
+    delete row[group.column]
   }
+}
 
-  delete row.meta
+/** A server row of a file from before #96. */
+function asBeforeSealing(ctx: VaultContext, row: Record<string, unknown>) {
+  unsealed(ctx, row, [SERVER_META as never])
 }

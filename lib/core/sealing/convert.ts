@@ -14,6 +14,11 @@ import {
   SERVER_META_SELECT,
 } from "../server-meta"
 import { sealedDefinitionMeta } from "../definition-rows"
+import {
+  plainToolValues,
+  sealedToolContent,
+  sealedToolOverride,
+} from "../tool-rows"
 import { PLAIN_SETTINGS, storedSetting } from "../settings"
 import { sealingState } from "./state"
 
@@ -307,6 +312,51 @@ export const SEAL_CONVERTERS: Converter[] = [
         },
       })
       return count === 1
+    },
+  }),
+  converter({
+    table: "mcp_tool",
+    read: (ctx, limit) =>
+      db().mcpTool.findMany({
+        where: {
+          server: { vaultId: ctx.vaultId },
+          OR: [{ about: null }, { schema: null }, { override: null }],
+        },
+        take: limit,
+      }),
+    write: async (ctx, row) => {
+      const values = plainToolValues(row)
+      let sealed = false
+
+      // Each part only while it is still from before: a read of the tools
+      // since seals what it wrote, and the owner's wording is theirs.
+      if (row.about === null || row.schema === null) {
+        const { count } = await db().mcpTool.updateMany({
+          where: { id: row.id, about: null, schema: null },
+          data: {
+            ...sealedToolContent(ctx, row.id, values),
+            updatedAt: row.updatedAt,
+          },
+        })
+        sealed ||= count === 1
+      }
+
+      if (row.override === null) {
+        const { count } = await db().mcpTool.updateMany({
+          where: {
+            id: row.id,
+            override: null,
+            plainDescriptionOverride: row.plainDescriptionOverride,
+          },
+          data: {
+            ...sealedToolOverride(ctx, row.id, values.descriptionOverride),
+            updatedAt: row.updatedAt,
+          },
+        })
+        sealed ||= count === 1
+      }
+
+      return sealed
     },
   }),
   converter({

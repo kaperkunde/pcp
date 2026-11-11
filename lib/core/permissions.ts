@@ -40,6 +40,7 @@ import type {
 import type { VaultContext } from "./context"
 import { asBytes, decryptString, encryptString } from "./crypto"
 import { db } from "./db"
+import { openTool } from "./tool-rows"
 import { definitionBasis } from "./definitions"
 import {
   applyNoteChange,
@@ -1489,18 +1490,20 @@ async function summarizeRow(
   }
 
   const tool = row.serverId
-    ? await db().mcpTool.findUnique({
-        where: {
-          serverId_name: { serverId: row.serverId, name: row.toolName },
-        },
-      })
+    ? await db()
+        .mcpTool.findUnique({
+          where: {
+            serverId_name: { serverId: row.serverId, name: row.toolName },
+          },
+        })
+        .then((found) => found && openTool(ctx, found))
     : null
   // The tool's tier (tool-tiers.ts): the owner's choice, a wrapper's calls,
   // or its annotations, where hints left out count as Destructive.
   const destructive =
     tool !== null &&
     row.serverId !== null &&
-    (await toolTier(row.serverId, row.toolName)) === "destructive"
+    (await toolTier(ctx, row.serverId, row.toolName)) === "destructive"
 
   const about = tool
     ? summarize(tool.descriptionOverride ?? tool.description)

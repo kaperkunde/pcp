@@ -102,7 +102,7 @@ export default async function ServerPage({
   const service = kind === "service" ? await serviceView(ctx, id) : null
   const replaced = await replacedTools(ctx, server.id)
   // Each tool's tier, and whether the owner chose it (tool-tiers.ts).
-  const tiers = await loadToolTiers(ctx.vaultId, [server])
+  const tiers = await loadToolTiers(ctx, [server])
   const about = await itemAbout(ctx, "server", server.id)
   const spec = endpoint
     ? await db().openApiSpec.findUnique({

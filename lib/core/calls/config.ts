@@ -232,7 +232,7 @@ export async function duplicateCallsOverview(
     .map((row) => openServer(ctx, row))
     .sort(byServerName)
     .filter((server) => !UNGUARDED_KINDS.has(server.kind))
-  const tiers = await loadToolTiers(ctx.vaultId, servers)
+  const tiers = await loadToolTiers(ctx, servers)
   const choices: DuplicateCallsTool[] = []
   const known = new Map<string, DuplicateCallsTool>()
 

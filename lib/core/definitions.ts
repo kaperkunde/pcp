@@ -19,6 +19,7 @@ import { createServer, getServer, type ExtraAuthHeaderInput } from "./servers"
 import { getSetting, setSetting } from "./settings"
 import { copyToolTiers, mergeToolTiers } from "./tool-tiers"
 import { findServers, type OpenServer, writeServer } from "./server-meta"
+import { toolOverrides } from "./tool-rows"
 
 /**
  * Definitions and instances, as the owner works with them.
@@ -360,17 +361,16 @@ async function dismissedMerges(ctx: VaultContext): Promise<string[]> {
  * its edits and the tool descriptions in the owner's words. Two definitions
  * with the same one build the same tools.
  */
-async function contentKey(serverId: string): Promise<string | null> {
+async function contentKey(
+  ctx: VaultContext,
+  serverId: string,
+): Promise<string | null> {
   const [spec, tools] = await Promise.all([
     db().openApiSpec.findUnique({
       where: { serverId },
       select: { hash: true, patches: true },
     }),
-    db().mcpTool.findMany({
-      where: { serverId, descriptionOverride: { not: null } },
-      select: { name: true, descriptionOverride: true },
-      orderBy: { name: "asc" },
-    }),
+    toolOverrides(ctx, { serverId }),
   ])
 
   if (!spec) {
@@ -431,7 +431,7 @@ async function endpointKeys(
 
   for (const [definitionId, { id, hash }] of byDefinition) {
     if (only || (hashes.get(hash) ?? 0) > 1) {
-      const key = await contentKey(id)
+      const key = await contentKey(ctx, id)
 
       if (key) {
         keys.set(definitionId, key)
@@ -715,11 +715,7 @@ export async function definitionBasis(
       where: { serverId: source.id },
       select: { hash: true },
     }),
-    db().mcpTool.findMany({
-      where: { serverId: source.id, descriptionOverride: { not: null } },
-      select: { name: true, descriptionOverride: true },
-      orderBy: { name: "asc" },
-    }),
+    toolOverrides(ctx, { serverId: source.id }),
   ])
 
   return sha256Hex(

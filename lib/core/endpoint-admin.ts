@@ -1,12 +1,11 @@
 import { isIP } from "node:net"
 
-import type { McpTool } from "@/lib/generated/prisma/client"
-
 import type { ResolvedToken } from "./api-tokens"
 import type { SyncResult } from "./catalogue"
 import { MAX_SPEC_BYTES } from "./constants"
 import type { VaultContext } from "./context"
 import { db } from "./db"
+import { openTools, type OpenTool } from "./tool-rows"
 import {
   contentInstance,
   disableOtherInstances,
@@ -185,7 +184,7 @@ export type EndpointDetails = {
  * descriptions) is then theirs too, so the assistant can only ask.
  */
 type Owned = OpenServer & { sharesWithOwner?: boolean }
-type EndpointRow = Owned & { tools: McpTool[] }
+type EndpointRow = Owned & { tools: OpenTool[] }
 
 function ownersAlone(
   server: Pick<OpenServer, "publicOnly" | "authType">,
@@ -274,7 +273,12 @@ async function findEndpoint(
     include: { tools: { orderBy: { name: "asc" } } },
   })
   const [row] = found
-    ? await withSharers([openServer(scope.ctx, found)])
+    ? await withSharers([
+        {
+          ...openServer(scope.ctx, found),
+          tools: openTools(scope.ctx, found.tools),
+        },
+      ])
     : [null]
 
   if (

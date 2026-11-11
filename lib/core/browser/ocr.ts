@@ -1,5 +1,6 @@
 import type { VaultContext } from "../context"
 import { db } from "../db"
+import { inputSchemasOf } from "../tool-rows"
 import { loadGatewayServers, listedTools } from "../gateway-servers"
 
 /**
@@ -67,17 +68,9 @@ export async function ocrToolFor(
     return null
   }
 
-  const schemas = new Map(
-    (
-      await db().mcpTool.findMany({
-        where: {
-          id: {
-            in: tools.slice(0, MAX_SCHEMAS_READ).map(({ tool }) => tool.id),
-          },
-        },
-        select: { id: true, inputSchema: true },
-      })
-    ).map((row) => [row.id, row.inputSchema]),
+  const schemas = await inputSchemasOf(
+    ctx,
+    tools.slice(0, MAX_SCHEMAS_READ).map(({ tool }) => tool.id),
   )
 
   let best: { rank: number; found: OcrTool } | null = null

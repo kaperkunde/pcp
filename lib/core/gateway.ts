@@ -8,7 +8,10 @@ import {
 } from "@modelcontextprotocol/server"
 import { z } from "zod"
 
-import type { McpServer as McpServerRow } from "@/lib/generated/prisma/client"
+import type {
+  McpServer as McpServerRow,
+  Prisma,
+} from "@/lib/generated/prisma/client"
 
 import { resolveAccessProposal, type AccessChange } from "./access-requests"
 import { resolveTokenForOwner } from "./api-tokens"
@@ -239,6 +242,7 @@ import {
   type AuthType,
 } from "./servers"
 import { openServer } from "./server-meta"
+import { openTool, TOOL_SCHEMA_SELECT } from "./tool-rows"
 import { collectHandleIds, missingResultMessage } from "./result-handles"
 import { capabilityProviders } from "./capabilities/candidates"
 import { sniffMediaType } from "./media-types"
@@ -440,15 +444,11 @@ const MAX_DESCRIBED_CHARS = 60_000
 
 /** What describing a tool and checking its handle read of its row. */
 const TOOL_ROW = {
-  id: true,
+  ...TOOL_SCHEMA_SELECT,
   name: true,
-  inputSchema: true,
   annotations: true,
-  output: true,
-  outputSchema: true,
   icons: true,
-  operation: true,
-} as const
+} as const satisfies Prisma.McpToolSelect
 
 type ToolRow = {
   id: string
@@ -1988,10 +1988,12 @@ export function buildGatewayServer(
   /** A tool's catalogue row, with what describing and calling it need. */
   function toolRow(serverId: string, name: string): Promise<ToolRow | null> {
     // The schema is not carried with the catalogue: fetch this tool's.
-    return db().mcpTool.findUnique({
-      where: { serverId_name: { serverId, name } },
-      select: TOOL_ROW,
-    })
+    return db()
+      .mcpTool.findUnique({
+        where: { serverId_name: { serverId, name } },
+        select: TOOL_ROW,
+      })
+      .then((row) => row && openTool(scope.ctx, row))
   }
 
   function handleFor(server: GatewayServer, row: ToolRow): string {
@@ -2116,10 +2118,12 @@ export function buildGatewayServer(
       return { answer: await notAHandle(handle) }
     }
 
-    const row = await db().mcpTool.findUnique({
-      where: { id: parsed.toolId },
-      select: { ...TOOL_ROW, serverId: true },
-    })
+    const row = await db()
+      .mcpTool.findUnique({
+        where: { id: parsed.toolId },
+        select: { ...TOOL_ROW, serverId: true },
+      })
+      .then((found) => found && openTool(scope.ctx, found))
     const entry =
       row && [...bySlug.values()].find((known) => known.id === row.serverId)
 
@@ -3463,10 +3467,12 @@ export function buildGatewayServer(
 
         ctx.logAs({ server: target.slug, upstreamTool: name })
 
-        const row = await db().mcpTool.findFirst({
-          where: { serverId: target.id, name },
-          select: { inputSchema: true },
-        })
+        const row = await db()
+          .mcpTool.findFirst({
+            where: { serverId: target.id, name },
+            select: TOOL_SCHEMA_SELECT,
+          })
+          .then((found) => found && openTool(scope.ctx, found))
 
         if (!row) {
           return failure(

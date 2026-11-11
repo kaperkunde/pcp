@@ -1,6 +1,7 @@
 import { SECRET_PLACEHOLDER } from "../constants"
 import type { VaultContext } from "../context"
 import { db } from "../db"
+import { toolOverrides } from "../tool-rows"
 import {
   DEFINITION_META_SELECT,
   definitionMeta,
@@ -305,11 +306,7 @@ async function endpointDocument(
     throw invalid(`${row.name} has no stored schema to share.`)
   }
 
-  const tools = await db().mcpTool.findMany({
-    where: { serverId: row.id, descriptionOverride: { not: null } },
-    select: { name: true, descriptionOverride: true },
-    orderBy: { name: "asc" },
-  })
+  const tools = await toolOverrides(ctx, { serverId: row.id })
   let auth: EndpointAuthDocument
 
   switch (row.authType) {
@@ -336,7 +333,7 @@ async function endpointDocument(
     spec: { format: specFormat(spec.text), text: spec.text },
     patches: spec.patches,
     toolDescriptions: Object.fromEntries(
-      tools.map((tool) => [tool.name, tool.descriptionOverride!]),
+      tools.map((tool) => [tool.name, tool.descriptionOverride]),
     ),
     auth,
   }

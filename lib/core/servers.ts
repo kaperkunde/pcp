@@ -27,6 +27,7 @@ import {
   updateServerRow,
   writeServer,
 } from "./server-meta"
+import { openTools, sealedToolOverride } from "./tool-rows"
 import {
   checkNewSecret,
   createSecret,
@@ -922,7 +923,7 @@ export async function getServer(ctx: VaultContext, id: string) {
     throw notFound("That server")
   }
 
-  return openServer(ctx, row)
+  return { ...openServer(ctx, row), tools: openTools(ctx, row.tools) }
 }
 
 export async function getServerBySlug(
@@ -1338,9 +1339,13 @@ export async function setToolDescription(
   await getServer(ctx, serverId)
   const trimmed = override?.trim().slice(0, 2000) || null
 
-  await db().mcpTool.update({
+  const tool = await db().mcpTool.findUniqueOrThrow({
     where: { serverId_name: { serverId, name: toolName } },
-    data: { descriptionOverride: trimmed },
+    select: { id: true },
+  })
+  await db().mcpTool.update({
+    where: { id: tool.id },
+    data: sealedToolOverride(ctx, tool.id, trimmed),
   })
   // A tool's description is the definition's: every instance gets it.
   await shareToolDescription(ctx, serverId, toolName, trimmed)

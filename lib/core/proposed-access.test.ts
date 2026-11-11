@@ -232,7 +232,7 @@ describe("writing what the owner saved", () => {
       ["addPet", "blocked"],
       ["listPets", "allowed"],
     ])
-    expect(await toolTier(id, "listPets")).toBe("read")
+    expect(await toolTier(ctx, id, "listPets")).toBe("read")
     expect(told).toMatch(/set this token's level for 2 tools/)
     expect(
       (await db().mcpServer.findUniqueOrThrow({ where: { id } })).pendingAccess,
