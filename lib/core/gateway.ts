@@ -3103,7 +3103,13 @@ export function buildGatewayServer(
   const guardedOwnTool = (tool: Tool, rerun: boolean): Tool => {
     const tier = ownTierOf(tool)
 
-    if (tier === "read" || UNGUARDED_OWN.has(tool.name)) {
+    // A tool that says a repeat does nothing more (withdraw_request)
+    // answers a repeat itself.
+    if (
+      tier === "read" ||
+      UNGUARDED_OWN.has(tool.name) ||
+      tool.annotations.idempotentHint === true
+    ) {
       return tool
     }
 
@@ -3150,7 +3156,9 @@ export function buildGatewayServer(
                 : endOfAnswer(toCallToolResult(outcome), before),
           )
 
-          return guarded.warning ? withLead(guarded.warning, outcome) : outcome
+          // No note about an earlier call with other arguments: PCP's own
+          // answer says what this one did (a memory saved, a request made).
+          return outcome
         } catch (error) {
           // A PcpError thrown by PCP's own tool is a refusal too, but for a
           // failure on the way, which may have gone through.

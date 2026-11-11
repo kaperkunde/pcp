@@ -52,7 +52,8 @@ tier in its annotations: `search`, `execute_read` and `run_read` only read
   `web_fetch` POST, `memory` create…) made again with the same arguments
   within the duplicate guard's window answers `duplicate_call`, as a
   server's tool does; pass `rerun: true` with a `reason` beside `tool` to
-  make it again. The stores' and capabilities' tools, and `memory`'s and
+  make it again. The stores' and capabilities' tools, `withdraw_request`
+  (a repeat does nothing more), and `memory`'s and
   `web_fetch`'s reading calls (view, search, every; GET, HEAD), are not
   held back.
 - Through `execute_<tier>`, one of PCP's own tools whose text is the JSON

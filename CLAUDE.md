@@ -628,8 +628,8 @@ embeddingProvider`, which hands `embeddings/provider.ts` the header;
   in `callResolved` (execute_write/destructive), `forwardCall` (a
   program's `pcp.call`), a wrapper's `innerCall` and execute's dispatch of
   PCP's own tools by name (`guardedOwnTool`, server id `pcp`: not the
-  stores' or capabilities' tools, nor memory's or web_fetch's reading
-  calls), never in `upstream.ts`.
+  stores' or capabilities' tools, an idempotent one, nor memory's or
+  web_fetch's reading calls; no note about a call with other arguments), never in `upstream.ts`.
   Never guarded: the browser, SSH and storage kinds, a capability's calls
   to its provider, a wrapper's calls in a run the owner approved, and
   executions from the owner's page. The lookup and the record are one

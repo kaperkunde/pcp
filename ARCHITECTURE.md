@@ -4524,7 +4524,8 @@ minute, one message each (`app/mcp/route.ts`). The tools:
   the request log under its own name, the lead. A Write or Destructive one
   goes through the duplicate guard as a server's tool does (`guardCall` on
   the arguments as checked, under the server id `pcp`), except the stores'
-  tools (their own tool's call is the one guarded) and the capabilities',
+  tools (their own tool's call is the one guarded), the capabilities', those
+  that say a repeat does nothing more (`idempotentHint`: `withdraw_request`),
   and `memory`'s and `web_fetch`'s calls that only read (view, search,
   every; GET, HEAD). Its structuredContent is dropped when its text already
   is that JSON (`withoutRepeatedStructure`: the entry declares no output
