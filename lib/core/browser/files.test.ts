@@ -56,12 +56,24 @@ import { browserTools } from "./tools"
 vi.mock("./limits", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./limits")>()),
   DOWNLOAD_START_MS: 1_500,
+  // A file a window shows is handed back to it up to this much, here.
+  MAX_HELD_DOCUMENT_BYTES: 64 * 1024,
   ACTION_TIMEOUT_MS: 3_000,
 }))
 
 const executable = await chromiumExecutable()
 const PUBLIC_URL = "http://pcp.test"
 const PDF = Buffer.from("%PDF-1.4\n% an invoice\n")
+/** A PDF of `size` bytes, its header first. */
+function pdfOf(size: number): Buffer {
+  const body = Buffer.alloc(size, 0x20)
+  body.write("%PDF-1.4\n")
+  return body
+}
+
+/** A code a site puts in an address, which no answer may carry. */
+const CODE = "Zq81SECRETcodeVALUE7x"
+
 /** A PDF a site shows rather than offers (no attachment). */
 const STATEMENT = Buffer.from("%PDF-1.4\n% a statement\n")
 
@@ -81,6 +93,12 @@ const FILES = `<!doctype html><title>Files</title>
 <button onclick="window.open('/statement')">Statement window</button>
 <button onclick="window.open('/closes')">Closing window</button>
 <button onclick="window.open('__ELSEWHERE__/x')">Elsewhere window</button>
+<button onclick="const w = window.open(); setTimeout(() => { w.location = '/to-elsewhere' }, 500)">Redirecting window</button>
+<button onclick="window.open('/fake-pdf')">Fake window</button>
+<button onclick="window.open('/big-statement')">Big statement window</button>
+<button onclick="window.open('/streamed-statement')">Streamed statement window</button>
+<button onclick="window.open('/wide-statement')">Wide statement window</button>
+<button onclick="window.open('/to-statement')">Moved statement window</button>
 <script>
 const link = document.getElementById("csv")
 link.href = URL.createObjectURL(new Blob(["name,amount\\nAda,12\\n"], { type: "text/csv" }))
@@ -151,6 +169,49 @@ beforeEach(async () => {
         'attachment; filename="invoice-42.pdf"',
       )
       return res.end(PDF)
+    }
+
+    // A sign-in's way back to another site, with a code in its address.
+    if (request.url.startsWith("/to-elsewhere")) {
+      res.statusCode = 302
+      res.setHeader("location", `${elsewhere.origin}/cb?token=${CODE}`)
+      return res.end()
+    }
+
+    if (request.url.startsWith("/to-statement")) {
+      res.statusCode = 302
+      res.setHeader("location", "/statement")
+      return res.end()
+    }
+
+    // A page that says it is a PDF and is not.
+    if (request.url.startsWith("/fake-pdf")) {
+      res.setHeader("content-type", "application/pdf")
+      return res.end("<!doctype html><title>Not a PDF</title><h1>Hello</h1>")
+    }
+
+    // PDFs past the largest file (1 MB in its test): one that says so
+    // up front, one that does not.
+    if (request.url.startsWith("/big-statement")) {
+      const body = pdfOf(2 * 1024 * 1024)
+      res.setHeader("content-type", "application/pdf")
+      res.setHeader("content-length", String(body.length))
+      return res.end(body)
+    }
+
+    if (request.url.startsWith("/streamed-statement")) {
+      const body = pdfOf(2 * 1024 * 1024)
+      res.setHeader("content-type", "application/pdf")
+      for (let at = 0; at < body.length; at += 256 * 1024) {
+        res.write(body.subarray(at, at + 256 * 1024))
+      }
+      return res.end()
+    }
+
+    // A PDF within the largest file, but more than a window is handed back.
+    if (request.url.startsWith("/wide-statement")) {
+      res.setHeader("content-type", "application/pdf")
+      return res.end(pdfOf(200 * 1024))
     }
 
     if (request.url.startsWith("/statement")) {
@@ -665,6 +726,95 @@ describe.skipIf(!executable)(
         "The page offered a file to download (invoice-42.pdf)",
       )
       expect(await db().toolResult.count()).toBe(0)
+    })
+
+    it("keeps an address the gate refused out of what it says of a window", async () => {
+      const page = await call("tabs", {
+        action: "open",
+        url: `${api.origin}/files`,
+      })
+      const tab = tabOf(page)
+
+      // The window is a tab of the token's before its address sends it on
+      // to a site the tab may not open.
+      const redirected = await call("download", {
+        tab,
+        ref: refOf(page, /button "Redirecting window"/),
+      })
+      expect(redirected.isError).toBe(true)
+      expect(textOf(redirected)).toContain("A new window opened")
+      expect(textOf(redirected)).not.toContain(CODE)
+      expect(textOf(redirected)).not.toContain(
+        `A new window opened at ${elsewhere.origin}`,
+      )
+      expect(elsewhere.requests).toHaveLength(0)
+    })
+
+    it("takes a file a window shows only when its bytes are one, and never breaks the window's page", async () => {
+      const page = await call("tabs", {
+        action: "open",
+        url: `${api.origin}/files`,
+      })
+      const tab = tabOf(page)
+
+      // HTML said to be a PDF: not taken, and the page gets it as it was.
+      const fake = await call("download", {
+        tab,
+        ref: refOf(page, /button "Fake window"/),
+      })
+      expect(fake.isError).toBe(true)
+      expect(textOf(fake)).toContain("Nothing started a download")
+      expect(await db().toolResult.count()).toBe(0)
+
+      // Through a redirect while the answer is held.
+      const moved = downloaded(
+        await call("download", {
+          tab,
+          ref: refOf(page, /button "Moved statement window"/),
+        }),
+      )
+      expect(moved.file.name).toBe("statement.pdf")
+      expect(moved.from).toBe(`${api.origin}/statement`)
+
+      // More than a window is handed back: kept, and the answer says the
+      // window could not show it.
+      const wide = downloaded(
+        await call("download", {
+          tab,
+          ref: refOf(page, /button "Wide statement window"/),
+        }),
+      )
+      expect(wide.file).toMatchObject({
+        type: "application/pdf",
+        size: 200 * 1024,
+      })
+      expect(wide.note).toContain("could not show it")
+
+      await saveResourceConfig({ ...EMPTY_CONFIG, fileMb: 1 })
+
+      // Too large, said up front: not held, so the window loads it.
+      const big = await call("download", {
+        tab,
+        ref: refOf(page, /button "Big statement window"/),
+      })
+      expect(big.isError).toBe(true)
+      expect(textOf(big)).toContain(
+        "big-statement.pdf is larger than PCP keeps",
+      )
+      expect(textOf(big)).not.toContain("shows nothing")
+
+      // Too large, found as it comes: given up, and the answer says the
+      // window shows nothing of it.
+      const streamed = await call("download", {
+        tab,
+        ref: refOf(page, /button "Streamed statement window"/),
+      })
+      expect(streamed.isError).toBe(true)
+      expect(textOf(streamed)).toContain(
+        "streamed-statement.pdf is larger than PCP keeps",
+      )
+      expect(textOf(streamed)).toContain("shows nothing of it")
+      expect(await leftOnDisk()).toEqual([])
     })
 
     it("puts kept files into a file field and its picker, read from handles through the gateway's path", async () => {

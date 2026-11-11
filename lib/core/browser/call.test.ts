@@ -221,6 +221,12 @@ setTimeout(() => window.open("/page"), 300)
 </script>`)
     }
 
+    // A window opened with "noopener", at a site the token may open.
+    if (request.url.startsWith("/noopener")) {
+      return res.end(`<!doctype html><title>Noopener</title>
+<script>window.open("/page?n", "_blank", "noopener")</script>`)
+    }
+
     if (request.url.startsWith("/frame")) {
       return res.end(
         `<script>window.open("${elsewhere.origin}/from-frame")</script>`,
@@ -538,6 +544,34 @@ describe.skipIf(!executable)("the browser's tools", { timeout: 90_000 }, () => {
     expect(
       (await listFetchRules(ctx, tokenId)).sites.map((site) => site.host),
     ).toContain(other)
+  })
+
+  it("makes a window opened with noopener a tab of the token's, by the page Chromium says opened it", async () => {
+    await setFetchSite(ctx, tokenId, new URL(api.origin).host, "allowed")
+    await setFetchPrivate(ctx, tokenId, "allowed")
+
+    const opened = await call("tabs", {
+      action: "open",
+      url: `${api.origin}/noopener`,
+    })
+    const parentId = tabOf(opened)
+    const vault = runningBrowser(ctx.vaultId)!
+    let popupId = ""
+    await vi.waitFor(
+      () => {
+        const popup = [...vault.tabs.values()].find(
+          (tab) => tab.page.url() === `${api.origin}/page?n`,
+        )
+        expect(popup?.tokenId).toBe(tokenId)
+        popupId = popup!.id
+      },
+      { timeout: 10_000, interval: 50 },
+    )
+
+    const snapshot = await call("snapshot", { tab: parentId })
+    expect(`${textOf(opened)}\n${textOf(snapshot)}`).toContain(
+      `A new window opened at ${api.origin}/page?n (tab ${popupId}).`,
+    )
   })
 
   it("keeps the sign-ins in the vault across a restart of the browser", async () => {
