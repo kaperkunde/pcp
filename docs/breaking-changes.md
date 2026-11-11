@@ -87,17 +87,19 @@ through `execute_<tier>`.
 No tool or argument was renamed. A Write or Destructive call made again by
 the same token with the same server, tool and arguments within 30 minutes
 (the owner can change that for every tool or one tool, or turn it off for a tool, under Settings → Repeated calls) is no longer run a
-second time: `call_tool_write` and `call_tool_destructive` answer a tool
+second time: `execute_write` and `execute_destructive` answer a tool
 error with code `duplicate_call` saying how the first call went, and a
-program's `pcp.call` (run_code, a wrapper) throws an Error with that code.
+program's `pcp.call` (`run_<tier>`, a wrapper) throws an Error with that code.
 To make it again on purpose, pass `rerun: true` with a `reason` on
-`call_tool_write`/`call_tool_destructive`, or `{ rerun: true, reason }` in
+`execute_write`/`execute_destructive`, or `{ rerun: true, reason }` in
 `pcp.call`'s options (`--rerun REASON` for the sandbox's `pcp call`,
 `rerun=True, reason=…` in Python). A program run again after it stopped
 for the owner meets `duplicate_call` on the calls that already ran: leave
 them out of the program or catch the error. Read tools, the browser, SSH's
 `run_command`, stores and calls the owner allowed on PCP's page are not
-guarded.
+guarded. PCP's own tools called by their old names (for the one release
+they still answer) are not held back either: those calls have no `rerun`,
+so call them through `execute_<tier>` to be guarded.
 
 ## Services: an MCP server a service registers can send a secret header
 

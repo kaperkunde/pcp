@@ -106,7 +106,11 @@ associated data (a ciphertext cannot be moved to another row):
   reads it and writes it back over what it read
   (`lib/core/sealed-fields.ts`, `server-meta.ts writeServer`), so a write
   that came between is read again, never lost. Kinds, flags and the status
-  word stay plain. A lookup by a short name or a tool name (a `server/tool`
+  word stay plain. Tool names are still plain where they key the owner's
+  levels, allowances and tiers (`api_token_tool_access`,
+  `api_token_tool_allowance`, `vault_tool_access`, `tool_tier`) and in a
+  waiting call's permission request (`permission_request.tool_name`): a
+  later part of #96. A lookup by a short name or a tool name (a `server/tool`
   ref, a call handle's tool, `pcp.call`'s names, list_tools' server, a
   wrapper's calls, a linked repository's item names) hashes the name it is
   given; sorting and matching a pattern (a proposed level's `get_*`) work

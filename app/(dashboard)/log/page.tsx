@@ -204,6 +204,11 @@ function LogLine({ entry }: { entry: ActivityEntry }) {
               Went out through the exit {entry.exit}
             </span>
           ) : null}
+          {entry.rerun ? (
+            <span className="mt-0.5 block">
+              Made again on purpose: the assistant said why it repeated it
+            </span>
+          ) : null}
           {entry.outcome === "error" && entry.error ? (
             <span className="mt-0.5 block text-destructive">{entry.error}</span>
           ) : null}
