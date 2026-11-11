@@ -274,6 +274,45 @@ describe("guardCall", () => {
   })
 })
 
+describe("a call's record", () => {
+  it("keeps the tool as a keyed hash, and still notes a call with other arguments", async () => {
+    const scope = () => ({ ctx, tokenId })
+    const made = await guardCall(
+      scope(),
+      { ...target(), tool: "send_marker_tool" },
+      { to: "Ada" },
+      { again: AGAIN },
+    )
+    await endCall("ticket" in made ? made.ticket : null, {
+      status: "succeeded",
+    })
+
+    const [row] = await db().$queryRawUnsafe<Array<{ tool_name: string }>>(
+      `SELECT "tool_name" FROM "call_record"`,
+    )
+    expect(row!.tool_name).toMatch(/^[0-9a-f]{64}$/)
+    expect(row!.tool_name).not.toContain("send_marker_tool")
+
+    const other = await guardCall(
+      scope(),
+      { ...target(), tool: "send_marker_tool" },
+      { to: "Bob" },
+      { again: AGAIN },
+    )
+    expect("warning" in other && other.warning).toContain(
+      "with other arguments",
+    )
+    // Another tool of the server is not that tool.
+    const elsewhere = await guardCall(
+      scope(),
+      { ...target(), tool: "other_tool" },
+      { to: "Bob" },
+      { again: AGAIN },
+    )
+    expect("warning" in elsewhere && elsewhere.warning).toBeNull()
+  })
+})
+
 describe("pruneCallRecords", () => {
   it("removes records past the longest window", async () => {
     const now = new Date()

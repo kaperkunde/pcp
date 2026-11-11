@@ -636,8 +636,9 @@ embeddingProvider`, which hands `embeddings/provider.ts` the header;
   Never guarded: the browser, SSH and storage kinds, a capability's calls
   to its provider, a wrapper's calls in a run the owner approved, and
   executions from the owner's page. The lookup and the record are one
-  transaction. `call_record` keeps only an HMAC of the arguments under the
-  vault key (`crypto.ts keyedHash`) and a short answer encrypted, never a
+  transaction. `call_record` keeps only an HMAC of the arguments and one of
+  the server and tool under the vault key (`crypto.ts keyedHash`,
+  `recordedTool`) and a short answer encrypted, never a
   kept result; it is never exported and is pruned by the cleanup. A new
   way to call a tool goes through it, with a test.
 - `lib/core/openapi` never fetches a remote `$ref`, never follows a redirect

@@ -1252,6 +1252,9 @@ model ToolResult {
   token      ApiToken   @relation(fields: [tokenId], references: [id], onDelete: Cascade)
   serverId   String?    @map("server_id")
   server     McpServer? @relation(fields: [serverId], references: [id], onDelete: SetNull)
+  /// The tool it came from, sealed as text (`pcp-sealed:v1:…`, AES-256-GCM
+  /// under the vault's data key with "tool_result:<id>:tool"; #96); plain
+  /// on a row from before, which is gone within a day.
   toolName   String     @map("tool_name")
   /// text | bytes: what was kept. A text answer, or a file's bytes (an
   /// attachment, a binary field of an answer).
@@ -1291,6 +1294,8 @@ model CallRecord {
   tokenId    String    @map("token_id")
   token      ApiToken  @relation(fields: [tokenId], references: [id], onDelete: Cascade)
   serverId   String    @map("server_id")
+  /// The tool, as a keyed hash of the server's id and its name under the
+  /// vault's key (guard.ts recordedTool, #96): compared, never read.
   toolName   String    @map("tool_name")
   /// HMAC-SHA256 of the server id, the tool and the canonical arguments (as
   /// checked and renamed) under a key derived from the vault's data key

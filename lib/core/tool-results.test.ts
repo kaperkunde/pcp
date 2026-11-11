@@ -72,6 +72,34 @@ function textOf(result: CallToolResult): string {
     .join("")
 }
 
+describe("the tool a result came from", () => {
+  it("is sealed in the row, and read back, also from a row from before", async () => {
+    const kept = await keepResult(ctx, {
+      tokenId,
+      serverId: null,
+      toolName: "fetch_marker_tool",
+      text: "an answer",
+      mediaType: "text/plain",
+    })
+
+    const [row] = await db().$queryRawUnsafe<Array<{ tool_name: string }>>(
+      `SELECT "tool_name" FROM "tool_result"`,
+    )
+    expect(row!.tool_name).not.toContain("fetch_marker_tool")
+    expect(await describeResults(ctx, tokenId, [kept.id])).toMatchObject([
+      { found: true, toolName: "fetch_marker_tool" },
+    ])
+
+    await db().toolResult.update({
+      where: { id: kept.id },
+      data: { toolName: "plain_from_before" },
+    })
+    expect(await describeResults(ctx, tokenId, [kept.id])).toMatchObject([
+      { found: true, toolName: "plain_from_before" },
+    ])
+  })
+})
+
 describe("keeping and reading", () => {
   it("reads back exactly what was kept, a slice at a time", async () => {
     const text = Array.from({ length: 5000 }, (_, i) => `line ${i}\n`).join("")

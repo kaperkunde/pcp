@@ -14,7 +14,13 @@ import { newId } from "./ids"
 import { bareType, charsetOf, decodeText, isTextType } from "./media-types"
 import { loadResourceLimits, resourceLimits } from "./resources/state"
 import { openLinkName } from "./link-names"
-import { openText, sealText, type Sealed } from "./sealed"
+import {
+  openFromText,
+  openText,
+  sealText,
+  sealToText,
+  type Sealed,
+} from "./sealed"
 
 /**
  * Answers too long to hand to an assistant in one piece, and files that move
@@ -109,6 +115,31 @@ export function sealedResultName(
   }
 }
 
+/**
+ * The tool a result came from, sealed in its text column (#96) as
+ * "tool_result:<id>:tool"; a row from before holds it in plain text.
+ */
+function toolAad(id: string): string {
+  return `tool_result:${id}:tool`
+}
+
+/** What a row stores for the tool it came from. */
+export function sealedResultTool(
+  ctx: VaultContext,
+  id: string,
+  toolName: string,
+): string {
+  return sealToText(ctx.dek, toolAad(id), toolName.slice(0, 200))
+}
+
+/** The tool a row came from, opened (or as it was, from before). */
+export function resultTool(
+  ctx: VaultContext,
+  row: { id: string; toolName: string },
+): string {
+  return openFromText(ctx.dek, toolAad(row.id), row.toolName)
+}
+
 /** A row's name, opened (or as it was, from before). */
 export function resultName(
   ctx: VaultContext,
@@ -166,7 +197,7 @@ async function store(
       vaultId: ctx.vaultId,
       tokenId: input.tokenId,
       serverId: input.serverId,
-      toolName: input.toolName.slice(0, 200),
+      toolName: sealedResultTool(ctx, id, input.toolName),
       kind: input.kind,
       ...sealedResultName(ctx, id, input.name),
       mediaType: input.mediaType.slice(0, MAX_MEDIA_TYPE_CHARS),
@@ -416,7 +447,11 @@ async function claimUploads(
           tokenId,
           serverId: null,
           // An upload page's file, or a receive_file link's.
-          toolName: link.uploadLinkId ? "create_upload_link" : "receive_file",
+          toolName: sealedResultTool(
+            ctx,
+            link.resultId,
+            link.uploadLinkId ? "create_upload_link" : "receive_file",
+          ),
           kind: "bytes",
           ...sealedResultName(
             ctx,
@@ -596,6 +631,7 @@ export async function describeResults(
     const { plainName: _plain, sealedName: _sealed, ...rest } = row
     return {
       ...rest,
+      toolName: resultTool(ctx, row),
       name: resultName(ctx, row),
       found: true,
       kind: row.kind as ResultKind,

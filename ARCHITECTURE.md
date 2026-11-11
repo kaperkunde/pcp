@@ -99,7 +99,9 @@ associated data (a ciphertext cannot be moved to another row):
   service's definition (`wrapper_spec`/`service_spec.sealed_definition`,
   each `<table>:<server id>:<column>`, `lib/core/spec-rows.ts`; their
   `hash` a keyed hash, so equal copies are still found equal), and a kept
-  file's name (`tool_result.sealed_name`, `tool_result:<id>:name`). Several
+  file's name and the tool it came from (`tool_result.sealed_name`,
+  `tool_result:<id>:name`; `tool_result.tool_name` sealed as text,
+  `tool_result:<id>:tool`). Several
   values sealed together are one JSON, written only through a helper that
   reads it and writes it back over what it read
   (`lib/core/sealed-fields.ts`, `server-meta.ts writeServer`), so a write
@@ -4698,7 +4700,8 @@ below them (`owner-notices.ts tierNotices`), until the owner chooses again.
 An assistant sometimes makes a call that changes things again: it lost the
 answer, a run timed out, it retried out of caution. So a Write or
 Destructive call is remembered for a while (`lib/core/calls/guard.ts`, a
-`call_record` row: token, server id, tool, tier, status, times, its answer
+`call_record` row: token, server id, tool (a keyed hash of the server id and
+its name, `recordedTool`), tier, status, times, its answer
 and the permission request it made), and the same call (server, tool and
 arguments as checked and renamed) made again by the same token within the
 window (`DUPLICATE_CALL_MS`, 30 minutes, in `calls/limits.ts`) is not run.

@@ -56,7 +56,7 @@ import { createSecret, revealSecret } from "./secrets"
 import { createServer } from "./servers"
 import { scratchDatabase } from "./test-db"
 import { OwnerNeeded } from "./browser/types"
-import { keepBytes } from "./tool-results"
+import { keepBytes, resultTool } from "./tool-results"
 import { callServerTool, syncServerTools } from "./upstream"
 import { copyTokenAccess, writeToolAccess } from "./tool-access"
 import { setToolTier } from "./tool-tiers"
@@ -354,7 +354,10 @@ describe("asking the owner", () => {
     )
     const kept = await db().toolResult.findFirstOrThrow()
 
-    expect(kept).toMatchObject({ tokenId, toolName: "add_numbers" })
+    expect({ ...kept, toolName: resultTool(ctx, kept) }).toMatchObject({
+      tokenId,
+      toolName: "add_numbers",
+    })
     expect(textOf(result)).toContain(`report → ${kept.id} (text/plain`)
     expect(textOf(result)).toContain(`"report":{"$result":"${kept.id}"`)
     expect(textOf(result)).not.toContain("THE END")
@@ -1201,7 +1204,10 @@ describe("the owner's answer", () => {
     expect(textOf(ran)).toContain("PCP kept the whole answer")
 
     const kept = await db().toolResult.findFirstOrThrow()
-    expect(kept).toMatchObject({ tokenId, toolName: "add_numbers" })
+    expect({ ...kept, toolName: resultTool(ctx, kept) }).toMatchObject({
+      tokenId,
+      toolName: "add_numbers",
+    })
     expect(kept.length).toBe(long.length)
 
     // The stored outcome is shorter still, and still names the result.
