@@ -9,6 +9,7 @@ import {
   SlidersHorizontal,
   SquareCode,
   StickyNote,
+  Timer,
   TriangleAlert,
 } from "lucide-react"
 import type { Metadata } from "next"
@@ -361,6 +362,8 @@ function RequestTile({ view }: { view: PermissionView }) {
       return <IconTile size="lg" icon={KeyRound} className={tile} />
     case "script_use":
       return <IconTile size="lg" icon={SquareCode} className={tile} />
+    case "tab_pace":
+      return <IconTile size="lg" icon={Timer} className={tile} />
     default:
       return <IconTile size="lg" icon={Server} className={tile} />
   }
@@ -456,6 +459,18 @@ function PendingNote({ view }: { view: PermissionView }) {
             the token&apos;s page
           </Link>
           . A script is never run while a field holds a secret PCP typed.
+        </p>
+      )
+    case "tab_pace":
+      return (
+        <p className={note}>
+          Use this pace in the tab sets it for that tab alone, until it closes;
+          nothing else changes. What assistants may set without asking you is
+          under{" "}
+          <Link href="/settings#pacing" className="underline">
+            Settings → Pacing
+          </Link>
+          .
         </p>
       )
     case "secret_request":

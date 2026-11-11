@@ -60,7 +60,7 @@ const GRADES: Record<string, number> = {
   excellent: 0.95,
 }
 
-/** The fields a capability asks of a provider's answer, as call_tool's fields. */
+/** The fields a capability asks of a provider's answer, as execute's fields. */
 export const READ_FIELDS = [
   ...new Set(
     [

@@ -90,6 +90,21 @@ export const INSTRUCTION_TEMPLATES: readonly InstructionTemplate[] = [
       "- If this app cannot load the call_tool entries, run_code_read, run_code_write or run_code_destructive make the same calls: await pcp.call(server, tool, args).",
     ].join("\n"),
   },
+  {
+    // PCP's tools collapsed into search, execute_<tier> and run_<tier>
+    // (#113): search with a ref does what describe did, and PCP's own tools
+    // run through execute_<tier> by name.
+    version: 7,
+    text: [
+      "- Find tools, skills and memories with search. Look a tool up with search's ref before you run it, and run it with the call_handle that gives, through the entry it names for its tier: execute_read, execute_write or execute_destructive. Do not guess argument names.",
+      "- When a skill fits the task, read it with search's ref and follow its steps: the owner approved them.",
+      "- After an action failed or is waiting for the owner, check before you try it again (check_permission, or look at what it would have changed), so nothing happens twice.",
+      "- When answers give you links to PCP, end your reply with all of them, each a markdown link with a short label naming the action on a line of its own, never the bare address.",
+      "- On the owner's next message after such a link, whatever it says, call check_permission with its id (check_server for a server to connect, check_upload for an upload link) before you send the link again or assume it is still open.",
+      "- Read a memory before you change or replace it.",
+      "- If this app cannot load the execute entries, run_read, run_write or run_destructive make the same calls: await pcp.call(server, tool, args).",
+    ].join("\n"),
+  },
 ]
 
 /** The suggested instructions new tokens get now. */

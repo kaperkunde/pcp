@@ -226,10 +226,10 @@ async function closePopupsSince(
   before: number,
 ): Promise<void> {
   const vault = runningBrowser(vaultId)
-  const ids = tab.popups.splice(before)
+  const notes = tab.popups.splice(before)
 
-  for (const id of ids) {
-    const popup = vault?.tabs.get(id)
+  for (const note of notes) {
+    const popup = note.tabId ? vault?.tabs.get(note.tabId) : undefined
     if (vault && popup) {
       await withVault(vault, () => closeTab(vault, popup)).catch(() => {})
     }

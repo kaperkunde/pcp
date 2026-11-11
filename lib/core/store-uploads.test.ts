@@ -15,6 +15,7 @@ import { openResult } from "./tool-results"
 import { deliverUploads, withStorageFolder } from "./upstream"
 import { createUploadLink, uploadPageView, uploadToPage } from "./upload-links"
 import { setupVault } from "./vault"
+import { entryCall } from "./test-handles"
 
 // Uploads into a store: what an upload link made with a destination takes
 // is a handle as always, and is saved in that store's folder by the next
@@ -204,10 +205,13 @@ describe("the upload tools with a store", () => {
 
   it("take a folder in PCP's own store, and check_upload says where each went", async () => {
     const { client, scope } = await connect()
-    const made = await client.callTool({
-      name: "create_upload_link",
-      arguments: { purpose: "scans", folder: "scans", max_files: 1 },
-    })
+    const made = await client.callTool(
+      entryCall("create_upload_link", {
+        purpose: "scans",
+        folder: "scans",
+        max_files: 1,
+      }),
+    )
     const { url, upload } = made.structuredContent as {
       url: string
       upload: { id: string }
@@ -220,10 +224,9 @@ describe("the upload tools with a store", () => {
       name: "page.pdf",
     })
 
-    const checked = await client.callTool({
-      name: "check_upload",
-      arguments: { id: upload.id },
-    })
+    const checked = await client.callTool(
+      entryCall("check_upload", { id: upload.id }),
+    )
     expect(checked.structuredContent).toMatchObject({
       files: [
         {
@@ -241,26 +244,23 @@ describe("the upload tools with a store", () => {
   it("refuse a store whose save_file is blocked for the token, an unknown one, and ..", async () => {
     const { client, scope, token } = await connect()
 
-    const unknown = await client.callTool({
-      name: "receive_file",
-      arguments: { store: "nowhere" },
-    })
+    const unknown = await client.callTool(
+      entryCall("receive_file", { store: "nowhere" }),
+    )
     expect(textOf(unknown)).toMatch(/no store called nowhere/)
 
-    const up = await client.callTool({
-      name: "receive_file",
-      arguments: { folder: "../etc" },
-    })
+    const up = await client.callTool(
+      entryCall("receive_file", { folder: "../etc" }),
+    )
     expect(up.isError).toBe(true)
     await client.close()
 
     await setServerToolAccess(ctx, scope.tokenId, own, "allowed")
     await setToolAccess(ctx, scope.tokenId, own, "save_file", "blocked")
     const again = await connect(token)
-    const blocked = await again.client.callTool({
-      name: "create_upload_link",
-      arguments: { purpose: "scans", store: "pcp-files" },
-    })
+    const blocked = await again.client.callTool(
+      entryCall("create_upload_link", { purpose: "scans", store: "pcp-files" }),
+    )
     expect(textOf(blocked)).toMatch(/blocked pcp-files\/save_file/)
     expect(await db().uploadLink.count()).toBe(0)
     expect(await db().fileLink.count()).toBe(0)

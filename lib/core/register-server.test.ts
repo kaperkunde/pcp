@@ -37,6 +37,7 @@ import { scratchDatabase } from "./test-db"
 import { setupVault } from "./vault"
 import { secretNameWhere } from "./secret-meta"
 import { TOKEN_NAME_SELECT, tokenName } from "./token-names"
+import { entryCall, listEveryTool } from "./test-handles"
 
 // register_server as an assistant meets it: through the gateway's MCP
 // interface, with its arguments checked and the request the owner is shown.
@@ -107,10 +108,7 @@ afterEach(async () => {
 })
 
 async function register(args: Record<string, unknown>) {
-  const result = await client.callTool({
-    name: "register_server",
-    arguments: args,
-  })
+  const result = await client.callTool(entryCall("register_server", args))
   const text = (result.content as Array<{ type: string; text?: string }>)
     .map((part) => part.text ?? "")
     .join("")
@@ -160,7 +158,7 @@ describe("what an assistant is told", () => {
   })
 
   it("describes the tool so a mailbox is a mail account and the authentication is a choice", async () => {
-    const { tools } = await client.listTools()
+    const { tools } = await listEveryTool(client)
     const tool = tools.find((entry) => entry.name === "register_server")!
     const properties = tool.inputSchema.properties as Record<
       string,
@@ -1188,10 +1186,7 @@ describe("another server of a definition", () => {
     })
     await connectSeeing(undefined, true)
     const update = async (args: Record<string, unknown>) => {
-      const result = await client.callTool({
-        name: "update_endpoint",
-        arguments: args,
-      })
+      const result = await client.callTool(entryCall("update_endpoint", args))
       return {
         isError: result.isError === true,
         text: (result.content as Array<{ text?: string }>)

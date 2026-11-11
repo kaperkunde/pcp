@@ -21,6 +21,7 @@ import { setToolTier } from "../tool-tiers"
 import { keepBytes, openResult } from "../tool-results"
 import { setupVault } from "../vault"
 import { PROVIDER_FILES } from "./run"
+import { entryCall } from "../test-handles"
 
 // The capability tools at /mcp, against fake providers: what they find,
 // what they call (through the token's own levels and the tool's tier), and
@@ -199,10 +200,9 @@ async function connect(): Promise<Client> {
 
 async function call(name: string, args: Record<string, unknown>) {
   const client = await connect()
-  const result = (await client.callTool({
-    name,
-    arguments: args,
-  })) as CallToolResult
+  const result = (await client.callTool(
+    entryCall(name, args),
+  )) as CallToolResult
   await client.close()
   const text = result.content
     .map((part) => (part.type === "text" ? part.text : ""))
@@ -211,7 +211,23 @@ async function call(name: string, args: Record<string, unknown>) {
   return {
     isError: result.isError === true,
     text,
-    structured: result.structuredContent as Record<string, unknown>,
+    // Through execute, a value whose text is its JSON comes as the text
+    // alone (tools/serve.ts withoutRepeatedStructure).
+    structured: (result.structuredContent ?? structuredText(result)) as Record<
+      string,
+      unknown
+    >,
+  }
+}
+
+/** The value a result's last text is the JSON of, or undefined. */
+function structuredText(result: CallToolResult): unknown {
+  const last = result.content.filter((part) => part.type === "text").at(-1)
+
+  try {
+    return last?.type === "text" ? JSON.parse(last.text) : undefined
+  } catch {
+    return undefined
   }
 }
 
@@ -276,10 +292,9 @@ describe("a capability with no provider", () => {
       name: "search",
       arguments: { query: "ocr a photo of the meter" },
     })) as CallToolResult
-    const described = (await client.callTool({
-      name: "describe",
-      arguments: { ref: "read_image" },
-    })) as CallToolResult
+    const described = (await client.callTool(
+      entryCall("describe", { ref: "read_image" }),
+    )) as CallToolResult
     await client.close()
     const textOf = (result: CallToolResult) =>
       result.content.map((part) => (part.type === "text" ? part.text : ""))
@@ -397,10 +412,9 @@ describe("a capability with a provider", () => {
       name: "search",
       arguments: { query: "convert a docx to markdown" },
     })) as CallToolResult
-    const described = (await client.callTool({
-      name: "describe",
-      arguments: { ref: "convert_document" },
-    })) as CallToolResult
+    const described = (await client.callTool(
+      entryCall("describe", { ref: "convert_document" }),
+    )) as CallToolResult
     await client.close()
     const textOf = (result: CallToolResult) =>
       result.content.map((part) => (part.type === "text" ? part.text : ""))
@@ -445,7 +459,7 @@ describe("forwarding through the token's levels and tiers", () => {
     expect(answer.text).toContain(
       "pdf/fill_pdf_form is a Destructive tool, above edit_pdf (Write)",
     )
-    expect(answer.text).toContain("call_tool_destructive")
+    expect(answer.text).toContain("execute_destructive")
     // The file was put in place; the edit itself never ran.
     expect(ran.map((entry) => entry.tool)).toEqual(["put_file"])
   })
@@ -781,14 +795,24 @@ describe("read_image with include_image", () => {
     })
 
     const client = await connect()
-    const result = (await client.callTool({
-      name: "read_image",
-      arguments: { file: { $result: kept.id }, include_image: true },
-    })) as CallToolResult
+    const result = (await client.callTool(
+      entryCall("read_image", {
+        file: { $result: kept.id },
+        include_image: true,
+      }),
+    )) as CallToolResult
     await client.close()
 
     expect(result.isError).toBeFalsy()
-    expect(result.structuredContent).toMatchObject({
+    // Through execute the readings are the text alone, once.
+    expect(result.structuredContent).toBeUndefined()
+    expect(
+      JSON.parse(
+        result.content.flatMap((part) =>
+          part.type === "text" && part.text.startsWith("{") ? [part.text] : [],
+        )[0]!,
+      ),
+    ).toMatchObject({
       kind: "readings",
       readings: [{ provider: "conv/convert_file", text: "STOP" }],
     })

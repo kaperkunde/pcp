@@ -953,7 +953,7 @@ export async function endSecretAllowance(
 
 /**
  * The one place a secret is let into a page (upstream.ts, for every way a
- * type call comes: call_tool, run_code, a wrapper or flow, an answer the
+ * type call comes: execute, run_code, a wrapper or flow, an answer the
  * owner gave): the secret the call names, if the token may have it typed
  * where `use` says the field is. Otherwise the owner is asked (OwnerNeeded,
  * a `secret_use` request), or the call is refused.

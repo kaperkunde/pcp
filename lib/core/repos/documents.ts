@@ -1,4 +1,12 @@
 import YAML from "yaml"
+import { browserToolSpec } from "../browser/tools"
+import {
+  emptyPace,
+  fromWrapperPaceInput,
+  toWrapperPaceInput,
+  wrapperPaceInput,
+  type WrapperPaceInput,
+} from "../pacing/input"
 import { z } from "zod"
 
 import { checkSyntax } from "../code/quickjs"
@@ -116,10 +124,16 @@ import { MAX_DOCUMENT_DEPTH } from "./limits"
  * document as before and refuses that one as written by a newer PCP rather
  * than half-reading it; a format-3 document that names either is refused,
  * as a PCP that reads format 3 would.
+ *
+ * Format 5 adds a wrapper's own pace (`pace`: the pace of the browser
+ * calls its tools make, per kind of action and per browser tool, in the
+ * shape create_wrapper takes it). Only a wrapper or flow document that has
+ * one is written as format 5 (`wrapperFormat`); every other stays as it
+ * was, and a document of an older format that names a pace is refused.
  */
 
 /** The newest document format this PCP reads and writes. */
-export const PCP_FORMAT = 4
+export const PCP_FORMAT = 5
 
 /**
  * The format each kind is written in: the first that holds it. A kind
@@ -148,6 +162,14 @@ export function serviceFormat(definition: ServiceDefinition): number {
     definition.files
     ? 4
     : FORMAT_OF_KIND.service
+}
+
+/**
+ * The format of a wrapper's or a flow's document: 5 when it has a pace of
+ * its own, which format 5 added, else the one its kind was first written in.
+ */
+export function wrapperFormat(document: WrapperDocument): number {
+  return document.pace ? 5 : FORMAT_OF_KIND[document.kind]
 }
 
 // ---- Documents --------------------------------------------------------------
@@ -198,6 +220,8 @@ export type WrapperDocument = {
   callLevels: CallLevels
   tools: WrapperToolDocument[]
   secrets: SecretBindingDocument[]
+  /** The pace of its browser calls (format 5); left out when it has none. */
+  pace?: WrapperPaceInput
 }
 
 /** A header a secret goes in; `secret` null: none chosen yet. */
@@ -523,11 +547,12 @@ export function serializeItem(document: ItemDocument): RepoFiles {
     case "wrapper":
     case "flow": {
       files[itemPath(ref, WRAPPER_YAML)] = yaml({
-        pcp_format: FORMAT_OF_KIND[document.kind],
+        pcp_format: wrapperFormat(document),
         version: document.version,
         name: document.displayName,
         description: document.description,
         callLevels: document.callLevels,
+        ...(document.pace ? { pace: document.pace } : {}),
         tools: document.tools.map((tool) => ({
           name: tool.name,
           ...(tool.title !== null ? { title: tool.title } : {}),
@@ -764,6 +789,8 @@ const wrapperSchema = z.strictObject({
   // A document that does not say follows the calling token's levels: the
   // narrower of the two.
   callLevels: z.enum(["approved", "token"]).default("token"),
+  // Format 5.
+  pace: wrapperPaceInput.optional(),
   tools: z
     .array(
       z.strictObject({
@@ -1154,11 +1181,30 @@ async function parseWrapper(item: ItemFiles): Promise<WrapperDocument> {
         path[0] === "tools" &&
         (path[2] === "title" || path[2] === "description")),
   )
-  formatOf(raw, what)
+  const format = formatOf(raw, what)
   const parsed = parseWith(wrapperSchema, raw, what)
   const { displayName, description } = nameAndDescription(parsed, what)
   const names = new Set<string>()
   const files = [WRAPPER_YAML]
+
+  if (parsed.pace && format < 5) {
+    throw invalid(
+      `${what} is in format ${format}, which has no pace: write it as format 5 to have one.`,
+    )
+  }
+
+  let pace: WrapperPaceInput | undefined
+
+  try {
+    const checked = parsed.pace
+      ? fromWrapperPaceInput(parsed.pace, (tool) => !!browserToolSpec(tool))
+      : null
+    pace =
+      checked && !emptyPace(checked) ? toWrapperPaceInput(checked) : undefined
+  } catch (error) {
+    if (error instanceof PcpError) throw invalid(`${what}: ${error.message}`)
+    throw error
+  }
   const tools: WrapperToolDocument[] = []
 
   for (const tool of parsed.tools) {
@@ -1303,6 +1349,7 @@ async function parseWrapper(item: ItemFiles): Promise<WrapperDocument> {
     callLevels: parsed.callLevels,
     tools,
     secrets,
+    ...(pace ? { pace } : {}),
   }
 }
 

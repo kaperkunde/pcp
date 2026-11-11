@@ -7,7 +7,7 @@ import { stem, tokenize } from "../search"
  * there for every token (read_image, edit_pdf, convert_document); what does
  * the work is a provider: a tool among the token's own that the words in
  * providers.ts find, called at the token's own levels and tiers as
- * call_tool_* would (gateway.ts forwardCall). With no provider, the tool
+ * execute_* would (gateway.ts forwardCall). With no provider, the tool
  * answers with a link to PCP's page for it (/plugins/<id>), which offers
  * the common items that provide it in one click.
  *

@@ -1,6 +1,6 @@
 /**
  * What PCP remembers of a conversation, for the few things it says once per
- * session: the reminder to call read_memory every, the instructions' key
+ * session: the reminder to call search with no arguments (or read_memory every), the instructions' key
  * rules repeated for an app that does not show them (profiles.ts), and the
  * owner's answers to the token's requests, each told once.
  *
@@ -34,7 +34,7 @@ type SessionState = {
   lastAt: number
   /** read_memory (or memory) every ran in it. */
   memoryRead: boolean
-  /** The reminder to call read_memory every was given. */
+  /** The reminder to call search with no arguments (or read_memory every) was given. */
   reminded: boolean
   /** The instructions' key rules were repeated in an answer. */
   mirrored: boolean
@@ -95,13 +95,13 @@ export function startSession(key: string, now = Date.now()): void {
   keep(key, fresh(now))
 }
 
-/** read_memory every ran: no reminder in this session any more. */
+/** search with no arguments (or read_memory every) ran: no reminder in this session any more. */
 export function noteMemoryRead(key: string, now = Date.now()): void {
   current(key, now).memoryRead = true
 }
 
 /**
- * Whether to remind about read_memory every now: once per session, and
+ * Whether to remind about search with no arguments (or read_memory every) now: once per session, and
  * only while it has not run.
  */
 export function takeMemoryReminder(key: string, now = Date.now()): boolean {
@@ -127,7 +127,7 @@ export function takeMirror(key: string, now = Date.now()): boolean {
   return true
 }
 
-/** The rules were repeated another way (read_memory every's answer). */
+/** The rules were repeated another way (search's standing rules, or read_memory every). */
 export function noteMirrored(key: string, now = Date.now()): void {
   current(key, now).mirrored = true
 }

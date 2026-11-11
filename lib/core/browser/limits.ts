@@ -1,4 +1,5 @@
 import { BROWSER_VIEWPORT, MAX_SIGN_IN_IMPORT_BYTES } from "../constants"
+import { PACING_MAX_WAIT_MS } from "../pacing/limits"
 
 /**
  * Bounds on what the browser makes PCP do. Addresses, text to type and
@@ -67,6 +68,24 @@ export const MAX_SCREENSHOT_QUALITY = 90
  */
 export const SCREENSHOT_SCALED_QUALITY = 40
 export const SCREENSHOT_SCALES = [0.75, 0.5, 0.35, 0.25] as const
+/**
+ * screenshot's full_page: the most of a page it takes, down and across, in
+ * CSS pixels (Chromium draws no larger picture in one piece). A longer page
+ * is taken from its top, and the answer says it was cut.
+ */
+export const MAX_FULL_PAGE_HEIGHT = 16_000
+export const MAX_FULL_PAGE_WIDTH = 4 * BROWSER_VIEWPORT.width
+/** print_pdf's page_ranges, in characters. */
+export const MAX_PDF_PAGE_RANGES_CHARS = 100
+/**
+ * print_pdf: Chromium's print is given ACTION_TIMEOUT_MS and a second more
+ * for every this many CSS pixels of the page's height, up to
+ * PRINT_PDF_MAX_MS (well inside TAB_DEADLINE_MS); the PDF is read in
+ * chunks of PDF_READ_BYTES and stopped past the largest file PCP keeps.
+ */
+export const PRINT_PDF_PX_PER_SECOND = 2_000
+export const PRINT_PDF_MAX_MS = 60_000
+export const PDF_READ_BYTES = 1024 * 1024
 /** The narrowest picture screenshot's max_width may ask for, in pixels. */
 export const MIN_SCREENSHOT_WIDTH = 200
 /** The size every tab renders at, in CSS pixels. */
@@ -205,6 +224,29 @@ export const MAX_UPLOAD_BYTES = 50 * 1024 * 1024
 export const DOWNLOAD_START_MS = 10_000
 export const DOWNLOAD_TIMEOUT_MS = 120_000
 /**
+ * Windows a page opened (popups), as Chromium named them: which page opened
+ * each, kept for this many of the newest so a download from a window that
+ * has closed is still known to be its tab's (downloads.ts), and followed
+ * back through at most this many openers (a window a window opened).
+ */
+export const MAX_REMEMBERED_WINDOWS = 512
+export const MAX_WINDOW_DEPTH = 4
+/** Windows a tab keeps to name in its next answer: the newest this many. */
+export const MAX_WINDOW_NOTES = 20
+/**
+ * How long download's answer waits for the window its file came from to
+ * become a tab (or close), so it can name the tab.
+ */
+export const WINDOW_SETTLE_MS = 2_000
+/** A PDF or picture a window shows, read in chunks of this many bytes. */
+export const DOCUMENT_READ_BYTES = 1024 * 1024
+/**
+ * The most of a PDF or picture a page was shown that PCP hands back to the
+ * page once it has read it (Fetch.fulfillRequest carries the body whole, as
+ * base64): one larger is kept, and the page shows nothing of it.
+ */
+export const MAX_HELD_DOCUMENT_BYTES = 32 * 1024 * 1024
+/**
  * How long one tool call may hold its tab (calls on one tab run one at a
  * time, each tab apart from the others). Past it the tab is taken to have
  * stopped responding: its page is closed and opened again at its address,
@@ -214,6 +256,17 @@ export const DOWNLOAD_TIMEOUT_MS = 120_000
  */
 export const TAB_DEADLINE_MS =
   2 * NAVIGATION_TIMEOUT_MS + CHALLENGE_WAIT_MS + 2 * ACTION_TIMEOUT_MS
+/** How long settle waits for what an action started to load. */
+export const SETTLE_MS = 5_000
+/**
+ * The most a call waits on its tab for its turn at the site under pacing
+ * (lib/core/pacing/, pacing's own PACING_MAX_WAIT_MS), with the time a page
+ * opened first takes to settle: a paced call holds its tab this much
+ * longer before the tab counts as not responding.
+ */
+export const PACED_TURN_WAIT_MS = PACING_MAX_WAIT_MS + SETTLE_MS
+/** TAB_DEADLINE_MS for a paced call. */
+export const PACED_TAB_DEADLINE_MS = TAB_DEADLINE_MS + PACED_TURN_WAIT_MS
 /**
  * timeout_ms (call.ts): how long a browser call waits, in all, before it is
  * answered with a `timeout` tool error naming the step it was at. tabs

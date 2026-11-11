@@ -359,5 +359,5 @@ Next.js 15 (App Router, Server Actions), React 19, TypeScript, Tailwind CSS 4
 with shadcn/ui primitives, Prisma 7 on SQLite (`better-sqlite3`), the
 `@modelcontextprotocol` v2 SDK for both the gateway and the upstream client,
 Kaperkunde's shared `@kaperkunde/*` packages, QuickJS in WebAssembly for
-`run_code`, `patchright-core` driving Chromium for
+the `run` tools, `patchright-core` driving Chromium for
 the browser, Electron for the desktop apps, Vitest, Playwright, pnpm.

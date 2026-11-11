@@ -16,6 +16,7 @@ import { scratchDatabase } from "./test-db"
 import { keepBytes } from "./tool-results"
 import { setupVault } from "./vault"
 import { fitImage, viewKind } from "./view-image"
+import { entryCall } from "./test-handles"
 
 // view_image at /mcp: a kept picture shown as image content, made to fit;
 // a video's frame through a fake sandbox; what it refuses. A PDF's page
@@ -82,10 +83,9 @@ async function view(args: Record<string, unknown>) {
   await buildGatewayServer(scope, []).connect(serverSide)
   const client = new Client({ name: "test", version: "1.0.0" })
   await client.connect(clientSide)
-  const result = (await client.callTool({
-    name: "view_image",
-    arguments: args,
-  })) as CallToolResult
+  const result = (await client.callTool(
+    entryCall("view_image", args),
+  )) as CallToolResult
   await client.close()
   const text = result.content
     .map((part) => (part.type === "text" ? part.text : ""))

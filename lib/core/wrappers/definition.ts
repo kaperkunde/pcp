@@ -11,6 +11,13 @@ import { invalid } from "../errors"
 import { hiddenCharacter, withoutPresentation } from "../memories"
 import { outlineSchema } from "../openapi/outline"
 import { parsePointer } from "../openapi/patch"
+import {
+  emptyPace,
+  fromWrapperPaceInput,
+  type WrapperPaceInput,
+} from "../pacing/input"
+import type { WrapperPace } from "../pacing/limits"
+import { browserToolSpec } from "../browser/tools"
 import { canonicalJson } from "../permission-rules"
 import {
   findOwnerSecretByName,
@@ -30,7 +37,9 @@ import {
   MAX_WRAPPER_SCHEMA_CHARS,
   MAX_WRAPPER_TOOLS,
 } from "./limits"
+import type { SecretPart } from "./placeholders"
 import { hasReference } from "./schema-check"
+import { secretLiterals } from "./secret-literals"
 import { secretNameWhere } from "../secret-meta"
 
 /**
@@ -79,6 +88,21 @@ export type WrapperTool = {
  * Pointer) of one tool, written as `template`, while that tool's server is
  * at `url`. `secretId` is null only in a request whose secret the owner is
  * to type in.
+ *
+ * `found`: PCP found the name written as it is in a program that types it
+ * into pages ({"$secret": "<name>"} in a tool that calls the browser's
+ * type), so the place is the browser's type at /text, made when the
+ * definition is checked rather than asked for (resolveDefinition), and
+ * approved with the rest of the wrapper. Typing it still passes the
+ * browser's own gate (browser-secrets.ts admitSecretUse). Left out of the
+ * places an assistant or a repository document gives (admin.ts toInput):
+ * made again from the programs every time. Stored only when true, so a
+ * definition without one hashes as it always did.
+ *
+ * `parts`: what may be typed of it there, the login name, the value or
+ * both. A found place has what the programs name of it, and nothing else is
+ * let through (run.ts, placeholders.ts matchGrant); a place given by name
+ * has none, which is both, as it always was.
  */
 export type SecretBinding = {
   secret: string
@@ -88,6 +112,8 @@ export type SecretBinding = {
   argument: string
   template: string
   url: string
+  found?: true
+  parts?: SecretPart[]
 }
 
 /**
@@ -108,6 +134,13 @@ export type WrapperDefinition = {
    * levels, as every wrapper did before the setting existed.
    */
   callLevels?: "approved"
+  /**
+   * The pace of the browser calls its tools make (lib/core/pacing/), in
+   * place of the owner's: approved with the rest, so one outside what
+   * assistants may set was shown to the owner as such. Left out when it has
+   * none, so a definition without one is stored (and hashed) as it was.
+   */
+  pace?: WrapperPace
 }
 
 /** A tool as an assistant or the owner sends it: other tools as server/tool. */
@@ -137,6 +170,8 @@ export type WrapperInput = {
   secrets?: SecretBindingInput[]
   /** Left out: "approved" for a new wrapper. */
   callLevels?: CallLevels
+  /** The pace of its browser calls; left out or null for none. */
+  pace?: WrapperPaceInput | null
 }
 
 const TOOL_NAME = /^[A-Za-z0-9_.-]{1,64}$/
@@ -148,6 +183,7 @@ const ANNOTATION_KEYS = new Set([
 ])
 
 const refSchema = z.object({ serverId: z.string(), tool: z.string() })
+const rangeSchema = z.object({ minMs: z.number(), maxMs: z.number() })
 
 const storedSchema = z.object({
   version: z.literal(1),
@@ -180,9 +216,18 @@ const storedSchema = z.object({
       argument: z.string(),
       template: z.string(),
       url: z.string(),
+      found: z.literal(true).optional(),
+      parts: z.array(z.enum(["username", "password"])).optional(),
     }),
   ),
   callLevels: z.literal("approved").optional(),
+  pace: z
+    .object({
+      actions: rangeSchema.optional(),
+      navigations: rangeSchema.optional(),
+      tools: z.record(z.string(), rangeSchema).optional(),
+    })
+    .optional(),
 })
 
 /** A stored definition, checked as it is read. */
@@ -351,7 +396,9 @@ function visible(text: string, what: string, hint = "take it out"): void {
  * A wrapper as asked for, checked and resolved: every name it uses is a
  * tool PCP has (and, for an assistant, one of its own it is not blocked
  * from), every program compiles, and every secret goes to an argument of a
- * tool its wrapper calls. Throws what is wrong, for the asker to fix.
+ * tool its wrapper calls. A secret a program types into pages by its name
+ * as written, one PCP holds, gets its place there too (`found`). Throws
+ * what is wrong, for the asker to fix.
  * `newSecret` is a secret's name PCP does not hold yet, for the owner to
  * type in (an assistant's request has at most one).
  */
@@ -390,6 +437,10 @@ export async function resolveDefinition(
       'call_levels is "approved" (the calls its tools list run on your approval of the wrapper) or "token" (at the calling token\'s own levels).',
     )
   }
+
+  const pace = input.pace
+    ? fromWrapperPaceInput(input.pace, (tool) => !!browserToolSpec(tool))
+    : null
 
   if (!Array.isArray(input.tools) || input.tools.length === 0) {
     throw invalid("A wrapper has at least one tool.")
@@ -739,10 +790,14 @@ export async function resolveDefinition(
       ref: String(binding.tool),
     })
 
-    const place = `${serverId}\n${tool}\n${argument}`
+    // Several secrets may go to one place (a login name and a password,
+    // both typed by browser/type at /text); each, once.
+    const place = `${serverId}\n${tool}\n${argument}\n${secretName}`
 
     if (places.has(place)) {
-      throw invalid(`Two secrets go to ${binding.tool} at ${argument}.`)
+      throw invalid(
+        `The secret "${secretName}" goes to ${binding.tool} at ${argument} twice.`,
+      )
     }
     places.add(place)
 
@@ -806,6 +861,10 @@ export async function resolveDefinition(
     })
   }
 
+  secrets.push(
+    ...(await foundBindings(ctx, resolvedTools, servers, places, secrets)),
+  )
+
   return {
     name,
     description,
@@ -814,9 +873,173 @@ export async function resolveDefinition(
       tools: resolvedTools,
       secrets,
       ...(callLevels === "approved" ? { callLevels } : {}),
+      ...(pace && !emptyPace(pace) ? { pace } : {}),
     },
     newSecret,
   }
+}
+
+/** A secret a program types into pages by a fixed name, one PCP holds. */
+export type TypedByName = {
+  secret: string
+  secretId: string
+  /** The browser server whose type takes it. */
+  server: { id: string; url: string }
+  /** What the programs type of it, in a stable order. */
+  parts: SecretPart[]
+}
+
+/**
+ * The secrets the programs type into pages by name as written
+ * (secret-literals.ts): for each tool that calls a browser's type
+ * (`typers`, those browser servers), each name its program writes in
+ * {"$secret": …} that PCP holds, by that exact name, as a secret the
+ * browser can type, with the parts the programs name of it. The one
+ * reading of it, for a definition being checked and for a repository's
+ * review (repos/found-review.ts).
+ */
+export async function secretsTypedByName(
+  ctx: VaultContext,
+  tools: Array<{ program: string; typers: Array<{ id: string; url: string }> }>,
+): Promise<TypedByName[]> {
+  const typed: TypedByName[] = []
+  const held = new Map<string, string | null>()
+
+  for (const tool of tools) {
+    if (tool.typers.length === 0) {
+      continue
+    }
+
+    for (const { name, parts } of secretLiterals(tool.program)) {
+      if (validateSecretName(name)) {
+        continue
+      }
+
+      if (!held.has(name)) {
+        const existing = await findOwnerSecretByName(ctx, name)
+        // By its exact name, as the call will name it.
+        held.set(name, existing?.name === name ? existing.id : null)
+      }
+
+      const secretId = held.get(name)
+
+      if (!secretId) {
+        continue
+      }
+
+      for (const server of tool.typers) {
+        const entry = typed.find(
+          (each) => each.secret === name && each.server.id === server.id,
+        )
+
+        if (entry) {
+          entry.parts = (["username", "password"] as const).filter(
+            (part) => entry.parts.includes(part) || parts.includes(part),
+          )
+        } else {
+          typed.push({ secret: name, secretId, server, parts: [...parts] })
+        }
+      }
+    }
+  }
+
+  return typed
+}
+
+/**
+ * The places of the secrets the programs type into pages by name as
+ * written (secretsTypedByName), at that type's /text, unless a place given
+ * already says so. Only the browser, which asks at the moment of typing
+ * whatever a place says (browser-secrets.ts admitSecretUse); a secret sent
+ * to any other tool goes without asking, so it needs a place the owner was
+ * asked for by name. A name PCP does not hold gets none: the run that types
+ * it is refused, saying how to ask for it (run.ts).
+ */
+async function foundBindings(
+  ctx: VaultContext,
+  tools: WrapperTool[],
+  servers: Array<{ id: string; kind: string; url: string }>,
+  places: Set<string>,
+  given: SecretBinding[],
+): Promise<SecretBinding[]> {
+  const typed = await secretsTypedByName(
+    ctx,
+    tools.map((tool) => ({
+      program: tool.program,
+      typers: tool.calls.flatMap((call) => {
+        const server = servers.find((entry) => entry.id === call.serverId)
+        return server?.kind === "browser" && call.tool === "type"
+          ? [{ id: server.id, url: server.url }]
+          : []
+      }),
+    })),
+  )
+  const found: SecretBinding[] = []
+
+  for (const entry of typed) {
+    const place = `${entry.server.id}\ntype\n/text\n${entry.secret}`
+
+    if (places.has(place)) {
+      continue
+    }
+    places.add(place)
+
+    if (given.length + found.length >= MAX_SECRET_BINDINGS) {
+      throw invalid(
+        `The wrapper's programs type more secrets into pages than the ${MAX_SECRET_BINDINGS} places a wrapper has.`,
+      )
+    }
+
+    found.push({
+      secret: entry.secret,
+      secretId: entry.secretId,
+      serverId: entry.server.id,
+      tool: "type",
+      argument: "/text",
+      template: SECRET_PLACEHOLDER,
+      url: entry.server.url,
+      found: true,
+      parts: entry.parts,
+    })
+  }
+
+  return found
+}
+
+/**
+ * The found places of `after` that `before` does not have, or has for less
+ * of the secret: what the owner is to be told is new.
+ */
+export function newFoundPlaces(
+  before: Pick<WrapperDefinition, "secrets"> | null,
+  after: Pick<WrapperDefinition, "secrets">,
+): Array<{ secret: string; parts: SecretPart[] }> {
+  return after.secrets.flatMap((binding) => {
+    if (!binding.found) {
+      return []
+    }
+
+    const covered = before?.secrets.some(
+      (old) =>
+        old.serverId === binding.serverId &&
+        old.tool === binding.tool &&
+        old.argument === binding.argument &&
+        old.secret === binding.secret &&
+        (old.parts === undefined ||
+          (binding.parts ?? ["username", "password"]).every((part) =>
+            old.parts!.includes(part),
+          )),
+    )
+
+    return covered
+      ? []
+      : [
+          {
+            secret: binding.secret,
+            parts: binding.parts ?? ["username", "password"],
+          },
+        ]
+  })
 }
 
 /**

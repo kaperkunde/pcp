@@ -218,12 +218,12 @@ export function clientPrefixed(
   return null
 }
 
-/** What search and describe say when a name came with an app's prefix. */
+/** What search says when a name came with an app's prefix. */
 export function clientPrefixNote(prefixed: {
   prefix: string
   name: string
 }): string {
-  return `"${prefixed.prefix}" is your app's prefix for PCP's tools, not part of the name: the tool is ${prefixed.name}, and you call it directly.`
+  return `"${prefixed.prefix}" is your app's prefix for PCP's tools, not part of the name: the tool is ${prefixed.name}.`
 }
 
 /** A query, read once for every candidate. */
@@ -535,7 +535,7 @@ export type MemoryCandidate = { path: string; text: string }
 
 /**
  * One of PCP's own tools the token has (gateway.ts registers them), which
- * an assistant calls directly, never through call_tool.
+ * an assistant runs by name through execute_<tier>, with no call_handle.
  */
 export type PcpToolCandidate = {
   name: string
@@ -547,9 +547,13 @@ export type PcpToolCandidate = {
 
 export type SearchKind = "tool" | "pcp" | "skill" | "memory"
 
-/** What a result of kind pcp says after its line. */
-export const PCP_TOOL_NOTE =
-  "PCP's own tool: call it directly (not through call_tool_*)."
+/** What a result of kind pcp says after its line: how it is run. */
+export function pcpToolNote(
+  name: string,
+  tier: "read" | "write" | "destructive" = "destructive",
+): string {
+  return `PCP's own tool: run it with execute_${tier}, {"tool": "${name}", "arguments": {…}}.`
+}
 
 /** One result of search: what it is, how describe names it, one line on it. */
 export type SearchResult = {
@@ -729,7 +733,7 @@ export function searchEverything(
         kind: "pcp",
         ref: tool.name,
         title: tool.title,
-        description: `${summarize(tool.description)} ${PCP_TOOL_NOTE}`,
+        description: `${summarize(tool.description)} ${pcpToolNote(tool.name, tool.tier)}`,
         ...(tool.tier ? { tier: tool.tier } : {}),
         // One comes up by its name or title (or for "pcp"), or by what
         // its description's lead says it is for; never by a word further
@@ -849,7 +853,7 @@ export type OwnToolDescription = PcpToolCandidate & {
 
 /**
  * describe's answer for one of PCP's own tools: what it is and its schemas,
- * and that it is called directly, so it has no call_handle. `note` says
+ * and that execute_<tier> runs it by name, so it has no call_handle. `note` says
  * first what describe made of the name it was given; `extra` adds what the
  * gateway knows of it (a capability's providers).
  */
@@ -863,7 +867,8 @@ export function describeOwnTool(
       ...(note ? { note } : {}),
       tool: tool.name,
       kind: "pcp",
-      call: `PCP's own tool: call ${tool.name} directly, with arguments that match its inputSchema, not through call_tool_*. It has no call_handle.`,
+      call: `PCP's own tool: run it with execute_${tool.tier ?? "destructive"} as {"tool": "${tool.name}", "arguments": {…}}, the arguments matching its inputSchema. It has no call_handle.`,
+      run_with: `execute_${tool.tier ?? "destructive"}`,
       ...(tool.tier ? { tier: tool.tier } : {}),
       ...extra,
       title: tool.title,
@@ -922,7 +927,7 @@ export type ListedTool = {
   title: string | null
   description: string
   access: "allowed" | "ask"
-  /** Its tier (tool-tiers.ts): which call_tool_<tier> runs it. */
+  /** Its tier (tool-tiers.ts): which execute_<tier> runs it. */
   tier?: "read" | "write" | "destructive"
 }
 
@@ -975,7 +980,7 @@ export function listTools(
     }`,
     ...page.map(
       (tool) =>
-        `${server}/${tool.name} [${tool.access}${tool.tier ? `, ${tool.tier}: call_tool_${tool.tier}` : ""}]${tool.title ? ` (${tool.title})` : ""} — ${summarize(tool.description) || "no description"}`,
+        `${server}/${tool.name} [${tool.access}${tool.tier ? `, ${tool.tier}: execute_${tool.tier}` : ""}]${tool.title ? ` (${tool.title})` : ""} — ${summarize(tool.description) || "no description"}`,
     ),
     ...(end < sorted.length
       ? [`More: call list_tools again with offset ${end}.`]

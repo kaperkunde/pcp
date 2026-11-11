@@ -23,11 +23,11 @@ import type { PermissionExecutor } from "./permissions"
 import { appendRequestLog } from "./request-log"
 import { createServer } from "./servers"
 import { scratchDatabase } from "./test-db"
-import { describedHandle } from "./test-handles"
+import { describedHandle, entryCall, listEveryTool } from "./test-handles"
 import { writeToolAccess } from "./tool-access"
 import { setupVault } from "./vault"
 
-// The call_tool_* entries take the call_handle describe gives, never a server and a
+// The execute_* entries take the call_handle describe gives, never a server and a
 // tool name: a tool is described before it is called, a handle goes stale
 // with its schema, and arguments that cannot work never reach the owner.
 
@@ -98,7 +98,7 @@ async function call(
   name: string,
   args: Record<string, unknown>,
 ) {
-  const result = await client.callTool({ name, arguments: args })
+  const result = await client.callTool(entryCall(name, args))
   const text = (result.content as Array<{ type: string; text?: string }>)
     .map((part) => part.text ?? "")
     .join("")
@@ -232,7 +232,7 @@ describe("call_tool with a call handle", () => {
 
     // Another request, as /mcp builds one each time: nothing is stored.
     const later = await connect()
-    const result = await call(later, "call_tool_destructive", {
+    const result = await call(later, "execute_destructive", {
       call_handle: handle,
       arguments: { to: "Grace", copies: 2 },
     })
@@ -243,7 +243,7 @@ describe("call_tool with a call handle", () => {
     ])
     expect(vi.mocked(appendRequestLog)).toHaveBeenCalledWith(
       expect.objectContaining({
-        tool: "call_tool_destructive",
+        tool: "execute_destructive",
         server: "postcards",
         upstreamTool: "send_postcard",
         ok: true,
@@ -251,16 +251,28 @@ describe("call_tool with a call handle", () => {
     )
   })
 
-  it("takes no server or tool name", async () => {
+  it("takes no server name, and a tool name only for PCP's own tools", async () => {
     const client = await connect()
-    const { tools } = await client.listTools()
+    const { tools } = await listEveryTool(client)
 
-    for (const name of ["call_tool_destructive", "call_tool_read"]) {
+    for (const name of ["execute_destructive", "execute_read"]) {
       const schema = tools.find((tool) => tool.name === name)!.inputSchema
       expect(Object.keys(schema.properties ?? {})).not.toContain("server")
-      expect(Object.keys(schema.properties ?? {})).not.toContain("tool")
-      expect(schema.required).toContain("call_handle")
+      // A call_handle, or one of PCP's own tools by name: one of them.
+      expect(JSON.stringify(schema.allOf)).toContain(
+        '{"anyOf":[{"required":["call_handle"]},{"required":["tool"]}]}',
+      )
     }
+
+    const own = await call(client, "execute_destructive", {
+      tool: "send_postcard",
+      arguments: { to: "Ada" },
+    })
+    expect(own.isError).toBe(true)
+    expect(own.text).toContain(
+      "PCP has no tool of its own called send_postcard",
+    )
+    expect(ran).toEqual([])
   })
 
   it("answers a stale handle with the schema as it is now and a fresh handle", async () => {
@@ -279,7 +291,7 @@ describe("call_tool with a call handle", () => {
     )
 
     const later = await connect()
-    const stale = await call(later, "call_tool_destructive", {
+    const stale = await call(later, "execute_destructive", {
       call_handle: old,
       arguments: { to: "Grace" },
     })
@@ -291,7 +303,7 @@ describe("call_tool with a call handle", () => {
     expect(fresh).not.toBe(old)
     expect(ran).toEqual([])
 
-    const result = await call(later, "call_tool_destructive", {
+    const result = await call(later, "execute_destructive", {
       call_handle: fresh,
       arguments: { to: "Grace", from: "Ada" },
     })
@@ -318,13 +330,13 @@ describe("call_tool with a call handle", () => {
         inputSchema: JSON.stringify(SEND_SCHEMA),
       }),
     ]) {
-      const result = await call(client, "call_tool_destructive", {
+      const result = await call(client, "execute_destructive", {
         call_handle: forged,
         arguments: { to: "Grace" },
       })
 
       expect(result.isError).toBe(true)
-      expect(result.text).toContain("not one describe gave this token")
+      expect(result.text).toContain("not one search gave this token")
       expect(result.text).not.toContain('"inputSchema"')
     }
 
@@ -339,13 +351,13 @@ describe("call_tool with a call handle", () => {
       "send_postcard",
     )
 
-    const result = await call(await connect(), "call_tool_destructive", {
+    const result = await call(await connect(), "execute_destructive", {
       call_handle: theirs,
       arguments: { to: "Grace" },
     })
 
     expect(result.isError).toBe(true)
-    expect(result.text).toContain("not one describe gave this token")
+    expect(result.text).toContain("not one search gave this token")
     expect(ran).toEqual([])
   })
 
@@ -358,17 +370,17 @@ describe("call_tool with a call handle", () => {
       ["postcards/send_postcard", "Grace"],
       ["send_postcard", "Ada"],
     ]) {
-      const result = await call(client, "call_tool_destructive", {
+      const result = await call(client, "execute_destructive", {
         call_handle: name,
         arguments: { to },
       })
 
       expect(result.isError).toBe(true)
-      expect(result.text).toContain("not a tool's name")
+      expect(result.text).toContain("not its name")
       expect(result.text).toContain('"inputSchema"')
       expect(ran).toEqual([])
 
-      const retried = await call(client, "call_tool_destructive", {
+      const retried = await call(client, "execute_destructive", {
         call_handle: handleIn(result.text),
         arguments: { to },
       })
@@ -376,11 +388,11 @@ describe("call_tool with a call handle", () => {
       ran = []
     }
 
-    const unknown = await call(client, "call_tool_destructive", {
+    const unknown = await call(client, "execute_destructive", {
       call_handle: "postcards/burn_cards",
     })
     expect(unknown.isError).toBe(true)
-    expect(unknown.text).toContain("describe")
+    expect(unknown.text).toContain("search again with its ref")
     expect(unknown.text).not.toContain('call_handle":')
   })
 
@@ -391,7 +403,7 @@ describe("call_tool with a call handle", () => {
     await db().mcpTool.delete({
       where: { serverId_name: { serverId, name: "send_postcard" } },
     })
-    const gone = await call(await connect(), "call_tool_destructive", {
+    const gone = await call(await connect(), "execute_destructive", {
       call_handle: handle,
       arguments: { to: "Grace" },
     })
@@ -403,7 +415,7 @@ describe("call_tool with a call handle", () => {
       where: { id: serverId },
       data: { enabled: false },
     })
-    const off = await call(await connect(), "call_tool_destructive", {
+    const off = await call(await connect(), "execute_destructive", {
       call_handle: list,
     })
     expect(off.text).toContain("can no longer reach")
@@ -413,7 +425,7 @@ describe("call_tool with a call handle", () => {
       data: { enabled: true },
     })
     await writeToolAccess(scope.tokenId, serverId, "list_cards", "blocked")
-    const blocked = await call(await connect(), "call_tool_destructive", {
+    const blocked = await call(await connect(), "execute_destructive", {
       call_handle: list,
     })
     expect(blocked.text).toContain("blocked")
@@ -424,7 +436,7 @@ describe("call_tool with a call handle", () => {
     const client = await connect()
     const handle = await describedHandle(client, "postcards", "ask_postcard")
 
-    const wrong = await call(client, "call_tool_destructive", {
+    const wrong = await call(client, "execute_destructive", {
       call_handle: handle,
       arguments: { recipient: "Grace", copies: "two", size: "A4" },
     })
@@ -438,7 +450,7 @@ describe("call_tool with a call handle", () => {
     expect(wrong.text).toContain('"required"')
     expect(await db().permissionRequest.count()).toBe(0)
 
-    const asked = await call(client, "call_tool_destructive", {
+    const asked = await call(client, "execute_destructive", {
       call_handle: handle,
       arguments: { to: "Grace" },
     })
@@ -467,7 +479,7 @@ describe("call_tool with a call handle", () => {
     const client = await connect()
     const handle = await describedHandle(client, "postcards", "ask_postcard")
 
-    const wrong = await call(client, "call_tool_destructive", {
+    const wrong = await call(client, "execute_destructive", {
       call_handle: handle,
       arguments: { to: "Grace Hopper", code: "nl", on: "tomorrow" },
     })
@@ -483,7 +495,7 @@ describe("call_tool with a call handle", () => {
       JSON.stringify(vi.mocked(appendRequestLog).mock.calls),
     ).not.toContain("Grace")
 
-    const fits = await call(client, "call_tool_destructive", {
+    const fits = await call(client, "execute_destructive", {
       call_handle: handle,
       arguments: { to: "Grace", code: "NL", on: "2026-11-01" },
     })
@@ -503,7 +515,7 @@ describe("call_tool with a call handle", () => {
     const click = await describedHandle(client, "browser", "click")
 
     // No tab: refused before anything is asked, with the token's tabs.
-    const tabless = await call(client, "call_tool_destructive", {
+    const tabless = await call(client, "execute_destructive", {
       call_handle: snapshot,
       arguments: {},
     })
@@ -512,7 +524,7 @@ describe("call_tool with a call handle", () => {
     expect(tabless.text).toContain("This token has no tab open (")
 
     // A rule across arguments, in its own words.
-    const both = await call(client, "call_tool_destructive", {
+    const both = await call(client, "execute_destructive", {
       call_handle: click,
       arguments: {
         tab: "t1",
@@ -526,7 +538,7 @@ describe("call_tool with a call handle", () => {
     )
     expect(await db().permissionRequest.count()).toBe(0)
 
-    const asked = await call(client, "call_tool_destructive", {
+    const asked = await call(client, "execute_destructive", {
       call_handle: click,
       arguments: { tab: "t1", ref: "e1" },
     })
@@ -534,26 +546,27 @@ describe("call_tool with a call handle", () => {
     expect(await db().permissionRequest.count()).toBe(1)
   })
 
-  it("runs a Read tool through call_tool_read, and refuses a higher tier by name before checking or asking", async () => {
+  it("runs a Read tool through execute_read, and refuses a higher tier by name before checking or asking", async () => {
     const client = await connect()
     const list = await describedHandle(client, "postcards", "list_cards")
     const send = await describedHandle(client, "postcards", "send_postcard")
 
-    expect(await call(client, "call_tool_read", { call_handle: list })).toEqual(
-      { isError: false, text: "ran list_cards" },
-    )
+    expect(await call(client, "execute_read", { call_handle: list })).toEqual({
+      isError: false,
+      text: "ran list_cards",
+    })
 
-    // No hints: Destructive, so neither call_tool_read nor call_tool_write
+    // No hints: Destructive, so neither execute_read nor execute_write
     // runs it, and the refusal comes before its (wrong) arguments are
     // checked or the owner is asked.
-    for (const entry of ["call_tool_read", "call_tool_write"]) {
+    for (const entry of ["execute_read", "execute_write"]) {
       const refused = await call(client, entry, {
         call_handle: send,
         arguments: { nobody: true },
       })
       expect(refused.isError).toBe(true)
       expect(refused.text).toContain("is a Destructive tool")
-      expect(refused.text).toContain("call_tool_destructive")
+      expect(refused.text).toContain("execute_destructive")
     }
 
     expect(ran).toEqual([{ tool: "list_cards", args: {} }])

@@ -6,6 +6,82 @@ release, with a note in front of the answer ("addPatches was renamed to
 add_patches; use add_patches."); after that it is refused like any other
 unknown key.
 
+## Seven tools: search, execute_read/write/destructive, run_read/write/destructive
+
+A client lists PCP's entry tools alone: `search`, `execute_read`,
+`execute_write`, `execute_destructive` and, for a token that runs code,
+`run_read`, `run_write`, `run_destructive`. Every other tool of PCP's
+(`check_permission`, `memory`, `web_fetch`, `register_server`, the store
+tools and the rest) is behind them, found with `search` (kind `pcp`) and
+run through the `execute_<tier>` of its tier by name. Each entry says its
+tier in its annotations: `search`, `execute_read` and `run_read` only read
+(`readOnlyHint: true`), so a client that lets reads through on their own
+(Claude Code's plan mode) does, and one that asks before every
+`destructiveHint` call (Claude's voice mode) asks only for
+`execute_destructive` and `run_destructive`.
+
+| Old tool                                                             | Now                                                                                                                                                                 |
+| -------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `describe` (`ref`, or `server` and `tool`)                           | `search` with `ref` (`server/tool` for `server` and `tool`): the same answer                                                                                        |
+| `read_memory` with `every`                                           | `search` with no arguments: what the owner wants followed in every conversation, their skills, and how PCP works (`read_memory` itself runs through `execute_read`) |
+| `call_tool_read`, `call_tool_write`, `call_tool_destructive`         | `execute_read`, `execute_write`, `execute_destructive`, the same arguments                                                                                          |
+| `run_code_read`, `run_code_write`, `run_code_destructive`            | `run_read`, `run_write`, `run_destructive`, the same arguments                                                                                                      |
+| any other PCP tool by its own name (`memory`, `check_permission`, …) | `execute_<tier>` with `{"tool": "<name>", "arguments": {…}}`, at the tier search gives (`run_with` for its `ref`)                                                   |
+
+- `execute_<tier>` takes a `call_handle` (one of the owner's tools, as
+  before) or `tool` (one of PCP's own, by the bare name search gives it;
+  `pcp/<name>` and an app's prefix are read as that name), never both. With
+  `tool`, only `arguments` goes beside it. A tool above the entry's tier is
+  refused (`forbidden`), naming the entry that runs it, before its
+  arguments are checked; its own arguments are checked by its own schema,
+  and its line in the request log carries its own name, as before.
+- PCP's own tools keep their names, schemas and answers, and the owner's
+  tier for each (Settings → PCP's own tools) decides the `execute_<tier>`
+  that runs it. The entries' tiers are their names: the owner no longer
+  sets one for `search` or an entry.
+- `search` takes `query` or `ref`, never both; neither (and no `server` or
+  `kind`) answers with the owner's standing rules. Its lines for PCP's own
+  tools end with the entry (`[read: execute_read]`) and how to call it.
+- The once-a-session reminder now says to call `search` with no
+  arguments; the instructions' first line for a token that keeps memories
+  says the same.
+- The request log names `search`, `execute_<tier>` and `run_<tier>` where
+  it named `describe`, `call_tool_<tier>` and `run_code_<tier>`.
+- A Write or Destructive call of one of PCP's own tools through
+  `execute_write` or `execute_destructive` (`register_server`, a
+  `web_fetch` POST, `memory` create…) made again with the same arguments
+  within the duplicate guard's window answers `duplicate_call`, as a
+  server's tool does; pass `rerun: true` with a `reason` beside `tool` to
+  make it again. The stores' and capabilities' tools, `withdraw_request`
+  (a repeat does nothing more), and `memory`'s and
+  `web_fetch`'s reading calls (view, search, every; GET, HEAD), are not
+  held back.
+- Through `execute_<tier>`, one of PCP's own tools whose text is the JSON
+  of its structuredContent answers with the text alone (the entry declares
+  no output schema); a needs_owner answer, or one whose text says it in
+  words (`check_permission`), keeps its structuredContent.
+- `search` with `kind: "pcp"` and no query lists every one of PCP's own
+  tools the token has; `limit` alone (no `query`, `server` or `kind`) is
+  refused.
+- A tier you chose under Settings → PCP's own tools for `search`, a
+  `call_tool_<tier>` or `run_code_<tier>` entry, or an `execute`/`run`
+  entry is ignored now (an entry's tier is its name) and dropped the next
+  time you choose one there.
+- PCP's suggested instructions for assistants are at version 7, naming
+  `search`, `execute_<tier>` and `run_<tier>`. A token whose instructions
+  you changed keeps its text, which may still name `describe` and
+  `call_tool_<tier>`: accept the merge PCP offers on the token's page
+  before the next release, when those names stop answering.
+
+For one release every old name is still answered when a client calls it,
+though no longer listed: `describe`, `call_tool_<tier>` and
+`run_code_<tier>` as the entry that took over, and each of PCP's own tools
+as itself, with one line in front of the answer naming what to call now
+("PCP's tools changed: memory is now run through execute_destructive, as
+{"tool": "memory", "arguments": {…}}. …"). In the release after, the old
+entry names are refused as unknown tools, and PCP's own tools answer only
+through `execute_<tier>`.
+
 ## The same Write or Destructive call twice is answered, not run
 
 No tool or argument was renamed. A Write or Destructive call made again by

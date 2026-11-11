@@ -18,7 +18,8 @@ import {
   listRemote,
   type FetchedItem,
 } from "@/lib/core/repos/remote"
-import { reviewItem, type ItemReview } from "@/lib/core/repos/review"
+import { reviewInVault } from "@/lib/core/repos/found-review"
+import type { ItemReview } from "@/lib/core/repos/review"
 import { clientFor, getRepo } from "@/lib/core/repos/store"
 import { requireContext } from "@/lib/server/session"
 
@@ -127,7 +128,12 @@ export default async function AddPage({
           return {
             root,
             fetched,
-            review: reviewItem(current, fetched.document),
+            review: await reviewInVault(
+              ctx,
+              current,
+              fetched.document,
+              found?.kind ? found.id : null,
+            ),
             resolved,
             problem:
               resolved.problems.length > 0 ? resolved.problems.join(" ") : null,

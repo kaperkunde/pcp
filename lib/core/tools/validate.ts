@@ -8,7 +8,7 @@ import {
  * The one check of a value against a JSON Schema (2020-12, and the drafts
  * before it as an MCP server writes them) is @kaperkunde/mcp's validate:
  * every argument that reaches a tool, PCP's own (define.ts) and those of a
- * call_tool or a run_code program's pcp.call against the inputSchema the
+ * execute or a run_code program's pcp.call against the inputSchema the
  * server or the API declared, before anything runs or the owner is asked.
  * Bounded, refusing a reference to another document (PCP never fetches one),
  * and leaving a pattern that could take exponential time to the tool.

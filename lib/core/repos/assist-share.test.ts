@@ -33,6 +33,7 @@ import { findLocalItem, localItem, localItems } from "./local"
 import { REVIEW_CHANGED, shareReview } from "./share-review"
 import { createRepo, setExcluded } from "./store"
 import { secretNameWhere } from "../secret-meta"
+import { entryCall } from "../test-handles"
 
 // An assistant proposing that an item go to a linked repository, through
 // the memory tool's /repos/share/: one item, a request that writes and
@@ -132,7 +133,7 @@ async function connect(
   return {
     tokenId: scope.tokenId,
     call: async (name: string, args: Record<string, unknown>) => {
-      const result = await client.callTool({ name, arguments: args })
+      const result = await client.callTool(entryCall(name, args))
       return {
         isError: result.isError === true,
         text: (result.content as Array<{ text?: string }>)

@@ -1,3 +1,5 @@
+import type { PaceRangeInput } from "../pacing/input"
+import type { PaceRange } from "../pacing/limits"
 import type { CallToolResult } from "@modelcontextprotocol/server"
 
 import type { ToolTier } from "../constants"
@@ -21,6 +23,7 @@ import {
   openResult,
   resultNotice,
 } from "../tool-results"
+import { runEntryFor } from "../tool-tiers"
 import { loadResourceLimits, type ResourceLimits } from "../resources/state"
 import {
   DUPLICATE_RUN_MS,
@@ -79,8 +82,8 @@ import type { Bridge, BridgeReply, Executor, RunResult } from "./types"
  * - `call` goes to the gateway's caller, which looks the tool up among the
  *   token's own, at the token's level: blocked is an error, "ask" stops the
  *   run with the owner's permission link (the request is the same one a
- *   call_tool would leave), and an allowed tool runs through the same
- *   upstream path as call_tool (permissions.ts runCodeCall). Every call is
+ *   execute would leave), and an allowed tool runs through the same
+ *   upstream path as execute (permissions.ts runCodeCall). Every call is
  *   in the request log, under run_code, by server and tool.
  * - `read` opens one of the token's own kept results, as text, or as
  *   base64 for a file's bytes.
@@ -135,6 +138,11 @@ export type CallRun = {
   signal: AbortSignal
   deadline: number
   onRun?: (runId: string) => void
+  /**
+   * A browser call's pace, as a wrapper's run chose it (wrappers/run.ts):
+   * handed on to the browser (upstream.ts CallOptions.pace).
+   */
+  pace?: PaceRange
 }
 
 /** How the gateway runs a program's call: by name, at the token's level. */
@@ -152,6 +160,12 @@ export type CodeCaller = (
     run: CallRun
     /** Says, once the tool is found, whether it is in the Read tier. */
     lookedUp?: (readOnly: boolean) => void
+    /**
+     * pcp.call's pace option, as the program gave it: only a wrapper's
+     * program has one (RunOptions.takesPace), which wrappers/run.ts holds
+     * to its wrapper's declared pace.
+     */
+    pace?: PaceRangeInput
     /**
      * The program repeats on purpose a call it (or the token) made a little
      * while ago, with a reason (pcp.call's options): the duplicate guard
@@ -284,7 +298,7 @@ export async function runCode(
     /** Run it even when the same program runs, or ran a moment ago. */
     rerun?: boolean
     /**
-     * The tier of the entry it came through (run_code_<tier>): the same
+     * The tier of the entry it came through (run_<tier>): the same
      * program through another entry is another run.
      */
     tier?: ToolTier
@@ -303,7 +317,7 @@ export async function runCode(
 
   if (input.code.length > MAX_CODE_CHARS) {
     return text(
-      `The program is ${input.code.length.toLocaleString("en")} characters; run_code takes ${MAX_CODE_CHARS.toLocaleString("en")} at most.`,
+      `The program is ${input.code.length.toLocaleString("en")} characters; a run takes ${MAX_CODE_CHARS.toLocaleString("en")} at most.`,
       true,
     )
   }
@@ -343,7 +357,7 @@ export async function runCode(
     {
       code: input.code,
       // Its calls are logged under the entry it came through.
-      logAs: `run_code_${input.tier ?? "destructive"}`,
+      logAs: runEntryFor(input.tier ?? "destructive"),
     },
     { ...options, runId: record.id, trace: record.trace },
   )
@@ -659,7 +673,7 @@ export async function checkRun(
 
     if (opened) {
       return text(
-        `${head} Its outcome, as run_code would have answered it (kept as result ${record.outcomeId}):\n\n${opened.text()}`,
+        `${head} Its outcome, as the run would have answered it (kept as result ${record.outcomeId}):\n\n${opened.text()}`,
         failed,
       )
     }
@@ -668,7 +682,7 @@ export async function checkRun(
   return text(
     [
       record.answered
-        ? `${head} run_code's own answer carried its outcome.`
+        ? `${head} The run's own answer carried its outcome.`
         : `${head} Its outcome is no longer kept.`,
       `Calls:\n${traceLines(record.trace)}`,
       ...(record.state === "finished" ? [] : effectLines(record.trace)),
@@ -696,6 +710,12 @@ export type RunOptions = {
    * of it and the run's own limit comes first.
    */
   deadline?: number
+  /**
+   * A wrapper's program: pcp.call takes a pace option ({min_ms, max_ms})
+   * for a browser call, which its caller holds to the wrapper's own pace.
+   * Anywhere else the option is refused.
+   */
+  takesPace?: boolean
 }
 
 /** How one program's run went, before it is put into words. */
@@ -750,6 +770,7 @@ export async function runProgram(
     runId = newRunId(),
     trace = [],
     deadline: outerDeadline,
+    takesPace = false,
   }: RunOptions,
 ): Promise<ProgramRun> {
   const limits = await loadResourceLimits()
@@ -852,6 +873,33 @@ export async function runProgram(
       )
     }
 
+    let pace: PaceRangeInput | undefined
+
+    if (payload.pace !== undefined && payload.pace !== null) {
+      if (!takesPace) {
+        return refuse(
+          "pcp.call's pace is for a wrapper's program, within the pace its wrapper declares. A tab's own pace is set with the browser's tabs (action pace).",
+        )
+      }
+
+      const given = payload.pace
+
+      if (
+        !isRecord(given) ||
+        Object.keys(given).some(
+          (key) => key !== "min_ms" && key !== "max_ms",
+        ) ||
+        typeof given.min_ms !== "number" ||
+        typeof given.max_ms !== "number"
+      ) {
+        return refuse(
+          "pcp.call's pace is { min_ms, max_ms }: the shortest and the longest wait before the call, in milliseconds.",
+        )
+      }
+
+      pace = { min_ms: given.min_ms, max_ms: given.max_ms }
+    }
+
     let shape: AnswerShape
 
     try {
@@ -941,6 +989,7 @@ export async function runProgram(
             lookedUp: (readOnly) => {
               entry.readOnly = readOnly
             },
+            ...(pace ? { pace } : {}),
             ...(rerun ? { rerun } : {}),
             ...shape,
           }),
@@ -1667,7 +1716,7 @@ async function shownReturn(
   }
 
   if (returned.length > limits.textChars) {
-    return `(${returned.length.toLocaleString("en")} characters of JSON, more than run_code passes on: ${limits.textChars.toLocaleString("en")}. Return less, or keep it with pcp.keep and return the handle.)`
+    return `(${returned.length.toLocaleString("en")} characters of JSON, more than a run passes on: ${limits.textChars.toLocaleString("en")}. Return less, or keep it with pcp.keep and return the handle.)`
   }
 
   const kept = await keepResult(scope.ctx, {

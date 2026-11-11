@@ -44,6 +44,11 @@ export type SecretGrant = Array<{
   template: string
   /** The server's address as the owner approved it. */
   url: string
+  /**
+   * What of the secret may go there; left out, either (a place given by
+   * name). A place found in a program has what the program names.
+   */
+  parts?: SecretPart[]
 }>
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -175,10 +180,18 @@ export function placeValues(
   return walk(args, "") as Record<string, unknown>
 }
 
+/** Whether a binding lets this part of its secret through. */
+export function allowsPart(
+  binding: { parts?: SecretPart[] },
+  part: SecretPart,
+): boolean {
+  return binding.parts === undefined || binding.parts.includes(part)
+}
+
 /**
  * Which binding each placeholder goes by: every placeholder needs one for
- * its exact place and name, or the call is refused before anything is read
- * or sent.
+ * its exact place, name and part, or the call is refused before anything is
+ * read or sent.
  */
 export function matchGrant(
   found: FoundPlaceholder[],
@@ -189,7 +202,8 @@ export function matchGrant(
     const binding = grant?.find(
       (entry) =>
         entry.pointer === placeholder.pointer &&
-        entry.name === placeholder.name,
+        entry.name === placeholder.name &&
+        allowsPart(entry, placeholder.part),
     )
 
     if (!binding) {

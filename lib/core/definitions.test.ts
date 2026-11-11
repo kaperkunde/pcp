@@ -40,6 +40,7 @@ import { createSkill, getSkill } from "./skills"
 import { scratchDatabase } from "./test-db"
 import { setToolAccess } from "./tool-access"
 import { setupVault } from "./vault"
+import { entryCall } from "./test-handles"
 
 // Definitions and instances: servers that are the same thing share one
 // definition (description, schema, edits, tool descriptions), each with its
@@ -659,7 +660,7 @@ describe("what assistants read", () => {
     await client.connect(clientSide)
     const say = async (name: string, args: Record<string, unknown>) =>
       (
-        (await client.callTool({ name, arguments: args })).content as Array<{
+        (await client.callTool(entryCall(name, args))).content as Array<{
           text?: string
         }>
       )[0]!.text!

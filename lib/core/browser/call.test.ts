@@ -224,6 +224,12 @@ setTimeout(() => window.open("/page"), 300)
 </script>`)
     }
 
+    // A window opened with "noopener", at a site the token may open.
+    if (request.url.startsWith("/noopener")) {
+      return res.end(`<!doctype html><title>Noopener</title>
+<script>window.open("/page?n", "_blank", "noopener")</script>`)
+    }
+
     if (request.url.startsWith("/frame")) {
       return res.end(
         `<script>window.open("${elsewhere.origin}/from-frame")</script>`,
@@ -526,19 +532,49 @@ describe.skipIf(!executable)("the browser's tools", { timeout: 90_000 }, () => {
     ).toEqual([])
     expect(api.requests.map((request) => request.url)).toContain("/redirect")
 
-    // The tab whose page tried says so, and the site is on the token's page.
+    // The tab whose page opened them names each window it refused, and the
+    // site is on the token's page.
     const snapshot = await call("snapshot", { tab: parentId })
-    expect(`${textOf(opened)}\n${textOf(snapshot)}`).toContain(
-      `The page tried to open ${other}`,
+    const both = `${textOf(opened)}\n${textOf(snapshot)}`
+    expect(both).toContain(
+      `The page opened a new window at ${other}, which this token may not open yet, so it was closed.`,
     )
     // The popup is named as a new tab; it is not the one the answer is about.
-    expect(`${textOf(opened)}\n${textOf(snapshot)}`).toContain(
-      `The page opened a new tab, ${popupId} (${api.origin}/page).`,
+    expect(both).toContain(
+      `A new window opened at ${api.origin}/page (tab ${popupId}).`,
     )
     expect(tabOf(snapshot)).toBe(parentId)
     expect(
       (await listFetchRules(ctx, tokenId)).sites.map((site) => site.host),
     ).toContain(other)
+  })
+
+  it("makes a window opened with noopener a tab of the token's, by the page Chromium says opened it", async () => {
+    await setFetchSite(ctx, tokenId, new URL(api.origin).host, "allowed")
+    await setFetchPrivate(ctx, tokenId, "allowed")
+
+    const opened = await call("tabs", {
+      action: "open",
+      url: `${api.origin}/noopener`,
+    })
+    const parentId = tabOf(opened)
+    const vault = runningBrowser(ctx.vaultId)!
+    let popupId = ""
+    await vi.waitFor(
+      () => {
+        const popup = [...vault.tabs.values()].find(
+          (tab) => tab.page.url() === `${api.origin}/page?n`,
+        )
+        expect(popup?.tokenId).toBe(tokenId)
+        popupId = popup!.id
+      },
+      { timeout: 10_000, interval: 50 },
+    )
+
+    const snapshot = await call("snapshot", { tab: parentId })
+    expect(`${textOf(opened)}\n${textOf(snapshot)}`).toContain(
+      `A new window opened at ${api.origin}/page?n (tab ${popupId}).`,
+    )
   })
 
   it("keeps the sign-ins in the vault across a restart of the browser", async () => {

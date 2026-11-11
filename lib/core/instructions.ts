@@ -12,7 +12,7 @@ import { TOKEN_NAME_SELECT, tokenName } from "./token-names"
  * The owner's instructions for one assistant: text kept on its token,
  * encrypted under the vault's key with "api_token:<id>" as associated data,
  * and given to the assistant at the start of every conversation (the
- * gateway's instructions, and read_memory every for a token that keeps
+ * gateway's instructions, and search with no arguments (or read_memory every) for a token that keeps
  * memories, since clients cut instructions short).
  *
  * A new token gets a copy of PCP's suggested instructions

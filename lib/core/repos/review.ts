@@ -1,4 +1,14 @@
 import { invalid } from "../errors"
+import {
+  fromWrapperPaceInput,
+  wrapperPaceOutside,
+  wrapperPaceWords,
+} from "../pacing/input"
+import {
+  ASSISTANT_PACE_BOUNDS,
+  type BrowserPacingClass,
+  type PaceRange,
+} from "../pacing/limits"
 import { diffLines, type DiffLine } from "../line-merge"
 import { hiddenCharacter } from "../memories"
 import { canonicalJson } from "../permission-rules"
@@ -65,6 +75,8 @@ export type FlagKind =
    * it registers are new or change.
    */
   | "service"
+  /** A wrapper's browser calls go at a pace of its own, new or changed. */
+  | "pace"
   /** A file has a character that does not show on screen. */
   | "hidden_characters"
   /** A file has a character that does not show on screen. */
@@ -127,6 +139,7 @@ function wrapperFlags(
   current: WrapperDocument | null,
   incoming: WrapperDocument,
   ref: ItemRef,
+  paceBounds: Record<BrowserPacingClass, PaceRange>,
 ): ReviewFlag[] {
   const flags: ReviewFlag[] = []
   const yamlPath = itemPath(ref, WRAPPER_YAML)
@@ -169,6 +182,20 @@ function wrapperFlags(
       path: yamlPath,
       message:
         "The calls its tools list would run on your approval of the wrapper, not at each token's own levels.",
+    })
+  }
+
+  if (
+    incoming.pace &&
+    canonicalJson(current?.pace ?? null) !== canonicalJson(incoming.pace)
+  ) {
+    const pace = fromWrapperPaceInput(incoming.pace, () => true)
+    const outside = wrapperPaceOutside(pace, paceBounds)
+
+    flags.push({
+      kind: "pace",
+      path: yamlPath,
+      message: `Its browser calls would go at a pace of their own: ${wrapperPaceWords(pace).join("; ")}.${outside.length > 0 ? ` Outside what you let assistants set without asking: ${outside.join("; ")}.` : ""}`,
     })
   }
 
@@ -406,6 +433,12 @@ function sameFamily(a: ItemDocument, b: ItemDocument): boolean {
 export function reviewItem(
   current: ItemDocument | null,
   incoming: ItemDocument,
+  {
+    paceBounds = ASSISTANT_PACE_BOUNDS,
+  }: {
+    /** What the owner lets assistants set (pacing/config.ts assistantBounds). */
+    paceBounds?: Record<BrowserPacingClass, PaceRange>
+  } = {},
 ): ItemReview {
   if (current && !sameFamily(current, incoming)) {
     throw invalid(
@@ -426,7 +459,12 @@ export function reviewItem(
     case "wrapper":
     case "flow":
       flags.push(
-        ...wrapperFlags(current as WrapperDocument | null, incoming, ref),
+        ...wrapperFlags(
+          current as WrapperDocument | null,
+          incoming,
+          ref,
+          paceBounds,
+        ),
       )
       break
     case "endpoint":

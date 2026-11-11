@@ -103,7 +103,7 @@ export const TOOL_ACCESS_ARG = z
           .enum(TOOL_TIERS)
           .optional()
           .describe(
-            'How much the tool can do: "read", "write" (changes things, deletes nothing for good) or "destructive". It decides the call_tool_* entry that runs it, and is every token\'s.',
+            'How much the tool can do: "read", "write" (changes things, deletes nothing for good) or "destructive". It decides the execute_* entry that runs it, and is every token\'s.',
           ),
       })
       // An entry sets a level, a tier, or both.

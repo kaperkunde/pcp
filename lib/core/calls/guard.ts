@@ -33,7 +33,7 @@ import {
  * reason). The same tool with other arguments is only noted.
  *
  * It sits where a call is resolved, its arguments checked and before it
- * asks or runs: call_tool_write and call_tool_destructive (gateway.ts
+ * asks or runs: execute_write and execute_destructive (gateway.ts
  * callResolved), run_code's pcp.call (forwardCall) and a wrapper's calls (wrappers/run.ts innerCall); never in upstream.ts,
  * so a call the owner allowed on PCP's page is not guarded. Read tools,
  * the kinds in UNGUARDED_KINDS and tools the owner exempted are not
@@ -264,7 +264,7 @@ async function earlierLines(
  * and not a repeat, records it as running. `asking` is a call that will ask
  * the owner (the permission flow then finds its own earlier request).
  * `again` says how to make the call again on purpose, in the caller's
- * words (rerun on call_tool_*, options on pcp.call).
+ * words (rerun on execute_*, options on pcp.call).
  */
 export async function guardCall(
   scope: GuardScope,
@@ -385,7 +385,7 @@ export type CallEnd =
   /** Refused before anything was sent (pacing, a server to connect). */
   | { status: "nothing" }
 
-/** How to make a call again on purpose, on call_tool_write/destructive. */
+/** How to make a call again on purpose, on execute_write/destructive. */
 export const RERUN_ON_CALL =
   "If it really must happen again (a new message that only reads the same, a second payment you mean to make), call again with rerun: true and a reason saying why; otherwise use what the first call did."
 
@@ -429,7 +429,7 @@ function ownerEnd(before: ReturnType<typeof noteBefore>): CallEnd | null {
     : { status: "nothing" }
 }
 
-/** How a call that answered an MCP result ended (call_tool_*). */
+/** How a call that answered an MCP result ended (execute_*). */
 export function endOfAnswer(
   result: CallToolResult,
   before: ReturnType<typeof noteBefore>,

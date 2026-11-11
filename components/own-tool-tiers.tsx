@@ -13,7 +13,7 @@ export function OwnToolTiers({ tools }: { tools: OwnToolTier[] }) {
   return (
     <ListSection
       title={`Tools (${tools.length})`}
-      footer="A tool a token cannot use (one for memories, web fetch or code it was not given) is not offered to it, whatever its tier. The call_tool and run_code tools still run only tools of their own tier and below, whatever they tell an app."
+      footer="A tool a token cannot use (one for memories, web fetch or code it was not given) is not offered to it, whatever its tier. Each runs through the execute tool of its tier (execute_read, execute_write or execute_destructive), which runs only tools of its own tier and below."
     >
       <List as="ul">
         {tools.map((tool) => (

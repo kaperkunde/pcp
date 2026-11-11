@@ -927,7 +927,7 @@ describe("restoring", { timeout: 60_000 }, () => {
   it("carries the owner's tiers, and restores a file from before tiers", async () => {
     const { ctx, serverId } = await populate()
     await setToolTier(ctx, serverId, "alpha", "read")
-    await setOwnToolTier(ctx, "search", "write")
+    await setOwnToolTier(ctx, "memory", "write")
     const before = await db().toolTier.findMany()
     expect(before).toHaveLength(1)
 
@@ -940,7 +940,7 @@ describe("restoring", { timeout: 60_000 }, () => {
     )
     expect(await db().toolTier.findMany()).toEqual(before)
     expect(await toolTier(ctx, serverId, "alpha")).toBe("read")
-    expect(await readOwnToolTiers(ctx)).toEqual({ search: "write" })
+    expect(await readOwnToolTiers(ctx)).toEqual({ memory: "write" })
 
     const older = structuredClone(await openRaw(file, EXPORT_PASSWORD))
     delete (older.tables as Record<string, unknown>).toolTiers
