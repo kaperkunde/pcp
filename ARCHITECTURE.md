@@ -103,8 +103,14 @@ associated data (a ciphertext cannot be moved to another row):
   names, kinds, flags and the status word stay plain. Whatever read these
   at boot with no key (rebuilding the tools of endpoints another version
   built, the browser's tools) runs on each vault's first request in a
-  process instead (`lib/core/vault-upkeep.ts`, beside `ensureSealed`), and
-  a status message is written only by a request that holds the key.
+  process instead (`lib/core/vault-upkeep.ts`, beside `ensureSealed`), so
+  after an upgrade or a restore the first answer from `/mcp` can still list
+  an endpoint's or the browser's tools as the older version left them; a
+  catch-up that fails is tried again by a later request, at most once a
+  minute. A status message is written only by a request that holds the
+  key, in one transaction with the read of the server's other sealed
+  values, and never in place of the outcome it follows (a failed status
+  write is logged and passed over).
   What is found by its value is found by a keyed hash (`keyedHash` in
   `crypto.ts`: HMAC-SHA256 under a key HKDF derives from the DEK per
   label), a secret's name in `secret.name_key`, unique in the vault. A

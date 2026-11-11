@@ -16,9 +16,14 @@ import type { VaultContext } from "./context"
 
 const STATE = Symbol.for("pcp.vault-upkeep")
 
+/** How long a vault whose catching up failed waits before another try. */
+export const RETRY_AFTER_MS = 60_000
+
 type UpkeepState = {
   /** Vaults this process has caught up, by the browser's generation then. */
   done: Map<string, number>
+  /** When each vault was last tried, so a failure is tried again throttled. */
+  tried: Map<string, number>
   /** Counts Chromium installs this process made: each asks for a check. */
   browserGeneration: number
   running: Map<string, Promise<void>>
@@ -29,6 +34,7 @@ function upkeepState(): UpkeepState {
   const holder = globalThis as unknown as { [STATE]?: UpkeepState }
   holder[STATE] ??= {
     done: new Map(),
+    tried: new Map(),
     browserGeneration: 0,
     running: new Map(),
   }
@@ -43,26 +49,39 @@ export function noteBrowserChanged(): void {
 /** The vault's rows were replaced (a restore): it is caught up again. */
 export function forgetVaultUpkeep(vaultId: string): void {
   upkeepState().done.delete(vaultId)
+  upkeepState().tried.delete(vaultId)
 }
 
 /** Tests: forget every vault. */
 export function forgetVaultUpkeeps(): void {
   const state = upkeepState()
   state.done.clear()
+  state.tried.clear()
   state.running.clear()
   state.browserGeneration = 0
 }
 
 /**
  * Catches the vault up, once per process (and the browser again after an
- * install). One at a time per vault; what fails is logged without its
- * values and tried by the next process.
+ * install). One at a time per vault. What fails is logged without its
+ * values and tried again by a later request, at most once per
+ * RETRY_AFTER_MS; an endpoint whose schema no longer builds counts as
+ * done (endpointMigration says so on its next describe or call).
  */
-export function catchUpVault(ctx: VaultContext): Promise<void> {
+export function catchUpVault(
+  ctx: VaultContext,
+  now = Date.now(),
+): Promise<void> {
   const state = upkeepState()
   const seen = state.done.get(ctx.vaultId)
 
   if (seen === state.browserGeneration) {
+    return Promise.resolve()
+  }
+
+  const tried = state.tried.get(ctx.vaultId)
+
+  if (tried !== undefined && now - tried < RETRY_AFTER_MS) {
     return Promise.resolve()
   }
 
@@ -73,7 +92,10 @@ export function catchUpVault(ctx: VaultContext): Promise<void> {
   }
 
   const generation = state.browserGeneration
+  state.tried.set(ctx.vaultId, now)
   const run = (async () => {
+    let caughtUp = true
+
     if (seen === undefined) {
       const { rebuildOutdatedEndpoints } = await import("./endpoints")
 
@@ -92,6 +114,7 @@ export function catchUpVault(ctx: VaultContext): Promise<void> {
         }
       } catch {
         console.error("[endpoints] rebuild failed")
+        caughtUp = false
       }
     }
 
@@ -101,9 +124,12 @@ export function catchUpVault(ctx: VaultContext): Promise<void> {
       await syncVaultBrowserTools(ctx)
     } catch {
       console.error("[browser] could not update the browser's tools")
+      caughtUp = false
     }
 
-    state.done.set(ctx.vaultId, generation)
+    if (caughtUp) {
+      state.done.set(ctx.vaultId, generation)
+    }
   })().finally(() => state.running.delete(ctx.vaultId))
 
   state.running.set(ctx.vaultId, run)
