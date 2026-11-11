@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
 
+import { openSpec, sealedSpecPatches } from "./spec-rows"
 import { readFileSync } from "node:fs"
 import { catchUpVault, forgetVaultUpkeeps } from "./vault-upkeep"
 import { editTools } from "./test-servers"
@@ -183,7 +184,7 @@ describe("createEndpoint", () => {
     const spec = await db().openApiSpec.findUniqueOrThrow({
       where: { serverId: id },
     })
-    expect(spec.text).toBe(schema(api.origin))
+    expect(openSpec(ctx, spec).text).toBe(schema(api.origin))
     expect(spec.hash).toMatch(/^[0-9a-f]{64}$/)
   })
 
@@ -735,9 +736,11 @@ describe("tools an earlier PCP built", () => {
     const id = await builtByEarlierPcp()
     await db().openApiSpec.update({
       where: { serverId: id },
-      data: {
-        patches: JSON.stringify([{ op: "remove", path: "/paths/~1gone" }]),
-      },
+      data: sealedSpecPatches(
+        ctx,
+        id,
+        JSON.stringify([{ op: "remove", path: "/paths/~1gone" }]),
+      ),
     })
 
     const result = await rebuildOutdatedEndpoints(ctx)
@@ -776,9 +779,11 @@ describe("tools an earlier PCP built", () => {
     const broken = await builtByEarlierPcp()
     await db().openApiSpec.update({
       where: { serverId: broken },
-      data: {
-        patches: JSON.stringify([{ op: "remove", path: "/paths/~1gone" }]),
-      },
+      data: sealedSpecPatches(
+        ctx,
+        broken,
+        JSON.stringify([{ op: "remove", path: "/paths/~1gone" }]),
+      ),
     })
     const server = await db().mcpServer.findUniqueOrThrow({
       where: { id: broken },

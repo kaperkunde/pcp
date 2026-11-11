@@ -1,5 +1,6 @@
 import type { VaultContext } from "../context"
 import { db } from "../db"
+import { openServiceSpec, SERVICE_SPEC_SELECT } from "../spec-rows"
 import { inputSchemasOf } from "../tool-rows"
 import { visibleTools, type GatewayServer } from "../gateway-servers"
 import { readServiceDefinition } from "../services/definition"
@@ -95,7 +96,7 @@ export async function serverOrigins(
       registeredId: { in: serverIds },
       server: { vaultId: ctx.vaultId },
     },
-    select: { serverId: true, registeredId: true, definition: true },
+    select: { ...SERVICE_SPEC_SELECT, registeredId: true },
   })
 
   for (const spec of specs) {
@@ -104,7 +105,9 @@ export async function serverOrigins(
     }
 
     try {
-      const definition = readServiceDefinition(spec.definition)
+      const definition = readServiceDefinition(
+        openServiceSpec(ctx, spec).definition,
+      )
       const item = itemOfImage(
         `${definition.image ?? ""} ${definition.source ?? ""}`,
       )

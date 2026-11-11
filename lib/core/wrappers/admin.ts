@@ -1,8 +1,13 @@
-import { createHash } from "node:crypto"
-
 import type { ToolTier } from "../constants"
 import type { VaultContext } from "../context"
 import { db } from "../db"
+import { keyedHash } from "../crypto"
+import {
+  canonicalOf,
+  openWrapperSpec,
+  sealedWrapperDefinition,
+  WRAPPER_SPEC_SELECT,
+} from "../spec-rows"
 import { invalid, notFound, PcpError } from "../errors"
 import type { GatewayServer } from "../gateway-servers"
 import { newId } from "../ids"
@@ -179,12 +184,15 @@ export type WrapperView = {
 }
 
 function basisOf(
+  ctx: VaultContext,
   server: { name: string; description: string },
   hash: string,
 ): string {
-  return createHash("sha256")
-    .update(canonicalJson([hash, server.name, server.description]))
-    .digest("hex")
+  return keyedHash(
+    ctx.dek,
+    "pcp wrapper basis",
+    canonicalJson([hash, server.name, server.description]),
+  )
 }
 
 async function slugsById(
@@ -251,12 +259,15 @@ async function loadWrapper(
     )
   }
 
-  const server = { ...openServer(ctx, row), wrapperSpec: row.wrapperSpec }
+  const { wrapperSpec, ...rest } = row
+  const server = openServer(ctx, rest)
+  // The hash is the keyed one, also for a row from before.
+  const spec = openWrapperSpec(ctx, wrapperSpec)
 
   return {
     server,
-    spec: server.wrapperSpec,
-    definition: readDefinition(server.wrapperSpec.definition),
+    spec,
+    definition: readDefinition(spec.definition),
   }
 }
 
@@ -659,7 +670,7 @@ export async function proposeWrapperDetach(
   return {
     action: "detach",
     serverId: server.id,
-    basis: basisOf(server, spec.hash),
+    basis: basisOf(ctx, server, spec.hash),
     name: server.name,
     description: server.description,
     definition: null,
@@ -753,7 +764,7 @@ export async function proposeWrapperChange(
   }
 
   if (
-    definitionHash(resolved.definition) === spec.hash &&
+    definitionHash(ctx, resolved.definition) === spec.hash &&
     resolved.name === server.name &&
     resolved.description === server.description
   ) {
@@ -763,7 +774,7 @@ export async function proposeWrapperChange(
   return {
     action: "update",
     serverId: server.id,
-    basis: basisOf(server, spec.hash),
+    basis: basisOf(ctx, server, spec.hash),
     name: resolved.name,
     description: resolved.description,
     definition: resolved.definition,
@@ -788,7 +799,7 @@ export async function proposeWrapperDelete(
   return {
     action: "delete",
     serverId: server.id,
-    basis: basisOf(server, spec.hash),
+    basis: basisOf(ctx, server, spec.hash),
     name: server.name,
     description: server.description,
     definition: null,
@@ -967,7 +978,7 @@ export async function applyWrapperChange(
 
   const { server, spec } = await loadWrapper(ctx, { id: ask.serverId! })
 
-  if (basisOf(server, spec.hash) !== ask.basis) {
+  if (basisOf(ctx, server, spec.hash) !== ask.basis) {
     throw new PcpError(
       "state",
       `${server.name} has changed since this was asked, so nothing changed. Read it again with get_wrapper and ask again.`,
@@ -1037,8 +1048,12 @@ async function createWrapperRow(
     db().wrapperSpec.create({
       data: {
         serverId: id,
-        definition: JSON.stringify(definition),
-        hash: definitionHash(definition),
+        ...sealedWrapperDefinition(
+          ctx,
+          id,
+          JSON.stringify(definition),
+          canonicalJson(definition),
+        ),
       },
     }),
   ])
@@ -1059,10 +1074,12 @@ async function writeWrapper(
     await writeServer(ctx, id, { name, description }, tx)
     await tx.wrapperSpec.update({
       where: { serverId: id },
-      data: {
-        definition: JSON.stringify(definition),
-        hash: definitionHash(definition),
-      },
+      data: sealedWrapperDefinition(
+        ctx,
+        id,
+        JSON.stringify(definition),
+        canonicalJson(definition),
+      ),
     })
   })
   await syncWrapperTools(ctx, { id })
@@ -1085,14 +1102,23 @@ async function shareWrapper(ctx: VaultContext, id: string): Promise<void> {
     return
   }
 
-  const spec = await db().wrapperSpec.findUniqueOrThrow({
-    where: { serverId: id },
-  })
+  const spec = openWrapperSpec(
+    ctx,
+    await db().wrapperSpec.findUniqueOrThrow({
+      where: { serverId: id },
+      select: WRAPPER_SPEC_SELECT,
+    }),
+  )
 
   for (const sibling of siblings) {
     const { count } = await db().wrapperSpec.updateMany({
       where: { serverId: sibling.id, hash: { not: spec.hash } },
-      data: { definition: spec.definition, hash: spec.hash },
+      data: sealedWrapperDefinition(
+        ctx,
+        sibling.id,
+        spec.definition,
+        canonicalOf(spec.definition),
+      ),
     })
 
     if (count > 0) {
@@ -1161,7 +1187,9 @@ export async function replacedTools(
       continue
     }
 
-    for (const tool of readDefinition(wrapper.wrapperSpec.definition).tools) {
+    for (const tool of readDefinition(
+      openWrapperSpec(ctx, wrapper.wrapperSpec).definition,
+    ).tools) {
       for (const replaced of tool.replaces) {
         if (replaced.serverId === serverId) {
           const list = found.get(replaced.tool) ?? []
@@ -1198,7 +1226,9 @@ export async function showReplacedTool(
       continue
     }
 
-    const definition = readDefinition(wrapper.wrapperSpec.definition)
+    const definition = readDefinition(
+      openWrapperSpec(ctx, wrapper.wrapperSpec).definition,
+    )
     let changed = false
     const tools = definition.tools.map((tool) => {
       const replaces = tool.replaces.filter(

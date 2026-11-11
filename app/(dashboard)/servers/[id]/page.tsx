@@ -21,7 +21,7 @@ import { WrapperForm } from "@/components/wrapper-form"
 import { db } from "@/lib/core/db"
 import { isPcpError } from "@/lib/core/errors"
 import { oauthRedirectUrl } from "@/lib/core/oauth-client"
-import { readStoredPatches } from "@/lib/core/openapi/patch"
+import { storedSpec } from "@/lib/core/endpoints"
 import { readCallPlan } from "@/lib/core/openapi/plan"
 import { pacingOverview, serverPacing } from "@/lib/core/pacing/config"
 import { listSecrets } from "@/lib/core/secrets"
@@ -107,10 +107,12 @@ export default async function ServerPage({
   const spec = endpoint
     ? await db().openApiSpec.findUnique({
         where: { serverId: server.id },
-        select: { fetchedAt: true, patches: true },
+        select: { fetchedAt: true },
       })
     : null
-  const patches = readStoredPatches(spec?.patches)
+  const patches = endpoint
+    ? ((await storedSpec(ctx, server.id))?.patches ?? [])
+    : []
 
   const authExtraHeaders = await extraAuthHeaders(server.id)
 

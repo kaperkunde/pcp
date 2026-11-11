@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs"
 
+import { createHash } from "node:crypto"
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
 
 import { cleanupIdle, stopCleanup } from "../cleanup/runtime"
@@ -18,6 +19,7 @@ import { writeServer } from "../server-meta"
 import { setToolDescription } from "../servers"
 import { storeTools } from "../catalogue"
 import { openTools } from "../tool-rows"
+import { createEndpoint, storedSpec } from "../endpoints"
 import { scratchDatabase } from "../test-db"
 import { setupVault } from "../vault"
 import { forgetVaultUpkeeps } from "../vault-upkeep"
@@ -306,5 +308,76 @@ describe("tools", () => {
         descriptionOverride: "OLD-OVERRIDE",
       },
     ])
+  })
+})
+
+describe("schemas", () => {
+  const SCHEMA = JSON.stringify({
+    openapi: "3.0.3",
+    info: { title: "SCHEMA-TITLE-MARKER", version: "1" },
+    servers: [{ url: "https://api.example.com" }],
+    paths: {
+      "/pets": {
+        get: {
+          operationId: "listPets",
+          summary: "PATH-SUMMARY-MARKER",
+          responses: { "200": { description: "ok" } },
+        },
+      },
+    },
+  })
+
+  async function addEndpoint(): Promise<string> {
+    return (
+      await createEndpoint(ctx, {
+        name: "Pets",
+        specSource: "upload",
+        specText: SCHEMA,
+        patches: [{ op: "add", path: "/info/x-note", value: "PATCH-MARKER" }],
+        readOnly: false,
+        authType: "none",
+      })
+    ).id
+  }
+
+  it("seals an endpoint's schema and edits, with a keyed hash", async () => {
+    const id = await addEndpoint()
+
+    expect(await onDisk("SCHEMA-TITLE-MARKER")).toBe(false)
+    expect(await onDisk("PATH-SUMMARY-MARKER")).toBe(false)
+    expect(await onDisk("PATCH-MARKER")).toBe(false)
+    expect((await storedSpec(ctx, id))?.text).toBe(SCHEMA)
+    const [raw] = await db().$queryRawUnsafe<
+      Array<{ text: string; patches: string; hash: string }>
+    >(`SELECT "text", "patches", "hash" FROM "openapi_spec"`)
+    expect(raw).toMatchObject({ text: "", patches: "" })
+    // Not the plain SHA-256, which would say whether it is a known schema.
+    expect(raw!.hash).not.toBe(
+      createHash("sha256").update(SCHEMA).digest("hex"),
+    )
+  })
+
+  it("reads a schema from before, and seals it on a request", async () => {
+    const id = await addEndpoint()
+    const before = await storedSpec(ctx, id)
+    const plainHash = createHash("sha256").update(SCHEMA).digest("hex")
+    await db().$executeRawUnsafe(
+      `UPDATE "openapi_spec" SET "text" = ?, "patches" = '[]', "hash" = ?, "sealed_text" = NULL, "sealed_patches" = NULL`,
+      SCHEMA,
+      plainHash,
+    )
+
+    // Read as it was, with the keyed hash a sealed row would have.
+    expect(await storedSpec(ctx, id)).toMatchObject({
+      text: SCHEMA,
+      hash: before!.hash,
+      patches: [],
+    })
+    expect(await ensureSealed(ctx)).toBe(true)
+    expect(await onDisk("SCHEMA-TITLE-MARKER")).toBe(false)
+    expect(await storedSpec(ctx, id)).toMatchObject({
+      text: SCHEMA,
+      hash: before!.hash,
+    })
   })
 })

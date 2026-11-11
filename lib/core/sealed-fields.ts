@@ -15,6 +15,13 @@ import { sealJson, type Sealed } from "./sealed"
 
 export type PlainKey<K extends string> = `plain${Capitalize<K>}`
 
+/** The group's values that have a plain column. */
+function plainKeys(group: { blank: object; sealedOnly?: readonly string[] }) {
+  return Object.keys(group.blank).filter(
+    (key) => !group.sealedOnly?.includes(key),
+  )
+}
+
 export function plainKey<K extends string>(key: K): PlainKey<K> {
   return `plain${key.charAt(0).toUpperCase()}${key.slice(1)}` as PlainKey<K>
 }
@@ -35,6 +42,8 @@ export type SealedGroup<
    * value missing from the JSON reads as.
    */
   blank: M
+  /** Values that never had a plain column: read from the sealed JSON only. */
+  sealedOnly?: ReadonlyArray<keyof M & string>
 }
 
 /** The columns a reader selects to read a group's values. */
@@ -54,7 +63,7 @@ export function groupSelect<
     [group.idKey]: true,
   }
 
-  for (const key of Object.keys(group.blank)) {
+  for (const key of plainKeys(group)) {
     select[plainKey(key)] = true
   }
 
@@ -83,7 +92,9 @@ export function sealFields<
   const sealed: Record<string, unknown> = {}
 
   for (const [key, blank] of Object.entries(group.blank)) {
-    stored[plainKey(key)] = blank
+    if (!group.sealedOnly?.includes(key)) {
+      stored[plainKey(key)] = blank
+    }
     sealed[key] = values[key] ?? blank
   }
 
@@ -125,11 +136,13 @@ function openFields<
   group: SealedGroup<M, C, I>,
   row: Record<string, unknown>,
 ): Partial<M> {
-  const keys = Object.keys(group.blank).filter((key) => plainKey(key) in row)
+  const plain = plainKeys(group).filter((key) => plainKey(key) in row)
 
-  if (keys.length === 0) {
+  if (plain.length === 0) {
     return {}
   }
+
+  const keys = [...plain, ...(group.sealedOnly ?? [])]
 
   if (!(group.column in row) || typeof row[group.idKey] !== "string") {
     throw new Error(
@@ -154,7 +167,9 @@ function openFields<
     }
   } else {
     for (const key of keys) {
-      values[key] = row[plainKey(key)]
+      values[key] = group.sealedOnly?.includes(key)
+        ? group.blank[key]
+        : row[plainKey(key)]
     }
   }
 
@@ -177,7 +192,7 @@ export function openRow<
 
   delete rest[group.column]
 
-  for (const key of Object.keys(group.blank)) {
+  for (const key of plainKeys(group)) {
     delete rest[plainKey(key)]
   }
 

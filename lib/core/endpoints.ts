@@ -1,11 +1,16 @@
-import { createHash } from "node:crypto"
-
 import type { CallToolResult } from "@modelcontextprotocol/client"
 
 import { storeTools, type SyncResult } from "./catalogue"
 import type { VaultContext } from "./context"
 import { db } from "./db"
 import { openTool, TOOL_SCHEMA_SELECT } from "./tool-rows"
+import {
+  contentHash,
+  openSpec,
+  SPEC_SELECT,
+  sealedSpecPatches,
+  sealedSpecText,
+} from "./spec-rows"
 import {
   contentInstance,
   definitionForNew,
@@ -447,21 +452,26 @@ async function applySpec(
 ): Promise<SyncResult> {
   const toolCount = await storeGenerated(ctx, server.id, generated)
 
-  const hash = specHash(text)
-  const stored = await db().openApiSpec.findUnique({
-    where: { serverId: server.id },
-    select: { hash: true },
-  })
+  const hash = specHash(ctx, text)
+  const stored = await storedSpec(ctx, server.id)
   const fetchedAt = new Date()
   const edits = JSON.stringify(patches)
 
   if (stored?.hash === hash) {
     await db().openApiSpec.update({
       where: { serverId: server.id },
-      data: { fetchedAt, patches: edits, builtWith: PCP_VERSION },
+      data: {
+        fetchedAt,
+        ...sealedSpecPatches(ctx, server.id, edits),
+        builtWith: PCP_VERSION,
+      },
     })
   } else {
-    const columns = { text, hash, fetchedAt, patches: edits }
+    const columns = {
+      ...sealedSpecText(ctx, server.id, text),
+      ...sealedSpecPatches(ctx, server.id, edits),
+      fetchedAt,
+    }
     await db().openApiSpec.upsert({
       where: { serverId: server.id },
       create: { serverId: server.id, ...columns, builtWith: PCP_VERSION },
@@ -525,19 +535,15 @@ async function shareSpec(
       await writeServer(ctx, sibling.id, shared)
     }
 
-    const stored = await db().openApiSpec.findUnique({
-      where: { serverId: sibling.id },
-      select: { hash: true, patches: true },
-    })
+    const stored = await storedSpecRow(ctx, sibling.id)
 
     if (stored?.hash === spec.hash && stored.patches === spec.patches) {
       continue
     }
 
     const columns = {
-      text: spec.text,
-      hash: spec.hash,
-      patches: spec.patches,
+      ...sealedSpecText(ctx, sibling.id, spec.text),
+      ...sealedSpecPatches(ctx, sibling.id, spec.patches),
       fetchedAt: spec.fetchedAt,
       builtWith: null,
     }
@@ -691,14 +697,16 @@ export async function endpointMigration(
     return null
   }
 
-  const stored = await db().openApiSpec.findUnique({
+  const built = await db().openApiSpec.findUnique({
     where: { serverId: server.id },
-    select: { builtWith: true, hash: true, patches: true },
+    select: { builtWith: true },
   })
 
-  if (!stored || stored.builtWith === PCP_VERSION) {
+  if (!built || built.builtWith === PCP_VERSION) {
     return null
   }
+
+  const stored = (await storedSpecRow(ctx, server.id))!
 
   const basis = `${stored.hash}\n${stored.patches}\n${server.readOnly}`
   const known = unbuilt.get(server.id)
@@ -752,9 +760,25 @@ export async function endpointMigration(
   return message
 }
 
-/** The fingerprint kept with a schema's text, to tell a changed one. */
-export function specHash(text: string): string {
-  return createHash("sha256").update(text).digest("hex")
+/**
+ * The fingerprint kept with a schema's text, to tell a changed one: a keyed
+ * hash under the vault's key (spec-rows.ts).
+ */
+export function specHash(ctx: VaultContext, text: string): string {
+  return contentHash(ctx, "openapi", text)
+}
+
+/** The stored schema's text, edits (as JSON) and keyed hash, opened. */
+async function storedSpecRow(
+  ctx: VaultContext,
+  serverId: string,
+): Promise<{ text: string; patches: string; hash: string } | null> {
+  const row = await db().openApiSpec.findUnique({
+    where: { serverId },
+    select: SPEC_SELECT,
+  })
+
+  return row ? openSpec(ctx, row) : null
 }
 
 /** What PCP keeps of an endpoint's schema: the text and its edits. */
@@ -766,10 +790,7 @@ export async function storedSpec(
   hash: string
   patches: PatchOperation[]
 } | null> {
-  const stored = await db().openApiSpec.findUnique({
-    where: { serverId },
-    select: { text: true, hash: true, patches: true },
-  })
+  const stored = await storedSpecRow(ctx, serverId)
 
   return stored
     ? { ...stored, patches: readStoredPatches(stored.patches) }
@@ -1431,7 +1452,7 @@ export async function syncEndpointTools(
         server.specUrlFromAssistant &&
         !byOwner &&
         stored &&
-        specHash(text) !== stored.hash
+        specHash(ctx, text) !== stored.hash
       ) {
         const message =
           "The schema at its URL has changed since it was approved. The tools are still built from the approved copy; re-read it in PCP to take the new one."

@@ -98,7 +98,7 @@ async function wrapperBinding(secretId: string, serverId: string) {
       slug: "linear-lookup",
       url: "pcp:wrapper",
       wrapperSpec: {
-        create: { definition: JSON.stringify(definition), hash: "x" },
+        create: { plainDefinition: JSON.stringify(definition), hash: "x" },
       },
     }),
   })

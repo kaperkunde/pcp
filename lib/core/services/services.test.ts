@@ -4,6 +4,7 @@ import {
   type Server,
   type ServerResponse,
 } from "node:http"
+import { openServiceSpec } from "../spec-rows"
 import { writeServer } from "../server-meta"
 import { mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs"
 import type { AddressInfo } from "node:net"
@@ -1383,7 +1384,7 @@ describe("a running service", { timeout: 30_000 }, () => {
     const spec = await db().serviceSpec.findUniqueOrThrow({
       where: { serverId: service.id },
     })
-    expect(JSON.parse(spec.definition).image).toBe(newer)
+    expect(JSON.parse(openServiceSpec(ctx, spec).definition).image).toBe(newer)
     expect((await readServiceStatus(ctx, service.id, PUBLIC)).upToDate).toBe(
       true,
     )
@@ -1860,7 +1861,7 @@ describe("an image update", { timeout: 30_000 }, () => {
     const spec = await db().serviceSpec.findUniqueOrThrow({
       where: { serverId: service.id },
     })
-    expect(JSON.parse(spec.definition).image).toBe(NEWER)
+    expect(JSON.parse(openServiceSpec(ctx, spec).definition).image).toBe(NEWER)
   })
 
   it("takes a digest an assistant names in the same repository, and refuses another", async () => {
@@ -2021,7 +2022,7 @@ describe("a service built from a repository", { timeout: 60_000 }, () => {
     const spec = await db().serviceSpec.findUniqueOrThrow({
       where: { serverId: launched.id },
     })
-    expect(JSON.parse(spec.definition).image).toBe(
+    expect(JSON.parse(openServiceSpec(ctx, spec).definition).image).toBe(
       `localhost/pcp-docs-server@${BUILT}`,
     )
     expect((await readServiceStatus(ctx, launched.id, PUBLIC)).upToDate).toBe(

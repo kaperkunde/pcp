@@ -5,6 +5,7 @@ import type { SyncResult } from "./catalogue"
 import { MAX_SPEC_BYTES } from "./constants"
 import type { VaultContext } from "./context"
 import { db } from "./db"
+import { contentHashMatches } from "./spec-rows"
 import { openTools, type OpenTool } from "./tool-rows"
 import {
   contentInstance,
@@ -999,7 +1000,7 @@ export async function updateEndpointDetails(
     patches !== undefined &&
     JSON.stringify(patches) !== JSON.stringify(stored?.patches ?? [])
   const newDocument =
-    fetched !== undefined && specHash(fetched.text) !== stored?.hash
+    fetched !== undefined && specHash(scope.ctx, fetched.text) !== stored?.hash
 
   // A change other assistants would see, or that widens what the endpoint
   // does, waits for the owner. Turning read-only on only narrows it.
@@ -1131,10 +1132,12 @@ export type EndpointChangeAsk = {
 
 /** What a change is made against: the schema, its edits and the words. */
 function basisOf(
+  ctx: VaultContext,
   server: OpenServer,
   stored: { hash: string; patches: PatchOperation[] } | null,
 ): string {
   return specHash(
+    ctx,
     JSON.stringify([
       stored?.hash ?? null,
       stored?.patches ?? [],
@@ -1251,7 +1254,7 @@ async function proposeChange(
   const downloaded =
     changes.refreshSpec === true ? await downloadSpec(server) : undefined
   const fetched =
-    downloaded && specHash(downloaded.text) !== stored.hash
+    downloaded && specHash(scope.ctx, downloaded.text) !== stored.hash
       ? downloaded
       : undefined
   const readOnly =
@@ -1365,12 +1368,14 @@ async function proposeChange(
   return {
     ask: {
       serverId: server.id,
-      basis: basisOf(server, stored),
+      basis: basisOf(scope.ctx, server, stored),
       ...(name !== undefined ? { name } : {}),
       ...(description !== undefined ? { description } : {}),
       ...(readOnly ? { readOnly } : {}),
       ...(editsChange ? { patches } : {}),
-      ...(fetched ? { fetched: { hash: specHash(fetched.text) } } : {}),
+      ...(fetched
+        ? { fetched: { hash: specHash(scope.ctx, fetched.text) } }
+        : {}),
       ...(toolEdits.length > 0
         ? { toolDescriptions: Object.fromEntries(toolEdits) }
         : {}),
@@ -1459,6 +1464,7 @@ export async function proposeEndpointDetach(
   return {
     serverId: server.id,
     basis: basisOf(
+      scope.ctx,
       server,
       server.kind === "openapi" ? await storedSpec(scope.ctx, server.id) : null,
     ),
@@ -1499,7 +1505,7 @@ export async function applyEndpointChange(
   }
 
   if (
-    basisOf(server, await storedSpec(ctx, server.id)) !== ask.basis ||
+    basisOf(ctx, server, await storedSpec(ctx, server.id)) !== ask.basis ||
     (ask.detach && server.definitionId !== ask.detach.definitionId)
   ) {
     throw new PcpError(
@@ -1518,7 +1524,9 @@ export async function applyEndpointChange(
   if (ask.fetched) {
     fetched = await downloadSpec(server)
 
-    if (specHash(fetched.text) !== ask.fetched.hash) {
+    // A request asked before the vault's rows were sealed holds the plain
+    // SHA-256: it still counts.
+    if (!contentHashMatches(ctx, "openapi", fetched.text, ask.fetched.hash)) {
       throw new PcpError(
         "state",
         "The schema at its URL has changed again since this was asked, so nothing changed. The assistant can ask again.",

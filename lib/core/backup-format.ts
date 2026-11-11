@@ -500,44 +500,61 @@ const McpToolRow = renamedFrom(
   }),
 )
 
-const OpenApiSpecRow = z.strictObject({
-  serverId: id,
-  text: str,
-  patches: str,
-  hash: str,
-  fetchedAt: date,
-  builtWith: str.nullable(),
-})
+// The schema and its edits were sealed (#96): an older file names their
+// plain columns by their old names.
+const OpenApiSpecRow = renamedFrom(
+  { text: "plainText", patches: "plainPatches" },
+  z.strictObject({
+    serverId: id,
+    plainText: str,
+    plainPatches: str,
+    sealedText: bytesOrNull.default(null),
+    sealedPatches: bytesOrNull.default(null),
+    hash: str,
+    fetchedAt: date,
+    builtWith: str.nullable(),
+  }),
+)
 
 // Wrappers, added in 0.4: absent from older files.
-const WrapperSpecRow = z.strictObject({
-  serverId: id,
-  definition: str,
-  hash: str,
-  updatedAt: date,
-})
+const WrapperSpecRow = renamedFrom(
+  { definition: "plainDefinition" },
+  z.strictObject({
+    serverId: id,
+    plainDefinition: str,
+    // Sealed since (#96): absent from older files.
+    sealedDefinition: bytesOrNull.default(null),
+    hash: str,
+    updatedAt: date,
+  }),
+)
 
 // Services, added with the service kind: absent from older files.
-const ServiceSpecRow = z.strictObject({
-  serverId: id,
-  definition: str,
-  hash: str,
-  hostId: id.nullable(),
-  engine: str,
-  engineVersion: str.default(""),
-  containerName: str,
-  publish: str.default("{}"),
-  env: str.default("{}"),
-  // Added with exits' VPN services: absent from older files.
-  plainValues: str.default("{}"),
-  registeredId: id.nullable(),
-  // Added with services reached through the SSH connection and started on
-  // demand: absent from older files, whose services are reached directly.
-  reach: str.default("direct"),
-  intendedState: str.default("running"),
-  createdAt: date,
-  updatedAt: date,
-})
+const ServiceSpecRow = renamedFrom(
+  { definition: "plainDefinition" },
+  z.strictObject({
+    serverId: id,
+    plainDefinition: str,
+    // Sealed since (#96): absent from older files.
+    sealedDefinition: bytesOrNull.default(null),
+    hash: str,
+    hostId: id.nullable(),
+    engine: str,
+    engineVersion: str.default(""),
+    containerName: str,
+    publish: str.default("{}"),
+    env: str.default("{}"),
+    // Added with exits' VPN services: absent from older files.
+    plainValues: str.default("{}"),
+    registeredId: id.nullable(),
+    // Added with services reached through the SSH connection and started on
+    // demand: absent from older files, whose services are reached directly.
+    reach: str.default("direct"),
+    intendedState: str.default("running"),
+    createdAt: date,
+    updatedAt: date,
+  }),
+)
 
 /** A text column that holds one of a few words. */
 const oneOf = (words: string[]) =>

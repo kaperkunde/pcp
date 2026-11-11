@@ -1,5 +1,5 @@
 import type { VaultContext } from "./context"
-import { sha256Hex } from "./crypto"
+import { keyedHash } from "./crypto"
 import { db } from "./db"
 import {
   contentInstance,
@@ -20,6 +20,14 @@ import { getSetting, setSetting } from "./settings"
 import { copyToolTiers, mergeToolTiers } from "./tool-tiers"
 import { findServers, type OpenServer, writeServer } from "./server-meta"
 import { toolOverrides } from "./tool-rows"
+import {
+  openServiceSpec,
+  openSpec,
+  openWrapperSpec,
+  SERVICE_SPEC_SELECT,
+  SPEC_SELECT,
+  WRAPPER_SPEC_SELECT,
+} from "./spec-rows"
 
 /**
  * Definitions and instances, as the owner works with them.
@@ -366,10 +374,9 @@ async function contentKey(
   serverId: string,
 ): Promise<string | null> {
   const [spec, tools] = await Promise.all([
-    db().openApiSpec.findUnique({
-      where: { serverId },
-      select: { hash: true, patches: true },
-    }),
+    db()
+      .openApiSpec.findUnique({ where: { serverId }, select: SPEC_SELECT })
+      .then((row) => row && openSpec(ctx, row)),
     toolOverrides(ctx, { serverId }),
   ])
 
@@ -385,7 +392,9 @@ async function contentKey(
     patches = spec.patches
   }
 
-  return sha256Hex(
+  return keyedHash(
+    ctx.dek,
+    "pcp definition content",
     canonicalJson({
       spec: spec.hash,
       patches,
@@ -405,7 +414,7 @@ async function endpointKeys(
       kind: "openapi",
       definitionId: only ? { in: only } : { not: null },
     },
-    select: { id: true, definitionId: true, spec: { select: { hash: true } } },
+    select: { id: true, definitionId: true, spec: { select: SPEC_SELECT } },
     orderBy: { createdAt: "asc" },
   })
   // One instance stands for each definition: they all hold the same.
@@ -415,7 +424,7 @@ async function endpointKeys(
     if (server.spec && !byDefinition.has(server.definitionId!)) {
       byDefinition.set(server.definitionId!, {
         id: server.id,
-        hash: server.spec.hash,
+        hash: openSpec(ctx, server.spec).hash,
       })
     }
   }
@@ -703,22 +712,30 @@ export async function definitionBasis(
   const definition = { ...openDefinition(ctx, row), kind: row.kind }
 
   const [spec, wrapper, service, tools] = await Promise.all([
-    db().openApiSpec.findUnique({
-      where: { serverId: source.id },
-      select: { hash: true, patches: true },
-    }),
-    db().wrapperSpec.findUnique({
-      where: { serverId: source.id },
-      select: { hash: true },
-    }),
-    db().serviceSpec.findUnique({
-      where: { serverId: source.id },
-      select: { hash: true },
-    }),
+    db()
+      .openApiSpec.findUnique({
+        where: { serverId: source.id },
+        select: SPEC_SELECT,
+      })
+      .then((found) => found && openSpec(ctx, found)),
+    db()
+      .wrapperSpec.findUnique({
+        where: { serverId: source.id },
+        select: WRAPPER_SPEC_SELECT,
+      })
+      .then((found) => found && openWrapperSpec(ctx, found)),
+    db()
+      .serviceSpec.findUnique({
+        where: { serverId: source.id },
+        select: SERVICE_SPEC_SELECT,
+      })
+      .then((found) => found && openServiceSpec(ctx, found)),
     toolOverrides(ctx, { serverId: source.id }),
   ])
 
-  return sha256Hex(
+  return keyedHash(
+    ctx.dek,
+    "pcp definition basis",
     canonicalJson({
       kind: definition.kind,
       description: definition.description,

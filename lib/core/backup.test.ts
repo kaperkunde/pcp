@@ -1822,6 +1822,10 @@ function unsealed(
       } as never)
 
       for (const [key, value] of Object.entries(values)) {
+        if (group.sealedOnly?.includes(key)) {
+          continue
+        }
+
         delete row[`plain${key.charAt(0).toUpperCase()}${key.slice(1)}`]
         row[key] = value
       }

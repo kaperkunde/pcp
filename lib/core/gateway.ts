@@ -242,7 +242,7 @@ import {
   type AuthType,
 } from "./servers"
 import { openServer } from "./server-meta"
-import { openTool, TOOL_SCHEMA_SELECT } from "./tool-rows"
+import { openTool, TOOL_ABOUT_SELECT, TOOL_SCHEMA_SELECT } from "./tool-rows"
 import { collectHandleIds, missingResultMessage } from "./result-handles"
 import { capabilityProviders } from "./capabilities/candidates"
 import { sniffMediaType } from "./media-types"
@@ -445,6 +445,8 @@ const MAX_DESCRIBED_CHARS = 60_000
 /** What describing a tool and checking its handle read of its row. */
 const TOOL_ROW = {
   ...TOOL_SCHEMA_SELECT,
+  // The annotations' title is sealed with the description.
+  ...TOOL_ABOUT_SELECT,
   name: true,
   annotations: true,
   icons: true,

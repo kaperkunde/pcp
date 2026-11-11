@@ -7,6 +7,14 @@ import type { ServiceSpec } from "@/lib/generated/prisma/client"
 import { storeTools, type SyncResult } from "../catalogue"
 import type { VaultContext } from "../context"
 import { db } from "../db"
+import { canonicalJson } from "../permission-rules"
+import {
+  contentHash,
+  contentHashMatches,
+  openServiceSpec,
+  sealedServiceDefinition,
+  SERVICE_SPEC_SELECT,
+} from "../spec-rows"
 import {
   definitionForNew,
   ensureDefinition,
@@ -64,7 +72,6 @@ import {
   readReach,
   readServiceDefinition,
   registerAuth,
-  serviceDefinitionHash,
   serviceOrigin,
   tunnelAddress,
   volumeOnHost,
@@ -257,12 +264,14 @@ export async function loadService(
   const { serviceSpec: spec, ...row } = server
   const { host: hostRow, ...bare } = spec
   const host = hostRow ? openServer(ctx, hostRow) : null
+  const opened = openServiceSpec(ctx, spec)
 
   return {
     ctx,
     server: openServer(ctx, row),
-    spec: bare,
-    definition: readServiceDefinition(spec.definition),
+    // Its hash is the keyed one, also for a row from before.
+    spec: { ...bare, hash: opened.hash },
+    definition: readServiceDefinition(opened.definition),
     publish: readPublish(spec.publish),
     env: readEnvBindings(spec.env),
     values: readPlainValues(spec.plainValues),
@@ -502,7 +511,7 @@ export async function serviceOfDefinition(
     id: shared.id,
     name: shared.name,
     description: shared.description,
-    definition: readServiceDefinition(source.definition),
+    definition: readServiceDefinition(openServiceSpec(ctx, source).definition),
   }
 }
 
@@ -647,8 +656,12 @@ export async function launchServiceOn(
       db().serviceSpec.create({
         data: {
           serverId: id,
-          definition: JSON.stringify(prepared.definition),
-          hash: serviceDefinitionHash(prepared.definition),
+          ...sealedServiceDefinition(
+            ctx,
+            id,
+            JSON.stringify(prepared.definition),
+            canonicalJson(prepared.definition),
+          ),
           hostId: prepared.host.id,
           engine: found.engine,
           engineVersion: found.version,
@@ -1649,7 +1662,17 @@ export async function updateServiceOn(
   access: ServiceAccess,
   choice: ServiceUpdateChoice = {},
 ): Promise<{ status: ServiceStatus; image: string; changed: boolean }> {
-  if (choice.basis !== undefined && loaded.spec.hash !== choice.basis) {
+  // A request asked before the vault's rows were sealed holds the plain
+  // SHA-256 of the definition: it still counts.
+  if (
+    choice.basis !== undefined &&
+    !contentHashMatches(
+      loaded.ctx,
+      "service",
+      canonicalJson(loaded.definition),
+      choice.basis,
+    )
+  ) {
     throw new PcpError(
       "state",
       `${loaded.server.name}'s definition changed since this was asked (it pins ${loaded.definition.image ?? "no image"} now), so nothing was updated. The assistant can ask again.`,
@@ -1726,20 +1749,21 @@ export async function writeServiceDefinition(
 ): Promise<void> {
   const checked = parseServiceDefinition(definition)
   const json = JSON.stringify(checked)
-  const hash = serviceDefinitionHash(checked)
+  const canonical = canonicalJson(checked)
 
   await db().serviceSpec.update({
     where: { serverId: id },
-    data: { definition: json, hash },
+    data: sealedServiceDefinition(ctx, id, json, canonical),
   })
 
   const instances = [id]
+  const hash = contentHash(ctx, "service", canonical)
 
   for (const sibling of await siblingInstances(ctx, id)) {
     if (sibling.kind === "service") {
       await db().serviceSpec.updateMany({
         where: { serverId: sibling.id, hash: { not: hash } },
-        data: { definition: json, hash },
+        data: sealedServiceDefinition(ctx, sibling.id, json, canonical),
       })
       instances.push(sibling.id)
     }
@@ -2582,7 +2606,7 @@ export async function exitServiceDefinitions(
   const specs = await db().serviceSpec.findMany({
     where: { server: { vaultId: ctx.vaultId, definitionId: { not: null } } },
     select: {
-      definition: true,
+      ...SERVICE_SPEC_SELECT,
       server: { select: { ...SERVER_META_SELECT, definitionId: true } },
     },
     orderBy: { createdAt: "asc" },
@@ -2597,7 +2621,9 @@ export async function exitServiceDefinitions(
     }
 
     try {
-      const definition = readServiceDefinition(spec.definition)
+      const definition = readServiceDefinition(
+        openServiceSpec(ctx, spec).definition,
+      )
 
       if (definition.registers.kind === "exit") {
         found.set(id, {

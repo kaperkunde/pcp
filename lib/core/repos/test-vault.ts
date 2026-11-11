@@ -392,8 +392,8 @@ export async function addService(
       authType: "none",
       serviceSpec: {
         create: {
-          definition: JSON.stringify(checked),
-          hash: serviceDefinitionHash(checked),
+          plainDefinition: JSON.stringify(checked),
+          hash: serviceDefinitionHash(ctx, checked),
           hostId,
           engine: "docker",
           engineVersion: "27.1.1",

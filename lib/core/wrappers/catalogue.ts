@@ -1,6 +1,7 @@
 import { storeTools, type SyncResult } from "../catalogue"
 import type { VaultContext } from "../context"
 import { db } from "../db"
+import { openWrapperSpec } from "../spec-rows"
 import { setServerStatus } from "../servers"
 
 import { catalogueTools, readDefinition } from "./definition"
@@ -28,7 +29,7 @@ export async function syncWrapperTools(
   const toolCount = await storeTools(
     ctx,
     server.id,
-    catalogueTools(readDefinition(spec.definition)),
+    catalogueTools(readDefinition(openWrapperSpec(ctx, spec).definition)),
   )
   await setServerStatus(ctx, server.id, "ok", "", { lastSyncedAt: new Date() })
 

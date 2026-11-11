@@ -26,7 +26,15 @@ import {
  * openTool, which takes either form.
  */
 
-export type ToolAbout = { title: string | null; description: string }
+export type ToolAbout = {
+  title: string | null
+  description: string
+  /**
+   * The title its annotations carried (MCP's annotations.title): kept here,
+   * sealed, and out of the plain annotations, which hold the hints only.
+   */
+  annotationsTitle?: string | null
+}
 
 export type ToolSchema = {
   inputSchema: string
@@ -41,7 +49,8 @@ export const TOOL_ABOUT: SealedGroup<ToolAbout, "about"> = {
   column: "about",
   idKey: "id",
   aad: (id) => `mcp_tool:${id}:about`,
-  blank: { title: null, description: "" },
+  blank: { title: null, description: "", annotationsTitle: null },
+  sealedOnly: ["annotationsTitle"],
 }
 
 export const TOOL_SCHEMA: SealedGroup<ToolSchema, "schema"> = {
@@ -83,11 +92,50 @@ export function openTool<T extends { id: string }>(
   ctx: VaultContext,
   row: T,
 ): OpenedTool<T> {
-  return openRow(
+  const opened = openRow(
     ctx.dek,
     TOOL_OVERRIDE,
     openRow(ctx.dek, TOOL_SCHEMA, openRow(ctx.dek, TOOL_ABOUT, row)),
-  )
+  ) as Record<string, unknown>
+
+  // The annotations' title goes back where it was, when both were read.
+  if ("annotationsTitle" in opened) {
+    const title = opened.annotationsTitle
+    delete opened.annotationsTitle
+
+    if (typeof title === "string" && typeof opened.annotations === "string") {
+      try {
+        opened.annotations = JSON.stringify({
+          title,
+          ...(JSON.parse(opened.annotations) as object),
+        })
+      } catch {
+        // Annotations that do not read stay as they are.
+      }
+    }
+  }
+
+  return opened as OpenedTool<T>
+}
+
+/**
+ * A tool's annotations as stored: the hints, plain; their title, which is
+ * words, sealed with the description (annotationsTitle).
+ */
+export function splitAnnotations(annotations: unknown): {
+  annotations: string | null
+  annotationsTitle: string | null
+} {
+  if (!annotations || typeof annotations !== "object") {
+    return { annotations: null, annotationsTitle: null }
+  }
+
+  const { title, ...hints } = annotations as Record<string, unknown>
+
+  return {
+    annotations: JSON.stringify(hints),
+    annotationsTitle: typeof title === "string" ? title : null,
+  }
 }
 
 export function openTools<T extends { id: string }>(
@@ -104,12 +152,13 @@ export function sealedToolContent(
   values: ToolAbout & ToolSchema,
 ): Pick<
   Prisma.McpToolUncheckedCreateInput,
-  "about" | "schema" | PlainKey<keyof ToolAbout | keyof ToolSchema>
+  "about" | "schema" | PlainKey<"title" | "description" | keyof ToolSchema>
 > {
   return {
     ...(sealFields(ctx.dek, TOOL_ABOUT, id, {
       title: values.title,
       description: values.description,
+      annotationsTitle: values.annotationsTitle ?? null,
     }) as object),
     ...(sealFields(ctx.dek, TOOL_SCHEMA, id, {
       inputSchema: values.inputSchema,
@@ -119,7 +168,7 @@ export function sealedToolContent(
     }) as object),
   } as Pick<
     Prisma.McpToolUncheckedCreateInput,
-    "about" | "schema" | PlainKey<keyof ToolAbout | keyof ToolSchema>
+    "about" | "schema" | PlainKey<"title" | "description" | keyof ToolSchema>
   >
 }
 

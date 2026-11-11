@@ -1,5 +1,6 @@
 import type { VaultContext } from "../context"
 import { db } from "../db"
+import { openServiceSpec, SERVICE_SPEC_SELECT } from "../spec-rows"
 import { SERVER_META_SELECT, serverName } from "../server-meta"
 import { isPcpError } from "../errors"
 import { commonRepository } from "../repos/common"
@@ -54,13 +55,15 @@ async function runningItems(
   const names = new Set(items.map((item) => item.name))
   const specs = await db().serviceSpec.findMany({
     where: { server: { vaultId: ctx.vaultId } },
-    select: { definition: true, server: { select: SERVER_META_SELECT } },
+    select: { ...SERVICE_SPEC_SELECT, server: { select: SERVER_META_SELECT } },
     orderBy: { createdAt: "asc" },
   })
 
   return specs.flatMap((spec) => {
     try {
-      const definition = readServiceDefinition(spec.definition)
+      const definition = readServiceDefinition(
+        openServiceSpec(ctx, spec).definition,
+      )
       const item = itemOfImage(
         `${definition.image ?? ""} ${definition.source ?? ""}`,
       )

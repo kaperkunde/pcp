@@ -1343,8 +1343,8 @@ describe("proposing a service", () => {
           definitionId: input.definitionId ?? null,
           serviceSpec: {
             create: {
-              definition: JSON.stringify(definition),
-              hash: serviceDefinitionHash(definition),
+              plainDefinition: JSON.stringify(definition),
+              hash: serviceDefinitionHash(ctx, definition),
               hostId: input.hostId,
               engine: "docker",
               containerName: `pcp-${id}`,

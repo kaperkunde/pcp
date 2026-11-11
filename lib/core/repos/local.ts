@@ -1,6 +1,7 @@
 import { SECRET_PLACEHOLDER } from "../constants"
 import type { VaultContext } from "../context"
 import { db } from "../db"
+import { openServiceSpec, SERVICE_SPEC_SELECT } from "../spec-rows"
 import { toolOverrides } from "../tool-rows"
 import {
   DEFINITION_META_SELECT,
@@ -374,19 +375,22 @@ async function serverDocument(
  * owner's SSH server is never shared.
  */
 async function serviceDocument(
+  ctx: VaultContext,
   row: OpenServer,
   named: Named,
 ): Promise<ServiceDocument> {
   const spec = await db().serviceSpec.findUnique({
     where: { serverId: row.id },
-    select: { definition: true },
+    select: SERVICE_SPEC_SELECT,
   })
 
   if (!spec) {
     throw invalid(`${row.name} has no service definition to share.`)
   }
 
-  const definition = readServiceDefinition(spec.definition)
+  const definition = readServiceDefinition(
+    openServiceSpec(ctx, spec).definition,
+  )
 
   // Its image is one the owner's own SSH server built: nothing another PCP
   // could pull, and a build is the owner's alone to set up.
@@ -429,7 +433,7 @@ async function documentOfRow(
     case "mcp":
       return serverDocument(row, named)
     case "service":
-      return serviceDocument(row, named)
+      return serviceDocument(ctx, row, named)
   }
 }
 

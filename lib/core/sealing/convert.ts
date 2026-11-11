@@ -15,9 +15,17 @@ import {
 } from "../server-meta"
 import { sealedDefinitionMeta } from "../definition-rows"
 import {
+  canonicalOf,
+  sealedServiceDefinition,
+  sealedSpecPatches,
+  sealedSpecText,
+  sealedWrapperDefinition,
+} from "../spec-rows"
+import {
   plainToolValues,
   sealedToolContent,
   sealedToolOverride,
+  splitAnnotations,
 } from "../tool-rows"
 import { PLAIN_SETTINGS, storedSetting } from "../settings"
 import { sealingState } from "./state"
@@ -331,10 +339,30 @@ export const SEAL_CONVERTERS: Converter[] = [
       // Each part only while it is still from before: a read of the tools
       // since seals what it wrote, and the owner's wording is theirs.
       if (row.about === null || row.schema === null) {
+        // The annotations' title is words: sealed with the description.
+        let annotations = splitAnnotations(null)
+
+        try {
+          annotations = splitAnnotations(
+            row.annotations ? JSON.parse(row.annotations) : null,
+          )
+        } catch {
+          annotations = { annotations: row.annotations, annotationsTitle: null }
+        }
+
         const { count } = await db().mcpTool.updateMany({
-          where: { id: row.id, about: null, schema: null },
+          where: {
+            id: row.id,
+            about: null,
+            schema: null,
+            annotations: row.annotations,
+          },
           data: {
-            ...sealedToolContent(ctx, row.id, values),
+            ...sealedToolContent(ctx, row.id, {
+              ...values,
+              annotationsTitle: annotations.annotationsTitle,
+            }),
+            annotations: annotations.annotations,
             updatedAt: row.updatedAt,
           },
         })
@@ -357,6 +385,97 @@ export const SEAL_CONVERTERS: Converter[] = [
       }
 
       return sealed
+    },
+  }),
+  converter({
+    table: "openapi_spec",
+    read: (ctx, limit) =>
+      db().openApiSpec.findMany({
+        where: {
+          server: { vaultId: ctx.vaultId },
+          OR: [{ sealedText: null }, { sealedPatches: null }],
+        },
+        take: limit,
+      }),
+    write: async (ctx, row) => {
+      let sealed = false
+
+      // Each only while it is still as it was read.
+      if (row.sealedText === null) {
+        const { count } = await db().openApiSpec.updateMany({
+          where: { serverId: row.serverId, sealedText: null, hash: row.hash },
+          data: sealedSpecText(ctx, row.serverId, row.plainText),
+        })
+        sealed ||= count === 1
+      }
+
+      if (row.sealedPatches === null) {
+        const { count } = await db().openApiSpec.updateMany({
+          where: {
+            serverId: row.serverId,
+            sealedPatches: null,
+            plainPatches: row.plainPatches,
+          },
+          data: sealedSpecPatches(ctx, row.serverId, row.plainPatches),
+        })
+        sealed ||= count === 1
+      }
+
+      return sealed
+    },
+  }),
+  converter({
+    table: "wrapper_spec",
+    read: (ctx, limit) =>
+      db().wrapperSpec.findMany({
+        where: { server: { vaultId: ctx.vaultId }, sealedDefinition: null },
+        take: limit,
+      }),
+    write: async (ctx, row) => {
+      const { count } = await db().wrapperSpec.updateMany({
+        where: {
+          serverId: row.serverId,
+          sealedDefinition: null,
+          hash: row.hash,
+        },
+        data: {
+          ...sealedWrapperDefinition(
+            ctx,
+            row.serverId,
+            row.plainDefinition,
+            canonicalOf(row.plainDefinition),
+          ),
+          updatedAt: row.updatedAt,
+        },
+      })
+      return count === 1
+    },
+  }),
+  converter({
+    table: "service_spec",
+    read: (ctx, limit) =>
+      db().serviceSpec.findMany({
+        where: { server: { vaultId: ctx.vaultId }, sealedDefinition: null },
+        take: limit,
+      }),
+    write: async (ctx, row) => {
+      const { count } = await db().serviceSpec.updateMany({
+        where: {
+          serverId: row.serverId,
+          sealedDefinition: null,
+          plainDefinition: row.plainDefinition,
+        },
+        data: {
+          ...sealedServiceDefinition(
+            ctx,
+            row.serverId,
+            row.plainDefinition,
+            canonicalOf(row.plainDefinition),
+          ),
+          updatedAt: row.updatedAt,
+        },
+      })
+      return count === 1
     },
   }),
   converter({

@@ -1,6 +1,7 @@
 import { openOrigin, siteLabel } from "./browser-secrets"
 import type { VaultContext } from "./context"
 import { db } from "./db"
+import { openWrapperSpec, WRAPPER_SPEC_SELECT } from "./spec-rows"
 import { SERVER_META_SELECT, serverName } from "./server-meta"
 import { openSecretDetails, type SecretKind } from "./secrets"
 import { readEnvBindings } from "./services/definition"
@@ -96,7 +97,7 @@ export async function secretUses(
 
   const wrappers = await db().mcpServer.findMany({
     where: { vaultId: ctx.vaultId, kind: "wrapper" },
-    select: { ...SERVER, wrapperSpec: { select: { definition: true } } },
+    select: { ...SERVER, wrapperSpec: { select: WRAPPER_SPEC_SELECT } },
   })
 
   for (const wrapper of wrappers) {
@@ -107,9 +108,9 @@ export async function secretUses(
     let bound: Array<string | null>
 
     try {
-      bound = readDefinition(wrapper.wrapperSpec.definition).secrets.map(
-        (binding) => binding.secretId,
-      )
+      bound = readDefinition(
+        openWrapperSpec(ctx, wrapper.wrapperSpec).definition,
+      ).secrets.map((binding) => binding.secretId)
     } catch {
       // A definition that does not read is no use of anything.
       continue

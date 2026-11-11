@@ -3,7 +3,11 @@ import { randomUUID } from "node:crypto"
 import type { VaultContext } from "./context"
 import { db } from "./db"
 import { inheritedToolDescriptions } from "./definition-rows"
-import { sealedToolContent, sealedToolOverride } from "./tool-rows"
+import {
+  sealedToolContent,
+  sealedToolOverride,
+  splitAnnotations,
+} from "./tool-rows"
 
 /**
  * Writing a server's tool list into the catalogue (mcp_tool), whichever way
@@ -82,10 +86,12 @@ export async function storeTools(
       for (const tool of tools) {
         names.add(tool.name)
         const id = known.get(tool.name) ?? randomUUID()
+        const annotations = splitAnnotations(tool.annotations)
         const fields = {
           ...sealedToolContent(ctx, id, {
             title: tool.title ?? null,
             description: tool.description ?? "",
+            annotationsTitle: annotations.annotationsTitle,
             inputSchema: JSON.stringify(tool.inputSchema ?? { type: "object" }),
             operation: tool.operation ?? null,
             output: tool.output ?? null,
@@ -94,9 +100,7 @@ export async function storeTools(
                 ? null
                 : JSON.stringify(tool.outputSchema),
           }),
-          annotations: tool.annotations
-            ? JSON.stringify(tool.annotations)
-            : null,
+          annotations: annotations.annotations,
           icons:
             tool.icons === undefined || tool.icons === null
               ? null

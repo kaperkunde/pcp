@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest"
 
+import { openServiceSpec } from "../spec-rows"
 import { openTool } from "../tool-rows"
 import { openDefinition } from "../definition-rows"
 import { createBrowserServer } from "../browser/server"
@@ -585,7 +586,9 @@ describe("applying a service", () => {
     const after = await db().serviceSpec.findUniqueOrThrow({
       where: { serverId: id },
     })
-    expect(readServiceDefinition(after.definition).image).toBe(image)
+    expect(
+      readServiceDefinition(openServiceSpec(ctx, after).definition).image,
+    ).toBe(image)
     // Its SSH server, engine, container, publish address, secrets and what
     // it registered stay as they were.
     expect(after).toMatchObject({

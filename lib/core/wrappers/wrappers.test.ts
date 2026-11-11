@@ -1,4 +1,5 @@
 import { Client, InMemoryTransport } from "@modelcontextprotocol/client"
+import { openWrapperSpec } from "../spec-rows"
 import { writeDefinition } from "../definition-rows"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
@@ -1505,7 +1506,7 @@ describe("a tool's output schema", () => {
   it("is stored only when a tool declares one, so older definitions read as they were", async () => {
     await approvedWrapper(ECHO_TOOL, { call_levels: "token" })
     const spec = await db().wrapperSpec.findFirstOrThrow()
-    const stored = JSON.parse(spec.definition) as {
+    const stored = JSON.parse(openWrapperSpec(ctx, spec).definition) as {
       tools: Array<Record<string, unknown>>
     } & Record<string, unknown>
 
@@ -1518,7 +1519,10 @@ describe("whose levels a wrapper's calls follow", () => {
   it("runs on the owner's approval by default, whatever the token's levels for its calls", async () => {
     const wrapper = await approvedWrapper()
     expect(
-      JSON.parse((await db().wrapperSpec.findFirstOrThrow()).definition),
+      JSON.parse(
+        openWrapperSpec(ctx, await db().wrapperSpec.findFirstOrThrow())
+          .definition,
+      ),
     ).toMatchObject({ callLevels: "approved" })
     await writeToolAccess(scope.tokenId, wrapper.id, "lookup", "allowed")
 
@@ -1734,7 +1738,8 @@ describe("a browser flow", () => {
   it("is a wrapper with a tool that calls the browser, told apart without being stored", async () => {
     const { view, wrapper } = await approved([FLOW_TOOL, PLAIN_TOOL])
     const definition = readDefinition(
-      (await db().wrapperSpec.findFirstOrThrow()).definition,
+      openWrapperSpec(ctx, await db().wrapperSpec.findFirstOrThrow())
+        .definition,
     )
     const browsers = await browserServerIds(ctx)
 
@@ -1825,7 +1830,8 @@ describe("a browser flow", () => {
       ],
     })
     const definition = readDefinition(
-      (await db().wrapperSpec.findFirstOrThrow()).definition,
+      openWrapperSpec(ctx, await db().wrapperSpec.findFirstOrThrow())
+        .definition,
     )
     expect(definition.secrets).toEqual([
       expect.objectContaining({

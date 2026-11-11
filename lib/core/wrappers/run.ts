@@ -5,6 +5,7 @@ import type { VaultContext } from "../context"
 import { runProgram } from "../code/run"
 import type { Executor } from "../code/types"
 import { db } from "../db"
+import { openWrapperSpec } from "../spec-rows"
 import { openTool, TOOL_SCHEMA_SELECT } from "../tool-rows"
 import { notFound, PcpError } from "../errors"
 import { loadGatewayServers, type GatewayServer } from "../gateway-servers"
@@ -187,7 +188,7 @@ async function callWrapperTool(
     throw new PcpError("state", `${server.name} has no definition.`)
   }
 
-  const definition = readDefinition(spec.definition)
+  const definition = readDefinition(openWrapperSpec(env.ctx, spec).definition)
   const tool = definition.tools.find((entry) => entry.name === toolName)
 
   if (!tool) {

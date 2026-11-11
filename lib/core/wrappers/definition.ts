@@ -1,11 +1,10 @@
-import { createHash } from "node:crypto"
-
 import { z } from "zod"
 
 import { checkSyntax } from "../code/quickjs"
 import type { VaultContext } from "../context"
 import { SECRET_PLACEHOLDER } from "../constants"
 import { db } from "../db"
+import { contentHash, openWrapperSpec, WRAPPER_SPEC_SELECT } from "../spec-rows"
 import { openTools, TOOL_SCHEMA_SELECT } from "../tool-rows"
 import { openServers, SERVER_NAME_SELECT } from "../server-meta"
 import { invalid } from "../errors"
@@ -192,8 +191,11 @@ export function readDefinition(json: string): WrapperDefinition {
 }
 
 /** What a request was asked against, and what the owner approves. */
-export function definitionHash(definition: WrapperDefinition): string {
-  return createHash("sha256").update(canonicalJson(definition)).digest("hex")
+export function definitionHash(
+  ctx: VaultContext,
+  definition: WrapperDefinition,
+): string {
+  return contentHash(ctx, "wrapper", canonicalJson(definition))
 }
 
 /** What a wrapper's tools are in the catalogue. */
@@ -280,19 +282,19 @@ export async function browserServerIds(
 }
 
 /** The vault's wrappers that are browser flows, by id. */
-export async function flowWrapperIds(
-  ctx: Pick<VaultContext, "vaultId">,
-): Promise<Set<string>> {
+export async function flowWrapperIds(ctx: VaultContext): Promise<Set<string>> {
   const browserIds = await browserServerIds(ctx)
 
   if (browserIds.size === 0) {
     return new Set()
   }
 
-  const specs = await db().wrapperSpec.findMany({
-    where: { server: { vaultId: ctx.vaultId } },
-    select: { serverId: true, definition: true },
-  })
+  const specs = (
+    await db().wrapperSpec.findMany({
+      where: { server: { vaultId: ctx.vaultId } },
+      select: WRAPPER_SPEC_SELECT,
+    })
+  ).map((row) => ({ serverId: row.serverId, ...openWrapperSpec(ctx, row) }))
 
   return new Set(
     specs.flatMap((spec) => {

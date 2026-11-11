@@ -980,20 +980,29 @@ model McpTool {
 /// from the server row so listing servers and serving the gateway never
 /// load it. Refreshing an uploaded schema regenerates from this copy.
 model OpenApiSpec {
-  serverId  String    @id @map("server_id")
-  server    McpServer @relation(fields: [serverId], references: [id], onDelete: Cascade)
-  /// The JSON or YAML text as read.
-  text      String
+  serverId      String    @id @map("server_id")
+  server        McpServer @relation(fields: [serverId], references: [id], onDelete: Cascade)
+  /// The JSON or YAML text as read, from before schemas were sealed (#96):
+  /// "" once sealed in sealedText.
+  plainText     String    @map("text")
   /// Edits applied to it before tools are generated: a JSON Patch (RFC
-  /// 6902) as JSON (lib/core/openapi/patch.ts).
-  patches   String    @default("[]")
-  /// SHA-256 of text, hex.
-  hash      String
-  fetchedAt DateTime  @map("fetched_at")
+  /// 6902) as JSON (lib/core/openapi/patch.ts), from before: "" once
+  /// sealed in sealedPatches.
+  plainPatches  String    @default("[]") @map("patches")
+  /// The text, sealed: AES-256-GCM under the vault's data key with
+  /// "openapi_spec:<server id>:sealedText" as associated data
+  /// (lib/core/spec-rows.ts).
+  sealedText    Bytes?    @map("sealed_text")
+  /// The edits, sealed as "openapi_spec:<server id>:sealedPatches".
+  sealedPatches Bytes?    @map("sealed_patches")
+  /// A keyed hash of text under the vault's key, hex; a row from before
+  /// holds its plain SHA-256 until it is sealed.
+  hash          String
+  fetchedAt     DateTime  @map("fetched_at")
   /// The PCP_VERSION that built the endpoint's tools from it. A boot under
   /// another version rebuilds them from this copy (endpoints.ts
   /// rebuildOutdatedEndpoints). Null for tools built before it was kept.
-  builtWith String?   @map("built_with")
+  builtWith     String?   @map("built_with")
 
   @@map("openapi_spec")
 }
@@ -1003,16 +1012,21 @@ model OpenApiSpec {
 /// (lib/core/wrappers/catalogue.ts), and nothing else changes it but the
 /// owner's own save or their answer to a request (lib/core/wrappers/admin.ts).
 model WrapperSpec {
-  serverId   String    @id @map("server_id")
-  server     McpServer @relation(fields: [serverId], references: [id], onDelete: Cascade)
+  serverId         String    @id @map("server_id")
+  server           McpServer @relation(fields: [serverId], references: [id], onDelete: Cascade)
   /// The definition as JSON: each tool's schema, program, the tools it calls
   /// and replaces, and where a secret may go (lib/core/wrappers/definition.ts).
-  /// Names a secret by its id, never by its value.
-  definition String
-  /// SHA-256 of the definition's canonical JSON, hex: what a request was
-  /// asked against.
-  hash       String
-  updatedAt  DateTime  @updatedAt @map("updated_at")
+  /// Names a secret by its id, never by its value. From before definitions
+  /// were sealed (#96): "" once sealed.
+  plainDefinition  String    @map("definition")
+  /// The definition, sealed: AES-256-GCM under the vault's data key with
+  /// "wrapper_spec:<server id>:sealedDefinition" as associated data.
+  sealedDefinition Bytes?    @map("sealed_definition")
+  /// A keyed hash of the definition's canonical JSON under the vault's key,
+  /// hex: what a request was asked against. A row from before holds its
+  /// plain SHA-256 until it is sealed.
+  hash             String
+  updatedAt        DateTime  @updatedAt @map("updated_at")
 
   @@map("wrapper_spec")
 }
@@ -1024,51 +1038,56 @@ model WrapperSpec {
 /// or MCP server of its own (registeredId). Kept apart from the server row
 /// like a wrapper's program.
 model ServiceSpec {
-  serverId      String     @id @map("server_id")
-  server        McpServer  @relation("ServiceOwn", fields: [serverId], references: [id], onDelete: Cascade)
+  serverId         String     @id @map("server_id")
+  server           McpServer  @relation("ServiceOwn", fields: [serverId], references: [id], onDelete: Cascade)
   /// What the definition's instances share, as JSON
   /// (lib/core/services/definition.ts): the image by digest, its ports, the
   /// names of its environment variables, its named volumes, the health
-  /// check and what it registers. Names no secret and no address.
-  definition    String
-  /// SHA-256 of the definition's canonical JSON, hex.
-  hash          String
+  /// check and what it registers. Names no secret and no address. From
+  /// before definitions were sealed (#96): "" once sealed.
+  plainDefinition  String     @map("definition")
+  /// The definition, sealed: AES-256-GCM under the vault's data key with
+  /// "service_spec:<server id>:sealedDefinition" as associated data.
+  sealedDefinition Bytes?     @map("sealed_definition")
+  /// A keyed hash of the definition's canonical JSON under the vault's key,
+  /// hex; a row from before holds its plain SHA-256 until it is sealed.
+  hash             String
   /// The SSH server the container runs on. Null once that server is
   /// deleted: the container stays there, and PCP no longer reaches it.
-  hostId        String?    @map("host_id")
-  host          McpServer? @relation("ServiceHost", fields: [hostId], references: [id], onDelete: SetNull)
+  hostId           String?    @map("host_id")
+  host             McpServer? @relation("ServiceHost", fields: [hostId], references: [id], onDelete: SetNull)
   /// docker | podman: the engine PCP found on the host.
-  engine        String
+  engine           String
   /// The engine's version as it reported it, for the owner.
-  engineVersion String     @default("") @map("engine_version")
+  engineVersion    String     @default("") @map("engine_version")
   /// The container's name on the host: pcp-<name>.
-  containerName String     @map("container_name")
+  containerName    String     @map("container_name")
   /// Where the container's ports are published on the host, as JSON:
   /// {"address": "0.0.0.0", "ports": [{"container": 5001, "host": 5001}]}.
-  publish       String     @default("{}")
+  publish          String     @default("{}")
   /// Which secret each environment variable takes, as JSON
   /// {"NAME": "<secret id>"}: by id, never a value. The values reach the
   /// host over standard input only (upstream.ts builds them).
-  env           String     @default("{}")
+  env              String     @default("{}")
   /// What the owner typed for the definition's plain variables (a VPN
   /// provider's name, a country), as JSON {"NAME": "value"}: no secrets.
-  plainValues   String     @default("{}") @map("plain_values")
+  plainValues      String     @default("{}") @map("plain_values")
   /// The API endpoint or MCP server launching it registered; null when it
   /// registers nothing, or once that server is deleted.
-  registeredId  String?    @unique @map("registered_id")
-  registered    McpServer? @relation("ServiceRegistered", fields: [registeredId], references: [id], onDelete: SetNull)
+  registeredId     String?    @unique @map("registered_id")
+  registered       McpServer? @relation("ServiceRegistered", fields: [registeredId], references: [id], onDelete: SetNull)
   /// How PCP reaches what the container publishes: "tunnel", a direct-tcpip
   /// channel through the SSH connection to the address its ports are bound
   /// to on the SSH server (every service launched, updated or made again
   /// since), or "direct", from PCP's machine to the published address (a
   /// service launched before, until then).
-  reach         String     @default("direct")
+  reach            String     @default("direct")
   /// What the owner (or an assistant's stop tool) last asked of it:
   /// "running" or "stopped". A call that finds it down starts it again, and
   /// the reconcile pass brings it back up, only while it is "running".
-  intendedState String     @default("running") @map("intended_state")
-  createdAt     DateTime   @default(now()) @map("created_at")
-  updatedAt     DateTime   @updatedAt @map("updated_at")
+  intendedState    String     @default("running") @map("intended_state")
+  createdAt        DateTime   @default(now()) @map("created_at")
+  updatedAt        DateTime   @updatedAt @map("updated_at")
 
   @@index([hostId])
   @@map("service_spec")

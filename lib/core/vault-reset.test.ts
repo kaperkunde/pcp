@@ -94,7 +94,7 @@ async function populate() {
       url: "pcp:service",
       serviceSpec: {
         create: {
-          definition: "{}",
+          plainDefinition: "{}",
           hash: "0",
           engine: "docker",
           containerName: "pcp-docs",
