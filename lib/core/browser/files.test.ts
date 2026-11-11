@@ -905,7 +905,7 @@ describe.skipIf(!executable)(
       )
     })
 
-    it("lets a run_code program download a file and upload its handle, the bytes never in the program", async () => {
+    it("lets a program (run_destructive) download a file and upload its handle, the bytes never in the program", async () => {
       const { token } = await createApiToken(ctx, {
         name: "Coder",
         allowAllServers: true,
