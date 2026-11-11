@@ -40,6 +40,7 @@ import { checkRun, runCode, runProgram } from "./run"
 import { javaScriptExecutor } from "./quickjs"
 import { MAY_HAVE_TAKEN_EFFECT } from "./runs"
 import { sandboxLanguages, startSandbox, stopSandbox } from "./sandbox"
+import { serverSlugWhere } from "../server-meta"
 
 // run_code as an assistant meets it, through the gateway's MCP interface,
 // with the upstream replaced by a stub that records what actually ran: the
@@ -1835,8 +1836,11 @@ describe("the same program again", () => {
     // would otherwise hold back each run's archive after the first.
     await setDuplicateCallWindow(
       ctx,
-      (await db().mcpServer.findFirstOrThrow({ where: { slug: "postcards" } }))
-        .id,
+      (
+        await db().mcpServer.findFirstOrThrow({
+          where: serverSlugWhere(ctx, "postcards"),
+        })
+      ).id,
       "archive",
       "exempt",
     )
@@ -2012,7 +2016,11 @@ describe("the same call again (#115)", () => {
   }
 
   const postcards = async () =>
-    (await db().mcpServer.findFirstOrThrow({ where: { slug: "postcards" } })).id
+    (
+      await db().mcpServer.findFirstOrThrow({
+        where: serverSlugWhere(ctx, "postcards"),
+      })
+    ).id
 
   it("answers a Write call made again with how the first went, and runs it once", async () => {
     const first = await callTool("archive", { id: 7 })

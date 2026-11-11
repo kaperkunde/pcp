@@ -41,6 +41,7 @@ import { scratchDatabase } from "./test-db"
 import { setToolAccess } from "./tool-access"
 import { setupVault } from "./vault"
 import { entryCall } from "./test-handles"
+import { writeServer } from "./server-meta"
 
 // Definitions and instances: servers that are the same thing share one
 // definition (description, schema, edits, tool descriptions), each with its
@@ -124,10 +125,7 @@ describe("a new server", () => {
       authType: "none",
     })
     // The server is renamed; its definition keeps the slug it had.
-    await db().mcpServer.update({
-      where: { id: first.id },
-      data: { slug: "old-docs" },
-    })
+    await writeServer(ctx, first.id, { slug: "old-docs" })
     const second = await createServer(ctx, {
       name: "Docs",
       url: "https://docs2.example.com/mcp",

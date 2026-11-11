@@ -298,7 +298,7 @@ describe.skipIf(!executable)("typing a secret", { timeout: 90_000 }, () => {
     })
 
     await expect.poll(async () => (await logDays()).length).toBe(1)
-    const { entries } = await readRequestLog(ctx.vaultId)
+    const { entries } = await readRequestLog(ctx)
     expect(entries).toMatchObject([
       {
         tokenId,

@@ -4,7 +4,11 @@ import YAML from "yaml"
 
 import type { VaultContext } from "../context"
 import { db } from "../db"
-import { shareDescription, writeDefinition } from "../definition-rows"
+import {
+  shareDescription,
+  writeDefinition,
+  definitionSlugWhere,
+} from "../definition-rows"
 import {
   checkPersonalNote,
   readServerNote,
@@ -22,6 +26,8 @@ import {
   type OpenServer,
   SERVER_META_SELECT,
   writeServer,
+  serverSlug,
+  serverSlugWhere,
 } from "../server-meta"
 import { getServer, normalizeNameAndDescription } from "../servers"
 import { isLoopback, readPublish } from "../services/definition"
@@ -511,10 +517,10 @@ async function prepare(
                     definitionId: row.definitionId,
                     vaultId: ctx.vaultId,
                   },
-                  select: { slug: true },
+                  select: SERVER_META_SELECT,
                   orderBy: { createdAt: "asc" },
                 })
-              ).map((instance) => instance.slug)
+              ).map((instance) => serverSlug(ctx, instance))
             : [row.slug]
         })()
 
@@ -779,12 +785,12 @@ export async function renameShared(
   }).name
   const slug = checkItemName(input.slug.trim().toLowerCase())
   const [definition, server] = await Promise.all([
-    db().serverDefinition.findUnique({
-      where: { vaultId_slug: { vaultId: ctx.vaultId, slug } },
+    db().serverDefinition.findFirst({
+      where: definitionSlugWhere(ctx, slug),
       select: { id: true },
     }),
-    db().mcpServer.findUnique({
-      where: { vaultId_slug: { vaultId: ctx.vaultId, slug } },
+    db().mcpServer.findFirst({
+      where: serverSlugWhere(ctx, slug),
       select: { definitionId: true },
     }),
   ])
@@ -799,7 +805,7 @@ export async function renameShared(
     )
   }
 
-  await writeDefinition(ctx, row.definitionId, { name }, { slug })
+  await writeDefinition(ctx, row.definitionId, { name, slug })
 }
 
 /**

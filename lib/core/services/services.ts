@@ -133,6 +133,7 @@ import {
   serverCreateData,
   serverName,
   writeServer,
+  serverSlug,
 } from "../server-meta"
 
 /**
@@ -618,7 +619,7 @@ export async function launchServiceOn(
     }
 
     const slug = await uniqueSlug(
-      ctx.vaultId,
+      ctx,
       `${slugify(prepared.name) || "service"}-service`,
     )
     const definitionRow = prepared.definitionId
@@ -2253,7 +2254,7 @@ async function statusAnswer(
   const registered = loaded.spec.registeredId
     ? await db().mcpServer.findUnique({
         where: { id: loaded.spec.registeredId },
-        select: { slug: true, kind: true },
+        select: { ...SERVER_META_SELECT, kind: true },
       })
     : null
 
@@ -2269,7 +2270,7 @@ async function statusAnswer(
     host: loaded.host?.name ?? null,
     ...(registered
       ? {
-          serves: registered.slug,
+          serves: serverSlug(loaded.ctx, registered),
           serves_kind:
             registered.kind === "openapi" ? "API endpoint" : "MCP server",
         }

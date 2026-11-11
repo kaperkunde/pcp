@@ -981,7 +981,7 @@ export async function createEndpoint(
             vaultId: ctx.vaultId,
             kind: "openapi",
             enabled: input.enabled !== false,
-            slug: await uniqueSlug(ctx.vaultId, slugify(data.name)),
+            slug: await uniqueSlug(ctx, slugify(data.name)),
             name: data.name,
             description: data.description,
             url: baseUrl,

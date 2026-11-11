@@ -11,6 +11,8 @@ import {
   openServers,
   type OpenServer,
   SERVER_NAME_SELECT,
+  SERVER_META_SELECT,
+  serverSlug,
 } from "./server-meta"
 import {
   answerValue,
@@ -1578,9 +1580,11 @@ async function wrapperCallLines(
       vaultId: ctx.vaultId,
       id: { in: [...new Set(calls.map((call) => call.serverId))] },
     },
-    select: { id: true, slug: true },
+    select: SERVER_META_SELECT,
   })
-  const slugs = new Map(servers.map((entry) => [entry.id, entry.slug]))
+  const slugs = new Map(
+    servers.map((entry) => [entry.id, serverSlug(ctx, entry)]),
+  )
 
   return [
     `Runs the program you approved for the wrapper ${server.name}, which may call: ${calls.map((call) => `${slugs.get(call.serverId) ?? "(removed server)"}/${call.tool}`).join(", ")}`,
@@ -2055,22 +2059,25 @@ export async function withPermission(
     ask.kind === "access"
       ? listAccessLevels(
           ask.input.levels,
-          await db().mcpServer.findMany({
-            where: {
-              vaultId: scope.ctx.vaultId,
-              id: {
-                in: [
-                  ...new Set([
-                    ...ask.input.levels.map((level) => level.serverId),
-                    ...(ask.input.tiers ?? []).flatMap((entry) =>
-                      entry.serverId ? [entry.serverId] : [],
-                    ),
-                  ]),
-                ],
+          openServers(
+            scope.ctx,
+            await db().mcpServer.findMany({
+              where: {
+                vaultId: scope.ctx.vaultId,
+                id: {
+                  in: [
+                    ...new Set([
+                      ...ask.input.levels.map((level) => level.serverId),
+                      ...(ask.input.tiers ?? []).flatMap((entry) =>
+                        entry.serverId ? [entry.serverId] : [],
+                      ),
+                    ]),
+                  ],
+                },
               },
-            },
-            select: { id: true, slug: true },
-          }),
+              select: SERVER_META_SELECT,
+            }),
+          ),
           ask.input.tiers ?? [],
         )
       : undefined

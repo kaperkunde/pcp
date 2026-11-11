@@ -8,6 +8,7 @@ import { newId } from "./ids"
 import { getSetting, setSetting } from "./settings"
 import type { ToolAnnotations } from "./tools/define"
 import { readWrapperOperation } from "./wrappers/definition"
+import { openServers, SERVER_META_SELECT, byServerSlug } from "./server-meta"
 
 /**
  * How much a tool can do, in three tiers, and the one place that says which
@@ -658,16 +659,17 @@ export async function wrapperTiersBelowCalls(
     return []
   }
 
-  const wrappers = await db().mcpServer.findMany({
-    where: { vaultId: ctx.vaultId, kind: "wrapper" },
-    select: {
-      id: true,
-      slug: true,
-      definitionId: true,
-      tools: { select: { name: true } },
-    },
-    orderBy: { slug: "asc" },
-  })
+  const wrappers = openServers(
+    ctx,
+    await db().mcpServer.findMany({
+      where: { vaultId: ctx.vaultId, kind: "wrapper" },
+      select: {
+        ...SERVER_META_SELECT,
+        definitionId: true,
+        tools: { select: { name: true } },
+      },
+    }),
+  ).sort(byServerSlug)
   const resolver = tierResolver(ctx, overrides)
   const found: TierBelowCalls[] = []
 

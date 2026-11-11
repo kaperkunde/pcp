@@ -463,9 +463,12 @@ describe("applying an item", () => {
     )
     expect(row).toMatchObject({ slug: "docs", syncVersion: 7 })
     expect(
-      await db().serverDefinition.findUniqueOrThrow({
-        where: { id: row.definitionId! },
-      }),
+      openDefinition(
+        ctx,
+        await db().serverDefinition.findUniqueOrThrow({
+          where: { id: row.definitionId! },
+        }),
+      ),
     ).toMatchObject({ slug: "team-docs" })
     expect((await localItem(ctx, "server", ids.docs)).document).toMatchObject({
       name: "team-docs",
@@ -475,9 +478,12 @@ describe("applying an item", () => {
     // A short name another definition has stays the definition's own.
     await applyItem(ctx, { ...docs, name: "pets" }, { id: ids.docs })
     expect(
-      await db().serverDefinition.findUniqueOrThrow({
-        where: { id: row.definitionId! },
-      }),
+      openDefinition(
+        ctx,
+        await db().serverDefinition.findUniqueOrThrow({
+          where: { id: row.definitionId! },
+        }),
+      ),
     ).toMatchObject({ slug: "team-docs" })
   })
 

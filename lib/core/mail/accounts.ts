@@ -247,7 +247,7 @@ export async function createMailAccount(
 
   const { data, newSecret } = await normalizeMailAccount(ctx, input)
   const id = newId()
-  const slug = await uniqueSlug(ctx.vaultId, slugify(data.name))
+  const slug = await uniqueSlug(ctx, slugify(data.name))
 
   await withNewSecret(ctx, newSecret, async (secretId) => {
     await db().mcpServer.create({

@@ -16,7 +16,13 @@ import {
 import { invalid, PcpError } from "../errors"
 import { checkPersonalNote, setPersonalNote } from "../personal-notes"
 import { findTextSecretByName } from "../secrets"
-import { writeServer } from "../server-meta"
+import {
+  writeServer,
+  openServers,
+  SERVER_META_SELECT,
+  serverSlugsWhere,
+  serverSlugTaken,
+} from "../server-meta"
 import {
   createServer,
   getServer,
@@ -214,10 +220,13 @@ async function wrapperProblems(
       }),
     ),
   ]
-  const servers = await db().mcpServer.findMany({
-    where: { vaultId: ctx.vaultId, slug: { in: slugs } },
-    select: { id: true, slug: true, kind: true },
-  })
+  const servers = openServers(
+    ctx,
+    await db().mcpServer.findMany({
+      where: serverSlugsWhere(ctx, slugs),
+      select: { ...SERVER_META_SELECT, kind: true },
+    }),
+  )
   const bySlug = new Map(servers.map((server) => [server.slug, server]))
   const tools = await db().mcpTool.findMany({
     where: { serverId: { in: servers.map((server) => server.id) } },
@@ -351,17 +360,16 @@ async function settle(
     const free =
       (await uniqueDefinitionSlug(
         db(),
+        ctx,
         ctx.vaultId,
         document.name,
         row.definitionId,
       )) === document.name
 
-    await writeDefinition(
-      ctx,
-      row.definitionId,
-      { name: document.displayName },
-      free ? { slug: document.name } : {},
-    )
+    await writeDefinition(ctx, row.definitionId, {
+      name: document.displayName,
+      ...(free ? { slug: document.name } : {}),
+    })
   }
 
   await db().mcpServer.updateMany({
@@ -382,12 +390,7 @@ async function firstName(
   const row = await getServer(ctx, id)
 
   if (!named && row.slug !== document.name) {
-    const taken = await db().mcpServer.findUnique({
-      where: { vaultId_slug: { vaultId: ctx.vaultId, slug: document.name } },
-      select: { id: true },
-    })
-
-    if (!taken) {
+    if (!(await serverSlugTaken(ctx, document.name))) {
       await renameServerSlug(ctx, id, document.name)
     }
   }

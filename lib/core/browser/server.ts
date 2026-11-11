@@ -128,7 +128,7 @@ export async function createBrowserServer(
       vaultId: ctx.vaultId,
       kind: "browser",
       name: BROWSER_NAME,
-      slug: await uniqueSlug(ctx.vaultId, slugify(BROWSER_NAME)),
+      slug: await uniqueSlug(ctx, slugify(BROWSER_NAME)),
       description: BROWSER_DESCRIPTION,
       url: BROWSER_URL,
       authType: "none",

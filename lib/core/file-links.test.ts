@@ -123,7 +123,7 @@ describe("a download link", () => {
       status: 410,
     })
 
-    const { entries } = await readRequestLog(ctx.vaultId)
+    const { entries } = await readRequestLog(ctx)
     expect(
       entries.filter((entry) => entry.tool === "file_link/download"),
     ).toHaveLength(MAX_LINK_DOWNLOADS + 1)

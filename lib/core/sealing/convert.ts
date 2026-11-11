@@ -9,11 +9,15 @@ import { isSealedText } from "../sealed"
 import { sealedTokenName } from "../token-names"
 import { sealedResultName } from "../tool-results"
 import {
-  plainServerMeta,
+  readServerMeta,
   sealedServerMeta,
   SERVER_META_SELECT,
 } from "../server-meta"
-import { sealedDefinitionMeta } from "../definition-rows"
+import {
+  DEFINITION_META_SELECT,
+  definitionMeta,
+  sealedDefinitionMeta,
+} from "../definition-rows"
 import {
   canonicalOf,
   sealedServiceDefinition,
@@ -28,6 +32,7 @@ import {
   splitAnnotations,
 } from "../tool-rows"
 import { PLAIN_SETTINGS, storedSetting } from "../settings"
+import { sealRequestLogDay, unsealedLogDays } from "../request-log"
 import { sealingState } from "./state"
 
 /**
@@ -273,17 +278,23 @@ export const SEAL_CONVERTERS: Converter[] = [
     table: "mcp_server",
     read: (ctx, limit) =>
       db().mcpServer.findMany({
-        where: { vaultId: ctx.vaultId, meta: null },
+        // A row sealed before its short name was still holds that in
+        // plain text, with no hash: sealed again whole.
+        where: { vaultId: ctx.vaultId, slugKey: null },
         select: { ...SERVER_META_SELECT, updatedAt: true },
         take: limit,
       }),
     write: async (ctx, row) => {
-      // Every write of these values since seals the whole row, so a row
-      // still without meta is still as it was read.
+      // Every write of these values since seals the whole row with the
+      // short name's hash, so a row still without one is as it was read.
       const { count } = await db().mcpServer.updateMany({
-        where: { id: row.id, meta: null },
+        where: {
+          id: row.id,
+          slugKey: null,
+          meta: row.meta === null ? null : { equals: row.meta },
+        },
         data: {
-          ...sealedServerMeta(ctx, row.id, plainServerMeta(row)),
+          ...sealedServerMeta(ctx, row.id, readServerMeta(ctx, row)),
           updatedAt: row.updatedAt,
         },
       })
@@ -294,28 +305,22 @@ export const SEAL_CONVERTERS: Converter[] = [
     table: "server_definition",
     read: (ctx, limit) =>
       db().serverDefinition.findMany({
-        where: { vaultId: ctx.vaultId, meta: null },
-        select: {
-          id: true,
-          plainName: true,
-          plainDescription: true,
-          updatedAt: true,
-        },
+        where: { vaultId: ctx.vaultId, slugKey: null },
+        select: { ...DEFINITION_META_SELECT, updatedAt: true },
         take: limit,
       }),
     write: async (ctx, row) => {
       const { count } = await db().serverDefinition.updateMany({
         where: {
           id: row.id,
-          meta: null,
+          slugKey: null,
+          meta: row.meta === null ? null : { equals: row.meta },
           plainName: row.plainName,
+          plainSlug: row.plainSlug,
           plainDescription: row.plainDescription,
         },
         data: {
-          ...sealedDefinitionMeta(ctx, row.id, {
-            name: row.plainName,
-            description: row.plainDescription,
-          }),
+          ...sealedDefinitionMeta(ctx, row.id, definitionMeta(ctx, row)),
           updatedAt: row.updatedAt,
         },
       })
@@ -506,6 +511,24 @@ export const SEAL_CONVERTERS: Converter[] = [
     },
   }),
 ]
+
+/**
+ * The request log's days that hold a line of the vault's from before its
+ * names were sealed: each file written again with those lines sealed where
+ * they were. Not rows of the database's, so no rebuild of its file.
+ */
+const REQUEST_LOG_CONVERTER: Converter = {
+  table: "request_log",
+  read: async (ctx, limit) =>
+    (await unsealedLogDays(ctx.vaultId))
+      .slice(0, limit)
+      .map((day) => async () => {
+        await sealRequestLogDay(ctx, day)
+        return false
+      }),
+}
+
+SEAL_CONVERTERS.push(REQUEST_LOG_CONVERTER)
 
 export { forgetSealedVaults } from "./state"
 

@@ -48,6 +48,9 @@ import {
   openServers,
   type OpenServer,
   SERVER_META_SELECT,
+  byServerSlug,
+  findServerBySlug,
+  serverSlugWhere,
 } from "./server-meta"
 
 /**
@@ -255,9 +258,8 @@ async function visibleEndpoints(scope: EndpointScope) {
           kind: "openapi",
           ...(scope.serverIds ? { id: { in: scope.serverIds } } : {}),
         },
-        orderBy: { slug: "asc" },
       }),
-    ),
+    ).sort(byServerSlug),
   )
 
   // An endpoint the owner configured and then disabled is theirs alone: the
@@ -269,8 +271,8 @@ async function findEndpoint(
   scope: EndpointScope,
   slug: string,
 ): Promise<EndpointRow> {
-  const found = await db().mcpServer.findUnique({
-    where: { vaultId_slug: { vaultId: scope.ctx.vaultId, slug } },
+  const found = await db().mcpServer.findFirst({
+    where: serverSlugWhere(scope.ctx, slug),
     include: { tools: { orderBy: { name: "asc" } } },
   })
   const [row] = found
@@ -1400,10 +1402,7 @@ async function findNoteTarget(
   scope: EndpointScope,
   slug: string,
 ): Promise<OpenServer> {
-  const row = await findServer(scope.ctx, {
-    vaultId: scope.ctx.vaultId,
-    slug,
-  })
+  const row = await findServerBySlug(scope.ctx, slug)
 
   if (row?.kind === "mcp" && row.enabled && inScope(scope, row.id)) {
     return row

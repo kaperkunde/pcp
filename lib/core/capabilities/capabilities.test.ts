@@ -22,6 +22,7 @@ import { keepBytes, openResult } from "../tool-results"
 import { setupVault } from "../vault"
 import { PROVIDER_FILES } from "./run"
 import { entryCall } from "../test-handles"
+import { serverSlugWhere } from "../server-meta"
 
 // The capability tools at /mcp, against fake providers: what they find,
 // what they call (through the token's own levels and the tool's tier), and
@@ -511,7 +512,7 @@ describe("forwarding through the token's levels and tiers", () => {
   it("leaves out a provider the owner blocked", async () => {
     await server("conv", CONVERTER)
     const serverId = (await db().mcpServer.findFirst({
-      where: { slug: "conv" },
+      where: serverSlugWhere(scope.ctx, "conv"),
     }))!.id
     await writeToolAccess(scope.tokenId, serverId, "convert_file", "blocked")
     const id = await keptFile("letter.png", "image/png")

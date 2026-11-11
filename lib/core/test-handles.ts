@@ -4,6 +4,7 @@ import { makeCallHandle } from "./call-handles"
 import { db } from "./db"
 import { openTool } from "./tool-rows"
 import type { GatewayScope } from "./gateway"
+import { serverSlugWhere } from "./server-meta"
 
 /**
  * For tests that call tools through the gateway: execute_<tier> takes the
@@ -110,7 +111,7 @@ export async function catalogueHandle(
   const row = openTool(
     scope.ctx,
     await db().mcpTool.findFirstOrThrow({
-      where: { name: tool, server: { slug, vaultId: scope.ctx.vaultId } },
+      where: { name: tool, server: serverSlugWhere(scope.ctx, slug) },
     }),
   )
 

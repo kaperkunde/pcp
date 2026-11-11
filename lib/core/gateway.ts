@@ -242,7 +242,12 @@ import {
   validateUsername,
   type AuthType,
 } from "./servers"
-import { openServer } from "./server-meta"
+import {
+  openServer,
+  SERVER_META_SELECT,
+  serverSlug,
+  serverSlugWhere,
+} from "./server-meta"
 import { openTool, TOOL_ABOUT_SELECT, TOOL_SCHEMA_SELECT } from "./tool-rows"
 import { collectHandleIds, missingResultMessage } from "./result-handles"
 import { capabilityProviders } from "./capabilities/candidates"
@@ -1273,6 +1278,7 @@ export function buildGatewayServer(
     log: ({ tool, names, ok: done, ms, error, note }) =>
       void appendRequestLog({
         vaultId: scope.ctx.vaultId,
+        dek: scope.ctx.dek,
         tokenId: scope.tokenId,
         tool,
         ...names,
@@ -3353,6 +3359,7 @@ export function buildGatewayServer(
 
       void appendRequestLog({
         vaultId: scope.ctx.vaultId,
+        dek: scope.ctx.dek,
         tokenId: scope.tokenId,
         tool: name,
         server: slug,
@@ -4227,8 +4234,7 @@ export function buildGatewayServer(
       const find = async () => {
         const found = await db().mcpServer.findFirst({
           where: {
-            vaultId: scope.ctx.vaultId,
-            slug: args.server,
+            ...serverSlugWhere(scope.ctx, args.server),
             ...(scope.serverIds ? { id: { in: scope.serverIds } } : {}),
           },
           include: { _count: { select: { tools: true } } },
@@ -4308,6 +4314,7 @@ export function buildGatewayServer(
 
       void appendRequestLog({
         vaultId: scope.ctx.vaultId,
+        dek: scope.ctx.dek,
         tokenId: scope.tokenId,
         tool: "resources/read",
         ok: opened !== null,
@@ -4755,9 +4762,9 @@ export function buildGatewayServer(
                 vaultId: scope.ctx.vaultId,
                 id: { in: [...places.values()].map((place) => place.storeId) },
               },
-              select: { id: true, slug: true },
+              select: SERVER_META_SELECT,
             })
-          ).map((row) => [row.id, row.slug]),
+          ).map((row) => [row.id, serverSlug(scope.ctx, row)]),
         )
         const savedOf = (resultId: string) => {
           const place = places.get(resultId)

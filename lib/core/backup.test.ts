@@ -50,7 +50,7 @@ import {
   revealSecret,
   updateSecret,
 } from "./secrets"
-import { createServer, getServer } from "./servers"
+import { createServer, getServer, getServerBySlug } from "./servers"
 import {
   byServerName,
   openServer,
@@ -103,6 +103,7 @@ import {
   unlockOwnerVault,
 } from "./vault"
 import { tokenName } from "./token-names"
+import { ensureSealed } from "./sealing/convert"
 
 // Export and restore against a scratch database: the file carries the
 // vault's rows as they are, a restore puts them back whole, and every way a
@@ -817,6 +818,14 @@ describe("restoring", { timeout: 60_000 }, () => {
       [cloneId, "upstream-staging", "mcp"],
     ])
     expect(servers.every((row) => row.personalNote === null)).toBe(true)
+    // The short names of the file, in plain text, are found and then
+    // sealed by the vault's next requests (#96).
+    expect((await getServerBySlug(ctx, "upstream-staging"))?.id).toBe(cloneId)
+    expect(await ensureSealed(ctx)).toBe(true)
+    expect(
+      await db().$queryRawUnsafe(`SELECT DISTINCT "slug" FROM "mcp_server"`),
+    ).toEqual([{ slug: "" }])
+    expect((await getServerBySlug(ctx, "upstream-staging"))?.id).toBe(cloneId)
   })
 
   it("carries a token's instructions as they are, and restores a file from before them as not set yet", async () => {
@@ -874,7 +883,7 @@ describe("restoring", { timeout: 60_000 }, () => {
           inputSchema: { type: "object" },
           program: "return 1",
           calls: [
-            `${(await db().mcpServer.findUniqueOrThrow({ where: { id: serverId } })).slug}/${(await db().mcpTool.findFirstOrThrow({ where: { serverId } })).name}`,
+            `${openServer(ctx, await db().mcpServer.findUniqueOrThrow({ where: { id: serverId } })).slug}/${(await db().mcpTool.findFirstOrThrow({ where: { serverId } })).name}`,
           ],
         },
       ],
@@ -1833,6 +1842,10 @@ function unsealed(
 
     delete row[group.column]
   }
+
+  // The keyed hashes a name is found by came with it.
+  delete row.slugKey
+  delete row.nameKey
 }
 
 /** A server row of a file from before #96. */

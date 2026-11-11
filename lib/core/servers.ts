@@ -20,10 +20,12 @@ import { closeSshConnections } from "./ssh/client"
 import { normalizeAuthorizeParams } from "./oauth-client"
 import {
   byServerName,
+  findServerBySlug,
   openServer,
   openServers,
   type OpenServer,
   serverCreateData,
+  serverSlugTaken,
   updateServerRow,
   writeServer,
 } from "./server-meta"
@@ -840,19 +842,14 @@ async function requireTextSecret(ctx: VaultContext, id: string) {
 }
 
 export async function uniqueSlug(
-  vaultId: string,
+  ctx: VaultContext,
   base: string,
   exceptId?: string,
 ) {
   let slug = base
 
   for (let n = 2; ; n++) {
-    const clash = await db().mcpServer.findUnique({
-      where: { vaultId_slug: { vaultId, slug } },
-      select: { id: true },
-    })
-
-    if (!clash || clash.id === exceptId) {
+    if (!(await serverSlugTaken(ctx, slug, exceptId))) {
       return slug
     }
 
@@ -930,11 +927,7 @@ export async function getServerBySlug(
   ctx: VaultContext,
   slug: string,
 ): Promise<OpenServer | null> {
-  const row = await db().mcpServer.findUnique({
-    where: { vaultId_slug: { vaultId: ctx.vaultId, slug } },
-  })
-
-  return row ? openServer(ctx, row) : null
+  return findServerBySlug(ctx, slug)
 }
 
 export async function createServer(
@@ -953,7 +946,7 @@ export async function createServer(
         ...serverCreateData(ctx, {
           id,
           vaultId: ctx.vaultId,
-          slug: await uniqueSlug(ctx.vaultId, slugify(data.name)),
+          slug: await uniqueSlug(ctx, slugify(data.name)),
           ...data,
           ...(definition
             ? {
@@ -1217,19 +1210,14 @@ export async function renameServerSlug(
     )
   }
 
-  const clash = await db().mcpServer.findUnique({
-    where: { vaultId_slug: { vaultId: ctx.vaultId, slug: cleaned } },
-    select: { id: true },
-  })
-
-  if (clash && clash.id !== id) {
+  if (await serverSlugTaken(ctx, cleaned, id)) {
     throw new PcpError(
       "conflict",
       `Another server is already called ${cleaned}.`,
     )
   }
 
-  await db().mcpServer.update({ where: { id }, data: { slug: cleaned } })
+  await writeServer(ctx, id, { slug: cleaned })
 }
 
 export async function setServerEnabled(

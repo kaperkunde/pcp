@@ -1,6 +1,6 @@
 import type { VaultContext } from "../context"
 import { db } from "../db"
-import { findServers } from "../server-meta"
+import { findServers, serverSlugsWhere } from "../server-meta"
 import { openWrapperSpec } from "../spec-rows"
 import { assistantBounds, readPacingConfig } from "../pacing/config"
 import {
@@ -78,9 +78,8 @@ async function foundPlaceFlags(
   }
 
   const browsers = await findServers(ctx, {
-    vaultId: ctx.vaultId,
+    ...serverSlugsWhere(ctx, slugs),
     kind: "browser",
-    slug: { in: slugs },
   })
 
   if (browsers.length === 0) {

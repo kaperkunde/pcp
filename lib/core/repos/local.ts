@@ -7,6 +7,7 @@ import {
   DEFINITION_META_SELECT,
   definitionMeta,
   ensureDefinition,
+  definitionSlugWhere,
 } from "../definition-rows"
 import { invalid, notFound } from "../errors"
 import { storedSpec } from "../endpoints"
@@ -40,6 +41,8 @@ import {
   type OpenServer,
   SERVER_META_SELECT,
   serverName,
+  serverSlug,
+  serverSlugWhere,
 } from "../server-meta"
 
 /**
@@ -115,15 +118,13 @@ async function definitionName(
   const definition = definitionId
     ? await db().serverDefinition.findUnique({
         where: { id: definitionId },
-        select: { ...DEFINITION_META_SELECT, slug: true },
+        select: DEFINITION_META_SELECT,
       })
     : null
+  const meta = definition ? definitionMeta(ctx, definition) : null
 
-  return definition
-    ? {
-        slug: itemSlug(definition.slug),
-        name: definitionMeta(ctx, definition).name,
-      }
+  return meta
+    ? { slug: itemSlug(meta.slug), name: meta.name }
     : { slug: itemSlug(row.slug), name: row.name }
 }
 
@@ -256,7 +257,7 @@ export async function serviceOwnLines(
     where: { serverId: row.id },
     include: {
       host: { select: { ...SERVER_META_SELECT, vaultId: true } },
-      registered: { select: { ...SERVER_META_SELECT, slug: true } },
+      registered: { select: SERVER_META_SELECT },
     },
   })
 
@@ -292,7 +293,7 @@ export async function serviceOwnLines(
       ([name, id]) => `${name} takes "${names.get(id) ?? "(none)"}"`,
     ),
     registered: spec.registered
-      ? `${serverName(ctx, spec.registered)} (${spec.registered.slug})`
+      ? `${serverName(ctx, spec.registered)} (${serverSlug(ctx, spec.registered)})`
       : null,
   }
 }
@@ -598,8 +599,8 @@ export async function findLocalItem(
     const kind = itemKindOfServer(serverKind)
     return kind === "wrapper" && ref.kind === "flow" ? "flow" : kind
   }
-  const definition = await db().serverDefinition.findUnique({
-    where: { vaultId_slug: { vaultId: ctx.vaultId, slug: ref.name } },
+  const definition = await db().serverDefinition.findFirst({
+    where: definitionSlugWhere(ctx, ref.name),
     select: { id: true, kind: true },
   })
 
@@ -619,8 +620,8 @@ export async function findLocalItem(
   }
 
   // A server of a kind without definitions goes by its own short name.
-  const row = await db().mcpServer.findUnique({
-    where: { vaultId_slug: { vaultId: ctx.vaultId, slug: ref.name } },
+  const row = await db().mcpServer.findFirst({
+    where: serverSlugWhere(ctx, ref.name),
     select: { id: true, kind: true },
   })
 

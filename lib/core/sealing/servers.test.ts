@@ -131,11 +131,11 @@ describe("servers", () => {
     const id = await addServer()
     const { id: definitionId } = (await definitionOf(ctx, id))!
     await db().$executeRawUnsafe(
-      `UPDATE "mcp_server" SET "name" = 'Old server', "description" = 'OLD-DESCRIPTION', "url" = 'https://old-url.example/mcp', "status_message" = 'Old status', "meta" = NULL WHERE "id" = ?`,
+      `UPDATE "mcp_server" SET "name" = 'Old server', "description" = 'OLD-DESCRIPTION', "url" = 'https://old-url.example/mcp', "status_message" = 'Old status', "slug" = 'old-server', "slug_key" = NULL, "meta" = NULL WHERE "id" = ?`,
       id,
     )
     await db().$executeRawUnsafe(
-      `UPDATE "server_definition" SET "name" = 'Old definition', "description" = 'OLD-DESCRIPTION', "meta" = NULL WHERE "id" = ?`,
+      `UPDATE "server_definition" SET "name" = 'Old definition', "slug" = 'old-definition', "slug_key" = NULL, "description" = 'OLD-DESCRIPTION', "meta" = NULL WHERE "id" = ?`,
       definitionId,
     )
 
@@ -168,12 +168,13 @@ describe("servers", () => {
   it("seals a row from before whole on its first write, and the conversion leaves it", async () => {
     const id = await addServer()
     await db().$executeRawUnsafe(
-      `UPDATE "mcp_server" SET "name" = 'Before', "url" = 'https://before.example/mcp', "meta" = NULL WHERE "id" = ?`,
+      `UPDATE "mcp_server" SET "name" = 'Before', "slug" = 'before', "slug_key" = NULL, "url" = 'https://before.example/mcp', "meta" = NULL WHERE "id" = ?`,
       id,
     )
     const read = await SEAL_CONVERTERS.find(
       (converter) => converter.table === "mcp_server",
     )!.read(ctx, 10)
+    expect(read).toHaveLength(1)
 
     // The owner, between the conversion's read and its write.
     await writeServer(ctx, id, { description: "Changed since" })
@@ -184,6 +185,7 @@ describe("servers", () => {
 
     expect(await getServer(ctx, id)).toMatchObject({
       name: "Before",
+      slug: "before",
       url: "https://before.example/mcp",
       description: "Changed since",
     })
