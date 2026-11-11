@@ -9,6 +9,7 @@ import {
   parseOrigins,
   unbindOrigin,
 } from "@/lib/core/browser-secrets"
+import { scrubFreedPages } from "@/lib/core/cleanup/runtime"
 import {
   createSecret,
   deleteSecret,
@@ -114,6 +115,9 @@ export async function deleteSecretAction(
 
   const result = await guarded(async () => {
     await deleteSecret(ctx, id)
+    // Its rows are zeroed in the file as they go; the log's older copy of
+    // their pages goes once the answer is sent.
+    after(() => scrubFreedPages({ rebuild: false }))
     return {}
   })
 

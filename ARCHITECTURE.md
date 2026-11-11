@@ -68,6 +68,80 @@ associated data (a ciphertext cannot be moved to another row):
 - the login name and note of one of the owner's secrets
   (`secret.login_name` with `secret:<id>:login`, `secret.note` with
   `secret:<id>:note`): not secret, but theirs,
+- what describes the owner's things (#96), sealed so that a copy of the
+  database does not show whom a vault belongs to or what it reaches
+  (`lib/core/sealed.ts`): a secret's name and description
+  (`secret.meta`, `secret:<id>:meta`), an API token's name
+  (`api_token.sealed_name`, `api_token:<id>:name`), the vault's settings
+  but the public address, which a request with no key reads
+  (`setting.value` as `pcp-sealed:v1:…`, `setting:<vault id>:<key>`), and
+  the sites a secret is typed at, a token's sites allowed for a while and
+  web fetch's site and script lines (each kept as a keyed hash of the site,
+  the site sealed beside it: `secret_browser_origin:<secret id>:<hash>`,
+  `api_token_site_allowance:<token id>:<hash>`,
+  `api_token_secret_allowance:<token id>:<secret id>:<hash>`,
+  `web_fetch_rule:<id>:key`); and what a server is and where it is: its
+  name, description, address, logins and accounts, OAuth client, scope
+  and addresses, schema address, what PCP found out of it (mail, SMTP and
+  calendar addresses, SSH host and public keys) and its status message,
+  as one JSON (`mcp_server.meta`, `mcp_server:<id>:meta`,
+  `lib/core/server-meta.ts`) with its short name (`slug`, found by its
+  keyed hash in `mcp_server.slug_key`, unique in the vault), a
+  definition's name, short name and description (`server_definition.meta`,
+  `slug_key`), a tool's name, title and description, the title its
+  annotations carried (`mcp_tool.about`; the name found by a keyed hash of
+  its server's id and the name in `mcp_tool.name_key`, unique per server,
+  so two servers' tools of one name hash apart), its schemas, call plan and
+  outline (`mcp_tool.schema`) and the owner's wording
+  (`mcp_tool.override`, each `mcp_tool:<id>:<column>`,
+  `lib/core/tool-rows.ts`), an endpoint's schema text and edits
+  (`openapi_spec.sealed_text`, `sealed_patches`), a wrapper's and a
+  service's definition (`wrapper_spec`/`service_spec.sealed_definition`,
+  each `<table>:<server id>:<column>`, `lib/core/spec-rows.ts`; their
+  `hash` a keyed hash, so equal copies are still found equal), and a kept
+  file's name and the tool it came from (`tool_result.sealed_name`,
+  `tool_result:<id>:name`; `tool_result.tool_name` sealed as text,
+  `tool_result:<id>:tool`). Several
+  values sealed together are one JSON, written only through a helper that
+  reads it and writes it back over what it read
+  (`lib/core/sealed-fields.ts`, `server-meta.ts writeServer`), so a write
+  that came between is read again, never lost. Kinds, flags and the status
+  word stay plain. Tool names are still plain where they key the owner's
+  levels, allowances and tiers (`api_token_tool_access`,
+  `api_token_tool_allowance`, `vault_tool_access`, `tool_tier`) and in a
+  waiting call's permission request (`permission_request.tool_name`): a
+  later part of #96. A lookup by a short name or a tool name (a `server/tool`
+  ref, a call handle's tool, `pcp.call`'s names, list_tools' server, a
+  wrapper's calls, a linked repository's item names) hashes the name it is
+  given; sorting and matching a pattern (a proposed level's `get_*`) work
+  on the opened names, in memory: a vault holds hundreds of servers at
+  most. Whatever read these
+  at boot with no key (rebuilding the tools of endpoints another version
+  built, the browser's tools) runs on each vault's first request in a
+  process instead (`lib/core/vault-upkeep.ts`, beside `ensureSealed`), so
+  after an upgrade or a restore the first answer from `/mcp` can still list
+  an endpoint's or the browser's tools as the older version left them; a
+  catch-up that fails is tried again by a later request, at most once a
+  minute. A status message is written only by a request that holds the
+  key, in one transaction with the read of the server's other sealed
+  values, and never in place of the outcome it follows (a failed status
+  write is logged and passed over).
+  What is found by its value is found by a keyed hash (`keyedHash` in
+  `crypto.ts`: HMAC-SHA256 under a key HKDF derives from the DEK per
+  label), a secret's name in `secret.name_key`, unique in the vault. A
+  linked file's name is sealed under its link's key (`file_link_name:<id>`,
+  `link-names.ts`) and the asking token's name on an upload page under the
+  page's (`upload_link_assistant:<id>`), since those pages hold no other
+  key. Rows from before keep the old plain columns (renamed `plainName`
+  and the like in the client, so nothing reads them by accident) until
+  `ensureSealed` (`lib/core/sealing/convert.ts`) seals them, a batch per
+  table per request through `after()` from `/mcp` and the owner's pages,
+  then rebuilds the database file once (see "Data on disk"); every reader
+  takes either form meanwhile, and an older export restores in the plain
+  form and is sealed the same way. The vault's own name (`vault.name`) stays
+  plain on purpose: the sign-in page shows it before anything is unlocked;
+  and an upload page, which holds only its link, names a file the
+  assistant took already as "A file",
 - a store's key (`storage_root.store_key`, `storage_store:<server id>`),
   which in turn wraps each file's key in an encrypted store, and the
   store's index of names, sizes and times (`storage_entry.meta`,
@@ -189,7 +263,7 @@ from one endpoint could be built on it. What that would take:
 An API with an OpenAPI schema is added like a server and reached the same way.
 It is an `mcp_server` row with `kind = "openapi"`; its `url` is the API's base
 URL, and each operation in the schema is an `mcp_tool` row. Because it is a
-server row, token scoping, `search`, `describe`, description
+server row, token scoping, `search` (with a query or a ref), description
 overrides, the "used by" list on a secret and the request log all work on it
 unchanged. Two functions in `lib/core/upstream.ts` branch on the kind:
 `syncServerTools` re-reads the schema, `callServerTool` makes the request.
@@ -260,8 +334,8 @@ any other type, a PDF or an image, or of a type the operation declares with a
 schema of `format: binary`, which the plan keeps as `fileAnswers`) is kept
 whole as the token's result (`keepBytes`) and answered as its handle,
 `{file: {"$result", type, size, name}, note}`, the name from
-`Content-Disposition` without a path, so call_tool, a program's `pcp.call`
-and a wrapper pass it on without reading it; describe's `returns` says so.
+`Content-Disposition` without a path, so execute, a program's `pcp.call`
+and a wrapper pass it on without reading it; search's `returns` for its ref says so.
 It is read up to its own cap, the smaller of `MAX_FILE_RESPONSE_BYTES`
 (`openapi/limits.ts`) and the largest file PCP keeps (`resourceLimits()`),
 and a larger one is refused, never cut (a `Content-Length` past it is refused
@@ -416,7 +490,7 @@ change an endpoint decides where PCP sends requests:
   answer. A change to an endpoint that other assistants can see (its words,
   schema or address, or read-only turned off) disables it until the owner
   enables it. Text an assistant writes reaches every other assistant through
-  `search`, the gateway's instructions and `describe`, so it is the
+  `search` (with a query or a ref) and the gateway's instructions, so it is the
   owner's to approve. Names cannot hold line breaks, which would otherwise
   start a line of their own in those instructions.
 - **No credential changes, ever.** A secret only comes with a registration
@@ -633,7 +707,7 @@ SKILL.md. Assistants that see the server or skill read it as the owner's
 note, after the description: the instructions' server and skill lines
 (`… (N tools) Owner's note: …`, cut to 120 characters), a line per server
 or skill under `search` results (it counts toward
-finding the server, too), the head of `list_tools`, `describe`
+finding the server, too), the head of `list_tools`, `search`'s ref
 (`ownerNote`, beside `serverName` and `serverDescription`; a skill's under
 its frame) and `check_server`. The owner wrote it, so it may stand in the
 instructions as the descriptions do.
@@ -1059,7 +1133,7 @@ until it is made plain or emptied: its files go with its keys.
 `/mcp` (`gateway.ts`), taking the family's arguments and `store` (a store's
 short name; without it, PCP's own). They are the default way in, not a second
 implementation: the tool named is the store server's own, run through the
-same path as `call_tool_<tier>` (`callResolved`: the token's level for that
+same path as `execute_<tier>` (`callResolved`: the token's level for that
 server's tool, blocked refused, ask a permission request, the arguments
 checked by the one validator, the tier at most the top-level tool's own),
 and logged under the store's server and tool.
@@ -1072,7 +1146,7 @@ deleted, when the folder says so and PCP no longer reaches it), the folder's
 absolute path, whose files the owner wants these to be (`write_as`) and the
 umask for what PCP makes (`umask`, 002 by default, so a Samba share's group
 sees ordinary files). Being a server, it has levels, tiers, read-only,
-pacing, search and describe as any other; it has no definition, and it is
+pacing and search as any other; it has no definition, and it is
 never an item in a linked repository. Only the owner adds one, from the SSH
 server's page, and changes it on its own; `register_server` has no kind for
 it, as for the SSH server itself. Its rows are exported and wiped with the
@@ -1579,10 +1653,12 @@ owner turns it on) gets one more tool, `memory`, with the commands of Claude's
 memory tool (view, create, str_replace, insert, delete, rename, over files
 under `/memories`) plus search and every, a second one, `read_memory`, with
 only every, view and search, and a paragraph in the instructions saying when
-to use them. `read_memory` and `call_tool_read` (the entry for a tool in
-the Read tier, below) are marked read-only, so a
-client that holds back other tools, as Claude Code's plan mode does, lets
-them through; the token's levels apply to them as to the rest. The rules are in `lib/core/memories.ts`. Like endpoint
+to use them. Both run through `execute_<tier>` by name (#113); `search`
+with no arguments gives what `read_memory every` does, and `search` and
+`execute_read` (the entry for a tool in the Read tier, below) are marked
+read-only, so a client that holds back other tools, as Claude Code's plan
+mode does, lets them through; the token's levels apply to them as to the
+rest. The rules are in `lib/core/memories.ts`. Like endpoint
 management, they are drawn around the fact that what one assistant writes
 another one reads:
 
@@ -1713,7 +1789,7 @@ the owner's or one they read:
   memories and name each visible one with its description while they fit in
   `SKILL_INSTRUCTIONS_CHARS`, past it by name alone, and past
   `MAX_INSTRUCTION_SKILLS` not at all ("search finds the rest"). `search`
-  ranks them beside tools and memories; `describe` with `skill:<name>`
+  ranks them beside tools and memories; `search` with the ref `skill:<name>`
   answers with one framing line ("A procedure the owner approved: follow it
   when the task matches."), the whole SKILL.md, its files by ref
   (`skill:<name>/<file>` reads one) and, for each tool it names that the
@@ -1748,9 +1824,9 @@ the owner's or one they read:
   at `/skills/mine/<name>/SKILL.md` and `/skills/mine/<name>/<file>`
   (`skill.visibility` `private`, `skill.token_id` the token): create,
   str_replace, insert, delete and rename are made at once, no request. Only
-  that token sees them (`skillsFor` takes the token; search and describe
+  that token sees them (`skillsFor` takes the token; search, by query or ref,
   name one `skill:mine/<name>`, the instructions list it as "(Your own.)",
-  and describe frames it as the assistant's own, never as approved), and the
+  and search's ref frames it as the assistant's own, never as approved), and the
   owner, on the Skills page, marked with the token's name, where they read,
   edit, delete and share it (`shareSkill`: theirs from then on). An own
   skill's name is unique among that token's own (at most `MAX_OWN_SKILLS`,
@@ -1854,7 +1930,13 @@ the GitHub client and sync itself build on it.
   format 4 (`documents.ts serviceFormat`); every other one keeps its format
   and its hash, so an older PCP refuses just that document as written by a
   newer PCP rather than failing on an unknown key; a format-3 document that
-  names either is refused here too.
+  names either is refused here too. Format 5 added a wrapper's or flow's
+  own `pace` (the pace of its browser calls, in `create_wrapper`'s
+  snake_case shape); only a wrapper document that has one is written as
+  format 5 (`documents.ts wrapperFormat`), and an older-format one naming
+  it is refused. A new or changed pace raises the review's `pace` flag
+  (with what goes past the owner's bounds for assistants), so it waits for
+  the owner like any wrapper change.
 - **Versions.** Each document carries `version`, a whole number: a skill's
   own version; for a server, endpoint or wrapper, `mcp_server.sync_version`
   (null reads as 1), which applying an item sets to the document's. PCP's
@@ -2030,7 +2112,7 @@ items at once.
   due at the next request. Sync now runs one at once.
 - **Assistants helping**, only a token that may manage endpoints, through
   the tools it has: `search` lists waiting changes as kind `repo`
-  (`repo:<id>`), `describe` gives both sides' files, what differs and
+  (`repo:<id>`), `search`'s ref gives both sides' files, what differs and
   PCP's flags, and the memory tool writes drafts under `/repos/<id>/`.
   Writing `/repos/<id>/REVIEW.md`, the assistant's own safety review, makes
   the merged files and the review one `repo_change` request that shows the
@@ -2076,7 +2158,7 @@ version of PCP's suggested instructions they were copied or merged from.
   `MAX_INSTRUCTIONS_CHARS`), since clients cut instructions short. For a
   token that keeps memories, `read_memory every` opens with the same block.
   `search`'s description carries the one rule that matters most:
-  describe a tool before calling it and pass its call_handle; check before
+  look a tool up with search's ref before running it and pass its call_handle; check before
   retrying anything that may have happened.
 - **The owner's to change.** The token's Advanced page has the editor and,
   folded, exactly what the token is told at the start of a conversation
@@ -2223,8 +2305,8 @@ that `web_fetch` was called and not where to.
 ## Running code
 
 A token made with "run code" (`api_token.run_code`, off unless the owner
-turns it on) gets `run_code_read(code)`, `run_code_write(code)` and
-`run_code_destructive(code)`, one implementation with the tier as its
+turns it on) gets `run_read(code)`, `run_write(code)` and
+`run_destructive(code)`, one implementation with the tier as its
 parameter: a program's `pcp.call` reaches tools at or below the entry's
 tier only, and one above refuses with an error the program may catch
 (before its arguments are checked or the owner asked); the duplicate
@@ -2257,14 +2339,14 @@ three parts:
   the instance, which is then dropped untouched.
 - **The bridge** (`run.ts`) is everything the program can ask for, as an
   operation name and a JSON payload it checks as untrusted: `call` (a
-  server, a tool, its arguments, and call_tool's `fields`, `decode` and
+  server, a tool, its arguments, and execute's `fields`, `decode` and
   `keep`), `read` (one of the token's own kept results, as text or base64, whole
   or a part: `offset` and `length` count a file's bytes or a text's
   characters, so a program reads a large file a piece at a time within the
   same bound on one answer), `keep`
   (a text kept as a result of the token's, returning its handle), `tools`
   (the token's servers, or one's tools, as `list_tools` gives them),
-  `describe` (one of those tools as `describe` gives it, from the catalogue
+  `describe` (one of those tools as `search`'s ref gives it, from the catalogue
   and without a call_handle, since `call` takes names; a blocked or unknown
   tool is refused as a call to it would be, and no server is read),
   `media` (below), and the waits: `sleep` (`pcp.sleep(ms)`, at most
@@ -2291,8 +2373,8 @@ three parts:
   minutes.
 - **The caller** is the gateway's: `resolveCall` looks the tool up among
   the token's own and refuses a blocked one or a handle the token has no
-  result for, as for `call_tool_<tier>`. An "ask" tool leaves the same permission
-  request a `call_tool_<tier>` would and stops the run, which answers with what ran
+  result for, as for `execute_<tier>`. An "ask" tool leaves the same permission
+  request a `execute_<tier>` would and stops the run, which answers with what ran
   before it and the owner's link last; the owner's Allow once runs that one
   call for `check_permission`, and Always allow (or Allow for, while it
   lasts) lets the next run make it.
@@ -2359,7 +2441,7 @@ never sees one. Its state is kept on `globalThis`, like the browser's,
 because the boot code that listens and the gateway are bundled apart.
 
 Each call is in the request log under the entry the program came through
-(`run_code_read`, `run_code_write`, `run_code_destructive`), by server and
+(`run_read`, `run_write`, `run_destructive`), by server and
 tool; the
 program, what it printed and its errors are not logged or kept. What it
 printed (up to a million characters) and what it returned come back in the
@@ -2385,7 +2467,7 @@ run_code cannot learn in time that nobody is waiting. It does not try to:
   completed, with a warning to check them before running it again when
   there are any. A call that changes things and failed on its way (a
   `PcpError` "upstream": not reached, timed out) is marked as one that may
-  have gone through; `call_tool_<tier>` says the same in one line.
+  have gone through; `execute_<tier>` says the same in one line.
 - run_code answers at most `RUN_ANSWER_MS` (45 seconds) after it started.
   A program not done by then, or whose request's signal aborted, is not
   stopped: it goes on within `RUN_TIMEOUT_MS`, and the answer says it is
@@ -2408,7 +2490,8 @@ run_code cannot learn in time that nobody is waiting. It does not try to:
   id, state and calls instead of running again; `rerun: true` runs it all
   the same. A run that stopped for the owner is not held to this: its
   answer says to check on the owner's next message and to run it again
-  once they allowed the call.
+  once they allowed the call. The program's calls that change things are
+  held to the call guard all the same ("The same call twice", below).
 
 A wrapper's run reports the same way but does not outlive its call: it
 stops when its request goes away, as before.
@@ -2452,7 +2535,7 @@ checkSyntax`), nothing has a character that does not show on screen
   the owner's approval: Levels, below); a call to anything else is an error
   the program sees. The arguments are checked against the tool's schema by
   the one validator (`tools/validate.ts`) first, and each call the program
-  makes is checked as call_tool's are (`call-arguments.ts`) before it runs:
+  makes is checked as execute's are (`call-arguments.ts`) before it runs:
   a call that uses an old argument name of a family's tool runs, and the
   wrapper's answer says what to change in which tool's program with
   `update_wrapper`; one that no longer fits is refused with what is wrong
@@ -2461,7 +2544,7 @@ checkSyntax`), nothing has a character that does not show on screen
   tool's is. When the tool has an `outputSchema`, the return is checked
   against it by the same validator, as strictly as arguments, and passed on
   as `structuredContent` with its JSON as the text; one that does not fit is
-  an error naming where, not passed on. `describe` shows the schema as
+  an error naming where, not passed on. `search`'s ref shows the schema as
   `outputSchema` (`mcp_tool.output_schema`), and the owner reads it in full
   on the request. A `$ref` is refused when it is saved, not followed. Gateway calls and the owner's allowed requests
   run with `withWrappers(executor)`, which sends a wrapper's tool to its
@@ -2513,11 +2596,50 @@ checkSyntax`), nothing has a character that does not show on screen
   `type` text (Browser, Secrets in pages). Scrubbing cannot catch a
   value a tool transforms or stores and answers with later: the owner's
   review of the place a secret goes is what decides, and the page says so.
+  Several secrets may share a place (a login name and a password, both
+  `browser/type` at `/text`): a binding is unique by place and secret.
+  A call whose placeholder has no binding is refused in `run.ts innerCall`
+  before anything is sent or asked, with the `secrets` entry to propose
+  through `update_wrapper` (`unboundSecretFix`); `upstream.ts` refuses it
+  again.
+- **Secrets a flow types, found in its program** (#120,
+  `secret-literals.ts`, `definition.ts foundBindings`). Each time a
+  definition is checked (an assistant's request, the owner's save, a
+  repository's document applied), PCP reads each tool's program for
+  placeholders written with a fixed name, `{"$secret": "<name>"}` in any
+  quoting QuickJS takes, with `"part"` or not (comments, strings and
+  regular expressions skipped; a name worked out as it runs, an object with
+  a computed key or a spread, and anything nested past 64 templates or
+  brackets deep is not found).
+  For a tool that calls a browser's `type`, each such name of a secret PCP
+  holds gets a binding at `browser/type` `/text` marked `found`, with the
+  `parts` the programs name of it (login name, password, or both), stored
+  in the definition (so its hash, the request's `basis` and the owner's
+  approval cover it) and shown on the review as found in the program, with
+  what it types. A found binding lets through only its parts: a call that
+  types another part is refused (`run.ts`, `placeholders.ts matchGrant`); a
+  binding given by name has no `parts`, which is both, as before. Only the browser: typing still
+  passes the browser's own gate at the moment of typing (the secret's
+  sites, the token's allowance, or a `secret_use` request), which no
+  binding changes, whereas a secret sent to any other tool goes without a
+  per-use ask, so it needs a binding the owner was asked for by name. A
+  found binding is never one an assistant or a document gives: `toInput`
+  keeps it out of `get_wrapper`'s `secrets` (it is `found_secrets` there),
+  the owner's form and the repository document, and a change finds it
+  again from the programs as they will be. Since what is found depends on
+  the secrets the vault holds, not on the text alone, every way a
+  definition is written says when it gains one: the request's review; a
+  repository's review, which compares the places the document would get
+  with the ones the wrapper has in the vault (`repos/found-review.ts
+reviewInVault`, `secret_binding`, so even a change of text only waits
+  for the owner) and is checked again when they take it (the number of
+  flags they were shown); and the owner's own save, whose message names
+  each new one. The wrapper's page lists them read only beside the form.
 - **Replacing.** A tool listed in `replaces` (it has to be among the
   tool's `calls`) is left out of `search`, `list_tools`, `pcp.tools`
   and the instructions' counts (`listedTools`) for a token while the
   wrapper's tool is not blocked for it; it can still be called and
-  described by name (`pcp.describe` too), and `describe` says what
+  described by name (`pcp.describe` too), and `search`'s ref says what
   replaced it. The owner
   shows it again from the server's page (`showReplacedTool`, which takes it
   out of every wrapper's lists).
@@ -2618,7 +2740,19 @@ Its config and cache folders (`XDG_CONFIG_HOME`, `XDG_CACHE_HOME`) are a
 private temporary folder of its own, removed once it has closed: its crash
 reporter keeps its database there, and without a folder it can write to
 (a system user with no home, as the Docker image runs as) Chromium can abort
-as it starts. It starts without `--enable-automation`, with
+as it starts. The folder (`pcp-chromium-<pid>-…`, `browser/scratch.ts`) also
+holds the file a `download` call waits for, and the virtual display's cookie
+is in one beside it (`pcp-display-<pid>-…`). Sign-ins never are: the contexts
+are off the record, their cookies and storage in memory. A PCP that crashes
+or is killed leaves these folders behind, so the process's id is in their
+names and the cleanup removes those of a process that is gone, and the
+process's own that no browser or display holds (one from before the id was
+in the name once it has not changed for a day, since an older PCP still
+running may hold it; never Playwright's own
+`playwright_*` folders beside them). Chromium starts with
+`--disk-cache-size=1`, so the disk cache of its own profile, in Playwright's
+folder, holds nothing to speak of; in the container image `/tmp` is a tmpfs
+(`docker-compose.yaml`, `install.sh`), so none of it reaches the disk at all. It starts without `--enable-automation`, with
 `--disable-blink-features=AutomationControlled`, and with
 `--disable-popup-blocking` and `--disable-back-forward-cache`, which
 patchright-core leaves out (script-opened popups reach the gate, and a back
@@ -2813,7 +2947,17 @@ which `runCall` turns into a `browse` request offering Allow once (the site
 for that tab while it is open), Allow this site for (an allowance, as for
 web fetch), Always allow this site and Block this site (the token's site
 line, as for web fetch) and Not now. A popup becomes a tab
-of the tab that opened it, which that tab's next answer names by its id. The gate is the browser's, not a tab's (`Fetch`
+of the tab that opened it, which that tab's next answer names by its
+address and tab id. Each window a page opens is a note on its tab
+(`PopupNote`, from Chromium's own targets, so one that closed before
+Playwright reported it is still there), said once in that tab's next
+answer: open as tab N, closed itself, closed by PCP and why (no room, a
+script running), or refused by the gate at a site the token may not open
+(named by its site only; a note takes an address only once the gate let
+it through, and shows it masked as the logs do), which also puts the site
+on the token's page. A window still opening, no tab yet and not closed,
+waits up to `WINDOW_SETTLE_MS` for a later answer; a tab keeps the newest
+`MAX_WINDOW_NOTES`, the oldest dropped. The gate is the browser's, not a tab's (`Fetch`
 on the browser's own DevTools session, on before the first page exists), so
 it holds a popup from its very first request, before Playwright has
 reported the popup: until then the popup opens only what the tab that
@@ -2844,7 +2988,7 @@ Hosts are never logged.
 **What an assistant gets.** The tools are `tabs`, `navigate`, `back`,
 `snapshot`, `read_page`, `find`, `click`, `drag`, `type`, `press_key`,
 `select_option`, `upload_file`, `scroll`, `wait_for`, `screenshot`,
-`download`, `handle_dialog`, `hand_over`, `request_secret`,
+`print_pdf`, `download`, `handle_dialog`, `hand_over`, `request_secret`,
 `update_secret_sites`, `evaluate`, `console_log` and `network_log`. Every one
 but `tabs`' open and list, `request_secret` and `update_secret_sites` names
 its tab (below). An assistant reads a snapshot (Playwright's
@@ -2917,7 +3061,18 @@ their refs back when they show again (a dialog over them closed); it goes
 with the tab. A screenshot steps its quality, then its size, down
 until it fits what an answer passes on inline (`MAX_ANSWER_IMAGE_CHARS`,
 an image's own budget, apart from the text's); one that never fits is kept
-and handed back as its handle. While the page shows a dialog (an alert),
+and handed back as its handle. With `full_page` it is the whole page from
+its top (`Page.getLayoutMetrics`' content size, `captureBeyondViewport`),
+cut at `MAX_FULL_PAGE_HEIGHT` CSS pixels down and `MAX_FULL_PAGE_WIDTH`
+across, through the same ladder; its answer says its pixels are the
+page's, not the viewport's. `print_pdf` prints the page with Chromium's
+`Page.printToPDF` on the tab's DevTools session (paper, landscape,
+backgrounds, page ranges) as a stream (`transferMode` "ReturnAsStream",
+read with `IO.read` in `PDF_READ_BYTES` chunks and stopped once it passes
+`resourceLimits().fileBytes`, so a huge PDF is never held whole; the print
+given longer for a longer page, within `PRINT_PDF_MAX_MS`), keeps the PDF
+as the token's result through `keepBytes` and answers its handle, as
+`download` does; it reads the page only, so it is Read and unpaced. While the page shows a dialog (an alert),
 every tool that needs the page answers at once with it and how to answer
 it with `handle_dialog`, rather than waiting on a page that cannot answer.
 No tool reads or sets cookies or storage directly; JavaScript runs only
@@ -3012,7 +3167,8 @@ the body could carry the secret encoded.
 A secret goes into a page only as `type`'s text, `{"$secret": name}`: in an
 assistant's call (`resolveCall` lets it through there and nowhere else),
 from run_code's `pcp.call`, or from a wrapper or flow whose binding names
-`browser/type` at `/text` with no template (`definition.ts`). Any other
+`browser/type` at `/text` with no template (`definition.ts`; given by name,
+or found in the program, Wrappers above). Any other
 browser tool or argument is refused, in `resolveCall` and in `upstream.ts`.
 `upstream.ts callBrowser` is the one path: it hands `callBrowserTool` a
 `SecretTyper`, never a value. The browser resolves the field (ref or
@@ -3042,8 +3198,13 @@ value, by page, in memory): while any field of the page has that value, as
 it is or reformatted (a bank writes an IBAN in groups of four), every answer
 to the token shows it as `[secret: name]` (the snapshot's field line, its
 `- text:` child where the field has a placeholder, and the value wherever
-else it appears, a title included), and `screenshot` is refused (a tool
-error). It lets go when no field has the value any more: the field changed,
+else it appears, a title included), and `screenshot` and `print_pdf` are
+refused (a tool error): both are pictures of the page. They are refused
+too while any frame of the page shows, in its text or a field, a secret
+PCP typed into one of the token's tabs (`held.ts typedShown`: each frame's
+`innerText` and field values through `maskTyped`'s matcher, read in PCP's
+own world; a frame that cannot be read refuses as well): an answer's text
+is masked, a picture or a PDF's text layer could not be. It lets go when no field has the value any more: the field changed,
 or a new document does not have it. For as long as the tab lives, whatever
 document it shows, every answer to the token (`callBrowserTool`'s
 `maskHeld`, so the snapshot, `find`, `read_page`, the logs and `evaluate`
@@ -3205,7 +3366,26 @@ DevTools session of PCP's own (Playwright's download objects can read nothing
 in a context made with downloads off), clicks the ref or opens the address,
 and takes the first download its tab, a frame in it, or a popup of it starts,
 from an address the tab may open (`mayOpen`; a page's own blob or data file
-is the page's). Every other download is cancelled as it begins, and the one
+is the page's). A popup is known to be the tab's by the page that opened it,
+as Chromium named it when it made the window (`Target.targetCreated` on that
+session, kept for the newest `MAX_REMEMBERED_WINDOWS` and followed back
+`MAX_WINDOW_DEPTH` openers, never through another tab that another token
+drives or the owner has): Chromium closes a blank window whose address
+turned out to be a download as the download begins, before anyone could ask
+it whose it was. A file a page shows rather than offers, a PDF, PNG, JPEG,
+GIF or WebP (never SVG; no `attachment`) that the main frame of its tab or
+such a popup is answered with, is taken the same way: while the call waits,
+the gate continues that document's request with its answer held
+(`interceptResponse`), and `takeDocument` reads the body in chunks. It is
+taken only when its first bytes are what its type says; otherwise the page
+gets the body unchanged. A body is handed back to the page only up to
+`MAX_HELD_DOCUMENT_BYTES` (DevTools carries it whole, as base64); one
+larger is kept and the page answered with nothing, which the call's answer
+says. One said to be past the largest file PCP keeps is never held, so the
+page loads it as usual; one found to be as it comes is given up, read on
+only as far as it can still be handed back, and the answer says when the
+page shows nothing of it. A held answer is never aborted. Every other download
+is cancelled as it begins, and the one
 taken is cancelled once Chromium says it is larger than PCP keeps of one file
 or slower than `DOWNLOAD_TIMEOUT_MS`. Its bytes are read and the file removed
 before the call answers; it is kept, encrypted, as the token's result, and
@@ -3216,7 +3396,10 @@ from there for `upload_file` (`receive_file`; see File links). A download a page
 starts while no call waits is refused by Chromium and only said in the tab's
 next answer, by the name the page gave, so the assistant can take it with
 `download`. An address given to `download` must be at a site the tab may
-open already; `navigate` is what asks the owner.
+open already; `navigate` is what asks the owner. The answer names the window
+the file came from (`window`: its tab, its address, `closed` when it closed
+itself) and the other windows the page opened meanwhile (`popups`); an
+answer without a file names them in its lines, as any answer does.
 
 **Whose tab** (`call.ts`). A tab belongs to the token that opened it (its
 `tokenId`; a popup is its opener's) or that the owner last handed it to,
@@ -3462,11 +3645,20 @@ above):
 
 - `callServerTool` (`upstream.ts`), for a server's tools: MCP servers, API
   endpoints, mail and calendar accounts and SSH servers, paced by the
-  server. call_tool_<tier>, run_code_<tier>'s `pcp.call`, a
+  server. execute_<tier>, run_<tier>'s `pcp.call`, a
   wrapper's calls and a call the owner allowed all end there. The browser's
   actions go through it too, and are paced in `browser/call.ts` by the tab's
-  site (for a navigation, the site it opens), before the call queues on its
-  tab: a wait for the site holds no lane and counts toward no deadline. A
+  site (for a navigation, the site it opens) as a turn taken on the tab's
+  lane right before the action (`pacedTurn`, `pacing/index.ts
+paceBrowserTurn`), held until the action is done: no two actions at a
+  site, from any tab or caller, follow closer than the pause, counted from
+  the previous one's end. The turn is held through the whole action, a
+  navigation's page load and site check included, on purpose: never a
+  double tap, at the cost of a slow page holding the site's other tabs
+  back that long. A download started by a click gives its turn back once
+  the click is done, not while the file comes in. A paced call holds its tab `PACED_TURN_WAIT_MS`
+  longer before the tab counts as not responding, and waits at most
+  `PACING_MAX_WAIT_MS` for its turn there (`browserTurnDeadline`). A
   wrapper's own tool is not paced; the calls its program makes are.
 - Web fetch's request path: `fetch/fetch.ts` paces each request it sends,
   every redirect it follows on the site included, and `web-fetch.ts`
@@ -3476,21 +3668,33 @@ above):
 Nothing at the gateway paces on its own: a new way in that reaches a server
 or a site goes through one of these, and so is paced.
 
-**Classes and defaults** (`pacing/limits.ts`, with why each is what it is).
-`browser_act` (navigate, back, click, type, press_key, select_option,
-upload_file, download, handle_dialog, scroll): 1.5 seconds between actions
-on a site and up to 2.5 more at random. `web_fetch`: a second and up to 0.75
-more. `server_change` (a tool its server does not mark read-only,
+**Classes and defaults** (`pacing/limits.ts`, with why each is what it is;
+`browserPacingClass` sorts the browser's tools, `entry-points.test.ts`
+pins it). `browser_act` (click, drag, type, press_key, select_option,
+upload_file, download by a click, handle_dialog, evaluate, scroll): 150 ms
+after the previous action on the site ended and up to 450 more at random,
+as a person moves from one field to the next; `type` fills a field in one
+go, with no pause per key. `browser_navigate` (navigate, back, tabs open,
+download by its address): the page the tab shows finishes loading first
+(`domcontentloaded`, at most `SETTLE_MS`), then 400 ms and up to 800 more.
+`web_fetch`: a second and up to 0.75 more. `server_change` (a tool its server does not mark read-only,
 `read-only.ts markedReadOnly`): no pause, at most 30 a minute per server.
 `server_read`: at most 300 a minute. The browser's reading tools (snapshot,
-find, read_page, screenshot, wait_for, tabs, hand_over) are never paced:
-they send the site nothing. Nothing names a site or a vendor.
+find, read_page, screenshot, print_pdf, wait_for, tabs but open,
+hand_over) are never paced: they send the site nothing. Nothing names a
+site or a vendor.
 
 **How a call waits** (`pacing/pace.ts`). State is in memory, per vault and
 destination (`server:<id>` or `site:<host>`; web fetch and the browser share
-a site's), on `globalThis`. A caller is given its slot the moment it asks,
-in order (the last slot, the pause, and a random extra wait; then the burst
-cap), so two callers never share one, and waits for it.
+a site's), on `globalThis`. A server's or web fetch's caller is given its
+slot the moment it asks, in order (the last slot, the pause, and a random
+extra wait; then the burst cap), so two callers never share one, and waits
+for it (`waitForSlot`). A browser action takes a turn instead (`takeTurn`):
+one at a time per site, each after the one before it released its turn,
+which sets the site's last action to when it ended, so a call that queued
+behind a long one still waits its pause after it. Waiting for the previous
+turn counts against the caller's budget as the pause does; one that gives
+up passes its place on once the one before it is done.
 
 How long a call may wait is its caller's: a `deadline` (epoch milliseconds,
 `CallOptions.deadline` in `upstream.ts`, `BrowserScope.deadline` for the
@@ -3501,7 +3705,7 @@ calls carry the run's end (`code/run.ts CallRun.deadline`: its start plus
 `RUN_TIMEOUT_MS`), and a wrapper's calls their run's (its own limit, or the
 calling run's end when that comes first), so a program waits for its turn
 instead of failing with work half done. A call straight from an assistant's
-request (call_tool_<tier>, web_fetch) or from the owner's
+request (execute_<tier>, web_fetch) or from the owner's
 answer to one carries `callDeadline()`: a wait up to
 `PACING_CALL_WAIT_MS`, 45 seconds, the same clock as `RUN_ANSWER_MS`. A
 caller that names none waits `PACING_MAX_WAIT_MS` at most.
@@ -3525,7 +3729,30 @@ pace or "unpaced". A call follows the most specific: the site's, then the
 server's, then the class's, then PCP's default; bounds are checked in core
 (`PACING_BOUNDS`), and a stored value that does not read as one counts as
 none. Settings → Upkeep → Pacing shows the classes, a reset to PCP's
-defaults, and the sites, folded.
+defaults, the sites, and what assistants may set, folded.
+
+**A tab's or a wrapper's own pace.** An assistant may give a browser
+action a pace of its own, a range (`PaceRange`: a wait between `minMs` and
+`maxMs`) per browser class: a tab's, with `tabs` action `pace`
+(`browser/tab-pace.ts`, a WeakMap on the tab in memory, never stored or
+exported, gone with the tab; `tabs` list shows it), or a wrapper's, in its
+definition (`pace`: per class and per browser tool, approved with the rest
+on its `wrapper_change` page), which a program narrows per call with
+`pcp.call(…, { pace })` within it (`wrappers/run.ts callPace`; the bridge
+refuses the option outside a wrapper's program, `RunOptions.takesPace`),
+carried as `CallRun.pace` → `CallOptions.pace` → `BrowserScope.pace`. What
+an action follows (`resolveBrowserPolicy`): its tab's, else its wrapper's,
+before the server's and the class's, but never below the owner's own pace
+for the site, which stays a floor. What an assistant may set without
+asking is the vault setting's `assistant` bounds per class
+(`ASSISTANT_PACE_BOUNDS` where the owner set none; `MAX_ASSISTANT_PACE_MS`
+the most any goes to). A tab's pace outside them is a `tab_pace` request
+(the tab, the pace, the bounds then); the owner's yes sets it on that tab
+alone (`applyTabPace`) and never writes the vault's setting. A wrapper's
+outside them is flagged on its `wrapper_change` page (`paceOutside`, and
+the warning), and only the owner's yes there makes it. A wrapper's pace
+travels in its linked repository's document (format 5, Linked
+repositories).
 
 `PCP_PACING=off` turns it off for a process: the unit and end-to-end suites
 set it (`vitest.config.mts`, `playwright.config.ts`), and the tests that
@@ -3548,6 +3775,17 @@ Linux):
   by `lib/core/migrate.ts`, which keeps Prisma's own `_prisma_migrations`
   bookkeeping (same table, same checksums), so a developer's
   `prisma migrate dev` and a container's boot agree on the history.
+  Every connection (`lib/core/db.ts`, and the one migrations run on) sets
+  `secure_delete = ON` (not `FAST`), so SQLite writes zeros over a row as it
+  deletes or rewrites it instead of leaving it in the page or on the free
+  list. The write-ahead log keeps the pages as they were until a
+  checkpoint, so removing a server or a secret checkpoints and truncates it
+  once the answer is sent, and deleting the vault or restoring over it
+  rebuilds the file (`VACUUM`; `scrubFreedPages` in
+  `lib/core/cleanup/runtime.ts`, one at a time with the cleanup). The first
+  cleanup after an upgrade rebuilds the file whatever is free, for pages an
+  older PCP freed without zeroing, and notes that in the `db.scrubbed` host
+  setting (a time, nothing of the vault).
 - `logs/mcp-YYYY-MM-DD.jsonl` — one line per gateway call: which token,
   which tool, which upstream, how long, whether it worked, and whether it
   stopped to ask the owner (with the permission request's id). Never
@@ -3723,8 +3961,12 @@ the vault's id), every token the file has live that the vault being replaced
 has revoked, or no longer has, is written revoked (the vault's `revoked_at`,
 or now for a deleted one) with its grant blanked as revoking blanks it
 (`carriedRevocations`, read inside the transaction before the wipe). The
-preview lists the file's tokens by name and prefix and marks those that
-come back revoked. At setup, or for another PCP's export, the vault knows
+preview lists the file's tokens by prefix and marks those that come back
+revoked; their names are sealed in the file under the vault's own key, so
+the preview shows them only when the owner also types the password of the
+vault in the file, which opens the file's password grant for the preview
+alone (`readExport`'s `vaultPassword`; its parameters held to an export's
+own, a wrong one refused, the key kept nowhere). At setup, or for another PCP's export, the vault knows
 nothing of them and the file is written as it is. A newer export of a vault
 restored here from an older one has tokens this vault never had; they come
 back revoked too, and the owner makes them again.
@@ -3956,10 +4198,38 @@ build tells the server (`PCP_DESKTOP_UPDATER=manual`) and the page links to
 the download instead. `desktop/README.md` has the details.
 
 **The Linux installer can update it once a day** (`PCP_AUTO_UPDATE=1`,
-remembered like its other settings). Under Podman with Quadlet that is
-Podman's own `podman-auto-update.timer`, which follows the unit's autoupdate
-label; otherwise a systemd timer runs a copy of the installer with `update`,
-which pulls the image and starts PCP again only when the image changed. The
+remembered like its other settings): a systemd timer runs a copy of the
+installer with `update`, which pulls the image, checks its signature, and
+starts PCP again only when the container runs another image. Under Quadlet too: Podman's
+own `podman-auto-update.timer`, which an older installer turned on with the
+unit's autoupdate label, checks no signature and cannot follow an image
+pinned by digest, so the unit no longer carries the label.
+
+**Every image the installer runs is one PCP's workflow signed** (#98).
+`build-images.yml` signs each image's digest with cosign, keyless (GitHub's
+OIDC token, so the certificate names the workflow file and the branch it
+ran from; the signature is in Sigstore's log), `--recursive` so each
+platform's manifest is signed too, and attests GitHub's build provenance
+beside it; `release.yml` and `develop.yml` add both digests to the release
+notes. The installer, after every pull (`pull_image`, `update`), takes the
+image's repository digest (`image inspect` `RepoDigests`) and runs cosign's
+image, pinned by digest (`COSIGN_IMAGE`), with `verify
+--certificate-identity-regexp` naming `build-images.yml` on `main` or
+`develop` (`IMAGE_SIGNER`) and GitHub's issuer. Only once that passes does
+it touch the running container, and from then on the run, the Quadlet unit
+(`Image=`) and the installer it reads use `<image>@sha256:…`, never the tag.
+The check is `cosign_verify`, which hands cosign's container the proxy
+settings by name; `install.sh verify-image` runs it alone, and
+`build-images.yml` runs that on each digest right after signing, so the
+workflow and installs check alike. `update` decides by the image the
+container runs (`inspect -f {{.Image}}`) against the checked digest's id,
+not the tag before and after the pull, which a failed check would leave
+moved. A failure stops the run before anything changes; `PCP_INSECURE_SKIP_VERIFY=1`
+skips the check for one run, with a warning, and is not remembered. A
+`policy.json` rule that would have Podman check the signature itself is not
+written: Podman reads one policy file per user (or the system's), so a rule
+for PCP's image would mean rewriting the host's policy for every other
+image. Compose checks nothing; the guide pins digests instead. The
 installer passes `PCP_AUTO_UPDATE=1` into the container, so Settings says
 there is nothing to do. PCP itself still pulls and restarts nothing.
 
@@ -3989,8 +4259,9 @@ run was saved at install time, so an update through it would write the unit
 as that installer did, without anything added since (the graphics card,
 #38). The image carries `install.sh` at `/app/install.sh` (root's, `0644`;
 `scripts/docker.test.ts`), and `update`, after the pull, reads it with
-`run --rm --network none --no-healthcheck --entrypoint cat <image id>` from
-the image it just pulled (the pinned one, for a pinned version), never from
+`run --rm --network none --no-healthcheck --entrypoint cat <image>@<digest>`
+from the image it just pulled and checked (the pinned one, for a pinned
+version), never from
 the running container, which PCP could change. It takes the file only when it
 starts with `#!/bin/sh`, holds the line `# pcp-installer-format: 1`, passes
 `sh -n` and is at most 256 KB; then, if it differs from the copy, it moves it
@@ -4000,8 +4271,7 @@ the request named holds), and `PCP_UPDATER_REEXEC=1`, which reads no
 installer again and installs even from the same image, since the unit may be
 what changed. Anything else, including an image from before this, leaves the
 update to the copy with a note. With no copy (no timer of PCP's) nothing is
-read: Podman's own auto-update only pulls, and the unit changes when the
-installer next runs. `write_unit` leaves drop-ins in `pcp.container.d/` alone
+read, and the unit changes when the installer next runs. `write_unit` leaves drop-ins in `pcp.container.d/` alone
 and names them, since one may do what the unit now does itself.
 
 ## Cleanup and the log
@@ -4017,8 +4287,22 @@ context (`noteOwnerAsked`, from `withPermission` and `connectResult`), so the
 line is right however the result is rewritten on its way out. A write that
 fails pauses the log for five minutes rather than failing the call.
 
+A line's names (the tool, the server and its tool, the error, a typed
+secret's name and site, the exit) are sealed under the vault's key (#96):
+`sealed` is their JSON, AES-256-GCM with
+`request_log:<vault id>:<line id>:<time>:<token id>` as associated data, so
+a sealed part opens only on its own line. The time, the vault and token ids,
+the outcome and the permission request's id stay plain: the cleanup deletes
+days by their file names with no key, and paging needs no key. A file or
+upload link's use, whose request holds no vault key, logs PCP's own name for
+it (`file_link/download` and the like) plain, marked `keyless`. Lines from
+before are sealed by the vault's requests (`ensureSealed`): a day's file is
+written again with that vault's lines sealed where they were, so the Log
+page's places hold, while new lines wait for it.
+
 The **Log page** (`/log`, `lib/core/activity.ts`) reads the vault's own lines
-back, newest first, filtered by token, outcome or a tool or server name, and
+back with the vault's key, newest first, filtered by token, outcome or a tool
+or server name (matched on the opened names), and
 fills in from the database what the log does not hold: each token's name, and
 how a request a call made was answered while PCP still keeps it. Paging goes
 by position (`day:line`), which holds while today's file grows; a page stops
@@ -4031,8 +4315,9 @@ ended sign-ins, unfinished OAuth sign-ins, apps' codes and tokens past their
 expiry (with their grants) and registrations no sign-in used within a day
 (PCP's authorization server), permission requests a week past
 their expiry, kept results past their day, search's cached embeddings no
-search used for a month, and days of the request log older
-than the owner keeps (90 by default, 1 to 3,650). It runs when PCP starts and
+search used for a month, the browser's temporary folders a crashed or
+killed PCP left behind (by the process id in their names), and days of the
+request log older than the owner keeps (90 by default, 1 to 3,650). It runs when PCP starts and
 then on a node-cron task, one per process and kept on `globalThis` like the
 update timer, unref'd, with no overlap: runs from the start, the schedule and
 the owner's **Clean up now** go one at a time. Each part runs on its own, so
@@ -4214,7 +4499,7 @@ connect, an upload link, or a capability to set up, as `structuredContent`
 `{kind: "needs_owner", reason, …}` with the link last in the text), or an answer made elsewhere passed on, in which a
 permission link is recognised and marked the same way.
 
-The families behind call_tool are written to the same interface
+The families behind execute are written to the same interface
 (`tools/family.ts`): `defineInnerTool` publishes a browser, mail,
 calendar, SSH or service tool's schema the same way, with its rules across
 arguments ("a ref or a target, one of them") as JSON Schema under the
@@ -4235,22 +4520,42 @@ server's status. A JSON-RPC error an MCP server answers with is a tool
 error in its words: the server is not marked down and the call is not said
 to have maybe gone through, which only a failure on the way says. An API
 endpoint's answer that is not an object is structuredContent as it is.
-An endpoint another PCP version built is built again when describe or a
+An endpoint another PCP version built is built again when search's ref or a
 call meets it; one whose schema no longer builds keeps its tools and says
 it needs migrating, with the edits `get_endpoint`'s `include_problems`
 proposes for `update_endpoint`.
 
 An MCP client that connects to `/mcp` receives an `instructions` string
 listing the servers its token can reach, each with the owner's one-line
-description and the number of tools it may see, and these tools (two more
-for a token with the right to manage endpoints, `memory` for a token that
-keeps memories, `web_fetch` for a token that fetches web pages, `run_code`
-for a token that runs code, and four for a token that proposes wrappers, all
-above). A request without a valid
-token is answered 401, and a token makes at most 240 requests a minute, one
-message each (`app/mcp/route.ts`). The tools:
+description and the number of tools it may see, and a list of seven tools at
+most (#113): `search`, `execute_read`, `execute_write` and
+`execute_destructive`, and for a token that runs code `run_read`,
+`run_write` and `run_destructive`. Every other tool of PCP's (below, and
+two more for a token with the right to manage endpoints, `memory` and
+`read_memory` for a token that keeps memories, `web_fetch` for a token that
+fetches web pages, `check_run` for a token that runs code, and four for a
+token that proposes wrappers, all above) is registered on the same server
+but left out of `tools/list` (`tools/serve.ts listOnly`): `search` finds it
+(kind `pcp`) and `execute_<tier>` runs it by name. A list of forty tools
+cost every conversation its definitions and every client's tool picker its
+room, and clients cut long descriptions short; seven entries with honest
+annotations keep what a client asks about to the tier a call can do, and
+the longer guidance travels in what `search` answers. A request without a
+valid token is answered 401, and a token makes at most 240 requests a
+minute, one message each (`app/mcp/route.ts`). The tools:
 
-- `search(query, server?, kind?, limit?)` ranks the catalogue, PCP's own
+- `search(query?, ref?, server?, kind?, limit?)` opens its description with
+  "Check first:", so a client that shows a deferred tool's first words
+  still says to call it before anything else. With neither `query` nor
+  `ref` (nor `server` or `kind`), it answers with the owner's standing
+  rules: what `read_memory every` gives for a token that keeps memories
+  (the owner's instructions, the memories chosen for every conversation,
+  the rest by path), or the owner's instructions alone, then the skills the
+  token sees as the instructions list them, then the instructions' key
+  rules under "How PCP works:" (`keyRules`); `limit` alone is refused, as
+  there is nothing to search by. The session has then read the
+  memories and has the key rules (clients/sessions.ts). With `ref`, it is
+  what `describe` was (`search(ref)`, below). With `query`, it ranks the catalogue, PCP's own
   tools the token has (as `buildGatewayServer` registered them), the skills
   the token sees and (for a token that keeps memories) the memories it reads
   together (`lib/core/search.ts searchEverything`: name, title, description
@@ -4262,8 +4567,8 @@ message each (`app/mcp/route.ts`). The tools:
   more than one further on; a skill scores as a tool named
   after it, a memory as one named by its path and described by its text),
   and returns `kind ref — line` lines: `tool server/tool`, `pcp <name>`
-  with its title, first sentence and that it is called directly (not
-  through `call_tool_<tier>`), `skill skill:<name>` with its description, `memory
+  with its title, first sentence, its tier and the `execute_<tier>` that
+  runs it by name (`pcpToolNote`), `skill skill:<name>` with its description, `memory
 /memories/…` with the line that says most of the query. A name the query
   gives exactly (the whole query, or a term in it that reads as a name;
   `server/name` too; case, `-`, `_`, `.` and spaces aside, and without an
@@ -4278,7 +4583,8 @@ message each (`app/mcp/route.ts`). The tools:
   and its title and lead then score as its name does; never by a word
   further on (which says how it works with the others), nor by a word the
   leads of a fifth of PCP's tools share ("owner", "tool"). With an empty
-  query it comes up only for kind `pcp`. `server` keeps to one server's
+  query it comes up only for kind `pcp`, and then every one of them is
+  listed unless `limit` says fewer. `server` keeps to one server's
   tools, `kind` to one kind (`tool`, `pcp`, `skill`, `memory`). With an
   embeddings provider (Search's embeddings, below), each item's nearness to
   the query is added to its keyword score.
@@ -4286,12 +4592,11 @@ message each (`app/mcp/route.ts`). The tools:
   server, by name, with its level (`allowed` or `ask`) and a summary,
   `LIST_PAGE_SIZE` at a time (`listTools` in `lib/core/search.ts`), so an
   access review does not depend on what a search happens to rank.
-- `describe(ref)` (or `describe(server, tool)`) reads what search
-  found: a skill (Skills, above), a memory as `read_memory view` gives it,
-  one of PCP's own tools (its name, also with an app's prefix or as
-  `pcp/<name>`: its title, description, input and output schema and
-  annotations, with no `call_handle`, since it is called directly), or a
-  tool. For a tool it returns the description (the owner's
+- `search(ref)` reads what a search found: a skill (Skills, above), a
+  memory as `read_memory view` gives it, one of PCP's own tools (its name,
+  also with an app's prefix or as `pcp/<name>`: its title, description,
+  input and output schema, annotations, tier and `run_with`, with no
+  `call_handle`, since `execute_<tier>` takes its name), or a tool. For a tool it returns the description (the owner's
   override when there is one), the JSON Schema exactly as the upstream
   published it, whether the tool runs at once or asks first, its
   `outputSchema` when it declares one (`mcp_tool.output_schema`), and for
@@ -4299,11 +4604,27 @@ message each (`app/mcp/route.ts`). The tools:
   from the schema (`openapi/outline.ts`, stored as `mcp_tool.output`); text
   the schema marks base64 (`format: byte`) shows as `string (base64)`.
   First in its answer is the tool's `call_handle` (below).
-- `call_tool_read`, `call_tool_write` and `call_tool_destructive`
-  (`call_handle, arguments, fields?, decode?, keep?`), one per tier (Tool
-  tiers, below), take no
-  server or tool name, only the handle `describe` gave, so a tool is
-  always described before it is called. It checks the arguments against
+- `execute_read`, `execute_write` and `execute_destructive`
+  (`call_handle, arguments, fields?, decode?, keep?`, or `tool, arguments`),
+  one per tier (Tool tiers, below), take no server name. One of the owner's
+  tools is named only by the handle `search` gave for its ref, so a tool is
+  always looked up before it is called; one of PCP's own tools is named by
+  `tool`, its bare name (`pcp/<name>` and an app's prefix read as it), with
+  its own `arguments` (and, on `execute_write` and `execute_destructive`,
+  `rerun` with a `reason`) and nothing else. That call is served as the
+  tool's own (`registerTool`'s `dispatch`): its own validator, its line in
+  the request log under its own name, the lead. A Write or Destructive one
+  goes through the duplicate guard as a server's tool does (`guardCall` on
+  the arguments as checked, under the server id `pcp`), except the stores'
+  tools (their own tool's call is the one guarded), the capabilities', those
+  that say a repeat does nothing more (`idempotentHint`: `withdraw_request`),
+  and `memory`'s and `web_fetch`'s calls that only read (view, search,
+  every; GET, HEAD). Its structuredContent is dropped when its text already
+  is that JSON (`withoutRepeatedStructure`: the entry declares no output
+  schema, so a client would show it twice), and kept for a needs_owner
+  answer or when the text says it in words. A tool above the entry's tier,
+  an entry's name or a name PCP does not have is refused by the entry
+  before anything is checked. For the owner's tool, the entry checks the arguments against
   the tool's stored inputSchema, then opens a connection
   to the upstream with the configured credential (header secret or OAuth
   token, refreshed by the SDK when needed), calls the tool, and passes the
@@ -4320,11 +4641,16 @@ message each (`app/mcp/route.ts`). The tools:
   Every tier's entry takes the same handle; a tool above the entry's tier
   is refused, naming the entry that runs it, before anything else.
 - `search_tools` and `describe_tool`, the old names, are gone after their
-  release (docs/breaking-changes.md).
-- `check_permission(id?)`, `withdraw_request(id)`, `check_server(server)`,
+  release (docs/breaking-changes.md). For one release from #113, `describe`,
+  `call_tool_<tier>` and `run_code_<tier>` are still registered under their
+  old names, unlisted, and answer as the entry that took over
+  (`RETIRED_ENTRIES` in `tool-tiers.ts`), and each of PCP's own tools still
+  answers by its own name; every such answer opens with a line naming what
+  to call now (`retiredNote`, `ownNameNote`).
+- `check_permission(id? | ids?, mode?)` (several ids wait together, `any` or `all`, `checkPermissions`), `withdraw_request(id)`, `check_server(server)`,
   `register_server(...)` and `propose_tool_access(changes)` belong to the
   permission flow below.
-- `check_run(id)`, beside `run_code_<tier>` for a token that runs code, says how
+- `check_run(id)`, beside `run_<tier>` for a token that runs code, says how
   one of the token's runs went (Running code, above). It only reads.
 - `read_result(id, offset?, length?, find?)` reads a slice of an answer
   PCP shortened and kept whole, or of a kept value; a file that is not text
@@ -4335,11 +4661,15 @@ message each (`app/mcp/route.ts`). The tools:
 Some clients ask before every call to a tool annotated `destructiveHint:
 true` however the owner answered before (Claude's voice mode on iOS), and
 some let only read-only tools through (Claude Code's plan mode). So every
-tool has a tier, and every tier its own entry tools: `call_tool_read`,
-`call_tool_write` and `call_tool_destructive`, and `run_code_read`,
-`run_code_write` and `run_code_destructive`. Each runs tools at or below
-its own tier and advertises its tier in its annotations; the owner's
-levels apply in every tier, and a tier adds no right.
+tool has a tier, and every tier its own entry tools: `execute_read`,
+`execute_write` and `execute_destructive`, and `run_read`, `run_write` and
+`run_destructive`. Each runs tools at or below its own tier and advertises
+its tier in its annotations, which are what a client sees: an entry's tier
+is its name, never the owner's choice, and `search`, `execute_read` and
+`run_read` are the read-only ones. PCP's own tools behind them keep their
+own tiers (the owner's choice included), which decide the `execute_<tier>`
+that runs them by name. The owner's levels apply in every tier, and a tier
+adds no right.
 
 `lib/core/tool-tiers.ts` is the one place a tier comes from: the owner's
 choice, else for a wrapper's tool the highest tier of the tools it calls (a
@@ -4352,7 +4682,7 @@ PATCH Write, DELETE Destructive. Derived tiers are worked out when asked,
 never stored. Everything that asks whether a tool reads asks there: the
 entry gates in `gateway.ts` (`callUpstream`, run_code's `pcp.call`),
 `read-only.ts markedReadOnly` (pacing's read or change, a run's trace),
-the permission page's warning, the wrapper review's badges, describe
+the permission page's warning, the wrapper review's badges, search's ref
 (`tier`, `run_with`), list_tools, search and pcp.tools, and
 `loadGatewayServers`, which puts each tool's tier on the request's view.
 
@@ -4369,6 +4699,75 @@ keeps the tier its calls came to when the owner chose (`seen_tier`); the
 header's bell names one whose calls come to more since and whose choice is
 below them (`owner-notices.ts tierNotices`), until the owner chooses again.
 
+### The same call twice
+
+An assistant sometimes makes a call that changes things again: it lost the
+answer, a run timed out, it retried out of caution. So a Write or
+Destructive call is remembered for a while (`lib/core/calls/guard.ts`, a
+`call_record` row: token, server id, tool (a keyed hash of the server id and
+its name, `recordedTool`), tier, status, times, its answer
+and the permission request it made), and the same call (server, tool and
+arguments as checked and renamed) made again by the same token within the
+window (`DUPLICATE_CALL_MS`, 30 minutes, in `calls/limits.ts`) is not run.
+It is answered as a tool error with code `duplicate_call` saying how the
+first went: still running, succeeded (with its answer when it was short,
+`MAX_INLINE_ANSWER_CHARS`, kept encrypted on the row as
+`call_record:<id>:answer`, or the kept result a long answer already was;
+never a new kept result, which would count against the token's own),
+failed (the tool answered an error, so most likely nothing happened),
+failed on its way (`MAY_HAVE_GONE_THROUGH`), or asking the owner (its
+request and `check_permission`). Every such answer also says that if what
+the call acts on changed since (turned off and on again), the assistant
+makes it again with a reason: the guard does not guess at that. A call still marked running past `STALE_RUNNING_MS`
+never reported back and may have happened. A call that came to nothing
+(paced, refused, a server to connect, an ask the owner declined or let
+expire) is forgotten. The same tool with other arguments is only noted in
+the answer.
+
+The lookup and the new record are one transaction, which SQLite runs one
+at a time: of two identical calls, the second to get there finds the
+first, whatever times they took before.
+
+The arguments are never stored: `args_hash` is an HMAC under a key derived
+from the vault key ("pcp call record v1", `keyedHash` in `crypto.ts`), so
+the table confirms no guess without it. Rows are not exported, go in
+`wipeVault`, and the cleanup removes them once past the longest window an
+owner may set (`CALL_RECORD_KEEP_MS`).
+
+The guard sits where a call is resolved, after its arguments are checked
+and before it asks or runs: `gateway.ts callResolved` for
+`execute_write` and `execute_destructive`, `forwardCall` for
+run_code's `pcp.call`, and `wrappers/run.ts innerCall` for a wrapper's
+calls; never in `upstream.ts`, so a call the owner allowed on PCP's page
+(and a wrapper's calls in a run the owner allowed) is not guarded. Not
+guarded either: Read tools (by `effectiveTier`), the browser, SSH's
+`run_command`, stores (PCP's own store tools, which have no rerun, and the
+stores' tools: a repeat fails or does the same), a capability tool's calls
+to its provider, and tools the owner exempted. An ask-level call leaves its
+repeats to the permission flow while that flow answers them (the request
+still waiting or running, or the run the owner allowed once while its
+answer is there to take, `reuseUntil`); once that answer was taken, or the
+allowed run failed, the next identical call is held back rather than
+asking the owner again unaware.
+
+An assistant repeats a call on purpose with `rerun: true` and a `reason`
+(required with it, under `allOf`) on `execute_write` and
+`execute_destructive`, or `{ rerun: true, reason }` in `pcp.call`'s
+options (`--rerun REASON` and `rerun=True, reason=…` in the sandbox). The
+request log notes `rerun` on the call's line; the reason is the assistant's
+own words and stays out, as arguments do. A wrapper's tool repeated so
+repeats the calls its program makes (`asRerun`). run_code's own `rerun`
+is the program's duplicate guard (`DUPLICATE_RUN_MS`, in memory, below)
+and does not reach its calls: a program run again after it stopped for the
+owner meets `duplicate_call` on the calls that already ran.
+
+The owner's own windows are the vault's `duplicateCalls` setting
+(`calls/config.ts`), set on Settings → Repeated calls
+(`components/repeated-calls-card.tsx`, `lib/actions/repeated-calls.ts`): a
+default for every tool, and per tool (chosen from the vault's tools that
+change things, by server id and name) minutes between 1 and 24 hours, or
+`exempt` ("Never hold back").
+
 ### Call handles
 
 `/mcp` keeps no session, so a call handle carries what it needs
@@ -4380,7 +4779,7 @@ server, tool name, row id and the first bytes of the schema's hash), those
 bytes, and a 128-bit call MAC over the same with the whole hash of the
 tool's canonical inputSchema (`canonicalJson`). So a handle cannot be made
 without the vault's key, works for its own token only, and goes stale when
-the schema changes. `call_tool_<tier>` resolves it against the catalogue as it is
+the schema changes. `execute_<tier>` resolves it against the catalogue as it is
 and answers, as a tool error and with nothing run or asked:
 
 - a genuine handle for an older schema: "The tool changed since you
@@ -4616,11 +5015,11 @@ A file meant to last goes into a store with `save_file`.
 
 Some work an assistant asks for by what it is, not by a tool's name: read
 the text in a picture or a scan, fill in or merge a PDF, turn a document
-into Markdown. Each is a capability (`lib/core/capabilities/list.ts`, a
-typed list: `read_image`, `pdf_edit`, `convert_document`) and one of PCP's
-own tools that every token has (`read_image`, `edit_pdf`,
-`convert_document`). The tool does no work itself: a provider does, one of
-the token's own tools.
+into Markdown or a PDF's page into a picture. Each is a capability
+(`lib/core/capabilities/list.ts`, a typed list: `read_image`, `pdf_edit`,
+`convert_document`) and one of PCP's own tools that every token has
+(`read_image`, `edit_pdf`, `convert_document`). The tool does no work
+itself: a provider does, one of the token's own tools.
 
 **Providers** (`providers.ts`, pure) are found among the tools the token
 can call or ask for (blocked ones are not there; the browser's never
@@ -4677,6 +5076,34 @@ picture of a signature; a digital signature needs a certificate and is the
 provider's own tool) try providers best first until one does it, and answer
 the text, or the PDF it made, as a handle.
 
+`convert_document` with `to: "png"` turns a PDF's page (`page`, from 1)
+into a picture: a `page_image` provider, a tool that renders a page to an
+image, found by its words (the page one less to an argument that counts
+from 0, by its name or description), its answer an image (kept as a handle)
+or a PNG it wrote through the file step; the answer is that handle, for
+`view_image`, once its first bytes are a PNG, JPEG or WebP (anything else is
+that provider failing: "the renderer answered with no picture"). The input
+goes by its first bytes too: a picture is pointed to `view_image`, and
+anything but a PDF is refused, whatever type it was kept as. No common item does it yet, so its setup answer names none.
+
+`view_image` (`lib/core/view-image.ts`) is PCP's own Read tool, not a
+capability: it calls no provider. It shows the assistant one of its kept
+files as MCP image content, so the model's own vision reads it rather than
+an OCR reading of its text: a PNG, JPEG, WebP or GIF by its first bytes
+(never an SVG, which is text), cropped (in the original's pixels), grey and
+as wide as asked, its longest side at most `VIEW_IMAGE_SIDE`, decoded once
+into raw pixels (`code/media.ts decodeImage`), then encoded from those
+(`encodeJpeg`) as a JPEG that fits an answer inline the way a screenshot is
+(`browser/screenshot.ts fitPicture` and `shotLadder`: quality, then size,
+down to `INLINE_IMAGE_BYTES`), the request's signal checked between steps. A PDF is refused
+with the `convert_document` call that makes its page a picture. A video's
+frame is taken by ffmpeg in the sandbox, through a program of PCP's own that
+calls `pcp.video.frames` (`runProgram`, no tool callable), only while the
+sandbox runner is connected; without it the answer says video needs the
+sandbox. The frame is kept as a result of the token's and named, so a closer
+look (crop) does not take it again. `read_image` with `include_image` adds
+the same picture beside its readings.
+
 **No provider**: the answer is `needs_owner` with reason `setup` and the
 capability, a markdown link labelled with the capability's own words, last,
 to `/plugins/<id>`, and `noteOwnerAsked`; the assistant calls the tool again
@@ -4687,7 +5114,7 @@ which comes back to the page), then "Launch <item>" to the repository's
 import page at the common repository's head commit, read on the page's load
 (where the owner reads the item whole, picks the SSH server and its secrets),
 or a link to the service they have. Search adds a "not installed" line for a
-capability its query names (`capabilitiesNamed`) with no provider, describe
+capability its query names (`capabilitiesNamed`) with no provider, search's ref
 of a capability tool lists its providers or says there is none, and
 read_result's answer for a picture or a PDF names the tool that reads it.
 
@@ -4734,16 +5161,17 @@ Sessions are kept in memory too (`clients/sessions.ts`), as /mcp is
 stateless and no request carries a session id: a session is a token and its
 client, begun again by an `initialize` and forgotten after half an hour
 without a request; two conversations at once share one, which is accepted.
-In it, PCP says three things once. `search` and `describe` add a line of
-their own, after their answer, while `read_memory` `every` has not run
-("Owner's rules: call read_memory with command "every" first."), for a token
-that keeps memories. For a profile that mirrors, the instructions' key
-rules (how to find and call a tool, the owner's link, check_permission,
-read_result) follow `read_memory` `every`'s answer, or else the first
-`search` or `describe` answer, as a text of its own so a JSON answer stays
-JSON; with the owner's own instructions when the token keeps no memories,
-since `read_memory` `every` gives them otherwise. And every answer of
-PCP's own tools (`call_tool_*` and `run_code_*` among them) starts with a
+In it, PCP says three things once. `search` adds a line of its own, after
+its answer, while neither its standing rules (no arguments) nor
+`read_memory` `every` have been read ("Owner's rules: call search with no
+arguments first."), for a token that keeps memories. For a profile that
+mirrors, the instructions' key rules (how to find and call a tool, the
+owner's link, check_permission, read_result) are in the standing rules
+(for every profile), follow `read_memory` `every`'s answer, or else the
+first `search` answer, as a text of its own so a JSON answer stays JSON;
+with the owner's own instructions when the token keeps no memories, since
+the standing rules give them otherwise. And every answer of PCP's own tools
+(`execute_*` and `run_*` among them) starts with a
 text naming the token's requests the owner answered that the session has
 not heard of, each once (`answeredLead` in the gateway, through
 `ServeHooks.lead`, `withLeadText`): in front, so an answer that asks the
@@ -4764,8 +5192,8 @@ Every token has a level per tool (`api_token_tool_access`,
 `lib/core/tool-access.ts`): **allowed**, **blocked**, or, when there is no
 row, **ask**. Rows are keyed by the tool's name, so a tool that drops out of
 a refresh and comes back keeps its level. Blocked tools are left out of the
-instructions, `search`, `list_tools` and `describe`, and
-`call_tool_<tier>` and `run_code_<tier>` refuse them. The gateway loads the levels by
+instructions, `search` and `list_tools`, and
+`execute_<tier>` and `run_<tier>` refuse them. The gateway loads the levels by
 token id. A wrapper's tool comes out at the strictest of its own level and
 those of the tools it calls (Wrappers, above).
 
@@ -4783,8 +5211,11 @@ nothing changes for it. The owner's answers to a request ("Always allow",
 A call to an "ask" tool becomes a `permission_request` row
 (`lib/core/permissions.ts`): the
 arguments encrypted under the vault's key with the row id as associated
-data, a hash of the call so the same call asked twice finds the same row,
-and a day to answer. The result is text for the assistant: what was asked,
+data, a hash of the call so the same call asked twice finds the same row
+(`args_hash`: an HMAC of the kind, target and canonical arguments under a key
+derived from the vault's, prefixed `h1:`, so the column and a backup's copy
+cannot confirm a guess at the arguments; `keyedHash` in `crypto.ts`, as
+`target_key` and call handles are made), and a day to answer. The result is text for the assistant: what was asked,
 the link to `/permissions/<id>` to end its reply with, and to call
 `check_permission` on the owner's next message, whatever it says. The signed-in
 owner answers on that page, and only there (the header's bell lists every
@@ -4836,7 +5267,7 @@ own.
 no level: it leaves an allowance (`lib/core/allowances.ts`,
 `api_token_tool_allowance` and `api_token_site_allowance`), the token, the
 tool or site, and when it ends. It is read only where the levels come out
-at "ask" (`loadGatewayServers` for tools, which `call_tool_<tier>` and run_code
+at "ask" (`loadGatewayServers` for tools, which `execute_<tier>` and run_code
 both go through; `resolveFetchAccess` for sites, which web fetch and the
 browser's page gate both go through) and lifts that to "allowed" until it
 ends. It never lifts a block, and when it ends the levels decide as they

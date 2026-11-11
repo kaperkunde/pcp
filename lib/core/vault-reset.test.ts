@@ -17,6 +17,7 @@ import { createServer } from "./servers"
 import { createSkill, setTokenSkills } from "./skills"
 import { createSession, resolveSession } from "./sessions"
 import { SETTING_PUBLIC_URL, setSetting } from "./settings"
+import { serverCreateData } from "./server-meta"
 import { scratchDatabase } from "./test-db"
 import { keepResult } from "./tool-results"
 import { createUploadLink } from "./upload-links"
@@ -84,7 +85,7 @@ async function populate() {
   })
   // A service on an SSH server: rows only, nothing connects here.
   await db().mcpServer.create({
-    data: {
+    data: serverCreateData(ctx, {
       id: "svc1",
       vaultId,
       kind: "service",
@@ -93,7 +94,7 @@ async function populate() {
       url: "pcp:service",
       serviceSpec: {
         create: {
-          definition: "{}",
+          plainDefinition: "{}",
           hash: "0",
           engine: "docker",
           containerName: "pcp-docs",
@@ -101,11 +102,11 @@ async function populate() {
           registeredId: server.id,
         },
       },
-    },
+    }),
   })
   // A storage root on an SSH server: rows only, nothing connects here.
   await db().mcpServer.create({
-    data: {
+    data: serverCreateData(ctx, {
       id: "files1",
       vaultId,
       kind: "storage",
@@ -117,9 +118,9 @@ async function populate() {
         create: { id: "entry1", nameKey: "k", meta: new Uint8Array([1]) },
       },
       storagePending: { create: { objectId: "0".repeat(32) } },
-    },
+    }),
   })
-  await storeTools(server.id, [
+  await storeTools(ctx, server.id, [
     { name: "alpha", description: "First", inputSchema: { type: "object" } },
   ])
   const { id: tokenId, token } = await createApiToken(ctx, {
@@ -178,6 +179,19 @@ async function populate() {
   // The owner's tier for a tool, kept apart from its row.
   await setToolTier(ctx, server.id, "alpha", "read")
   await setSetting(ctx, SETTING_PUBLIC_URL, "https://pcp.example")
+  // A call the duplicate guard remembers.
+  await db().callRecord.create({
+    data: {
+      vaultId,
+      tokenId,
+      id: "call1",
+      serverId: server.id,
+      toolName: "alpha",
+      argsHash: "h",
+      tier: "write",
+      status: "succeeded",
+    },
+  })
   // A search vector cached for the owner's embeddings provider.
   await db().embeddingVector.create({
     data: {
@@ -193,6 +207,7 @@ async function populate() {
   const deviceKey = await createDeviceKey(ctx)
   await appendRequestLog({
     vaultId,
+    dek: ctx.dek,
     tokenId,
     tool: "call_tool",
     ok: true,
@@ -213,6 +228,7 @@ describe("deleteVault", { timeout: 30_000 }, () => {
     expect(before.repo_item).toBe(1)
     expect(before.secret_browser_origin).toBe(1)
     expect(before.api_token_secret_allowance).toBe(1)
+    expect(before.call_record).toBe(1)
     expect(before.server_definition).toBe(1)
     expect(before.service_spec).toBe(1)
     expect(before.storage_root).toBe(1)

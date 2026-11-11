@@ -39,6 +39,7 @@ import {
   withStorageFolder,
 } from "./upstream"
 import { setupVault } from "./vault"
+import { entryCall, listEveryTool } from "./test-handles"
 
 // Public links to one file of a store (share_file): the link's key wraps
 // that file's key, PCP's own store is read in place with it alone, any
@@ -240,7 +241,7 @@ describe("a link to a file of PCP's own store", () => {
     })
 
     // Every use in the log, by name.
-    const { entries } = await readRequestLog(ctx.vaultId)
+    const { entries } = await readRequestLog(ctx)
     expect(
       entries
         .filter((entry) => entry.tool === "file_link/store_download")
@@ -463,25 +464,23 @@ describe("share_file at /mcp", () => {
     const own = await saveOwn("a.txt", Buffer.from("hello"))
     const keeper = await connect(false)
     expect(
-      (await keeper.client.listTools()).tools.map((tool) => tool.name),
+      (await listEveryTool(keeper.client)).tools.map((tool) => tool.name),
     ).not.toContain("share_file")
     await keeper.client.close()
 
     const mover = await connect(true)
-    const asked = await mover.client.callTool({
-      name: "share_file",
-      arguments: { path: "a.txt" },
-    })
+    const asked = await mover.client.callTool(
+      entryCall("share_file", { path: "a.txt" }),
+    )
     expect(JSON.stringify(asked.content)).toMatch(/Not done yet/)
     expect(await db().fileLink.count()).toBe(0)
 
     await setServerToolAccess(ctx, mover.id, own, "allowed")
     await mover.client.close()
     const allowed = await connect(true, mover.token)
-    const shared = await allowed.client.callTool({
-      name: "share_file",
-      arguments: { path: "a.txt", max_downloads: 1 },
-    })
+    const shared = await allowed.client.callTool(
+      entryCall("share_file", { path: "a.txt", max_downloads: 1 }),
+    )
     const link = JSON.parse(
       (shared.content as Array<{ text: string }>)[0]!.text,
     ) as Record<string, unknown>

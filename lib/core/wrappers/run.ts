@@ -1,12 +1,12 @@
 import type { CallToolResult } from "@modelcontextprotocol/server"
 
-import type { McpServer } from "@/lib/generated/prisma/client"
-
 import { isConnectResult } from "../connect"
 import type { VaultContext } from "../context"
 import { runProgram } from "../code/run"
 import type { Executor } from "../code/types"
 import { db } from "../db"
+import { openWrapperSpec } from "../spec-rows"
+import { openTool, TOOL_SCHEMA_SELECT, toolNameWhere } from "../tool-rows"
 import { notFound, PcpError } from "../errors"
 import { loadGatewayServers, type GatewayServer } from "../gateway-servers"
 import {
@@ -15,6 +15,16 @@ import {
   type PermissionExecutor,
 } from "../permissions"
 import { markedReadOnly } from "../read-only"
+import { noteRerun } from "../request-log"
+import { toolTier } from "../tool-tiers"
+import {
+  RERUN_IN_CODE,
+  endCall,
+  endOfOutcome,
+  endOfThrow,
+  guardCall,
+  noteBefore,
+} from "../calls/guard"
 import { resourceLimits } from "../resources/state"
 import {
   effectLines,
@@ -33,8 +43,26 @@ import {
   type WrapperTool,
 } from "./definition"
 import { FLOW_RUN_TIMEOUT_MS, WRAPPER_RUN_TIMEOUT_MS } from "./limits"
-import type { SecretGrant } from "./placeholders"
+import {
+  allowsPart,
+  findPlaceholders,
+  type FoundPlaceholder,
+  type SecretGrant,
+} from "./placeholders"
+import { typedPartsLabel } from "./secret-literals"
 import { checkCallArguments } from "../call-arguments"
+import {
+  checkPaceRange,
+  describeRange,
+  paceWithin,
+  type PaceRangeInput,
+} from "../pacing/input"
+import {
+  browserPacingClass,
+  PACE_KEY_OF,
+  type PaceRange,
+  type WrapperPace,
+} from "../pacing/limits"
 import {
   ok,
   passOn,
@@ -50,6 +78,7 @@ import {
   type Rename,
 } from "../tools/family"
 import { argumentsRefusal, validate } from "../tools/validate"
+import { findServerBySlug, type OpenServer } from "../server-meta"
 
 /**
  * A call to a wrapper's tool: its program, run as run_code's are (one
@@ -160,7 +189,7 @@ export function wrapperRunTimeout(flow: boolean): number {
 async function callWrapperTool(
   env: WrapperEnv,
   base: PermissionExecutor,
-  server: McpServer,
+  server: OpenServer,
   toolName: string,
   args: Record<string, unknown>,
   {
@@ -177,7 +206,7 @@ async function callWrapperTool(
     throw new PcpError("state", `${server.name} has no definition.`)
   }
 
-  const definition = readDefinition(spec.definition)
+  const definition = readDefinition(openWrapperSpec(env.ctx, spec).definition)
   const tool = definition.tools.find((entry) => entry.name === toolName)
 
   if (!tool) {
@@ -220,6 +249,8 @@ async function callWrapperTool(
       ...(env.codeExecutor ? { executor: env.codeExecutor } : {}),
       timeoutMs: wrapperRunTimeout(flow),
       runId,
+      // pcp.call's pace option, held to the wrapper's own pace (innerCall).
+      takesPace: true,
       // Called from a run (run_code's), its calls wait under pacing no
       // longer than that run lasts. A call straight from a request or the
       // owner's answer gives the wrapper its own limit.
@@ -325,6 +356,101 @@ function finished(
   )
 }
 
+/**
+ * The first placeholder in a call's arguments that no binding the owner
+ * approved names, by its place, name and part, with the binding there for
+ * another part when there is one. A malformed one is left for upstream.ts
+ * to refuse in its own words.
+ */
+function unboundSecret(
+  args: Record<string, unknown>,
+  grant: SecretGrant,
+): {
+  placeholder: FoundPlaceholder
+  /** What the binding at that place lets through, when it lacks this part. */
+  allowed?: SecretGrant[number]["parts"]
+} | null {
+  let found: FoundPlaceholder[]
+
+  try {
+    found = findPlaceholders(args)
+  } catch {
+    return null
+  }
+
+  for (const placeholder of found) {
+    const there = grant.filter(
+      (binding) =>
+        binding.pointer === placeholder.pointer &&
+        binding.name === placeholder.name,
+    )
+
+    if (there.some((binding) => allowsPart(binding, placeholder.part))) {
+      continue
+    }
+
+    return there.length > 0
+      ? {
+          placeholder,
+          allowed: there.flatMap((binding) => binding.parts ?? []),
+        }
+      : { placeholder }
+  }
+
+  return null
+}
+
+/**
+ * The refusal of a call whose secret has no place the owner approved: the
+ * exact place to add with update_wrapper, which asks the owner. For the
+ * browser's type, also that a name written as it is in the program is found
+ * when the wrapper is changed (definition.ts), for a secret PCP holds.
+ */
+export function unboundSecretFix({
+  wrapper,
+  tool,
+  target,
+  browser,
+  placeholder,
+  allowed,
+}: {
+  wrapper: string
+  tool: string
+  target: string
+  browser: boolean
+  placeholder: FoundPlaceholder
+  /** The parts a place found in the program lets through, lacking this one. */
+  allowed?: Array<"username" | "password">
+}): string {
+  const entry = JSON.stringify({
+    secret: placeholder.name,
+    tool: target,
+    argument: placeholder.pointer || "/",
+  })
+
+  if (allowed) {
+    const literal = JSON.stringify({
+      $secret: placeholder.name,
+      ...(placeholder.part === "username" ? { part: "username" } : {}),
+    }).replace(/":/g, '": ')
+
+    return [
+      `The owner allowed only ${typedPartsLabel(allowed).replace(/^its /, "the ")} of the secret "${placeholder.name}" in ${target} at ${placeholder.pointer || "/"} for the wrapper ${wrapper}, as its programs name it; its tool ${tool} typed ${placeholder.part === "username" ? "its login name" : "its password"} there, so the call was not made.`,
+      `Fix it with update_wrapper: write ${literal} in the program as it is, so PCP finds that part too, or add ${entry} to secrets (the whole list, so keep the places get_wrapper shows). The owner sees it and decides.`,
+    ].join(" ")
+  }
+
+  return [
+    `The owner has not allowed the secret "${placeholder.name}" in ${target} at ${placeholder.pointer || "/"} for the wrapper ${wrapper}, so its tool ${tool}'s call was not made.`,
+    `Fix it with update_wrapper: add ${entry} to secrets (the whole list, so keep the places get_wrapper shows). The owner sees it and decides; a secret PCP does not hold yet they type in then.`,
+    ...(browser
+      ? [
+          `A secret the program types into pages with its name written as it is, {"$secret": "${placeholder.name}"}, needs no entry once PCP holds it: any update_wrapper finds it in the program and shows it to the owner. Typing it still asks the owner at a site the secret is not bound to.`,
+        ]
+      : []),
+  ].join(" ")
+}
+
 /** One call a wrapper tool's program makes. */
 async function innerCall(
   env: WrapperEnv,
@@ -337,18 +463,18 @@ async function innerCall(
     args,
     run,
     lookedUp,
+    pace: asked,
+    rerun,
     ...shape
   }: Parameters<Parameters<typeof runProgram>[2]["call"]>[0],
-  definition: Pick<WrapperDefinition, "secrets" | "callLevels">,
+  definition: Pick<WrapperDefinition, "secrets" | "callLevels" | "pace">,
   { wrapper, notes }: { wrapper: string; notes: string[] },
 ): Promise<CodeCallOutcome> {
   // On the owner's approval the calls are the wrapper's own: any enabled
   // server of the vault, whether or not this token reaches it.
   const onApproval = definition.callLevels === "approved"
-  const target: McpServer | undefined = onApproval
-    ? ((await db().mcpServer.findFirst({
-        where: { vaultId: env.ctx.vaultId, slug },
-      })) ?? undefined)
+  const target: OpenServer | undefined = onApproval
+    ? ((await findServerBySlug(env.ctx, slug)) ?? undefined)
     : servers.find((entry) => entry.slug === slug)
   const declared =
     target &&
@@ -403,6 +529,7 @@ async function innerCall(
             secretId: binding.secretId,
             template: binding.template,
             url: binding.url,
+            ...(binding.parts ? { parts: binding.parts } : {}),
           },
         ]
       : [],
@@ -414,10 +541,12 @@ async function innerCall(
   // program that uses an old argument name is told how to change it, in
   // the wrapper's answer while the name still works, and in the refusal
   // once it does not.
-  const row = await db().mcpTool.findUnique({
-    where: { serverId_name: { serverId: target.id, name } },
-    select: { inputSchema: true },
-  })
+  const row = await db()
+    .mcpTool.findFirst({
+      where: toolNameWhere(env.ctx, target.id, name),
+      select: TOOL_SCHEMA_SELECT,
+    })
+    .then((found) => found && openTool(env.ctx, found))
   const checked = await checkCallArguments(
     target,
     name,
@@ -434,26 +563,199 @@ async function innerCall(
       ok: false,
       refused: true,
       error: [
-        argumentsRefusal(`${slug}/${name}`, checked.problems),
+        argumentsRefusal(`${slug}/${name}`, checked.problems, {
+          hint: checked.hint,
+        }),
         fixes.length > 0
           ? fixes.join("\n")
-          : `The wrapper ${wrapper}'s tool ${tool.name} needs migrating: fix it with update_wrapper (edit tool ${tool.name}'s program so this call fits ${slug}/${name}'s inputSchema, which describe gives).`,
+          : `The wrapper ${wrapper}'s tool ${tool.name} needs migrating: fix it with update_wrapper (edit tool ${tool.name}'s program so this call fits ${slug}/${name}'s inputSchema, which search with its ref gives). The wrapper ${wrapper}'s tool ${tool.name} built these arguments from its own, so a value that does not fit may be one the caller handed ${tool.name} as it is.`,
       ].join("\n\n"),
     }
   }
 
-  notes.push(...fixes)
-  lookedUp?.(await markedReadOnly(target.id, name))
+  const paced = callPace(
+    target,
+    name,
+    checked.args,
+    definition.pace,
+    asked,
+    `${slug}/${name}`,
+    tool.name,
+  )
 
-  return runCodeCall(env.ctx, target, name, checked.args, {
-    publicUrl: env.publicUrl,
-    tokenId: env.tokenId,
-    max: resourceLimits().answerChars,
-    executor: base,
-    run,
-    // Always handed on, empty or not: a wrapper's call carries a secret only
-    // where a binding says so, the browser's type included (upstream.ts).
-    secrets,
-    ...shape,
-  })
+  if ("refused" in paced) {
+    return { ok: false, refused: true, error: paced.refused }
+  }
+
+  notes.push(...fixes)
+
+  // A secret the owner has not allowed here is refused before anything is
+  // sent or asked, saying what to propose (upstream.ts refuses it again).
+  const unbound = unboundSecret(checked.args, secrets)
+
+  if (unbound) {
+    return {
+      ok: false,
+      refused: true,
+      error: unboundSecretFix({
+        wrapper,
+        tool: tool.name,
+        target: `${slug}/${name}`,
+        browser: target.kind === "browser" && name === "type",
+        ...unbound,
+      }),
+    }
+  }
+
+  lookedUp?.(await markedReadOnly(env.ctx, target.id, name))
+  const sent =
+    target.kind === "browser" && name === "tabs"
+      ? clampTabPace(checked.args, definition.pace)
+      : checked.args
+
+  // The same Write or Destructive call the token made a little while ago,
+  // through this wrapper or any other way, is not made twice
+  // (calls/guard.ts); a call the owner allowed on PCP's page is theirs.
+  const guarded = env.approved
+    ? { ticket: null, warning: null }
+    : await guardCall(
+        env,
+        {
+          server: target,
+          tool: name,
+          tier: await toolTier(env.ctx, target.id, name),
+        },
+        sent,
+        { rerun: rerun === true, again: RERUN_IN_CODE },
+      )
+
+  if ("duplicate" in guarded) {
+    return {
+      ok: false,
+      refused: true,
+      error: guarded.duplicate,
+      code: "duplicate_call",
+    }
+  }
+
+  if (guarded.warning) {
+    notes.push(guarded.warning)
+  }
+
+  if (rerun === true && guarded.ticket) {
+    noteRerun()
+  }
+
+  const before = noteBefore()
+
+  try {
+    const outcome = await runCodeCall(env.ctx, target, name, sent, {
+      publicUrl: env.publicUrl,
+      tokenId: env.tokenId,
+      max: resourceLimits().answerChars,
+      executor: base,
+      run: paced.pace && run ? { ...run, pace: paced.pace } : run,
+      // Always handed on, empty or not: a wrapper's call carries a secret
+      // only where a binding says so, the browser's type included
+      // (upstream.ts).
+      secrets,
+      ...shape,
+    })
+    await endCall(guarded.ticket, endOfOutcome(outcome, before))
+    return outcome
+  } catch (error) {
+    await endCall(guarded.ticket, endOfThrow(error))
+    throw error
+  }
+}
+
+/**
+ * The pace a wrapper's browser call goes at (lib/core/pacing/): the one the
+ * program picked for it (pcp.call's pace), which must sit within the
+ * wrapper's own for the tool, or for its kind of action; else the
+ * wrapper's own; else none, and the browser follows the owner's. A pace
+ * on any other server's call is refused: only the browser is paced per
+ * action.
+ */
+export function callPace(
+  target: Pick<OpenServer, "kind">,
+  toolName: string,
+  args: Record<string, unknown>,
+  declared: WrapperPace | undefined,
+  asked: PaceRangeInput | undefined,
+  label: string,
+  wrapperTool: string,
+): { pace: PaceRange | null } | { refused: string } {
+  if (target.kind !== "browser") {
+    return asked
+      ? {
+          refused: `pcp.call's pace is for the browser's calls; ${label} is not paced per action.`,
+        }
+      : { pace: null }
+  }
+
+  const pacingClass = browserPacingClass(toolName, args)
+  const own =
+    declared?.tools?.[toolName] ??
+    (pacingClass ? declared?.[PACE_KEY_OF[pacingClass]] : undefined) ??
+    null
+
+  if (!asked) {
+    return { pace: own }
+  }
+
+  if (!own) {
+    return {
+      refused: `${wrapperTool}'s wrapper declares no pace for ${label}, so its program cannot pick one: the wrapper's pace (update_wrapper's pace) says what its browser calls may go at.`,
+    }
+  }
+
+  let range: PaceRange
+
+  try {
+    range = checkPaceRange(
+      { minMs: asked.min_ms, maxMs: asked.max_ms },
+      `the pace for ${label}`,
+    )
+  } catch (error) {
+    if (error instanceof PcpError) return { refused: error.message }
+    throw error
+  }
+
+  return paceWithin(range, own)
+    ? { pace: range }
+    : {
+        refused: `The pace for ${label} goes outside the one its wrapper declares for it (${describeRange(own)}): pick one within it, or change the wrapper's pace with update_wrapper.`,
+      }
+}
+
+/**
+ * A tab's pace a wrapper's program sets (browser tabs, action pace), held
+ * within the wrapper's own pace for each kind it declares: a flow never
+ * makes a tab go faster or slower than the owner approved for it. A kind
+ * it declares no pace for is left to the owner's bounds (the browser asks
+ * past them).
+ */
+export function clampTabPace(
+  args: Record<string, unknown>,
+  declared: WrapperPace | undefined,
+): Record<string, unknown> {
+  const pace = args.pace as
+    Record<string, { min_ms: number; max_ms: number } | undefined> | undefined
+
+  if (args.action !== "pace" || !pace || !declared) {
+    return args
+  }
+
+  const held: Record<string, { min_ms: number; max_ms: number }> = {}
+
+  for (const [key, range] of Object.entries(pace)) {
+    if (!range) continue
+    const own = declared[key as "actions" | "navigations"]
+    const within = (ms: number) =>
+      own ? Math.min(Math.max(ms, own.minMs), own.maxMs) : ms
+    held[key] = { min_ms: within(range.min_ms), max_ms: within(range.max_ms) }
+  }
+
+  return { ...args, pace: held }
 }

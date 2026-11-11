@@ -62,7 +62,8 @@ curl -fsSL https://raw.githubusercontent.com/kaperkunde/pcp/main/install.sh | sh
 
 The installer finds Docker or Podman on the computer (Bazzite and other
 Fedora Atomic systems come with Podman), pulls the published image
-(`ghcr.io/kaperkunde/pcp`) and keeps PCP running on port 3000 across reboots:
+(`ghcr.io/kaperkunde/pcp`), checks its signature, and keeps PCP running on
+port 3000 across reboots:
 as a container Docker restarts, or as a systemd unit under Podman. It never
 runs `sudo` or installs Docker for you; when neither is usable, it prints what
 to run. Run the same line again to update PCP, or choose **Install and
@@ -168,7 +169,7 @@ or a quarter of it), it rewrites the file without it.
 How much of the machine PCP may use for what assistants hand it follows the
 machine: its memory (a container's limit, where it has one), its processors
 and the free disk where PCP keeps its data. **Settings → Resources** shows
-what PCP picked and lets you set each yourself: a `run_code` program's memory
+what PCP picked and lets you set each yourself: a `run` program's memory
 (a sixteenth of the machine's, 128 MB to 1 GB), how many programs run at once
 (no more than the processors, and half the memory together), the largest file
 PCP keeps for an assistant and so what a program reads of one (an eighth of a

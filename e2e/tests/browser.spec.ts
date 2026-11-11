@@ -45,7 +45,7 @@ function browse(
   tool: string,
   args: Record<string, unknown> = {},
 ): Promise<McpResponse> {
-  return callTool(baseURL, token, "call_tool_destructive", {
+  return callTool(baseURL, token, "execute_destructive", {
     server: "browser",
     tool,
     arguments: args,
@@ -321,6 +321,106 @@ test("the tabs view: a hand-over answered on its tab, old links led there, a sta
   ).toContainText("This tab is closed")
 })
 
+test("the live view: Take over and Hand back switch back and forth without a reload", async ({
+  page,
+  baseURL,
+}) => {
+  const opened = toolText(
+    await browse(baseURL!, "tabs", {
+      action: "open",
+      url: `${upstream.browserUrl}/form`,
+    }),
+  )
+  const tab =
+    opened.match(/Opened a new tab: ([^\s.]+)[ .]/)?.[1] ?? tabOf(opened)
+
+  // The page's own refresh is slow (a busy page makes the tab list slow to
+  // draw): the buttons must not wait for it.
+  await page.route(/\/browser\?.*_rsc=/, async (route) => {
+    if (route.request().method() !== "GET") return route.continue()
+    await new Promise((resolve) => setTimeout(resolve, 15_000))
+    await route.continue().catch(() => {})
+  })
+  await page.goto(`/browser?tab=${tab}`)
+  const live = page.getByRole("region", { name: "Live tab" })
+  await expect(page.getByTestId("browser-frame")).toBeVisible()
+
+  // Each switch leaves the button enabled and offering the opposite action.
+  for (let round = 0; round < 2; round += 1) {
+    const takeOver = live.getByRole("button", { name: "Take over" })
+    await expect(takeOver).toBeEnabled()
+    await clickHydrated(takeOver)
+
+    const handBack = live.getByRole("button", { name: "Hand back" })
+    await expect(handBack).toBeVisible()
+    await expect(handBack).toBeEnabled({ timeout: 4_000 })
+    await clickHydrated(handBack)
+  }
+
+  await expect(live.getByRole("button", { name: "Take over" })).toBeEnabled({
+    timeout: 4_000,
+  })
+  await expect(live.getByRole("button", { name: /^Close/ })).toBeEnabled()
+})
+
+test("the live view: a stream that dropped for a while comes back, and the buttons with it", async ({
+  page,
+  baseURL,
+}) => {
+  test.setTimeout(120_000)
+  const opened = toolText(
+    await browse(baseURL!, "tabs", {
+      action: "open",
+      url: `${upstream.browserUrl}/form`,
+    }),
+  )
+  const tab =
+    opened.match(/Opened a new tab: ([^\s.]+)[ .]/)?.[1] ?? tabOf(opened)
+
+  // The first connections fail (an address that answers 404), enough to
+  // use up the quick retries.
+  await page.addInitScript(() => {
+    const Real = window.EventSource
+    let refused = 0
+    const w = window as unknown as { __refused: () => number }
+    w.__refused = () => refused
+    window.EventSource = class extends Real {
+      constructor(url: string | URL, init?: EventSourceInit) {
+        if (refused < 7) {
+          refused += 1
+          super("/api/browser/tabs/none/stream", init)
+        } else {
+          super(url, init)
+        }
+      }
+    } as typeof EventSource
+  })
+  await page.goto(`/browser?tab=${tab}`)
+  const live = page.getByRole("region", { name: "Live tab" })
+
+  // It is not shown as closed for good: once the stream is back, so are
+  // the buttons.
+  await expect
+    .poll(
+      () =>
+        page.evaluate(() =>
+          (window as unknown as { __refused: () => number }).__refused(),
+        ),
+      { timeout: 90_000 },
+    )
+    .toBe(7)
+  await expect(live.getByText("Connection lost")).toHaveCount(0, {
+    timeout: 60_000,
+  })
+  await expect(live.getByText("This tab is closed")).toHaveCount(0)
+  const takeOver = live.getByRole("button", { name: "Take over" })
+  await expect(takeOver).toBeEnabled()
+  await clickHydrated(takeOver)
+  await expect(live.getByRole("button", { name: "Hand back" })).toBeEnabled({
+    timeout: 4_000,
+  })
+})
+
 test("a secret for the browser: its login name, a password PCP makes, and its sites changed on request", async ({
   page,
   baseURL,
@@ -346,11 +446,19 @@ test("a secret for the browser: its login name, a password PCP makes, and its si
   const login = page.getByLabel("Login name")
   await expect(login).toHaveValue("ada@example.com")
   await expect(login).toHaveAttribute("autocomplete", "username")
+  await expect(login).toHaveAttribute("autocapitalize", "off")
   const generate = page.getByRole("switch", {
     name: /Have PCP make a new password/,
   })
   await expect(generate).toBeChecked()
   await expect(page.getByLabel("Length")).toHaveValue("20")
+  // Enter in a field of the form is not Allow: the sites are still unseen.
+  await page.getByLabel("Length").press("Enter")
+  await login.press("Enter")
+  await expect(page.getByTestId("permission-outcome")).toHaveCount(0)
+  await expect(
+    page.getByRole("button", { name: "Save, allow one use" }),
+  ).toBeEnabled()
   await expect(
     page.getByRole("checkbox", { name: "https://www.frankenergie.nl" }),
   ).toBeChecked()
@@ -359,9 +467,26 @@ test("a secret for the browser: its login name, a password PCP makes, and its si
     "true",
   )
   await clickHydrated(generate)
+  // Not generating: the password follows the login name in one real form,
+  // under the plain pair of hints (Safari puts a "new-password" into the
+  // login name), and Allow submits that form.
+  const password = page.getByLabel(`Value of the secret "${name}"`)
+  await expect(password).toHaveAttribute("autocomplete", "current-password")
+  await expect(password).toHaveAttribute("name", "password")
+  const form = page.locator("form", { has: login })
+  await expect(form.locator("input:not([type=checkbox])")).toHaveCount(2)
   await expect(
-    page.getByLabel(`Value of the secret "${name}"`),
-  ).toHaveAttribute("autocomplete", "new-password")
+    form.locator("input:not([type=checkbox])").nth(0),
+  ).toHaveAttribute("name", "username")
+  await expect(
+    form.locator("input:not([type=checkbox])").nth(1),
+  ).toHaveAttribute("name", "password")
+  await expect(
+    page.getByRole("button", { name: "Save, allow one use" }),
+  ).toHaveAttribute("type", "submit")
+  await expect(
+    page.getByRole("button", { name: "Save, allow one use" }),
+  ).toHaveAttribute("form", (await form.getAttribute("id")) ?? "")
   await clickHydrated(generate)
 
   await clickHydrated(page.getByRole("button", { name: "Save, allow one use" }))

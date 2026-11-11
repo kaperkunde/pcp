@@ -69,7 +69,7 @@ export const TOOL_ACCESS_LABELS: Record<ToolAccess, string> = {
 /**
  * How much a tool can do (lib/core/tool-tiers.ts): read, change (write) or
  * change or delete for good (destructive). Each tier has its own entry
- * tools (call_tool_<tier>, run_code_<tier>), which run tools at or below
+ * tools (execute_<tier>, run_<tier>), which run tools at or below
  * it, so a client can let Read through without asking each time.
  */
 export const TOOL_TIERS = ["read", "write", "destructive"] as const
@@ -176,6 +176,7 @@ export type PermissionKind =
   | "secret_sites_change"
   | "exit_use"
   | "script_use"
+  | "tab_pace"
   | "wrapper_change"
   | "skill_change"
   | "repo_change"

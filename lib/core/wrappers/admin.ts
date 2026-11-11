@@ -1,11 +1,23 @@
-import { createHash } from "node:crypto"
-
 import type { ToolTier } from "../constants"
 import type { VaultContext } from "../context"
 import { db } from "../db"
+import { keyedHash } from "../crypto"
+import {
+  canonicalOf,
+  openWrapperSpec,
+  sealedWrapperDefinition,
+  WRAPPER_SPEC_SELECT,
+} from "../spec-rows"
 import { invalid, notFound, PcpError } from "../errors"
 import type { GatewayServer } from "../gateway-servers"
 import { newId } from "../ids"
+import { assistantBounds, readPacingConfig } from "../pacing/config"
+import {
+  toWrapperPaceInput,
+  wrapperPaceOutside,
+  wrapperPaceWords,
+  type WrapperPaceInput,
+} from "../pacing/input"
 import { canonicalJson } from "../permission-rules"
 import { createSecretNamedAfter, findTextSecretByName } from "../secrets"
 import { tierOfCalls } from "../tool-tiers"
@@ -38,12 +50,23 @@ import {
   WRAPPER_URL,
 } from "../servers"
 
+import {
+  openServer,
+  openServers,
+  SERVER_META_SELECT,
+  serverCreateData,
+  serverName,
+  writeServer,
+  serverSlug,
+  serverSlugWhere,
+} from "../server-meta"
 import { syncWrapperTools } from "./catalogue"
 import {
   browserServerIds,
   definitionHash,
   isFlow,
   isFlowTool,
+  newFoundPlaces,
   readDefinition,
   resolveDefinition,
   type CallLevels,
@@ -55,6 +78,8 @@ import {
 } from "./definition"
 import { flowSites, type FlowSites } from "./flow-sites"
 import { MAX_WRAPPERS } from "./limits"
+import type { SecretPart } from "./placeholders"
+import { typedPartsLabel } from "./secret-literals"
 
 /**
  * Making and changing wrappers. An assistant only ever asks: create_wrapper,
@@ -105,6 +130,12 @@ export type WrapperShownSecret = {
   template: string
   /** The owner types its value in on the page. */
   isNew: boolean
+  /**
+   * PCP found it written as it is in a program that types it into pages
+   * (definition.ts SecretBinding `found`), with what the programs type of
+   * it. Left out of a request made before places were found.
+   */
+  found?: { parts: SecretPart[] }
 }
 
 /** What the owner is shown, worked out when the request is made. */
@@ -118,6 +149,12 @@ export type WrapperShown = {
   flow?: boolean
   tools: WrapperShownTool[]
   secrets: WrapperShownSecret[]
+  /**
+   * The ranges of its pace outside what you let assistants set, in words:
+   * only your yes on this request allows them. Absent from a request made
+   * before wrappers had a pace.
+   */
+  paceOutside?: string[]
 }
 
 export type WrapperChangeAsk = {
@@ -167,16 +204,32 @@ export type WrapperView = {
       replaces: string[]
     }
   >
+  /** The places given by name; not the ones found in the programs. */
   secrets: Array<SecretBindingInput & { template: string }>
+  /** The pace of its browser calls, when it has one of its own. */
+  pace?: WrapperPaceInput
+  /**
+   * The secrets the programs type into pages by name as written, whose
+   * places PCP made (definition.ts SecretBinding `found`), with what of each.
+   */
+  foundSecrets: FoundSecret[]
 }
 
+type InputSecret = SecretBindingInput & { template: string; found?: true }
+
+/** A secret typed into pages by its name in a program, and what of it. */
+export type FoundSecret = { secret: string; parts: SecretPart[] }
+
 function basisOf(
+  ctx: VaultContext,
   server: { name: string; description: string },
   hash: string,
 ): string {
-  return createHash("sha256")
-    .update(canonicalJson([hash, server.name, server.description]))
-    .digest("hex")
+  return keyedHash(
+    ctx.dek,
+    "pcp wrapper basis",
+    canonicalJson([hash, server.name, server.description]),
+  )
 }
 
 async function slugsById(
@@ -185,17 +238,22 @@ async function slugsById(
 ): Promise<Map<string, { slug: string; name: string }>> {
   const rows = await db().mcpServer.findMany({
     where: { vaultId: ctx.vaultId, id: { in: [...new Set(ids)] } },
-    select: { id: true, slug: true, name: true },
+    select: SERVER_META_SELECT,
   })
 
-  return new Map(rows.map((row) => [row.id, row]))
+  return new Map(
+    openServers(ctx, rows).map((row) => [
+      row.id,
+      { slug: row.slug, name: row.name },
+    ]),
+  )
 }
 
 /** A definition with other tools named by short name, as people write them. */
 async function toInput(
   ctx: VaultContext,
   definition: WrapperDefinition,
-): Promise<Pick<WrapperView, "tools" | "secrets">> {
+): Promise<Pick<WrapperView, "tools" | "pace"> & { secrets: InputSecret[] }> {
   const servers = await slugsById(ctx, [
     ...definition.tools.flatMap((tool) =>
       [...tool.calls, ...tool.replaces].map((ref) => ref.serverId),
@@ -222,29 +280,48 @@ async function toInput(
       tool: ref(binding.serverId, binding.tool),
       argument: binding.argument,
       template: binding.template,
+      ...(binding.found ? { found: binding.found } : {}),
     })),
+    ...(definition.pace ? { pace: toWrapperPaceInput(definition.pace) } : {}),
   }
+}
+
+/** The places given by name, as a change or the owner's form takes them. */
+function givenSecrets(
+  secrets: InputSecret[],
+): Array<SecretBindingInput & { template: string }> {
+  return secrets.flatMap(({ found, ...binding }) => (found ? [] : [binding]))
 }
 
 async function loadWrapper(
   ctx: VaultContext,
   where: { slug: string } | { id: string },
 ) {
-  const server = await db().mcpServer.findFirst({
-    where: { vaultId: ctx.vaultId, kind: "wrapper", ...where },
+  const row = await db().mcpServer.findFirst({
+    where: {
+      ...("slug" in where
+        ? serverSlugWhere(ctx, where.slug)
+        : { vaultId: ctx.vaultId, id: where.id }),
+      kind: "wrapper",
+    },
     include: { wrapperSpec: true },
   })
 
-  if (!server || !server.wrapperSpec) {
+  if (!row || !row.wrapperSpec) {
     throw notFound(
       "slug" in where ? `A wrapper called ${where.slug}` : "That wrapper",
     )
   }
 
+  const { wrapperSpec, ...rest } = row
+  const server = openServer(ctx, rest)
+  // The hash is the keyed one, also for a row from before.
+  const spec = openWrapperSpec(ctx, wrapperSpec)
+
   return {
     server,
-    spec: server.wrapperSpec,
-    definition: readDefinition(server.wrapperSpec.definition),
+    spec,
+    definition: readDefinition(spec.definition),
   }
 }
 
@@ -254,6 +331,7 @@ export async function getWrapper(
   where: { slug: string } | { id: string },
 ): Promise<WrapperView> {
   const { server, definition } = await loadWrapper(ctx, where)
+  const { tools, secrets, pace } = await toInput(ctx, definition)
 
   return {
     id: server.id,
@@ -263,7 +341,13 @@ export async function getWrapper(
     enabled: server.enabled,
     callLevels: definition.callLevels ?? "token",
     flow: isFlow(definition, await browserServerIds(ctx)),
-    ...(await toInput(ctx, definition)),
+    tools,
+    secrets: givenSecrets(secrets),
+    foundSecrets: newFoundPlaces(null, definition).filter(
+      (entry, index, all) =>
+        all.findIndex((other) => other.secret === entry.secret) === index,
+    ),
+    ...(pace ? { pace } : {}),
   }
 }
 
@@ -370,6 +454,9 @@ async function describe(
       argument: binding.argument,
       template: binding.template,
       isNew: binding.secretId === null,
+      ...(binding.found
+        ? { found: { parts: binding.parts ?? ["username", "password"] } }
+        : {}),
     }),
   )
   const replaced = [
@@ -388,6 +475,30 @@ async function describe(
       : action === "delete"
         ? `Delete the wrapper ${previousName ?? name}?`
         : `Change the wrapper ${previousName ?? name}?`
+
+  const paceBefore = before?.pace ? wrapperPaceWords(before.pace) : []
+  const paceAfter = after?.pace ? wrapperPaceWords(after.pace) : []
+  const paceChanged =
+    canonicalJson(before?.pace ?? null) !== canonicalJson(after?.pace ?? null)
+  const paceOutside =
+    action !== "delete" && after?.pace && paceChanged
+      ? wrapperPaceOutside(
+          after.pace,
+          assistantBounds(await readPacingConfig(ctx)),
+        )
+      : []
+  const paceLines =
+    action === "delete"
+      ? []
+      : paceAfter.length > 0
+        ? [
+            `${action === "update" && paceChanged ? (paceBefore.length > 0 ? "New pace" : "Its own pace") : "Its own pace"} for the browser calls its tools make, in place of yours (a site you paced yourself never goes faster): ${paceAfter.join("; ")}${action === "update" && paceChanged && paceBefore.length > 0 ? ` (was: ${paceBefore.join("; ")})` : ""}`,
+          ]
+        : action === "update" && paceBefore.length > 0
+          ? [
+              `Its own pace goes (was: ${paceBefore.join("; ")}): its browser calls follow yours.`,
+            ]
+          : []
 
   const lines = [
     ...(action === "delete"
@@ -421,6 +532,7 @@ async function describe(
                 `The calls inside its tools now follow ${after?.callLevels === "approved" ? "your approval of the wrapper (they were at each token's own levels)" : "each token's own levels (they followed your approval of the wrapper)"}.`,
               ]
             : []),
+          ...paceLines,
           ...(flow
             ? [
                 `A browser flow: its tools drive PCP's browser as the token that calls them, on the sites that token may open.${action === "create" ? " Like every new tool, each asks you first for every token until you allow it." : ""}`,
@@ -442,9 +554,11 @@ async function describe(
         ]
       : []
 
-  const secretWarning =
-    secrets.length > 0
-      ? `PCP will put ${secrets
+  const given = secrets.filter((binding) => !binding.found)
+  const typed = secrets.filter((binding) => binding.found)
+  const givenWarning =
+    given.length > 0
+      ? `PCP will put ${given
           .map(
             (binding) =>
               `your secret "${binding.secret}"${binding.isNew ? " (new: you type its value in below)" : ""} into the argument ${binding.argument} of ${binding.tool} (${binding.serverName}, ${binding.url})`,
@@ -453,12 +567,29 @@ async function describe(
             "; ",
           )}. The programs never see it and PCP takes it out of what that tool answers, but what the tool does with it is up to the tool: allow it only where that argument is meant for a credential.`
       : null
+  const typedWarning =
+    typed.length > 0
+      ? `Found in the programs: they type ${typed
+          .map(
+            (binding) =>
+              `your secret "${binding.secret}" (${typedPartsLabel(binding.found!.parts)})`,
+          )
+          .join(
+            ", ",
+          )} into pages with ${[...new Set(typed.map((binding) => binding.tool))].join(", ")}. PCP types it only at the sites you bound it to, or after asking you, never anywhere else; the programs never see it.`
+      : null
+  const secretWarning =
+    [givenWarning, typedWarning].filter((part) => part !== null).join(" ") ||
+    null
   const warning =
     [
       approvedCalls.length > 0
         ? `Any token you let use these tools can make these calls through them, whatever its own levels for ${approvedCalls.join(", ")} are.`
         : null,
       secretWarning,
+      paceOutside.length > 0
+        ? `Its pace goes past what you let assistants set without asking: ${paceOutside.join("; ")}. Making this change allows it for this wrapper.`
+        : null,
     ]
       .filter((part) => part !== null)
       .join(" ") || null
@@ -471,6 +602,7 @@ async function describe(
     flow,
     tools,
     secrets,
+    ...(paceOutside.length > 0 ? { paceOutside } : {}),
   }
 }
 
@@ -585,7 +717,7 @@ export async function proposeWrapperInstance(
   input: { name: string },
 ): Promise<WrapperChangeAsk> {
   await assertRoomForWrapper(ctx)
-  const source = await contentInstance(bound.id)
+  const source = await contentInstance(ctx, bound.id)
 
   if (!source || source.kind !== "wrapper") {
     throw invalid("That wrapper has no program to make another of.")
@@ -636,7 +768,7 @@ export async function proposeWrapperDetach(
   slug: string,
 ): Promise<WrapperChangeAsk> {
   const { server, spec, definition } = await loadWrapper(ctx, { slug })
-  const others = await siblingInstances(server.id)
+  const others = await siblingInstances(ctx, server.id)
 
   if (!server.definitionId || others.length === 0) {
     throw invalid(
@@ -647,7 +779,7 @@ export async function proposeWrapperDetach(
   return {
     action: "detach",
     serverId: server.id,
-    basis: basisOf(server, spec.hash),
+    basis: basisOf(ctx, server, spec.hash),
     name: server.name,
     description: server.description,
     definition: null,
@@ -681,6 +813,8 @@ export type WrapperChanges = {
   secrets?: SecretBindingInput[]
   /** Whose levels the calls inside its tools follow; kept when left out. */
   callLevels?: CallLevels
+  /** The pace of its browser calls; kept when left out, null for none. */
+  pace?: WrapperPaceInput | null
 }
 
 export async function proposeWrapperChange(
@@ -714,8 +848,11 @@ export async function proposeWrapperChange(
       name: changes.name ?? server.name,
       description: changes.description ?? server.description,
       tools,
-      secrets: changes.secrets ?? current.secrets,
+      // The places found in the programs are found again, in the programs
+      // as they will be.
+      secrets: changes.secrets ?? givenSecrets(current.secrets),
       callLevels: changes.callLevels ?? definition.callLevels ?? "token",
+      pace: changes.pace === undefined ? (current.pace ?? null) : changes.pace,
     },
     {
       reach: reachOf(servers),
@@ -741,7 +878,7 @@ export async function proposeWrapperChange(
   }
 
   if (
-    definitionHash(resolved.definition) === spec.hash &&
+    definitionHash(ctx, resolved.definition) === spec.hash &&
     resolved.name === server.name &&
     resolved.description === server.description
   ) {
@@ -751,7 +888,7 @@ export async function proposeWrapperChange(
   return {
     action: "update",
     serverId: server.id,
-    basis: basisOf(server, spec.hash),
+    basis: basisOf(ctx, server, spec.hash),
     name: resolved.name,
     description: resolved.description,
     definition: resolved.definition,
@@ -776,7 +913,7 @@ export async function proposeWrapperDelete(
   return {
     action: "delete",
     serverId: server.id,
-    basis: basisOf(server, spec.hash),
+    basis: basisOf(ctx, server, spec.hash),
     name: server.name,
     description: server.description,
     definition: null,
@@ -856,13 +993,15 @@ async function checkBoundAddresses(
   ctx: VaultContext,
   definition: WrapperDefinition,
 ): Promise<void> {
-  const servers = await db().mcpServer.findMany({
-    where: {
-      vaultId: ctx.vaultId,
-      id: { in: definition.secrets.map((binding) => binding.serverId) },
-    },
-    select: { id: true, url: true, name: true },
-  })
+  const servers = await db()
+    .mcpServer.findMany({
+      where: {
+        vaultId: ctx.vaultId,
+        id: { in: definition.secrets.map((binding) => binding.serverId) },
+      },
+      select: SERVER_META_SELECT,
+    })
+    .then((rows) => openServers(ctx, rows))
 
   for (const binding of definition.secrets) {
     const server = servers.find((entry) => entry.id === binding.serverId)
@@ -900,7 +1039,7 @@ export async function applyWrapperChange(
     // Another wrapper of a definition: as the owner was shown it, or not.
     if (
       ask.instanceOf &&
-      (await definitionBasis(ask.instanceOf.definitionId)) !==
+      (await definitionBasis(ctx, ask.instanceOf.definitionId)) !==
         ask.instanceOf.basis
     ) {
       throw new PcpError(
@@ -937,10 +1076,13 @@ export async function applyWrapperChange(
       await db().apiTokenServer.create({ data: { tokenId, serverId: id } })
     }
 
-    const { slug } = await db().mcpServer.findUniqueOrThrow({
-      where: { id },
-      select: { slug: true },
-    })
+    const slug = serverSlug(
+      ctx,
+      await db().mcpServer.findUniqueOrThrow({
+        where: { id },
+        select: SERVER_META_SELECT,
+      }),
+    )
 
     const levels = await settleChosenAccess(ctx, {
       serverId: id,
@@ -953,7 +1095,7 @@ export async function applyWrapperChange(
 
   const { server, spec } = await loadWrapper(ctx, { id: ask.serverId! })
 
-  if (basisOf(server, spec.hash) !== ask.basis) {
+  if (basisOf(ctx, server, spec.hash) !== ask.basis) {
     throw new PcpError(
       "state",
       `${server.name} has changed since this was asked, so nothing changed. Read it again with get_wrapper and ask again.`,
@@ -1008,28 +1150,32 @@ async function createWrapperRow(
 
   await db().$transaction([
     db().mcpServer.create({
-      data: {
+      data: serverCreateData(ctx, {
         id,
         vaultId: ctx.vaultId,
         kind: "wrapper",
         name,
-        slug: await uniqueSlug(ctx.vaultId, slugify(name)),
+        slug: await uniqueSlug(ctx, slugify(name)),
         description: shared?.description ?? description,
         url: WRAPPER_URL,
         authType: "none",
         definitionId: shared?.id ?? null,
-      },
+      }),
     }),
     db().wrapperSpec.create({
       data: {
         serverId: id,
-        definition: JSON.stringify(definition),
-        hash: definitionHash(definition),
+        ...sealedWrapperDefinition(
+          ctx,
+          id,
+          JSON.stringify(definition),
+          canonicalJson(definition),
+        ),
       },
     }),
   ])
-  await syncWrapperTools({ id })
-  await ensureDefinition(id)
+  await syncWrapperTools(ctx, { id })
+  await ensureDefinition(ctx, id)
 
   return id
 }
@@ -1041,18 +1187,20 @@ async function writeWrapper(
   description: string,
   definition: WrapperDefinition,
 ): Promise<void> {
-  await db().$transaction([
-    db().mcpServer.update({ where: { id }, data: { name, description } }),
-    db().wrapperSpec.update({
+  await db().$transaction(async (tx) => {
+    await writeServer(ctx, id, { name, description }, tx)
+    await tx.wrapperSpec.update({
       where: { serverId: id },
-      data: {
-        definition: JSON.stringify(definition),
-        hash: definitionHash(definition),
-      },
-    }),
-  ])
-  await syncWrapperTools({ id })
-  await shareWrapper(id)
+      data: sealedWrapperDefinition(
+        ctx,
+        id,
+        JSON.stringify(definition),
+        canonicalJson(definition),
+      ),
+    })
+  })
+  await syncWrapperTools(ctx, { id })
+  await shareWrapper(ctx, id)
 }
 
 /**
@@ -1060,10 +1208,10 @@ async function writeWrapper(
  * description, and rebuilds their tools: what a wrapper is, is the
  * definition's.
  */
-async function shareWrapper(id: string): Promise<void> {
-  await shareDescription(id)
+async function shareWrapper(ctx: VaultContext, id: string): Promise<void> {
+  await shareDescription(ctx, id)
 
-  const siblings = (await siblingInstances(id)).filter(
+  const siblings = (await siblingInstances(ctx, id)).filter(
     (sibling) => sibling.kind === "wrapper",
   )
 
@@ -1071,18 +1219,27 @@ async function shareWrapper(id: string): Promise<void> {
     return
   }
 
-  const spec = await db().wrapperSpec.findUniqueOrThrow({
-    where: { serverId: id },
-  })
+  const spec = openWrapperSpec(
+    ctx,
+    await db().wrapperSpec.findUniqueOrThrow({
+      where: { serverId: id },
+      select: WRAPPER_SPEC_SELECT,
+    }),
+  )
 
   for (const sibling of siblings) {
     const { count } = await db().wrapperSpec.updateMany({
       where: { serverId: sibling.id, hash: { not: spec.hash } },
-      data: { definition: spec.definition, hash: spec.hash },
+      data: sealedWrapperDefinition(
+        ctx,
+        sibling.id,
+        spec.definition,
+        canonicalOf(spec.definition),
+      ),
     })
 
     if (count > 0) {
-      await syncWrapperTools({ id: sibling.id })
+      await syncWrapperTools(ctx, { id: sibling.id })
     }
   }
 }
@@ -1095,7 +1252,14 @@ export async function saveWrapperByOwner(
   ctx: VaultContext,
   id: string | null,
   input: WrapperInput,
-): Promise<{ id: string }> {
+): Promise<{
+  id: string
+  /**
+   * The places found in the programs that it did not have (definition.ts
+   * newFoundPlaces), for the owner to be told of.
+   */
+  found: FoundSecret[]
+}> {
   const existing = id ? await loadWrapper(ctx, { id }) : null
 
   if (!existing) {
@@ -1115,7 +1279,10 @@ export async function saveWrapperByOwner(
       resolved.description,
       resolved.definition,
     )
-    return { id: existing.server.id }
+    return {
+      id: existing.server.id,
+      found: newFoundPlaces(existing.definition, resolved.definition),
+    }
   }
 
   return {
@@ -1125,6 +1292,7 @@ export async function saveWrapperByOwner(
       resolved.description,
       resolved.definition,
     ),
+    found: newFoundPlaces(null, resolved.definition),
   }
 }
 
@@ -1147,11 +1315,17 @@ export async function replacedTools(
       continue
     }
 
-    for (const tool of readDefinition(wrapper.wrapperSpec.definition).tools) {
+    for (const tool of readDefinition(
+      openWrapperSpec(ctx, wrapper.wrapperSpec).definition,
+    ).tools) {
       for (const replaced of tool.replaces) {
         if (replaced.serverId === serverId) {
           const list = found.get(replaced.tool) ?? []
-          list.push({ id: wrapper.id, name: wrapper.name, tool: tool.name })
+          list.push({
+            id: wrapper.id,
+            name: serverName(ctx, wrapper),
+            tool: tool.name,
+          })
           found.set(replaced.tool, list)
         }
       }
@@ -1180,7 +1354,9 @@ export async function showReplacedTool(
       continue
     }
 
-    const definition = readDefinition(wrapper.wrapperSpec.definition)
+    const definition = readDefinition(
+      openWrapperSpec(ctx, wrapper.wrapperSpec).definition,
+    )
     let changed = false
     const tools = definition.tools.map((tool) => {
       const replaces = tool.replaces.filter(
@@ -1191,7 +1367,8 @@ export async function showReplacedTool(
     })
 
     if (changed) {
-      await writeWrapper(ctx, wrapper.id, wrapper.name, wrapper.description, {
+      const { name, description } = openServer(ctx, wrapper)
+      await writeWrapper(ctx, wrapper.id, name, description, {
         ...definition,
         tools,
       })

@@ -1,5 +1,6 @@
 import type { VaultContext } from "../context"
 import { db } from "../db"
+import { findServer } from "../server-meta"
 import { definitionBasis } from "../definitions"
 import { invalid, isPcpError, PcpError } from "../errors"
 import type { ShownText } from "../permission-rules"
@@ -152,8 +153,10 @@ export async function prepareServiceProposal(
   }
 
   const named = normalizeNameAndDescription({ name: args.name, description })
-  const host = await db().mcpServer.findFirst({
-    where: { id: args.sshServerId, vaultId: ctx.vaultId, kind: "ssh" },
+  const host = await findServer(ctx, {
+    id: args.sshServerId,
+    vaultId: ctx.vaultId,
+    kind: "ssh",
   })
 
   if (!host) {
@@ -401,7 +404,7 @@ export async function applyServiceChange(
 ): Promise<string> {
   if (
     ask.instanceOf &&
-    (await definitionBasis(ask.instanceOf.definitionId)) !==
+    (await definitionBasis(ctx, ask.instanceOf.definitionId)) !==
       ask.instanceOf.basis
   ) {
     throw new PcpError(

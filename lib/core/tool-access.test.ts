@@ -45,9 +45,9 @@ async function addTool(serverId: string, name: string) {
     data: {
       id: randomUUID(),
       serverId,
-      name,
-      description: `${name} does one thing.`,
-      inputSchema: JSON.stringify({ type: "object" }),
+      plainName: name,
+      plainDescription: `${name} does one thing.`,
+      plainInputSchema: JSON.stringify({ type: "object" }),
     },
   })
 }

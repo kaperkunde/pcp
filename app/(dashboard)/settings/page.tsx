@@ -10,6 +10,7 @@ import { FormNote } from "@kaperkunde/ui/form-status"
 import { PageColumn } from "@kaperkunde/ui/page"
 import { PacingCard } from "@/components/pacing-card"
 import { PageHeader } from "@kaperkunde/ui/page"
+import { RepeatedCallsCard } from "@/components/repeated-calls-card"
 import { ResourcesCard } from "@/components/resources-card"
 import {
   ChangePasswordForm,
@@ -21,6 +22,7 @@ import { TouchIdCard } from "@/components/touch-id-card"
 import { IconTile } from "@/components/ui/icon-tile"
 import { List, ListRow, ListSection } from "@kaperkunde/ui/list"
 import { UpdatesCard } from "@/components/updates-card"
+import { duplicateCallsOverview } from "@/lib/core/calls/config"
 import { cleanupOverview } from "@/lib/core/cleanup/runtime"
 import { deviceKeyInfo } from "@/lib/core/device-keys"
 import { embeddingsOverview } from "@/lib/core/embeddings/config"
@@ -64,6 +66,7 @@ export default async function SettingsPage({
     resources,
     pacing,
     embeddings,
+    repeatedCalls,
   ] = await Promise.all([
     getSetting(ctx, SETTING_PUBLIC_URL),
     requestOrigin(),
@@ -77,6 +80,7 @@ export default async function SettingsPage({
     resourcesOverview(),
     pacingOverview(ctx),
     embeddingsOverview(ctx),
+    duplicateCallsOverview(ctx),
   ])
 
   return (
@@ -97,7 +101,7 @@ export default async function SettingsPage({
               />
             }
             title="Connection address"
-            description="Add this as a remote MCP server in your assistant, with an API token as the bearer token. It offers search, describe and the call_tool tools (Read, Write and Destructive), which reach every server you connected, and your skills."
+            description="Add this as a remote MCP server in your assistant, with an API token as the bearer token. It offers search and the execute and run tools (Read, Write and Destructive), which reach every server you connected, your skills and the rest of PCP."
           >
             <div className="basis-full">
               <CopyableValue value={`${publicUrl}/mcp`} />
@@ -115,7 +119,7 @@ export default async function SettingsPage({
             href="/settings/tools"
             icon={<IconTile icon={Wrench} size="sm" />}
             title="PCP's own tools"
-            description="Read, Write or Destructive for search, the call_tool and run_code tools, memory and the rest: what assistants' apps are told each one can do"
+            description="Read, Write or Destructive for memory, web fetch, files and the rest: what assistants' apps are told each one can do"
           />
           <EmbeddingsCard overview={embeddings} />
         </List>
@@ -164,6 +168,7 @@ export default async function SettingsPage({
           <CleanupCard overview={cleanup} />
           <ResourcesCard overview={resources} />
           <PacingCard overview={pacing} />
+          <RepeatedCallsCard overview={repeatedCalls} />
         </List>
       </ListSection>
 

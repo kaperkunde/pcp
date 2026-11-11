@@ -1,7 +1,10 @@
-import { randomUUID } from "node:crypto"
+import { createHash, randomUUID } from "node:crypto"
 
+import { firstServer, toolNamed, toolsWhere } from "./test-servers"
 import type { CallToolResult } from "@modelcontextprotocol/server"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
+
+import { serverNamed } from "./test-servers"
 
 import { listTokenAllowances } from "./allowances"
 import { createApiToken, resolveApiToken, revokeApiToken } from "./api-tokens"
@@ -20,6 +23,7 @@ import { permissionLinkIn } from "./tools/serve"
 import {
   askCodeCall,
   checkPermission,
+  checkPermissions,
   decidePermission,
   getPermissionView,
   listAnsweredRequests,
@@ -38,7 +42,11 @@ import {
   type RegisterArgs,
 } from "./permissions"
 import { closePendingRequests } from "./permission-close"
-import { REUSE_VALUE_MAX_CHARS } from "./permission-rules"
+import {
+  REUSE_VALUE_MAX_CHARS,
+  canonicalJson,
+  requestHash,
+} from "./permission-rules"
 import { decryptString } from "./crypto"
 import { finishHandover } from "./browser/call"
 import { createFakeCalDav } from "./caldav/fake-caldav"
@@ -48,12 +56,13 @@ import { createSecret, revealSecret } from "./secrets"
 import { createServer } from "./servers"
 import { scratchDatabase } from "./test-db"
 import { OwnerNeeded } from "./browser/types"
-import { keepBytes } from "./tool-results"
+import { keepBytes, resultTool } from "./tool-results"
 import { callServerTool, syncServerTools } from "./upstream"
 import { copyTokenAccess, writeToolAccess } from "./tool-access"
 import { setToolTier } from "./tool-tiers"
 import { setupVault } from "./vault"
 import { createSshServer } from "./ssh/hosts"
+import { openSecretMeta, secretNameWhere } from "./secret-meta"
 
 // The owner's permission against a scratch database, with the upstream
 // replaced by a stub that counts what actually ran.
@@ -116,9 +125,9 @@ async function setup(options: { allowAllServers?: boolean } = {}): Promise<{
       data: {
         id: randomUUID(),
         serverId,
-        name,
-        description: `${name} does one thing.`,
-        inputSchema: JSON.stringify({ type: "object" }),
+        plainName: name,
+        plainDescription: `${name} does one thing.`,
+        plainInputSchema: JSON.stringify({ type: "object" }),
         annotations: JSON.stringify(annotations),
       },
     })
@@ -242,6 +251,34 @@ describe("asking the owner", () => {
     expect(await db().permissionRequest.count()).toBe(2)
   })
 
+  it("finds a request by a hash keyed under the vault key, and an old plain hash by nothing", async () => {
+    const { ctx, scope, server } = await setup()
+    const args = { to: "Ada", message: "Hi" }
+    const asked = call(server, "send_postcard", args)
+
+    await withPermission(scope, asked)
+    const id = await onlyRequestId()
+    const row = await db().permissionRequest.findUniqueOrThrow({
+      where: { id },
+    })
+    const plain = createHash("sha256")
+      .update(`call\n${server.id}/send_postcard\n${canonicalJson(args)}`)
+      .digest("hex")
+
+    expect(row.argsHash).toBe(
+      requestHash(ctx.dek, "call", `${server.id}/send_postcard`, args),
+    )
+    expect(row.argsHash).not.toContain(plain)
+
+    // A row stored before the hash was keyed: the same call is a new request.
+    await db().permissionRequest.update({
+      where: { id },
+      data: { argsHash: plain },
+    })
+    await withPermission(scope, asked)
+    expect(await db().permissionRequest.count()).toBe(2)
+  })
+
   it("keeps only the fields the assistant asked for once the owner allows the call", async () => {
     const { ctx, scope, server } = await setup()
     const executor: PermissionExecutor = {
@@ -317,7 +354,10 @@ describe("asking the owner", () => {
     )
     const kept = await db().toolResult.findFirstOrThrow()
 
-    expect(kept).toMatchObject({ tokenId, toolName: "add_numbers" })
+    expect({ ...kept, toolName: resultTool(ctx, kept) }).toMatchObject({
+      tokenId,
+      toolName: "add_numbers",
+    })
     expect(textOf(result)).toContain(`report → ${kept.id} (text/plain`)
     expect(textOf(result)).toContain(`"report":{"$result":"${kept.id}"`)
     expect(textOf(result)).not.toContain("THE END")
@@ -391,7 +431,7 @@ describe("asking the owner", () => {
   it("warns about a tool without hints, which counts as Destructive", async () => {
     const { ctx, scope, server } = await setup()
     await db().mcpTool.updateMany({
-      where: { serverId: server.id, name: "send_postcard" },
+      where: { id: (await toolNamed(ctx, "send_postcard", server.id)).id },
       data: { annotations: null },
     })
     await withPermission(scope, call(server, "send_postcard", { to: "Ada" }))
@@ -461,9 +501,9 @@ describe("asking the owner", () => {
       data: {
         id: randomUUID(),
         serverId,
-        name: "run_command",
-        description: "Runs one command.",
-        inputSchema: JSON.stringify({ type: "object" }),
+        plainName: "run_command",
+        plainDescription: "Runs one command.",
+        plainInputSchema: JSON.stringify({ type: "object" }),
         annotations: JSON.stringify({ destructiveHint: true }),
       },
     })
@@ -642,7 +682,7 @@ describe("kept results in a call", () => {
       syncTools: async () => ({ status: "ok", message: "", toolCount: 3 }),
     }
 
-    const row = await db().mcpServer.findFirstOrThrow()
+    const row = await firstServer(ctx)
     await runCall(
       ctx,
       row,
@@ -709,7 +749,7 @@ describe("a site the browser asks about", () => {
         return { content: [{ type: "text", text: "opened" }] }
       },
     }
-    const row = await db().mcpServer.findFirstOrThrow()
+    const row = await firstServer(ctx)
 
     await runCall(ctx, row, "navigate", args, {
       publicUrl: PUBLIC_URL,
@@ -798,6 +838,136 @@ describe("check_permission", () => {
     const started = Date.now()
     expect(textOf(await checkPermission(scope, id))).toContain("said no")
     expect(Date.now() - started).toBeLessThan(1_000)
+  })
+})
+
+describe("check_permission on several requests", () => {
+  async function two() {
+    const made = await setup()
+    await withPermission(made.scope, call(made.server, "add_numbers", { a: 1 }))
+    await withPermission(made.scope, call(made.server, "add_numbers", { a: 2 }))
+    const rows = await db().permissionRequest.findMany({
+      orderBy: { createdAt: "asc" },
+    })
+    return { ...made, a: rows[0].id, b: rows[1].id }
+  }
+
+  it("any: returns as soon as one is answered, with the rest's status", async () => {
+    const { ctx, scope, a, b } = await two()
+    const { executor } = stub()
+
+    const checked = checkPermissions(scope, [a, b], { waitMs: 10_000 })
+    setTimeout(() => {
+      void decidePermission(
+        ctx,
+        b,
+        "allow_once",
+        { publicUrl: PUBLIC_URL },
+        executor,
+      )
+    }, 200)
+    const result = await checked
+
+    expect(result.entries).toEqual([
+      { id: a, status: "pending" },
+      { id: b, status: "executed", outcome: expect.stringContaining("ran") },
+    ])
+    expect(result.told).toEqual([b])
+    expect(result.text).toContain(`/permissions/${a}`)
+    expect(result.text.split("\n").at(-1)).toContain(`/permissions/${a}`)
+  })
+
+  it("all: waits until none is waiting", async () => {
+    const { ctx, scope, a, b } = await two()
+    const { executor } = stub()
+    const decide = (id: string, delay: number) =>
+      setTimeout(() => {
+        void decidePermission(
+          ctx,
+          id,
+          "allow_once",
+          { publicUrl: PUBLIC_URL },
+          executor,
+        )
+      }, delay)
+    decide(a, 100)
+    decide(b, 1_500)
+
+    const started = Date.now()
+    const result = await checkPermissions(scope, [a, b], {
+      mode: "all",
+      waitMs: 10_000,
+    })
+
+    expect(Date.now() - started).toBeGreaterThanOrEqual(1_400)
+    expect(result.entries.map((entry) => entry.status)).toEqual([
+      "executed",
+      "executed",
+    ])
+    expect(result.told).toEqual([a, b])
+  })
+
+  it("on timeout lists every status, and an unknown id stays one entry", async () => {
+    const { ctx, scope, a, b } = await two()
+    await decidePermission(
+      ctx,
+      b,
+      "decline",
+      { publicUrl: PUBLIC_URL },
+      stub().executor,
+    )
+
+    const result = await checkPermissions(scope, [a, "nope", b], {
+      mode: "all",
+      waitMs: 50,
+    })
+
+    expect(result.entries).toEqual([
+      { id: a, status: "pending" },
+      { id: "nope", status: "unknown" },
+      {
+        id: b,
+        status: "declined",
+        outcome: expect.stringContaining("said no"),
+      },
+    ])
+    expect(result.told).toEqual([b])
+  })
+
+  it("stops waiting at once when the client goes away", async () => {
+    const { scope, a, b } = await two()
+    const gone = new AbortController()
+    const started = Date.now()
+    const checked = checkPermissions(scope, [a, b], {
+      mode: "all",
+      waitMs: 30_000,
+      signal: gone.signal,
+    })
+    setTimeout(() => gone.abort(), 100)
+    const result = await checked
+
+    expect(Date.now() - started).toBeLessThan(5_000)
+    expect(result.entries.map((entry) => entry.status)).toEqual([
+      "pending",
+      "pending",
+    ])
+  })
+
+  it("answers at once when every id is unknown, and never shows another token's request", async () => {
+    const { ctx, a } = await two()
+    const { token } = await createApiToken(ctx, {
+      name: "Other",
+      allowAllServers: true,
+      serverIds: [],
+    })
+    const other = { ...(await resolveApiToken(token))!, publicUrl: PUBLIC_URL }
+
+    const started = Date.now()
+    const result = await checkPermissions(other, [a], { waitMs: 10_000 })
+
+    expect(Date.now() - started).toBeLessThan(2_000)
+    expect(result.entries).toEqual([{ id: a, status: "unknown" }])
+    expect(result.text).not.toContain("/permissions/")
   })
 })
 
@@ -1034,7 +1204,10 @@ describe("the owner's answer", () => {
     expect(textOf(ran)).toContain("PCP kept the whole answer")
 
     const kept = await db().toolResult.findFirstOrThrow()
-    expect(kept).toMatchObject({ tokenId, toolName: "add_numbers" })
+    expect({ ...kept, toolName: resultTool(ctx, kept) }).toMatchObject({
+      tokenId,
+      toolName: "add_numbers",
+    })
     expect(kept.length).toBe(long.length)
 
     // The stored outcome is shorter still, and still names the result.
@@ -1160,9 +1333,7 @@ describe("adding a server", () => {
       { publicUrl: PUBLIC_URL },
       executor,
     )
-    const linear = await db().mcpServer.findFirstOrThrow({
-      where: { name: "Linear" },
-    })
+    const linear = await serverNamed(ctx, "Linear")
 
     expect(added.structuredContent).toMatchObject({
       kind: "needs_owner",
@@ -1198,6 +1369,16 @@ describe("adding a server", () => {
       reason: "connect",
       connect: { serverId: linear.id, slug: linear.slug },
     })
+
+    const several = await checkPermissions(scope, [id, "nope"], { waitMs: 50 })
+    expect(several.told).toEqual([])
+    expect(several.entries[0]).toMatchObject({ id, status: "executed" })
+    const lines = several.text.split("\n")
+    expect(lines.at(-1)).toMatch(/^\[Connect Linear in PCP\]\(.+\)$/)
+    expect(several.text).toContain(`check_server with server "${linear.slug}"`)
+    // The link appears once, at the end, never inside an entry.
+    expect(several.text.split("Connect Linear in PCP").length).toBe(2)
+
     expect(textOf(waiting)).toContain("Linear needs connecting")
 
     await db().mcpServer.update({
@@ -1244,9 +1425,10 @@ describe("adding a server", () => {
       executor,
     )
     expect(textOf(added)).toMatch(/Added Weather as "weather" with 3 tools/)
-    expect(
-      await db().mcpServer.findFirstOrThrow({ where: { name: "Weather" } }),
-    ).toMatchObject({ authType: "header", authSecretId: secret.id })
+    expect(await serverNamed(ctx, "Weather")).toMatchObject({
+      authType: "header",
+      authSecretId: secret.id,
+    })
   })
 
   it("names every secret when the credential has several headers, and adds them all", async () => {
@@ -1317,10 +1499,7 @@ describe("adding a server", () => {
       { publicUrl: PUBLIC_URL },
       executor,
     )
-    const added = await db().mcpServer.findFirstOrThrow({
-      where: { name: "Domains" },
-      include: { authHeaders: true },
-    })
+    const added = await serverNamed(ctx, "Domains")
     expect(added.authHeaders).toMatchObject([
       {
         position: 1,
@@ -1462,10 +1641,7 @@ describe("adding an API from OpenAPI text", () => {
     )
     expect(textOf(added)).toMatch(/Added Pets as "pets" with 3 tools/)
 
-    const pets = await db().mcpServer.findFirstOrThrow({
-      where: { name: "Pets" },
-      include: { tools: true },
-    })
+    const pets = await serverNamed(ctx, "Pets")
     expect(pets).toMatchObject({
       kind: "openapi",
       url: "https://api.example.com/v1",
@@ -1542,9 +1718,7 @@ describe("adding an API from OpenAPI text", () => {
       { publicUrl: PUBLIC_URL },
       executor,
     )
-    expect(
-      await db().mcpServer.findFirstOrThrow({ where: { name: "Pets" } }),
-    ).toMatchObject({
+    expect(await serverNamed(ctx, "Pets")).toMatchObject({
       authType: "header",
       authSecretId: secret.id,
       readOnly: true,
@@ -1637,10 +1811,7 @@ describe("a change to an API endpoint of the owner's", () => {
     })
     expect(textOf(done)).toBe("Changed Pets: 2 tools.")
 
-    const tools = await db().mcpTool.findMany({
-      where: { serverId: id },
-      orderBy: { name: "asc" },
-    })
+    const tools = await toolsWhere(ctx, { serverId: id })
     expect(tools.map((tool) => [tool.name, tool.descriptionOverride])).toEqual([
       ["createPet", null],
       ["listPets", "Every pet in the shop."],
@@ -1778,13 +1949,13 @@ describe("a new secret the owner types in", () => {
     expect(textOf(added)).not.toContain("k-123")
 
     const secret = await db().secret.findFirstOrThrow({
-      where: { name: "Pets API key" },
+      where: secretNameWhere(ctx, "Pets API key"),
     })
     expect(await revealSecret(ctx, secret.id)).toBe("k-123")
-    expect(secret.description).toBe("Sent to Pets in the X-API-Key header.")
-    expect(
-      await db().mcpServer.findFirstOrThrow({ where: { name: "Pets" } }),
-    ).toMatchObject({
+    expect(openSecretMeta(ctx, secret).description).toBe(
+      "Sent to Pets in the X-API-Key header.",
+    )
+    expect(await serverNamed(ctx, "Pets")).toMatchObject({
       authType: "header",
       authSecretId: secret.id,
       authHeaderName: "X-API-Key",
@@ -1818,9 +1989,9 @@ describe("a new secret the owner types in", () => {
     ).toMatchObject({ name: "Pets API key", exists: true })
 
     await decidePermission(ctx, first, "allow_once", web, executor)
-    expect(
-      await db().mcpServer.findFirstOrThrow({ where: { name: "Pets" } }),
-    ).toMatchObject({ authSecretId: added.id })
+    expect(await serverNamed(ctx, "Pets")).toMatchObject({
+      authSecretId: added.id,
+    })
 
     await withPermission(scope, {
       kind: "register",
@@ -1963,9 +2134,7 @@ describe("an API that signs in with OAuth", () => {
 
     expect(textOf(added)).toMatch(/Added Mail as "mail"/)
     expect(textOf(added)).not.toContain("client-s3cret")
-    const server = await db().mcpServer.findFirstOrThrow({
-      where: { name: "Mail" },
-    })
+    const server = await serverNamed(ctx, "Mail")
     expect(server).toMatchObject({
       kind: "openapi",
       authType: "oauth",
@@ -1997,9 +2166,7 @@ describe("an API that signs in with OAuth", () => {
     )
 
     expect(added.isError ?? false).toBe(false)
-    expect(
-      await db().mcpServer.findFirstOrThrow({ where: { name: "Mail" } }),
-    ).toMatchObject({
+    expect(await serverNamed(ctx, "Mail")).toMatchObject({
       oauthClientId: "owner-client",
       oauthClientSecretId: null,
     })
@@ -2770,13 +2937,13 @@ describe("an API with a user name and password", () => {
     expect(textOf(added)).not.toContain("pw-123")
 
     const secret = await db().secret.findFirstOrThrow({
-      where: { name: "Pets password" },
+      where: secretNameWhere(ctx, "Pets password"),
     })
     expect(await revealSecret(ctx, secret.id)).toBe("pw-123")
-    expect(secret.description).toBe("The password for ada at Pets.")
-    expect(
-      await db().mcpServer.findFirstOrThrow({ where: { name: "Pets" } }),
-    ).toMatchObject({
+    expect(openSecretMeta(ctx, secret).description).toBe(
+      "The password for ada at Pets.",
+    )
+    expect(await serverNamed(ctx, "Pets")).toMatchObject({
       kind: "openapi",
       authType: "basic",
       authUsername: "ada",
@@ -2833,9 +3000,7 @@ describe("a calendar account an assistant proposes", () => {
 
       expect(textOf(added)).toMatch(/Added iCloud as "icloud" with 13 tools/)
       expect(textOf(added)).not.toContain(PASSWORD)
-      const account = await db().mcpServer.findFirstOrThrow({
-        where: { name: "iCloud" },
-      })
+      const account = await serverNamed(ctx, "iCloud")
       expect(account).toMatchObject({
         kind: "caldav",
         authUsername: "ada@icloud.com",
@@ -2960,13 +3125,13 @@ describe("a mail account an assistant proposes", () => {
     expect(textOf(added)).not.toContain(PASSWORD)
 
     const secret = await db().secret.findFirstOrThrow({
-      where: { name: "Mail password" },
+      where: secretNameWhere(ctx, "Mail password"),
     })
     expect(await revealSecret(ctx, secret.id)).toBe(PASSWORD)
-    expect(secret.description).toBe("The password for ada@example.com at Mail.")
-    const account = await db().mcpServer.findFirstOrThrow({
-      where: { name: "Mail" },
-    })
+    expect(openSecretMeta(ctx, secret).description).toBe(
+      "The password for ada@example.com at Mail.",
+    )
+    const account = await serverNamed(ctx, "Mail")
     expect(account).toMatchObject({
       kind: "jmap",
       authType: "basic",
@@ -3073,9 +3238,7 @@ describe("a mail account an assistant proposes", () => {
     )
     expect(textOf(added)).toMatch(/Added Mail as "mail" with 7 tools/)
     expect(fake.requests[0]!.authorization).toBe("Bearer token-1")
-    expect(
-      await db().mcpServer.findFirstOrThrow({ where: { name: "Mail" } }),
-    ).toMatchObject({
+    expect(await serverNamed(ctx, "Mail")).toMatchObject({
       kind: "jmap",
       authType: "header",
       readOnly: true,
@@ -3115,9 +3278,7 @@ describe("a mail account an assistant proposes", () => {
       kind: "needs_owner",
       reason: "connect",
     })
-    expect(
-      await db().mcpServer.findFirstOrThrow({ where: { name: "Mail" } }),
-    ).toMatchObject({
+    expect(await serverNamed(ctx, "Mail")).toMatchObject({
       kind: "jmap",
       authType: "oauth",
       oauthConnectedAt: null,
@@ -3162,9 +3323,10 @@ describe("a mail account an assistant proposes", () => {
     expect(textOf(added)).toMatch(
       /Added Mail as "mail", but its tools could not be read yet/,
     )
-    expect(
-      await db().mcpServer.findFirstOrThrow({ where: { name: "Mail" } }),
-    ).toMatchObject({ kind: "imap", status: "error" })
+    expect(await serverNamed(ctx, "Mail")).toMatchObject({
+      kind: "imap",
+      status: "error",
+    })
   })
 
   it("notes a private address that PCP did not look at, for the owner to weigh", async () => {

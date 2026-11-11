@@ -4,6 +4,7 @@ import { createApiToken, resolveApiToken } from "../api-tokens"
 import { storeTools } from "../catalogue"
 import type { VaultContext } from "../context"
 import { db } from "../db"
+import { serverCreateData } from "../server-meta"
 import { scratchDatabase } from "../test-db"
 import { writeToolAccess } from "../tool-access"
 import { setupVault } from "../vault"
@@ -18,19 +19,19 @@ let cleanup: () => Promise<void>
 let ctx: VaultContext
 let tokenId: string
 
-async function server(slug: string, tools: Parameters<typeof storeTools>[1]) {
+async function server(slug: string, tools: Parameters<typeof storeTools>[2]) {
   const id = `srv_${slug}`
   await db().mcpServer.create({
-    data: {
+    data: serverCreateData(ctx, {
       id,
       vaultId: ctx.vaultId,
       kind: "http",
       name: slug,
       slug,
       url: `https://${slug}.example.com/mcp`,
-    },
+    }),
   })
-  await storeTools(id, tools)
+  await storeTools(ctx, id, tools)
   return id
 }
 

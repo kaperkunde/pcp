@@ -9,10 +9,12 @@ import { isClientProfileId, type ClientProfileId } from "./clients/profiles"
 import type { VaultContext } from "./context"
 import { newHkdfParams, randomSecret } from "./crypto"
 import { db } from "./db"
+import { SERVER_META_SELECT, serverName } from "./server-meta"
 import { invalid, notFound, PcpError } from "./errors"
 import { newId } from "./ids"
 import { newTokenInstructions, openInstructions } from "./instructions"
 import { createCredentialGrant, unlockWithCredential } from "./keys"
+import { sealedTokenName, tokenName } from "./token-names"
 
 /**
  * API tokens: what an MCP client presents to /mcp as a bearer token. Each
@@ -141,7 +143,7 @@ export type ResolvedToken = {
 
 function summaryInclude(now: Date) {
   return {
-    servers: { include: { server: { select: { id: true, name: true } } } },
+    servers: { include: { server: { select: SERVER_META_SELECT } } },
     _count: {
       select: {
         permissionRequests: {
@@ -154,7 +156,8 @@ function summaryInclude(now: Date) {
 
 type SummaryRow = {
   id: string
-  name: string
+  plainName: string
+  sealedName: Uint8Array | null
   prefix: string
   allowAllServers: boolean
   manageEndpoints: boolean
@@ -172,14 +175,14 @@ type SummaryRow = {
   oauthClientName: string | null
   clientProfile: string | null
   clientSeen: string | null
-  servers: Array<{ server: { id: string; name: string } }>
+  servers: Array<{ server: Parameters<typeof serverName>[1] }>
   _count: { permissionRequests: number }
 }
 
-function toSummary(row: SummaryRow): ApiTokenSummary {
+function toSummary(ctx: VaultContext, row: SummaryRow): ApiTokenSummary {
   return {
     id: row.id,
-    name: row.name,
+    name: tokenName(ctx, row),
     prefix: row.prefix,
     allowAllServers: row.allowAllServers,
     manageEndpoints: row.manageEndpoints,
@@ -189,7 +192,10 @@ function toSummary(row: SummaryRow): ApiTokenSummary {
     runCode: row.runCode,
     manageWrappers: row.manageWrappers,
     shareFiles: row.shareFiles,
-    servers: row.servers.map((link) => link.server),
+    servers: row.servers.map((link) => ({
+      id: link.server.id,
+      name: serverName(ctx, link.server),
+    })),
     expiresAt: row.expiresAt,
     revokedAt: row.revokedAt,
     createdAt: row.createdAt,
@@ -212,7 +218,7 @@ export async function listApiTokens(
     orderBy: { createdAt: "desc" },
   })
 
-  return rows.map(toSummary)
+  return rows.map((row) => toSummary(ctx, row))
 }
 
 export async function getApiToken(
@@ -228,7 +234,7 @@ export async function getApiToken(
     throw notFound("That token")
   }
 
-  return toSummary(row)
+  return toSummary(ctx, row)
 }
 
 /** The token row, when it belongs to this vault. */
@@ -337,7 +343,7 @@ export async function createApiToken(
       id,
       vaultId: ctx.vaultId,
       grantId: grant.id,
-      name,
+      ...sealedTokenName(ctx, id, name),
       prefix: token.slice(0, DISPLAY_PREFIX_LENGTH),
       allowAllServers: input.allowAllServers,
       manageEndpoints: input.manageEndpoints ?? false,
@@ -387,7 +393,7 @@ export async function createOAuthApiToken(
         id,
         vaultId: ctx.vaultId,
         grantId,
-        name,
+        ...sealedTokenName(ctx, id, name),
         prefix: "",
         allowAllServers: input.allowAllServers,
         manageEndpoints: input.manageEndpoints ?? false,
@@ -435,7 +441,7 @@ export async function updateApiToken(
     db().apiToken.update({
       where: { id },
       data: {
-        name,
+        ...sealedTokenName(ctx, id, name),
         allowAllServers: input.allowAllServers,
         ...(input.manageEndpoints !== undefined
           ? { manageEndpoints: input.manageEndpoints }
@@ -572,7 +578,7 @@ function resolved(record: TokenRecord, dek: Buffer): ResolvedToken {
   return {
     ctx: { vaultId: record.vaultId, dek },
     tokenId: record.id,
-    tokenName: record.name,
+    tokenName: tokenName({ vaultId: record.vaultId, dek }, record),
     serverIds: record.allowAllServers
       ? null
       : record.servers.map((link) => link.serverId),

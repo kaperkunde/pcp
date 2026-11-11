@@ -23,7 +23,21 @@ import { afterEach, describe, expect, it } from "vitest"
 
 const INSTALL_SH = fileURLToPath(new URL("../install.sh", import.meta.url))
 const IMAGE = "ghcr.io/kaperkunde/pcp:latest"
-const RUN = `run -d --name pcp --restart unless-stopped -p 3000:3000 -e PCP_HOST_UPDATER=2 -v pcp-data:/data ${IMAGE}`
+/** What the registry says the pulled image is: every fake image has it. */
+const DIGEST = `sha256:${"5e".repeat(32)}`
+/** The image PCP runs: the one pulled, by the digest whose signature checked out (#98). */
+const PINNED = `ghcr.io/kaperkunde/pcp@${DIGEST}`
+/** The cosign PCP checks a signature with, pinned by its digest. */
+const COSIGN =
+  "ghcr.io/sigstore/cosign/cosign:v3.1.4@sha256:0f06154836d2de34f887a5c273506d52ca43edaa1d9e53e6510fa78a48f69c2d"
+/** Who may have signed it: PCP's image workflow, on main or develop. */
+const SIGNER =
+  "^https://github\\.com/kaperkunde/pcp/\\.github/workflows/build-images\\.yml@refs/heads/(main|develop)$"
+const VERIFY = (image: string, env = "") =>
+  `run --rm ${env}${COSIGN} verify --certificate-identity-regexp ${SIGNER} --certificate-oidc-issuer https://token.actions.githubusercontent.com ${image}`
+/** /tmp in memory, for what PCP's browser keeps there (#100). */
+const TMPFS = "/tmp:rw,nosuid,nodev,noexec,mode=1777,size=1g"
+const RUN = `run -d --name pcp --restart unless-stopped --tmpfs ${TMPFS} -p 3000:3000 -e PCP_HOST_UPDATER=2 -v pcp-data:/data ${PINNED}`
 
 /** The real programs the script needs besides the ones a host fakes. */
 const TOOLS = [
@@ -51,10 +65,11 @@ const UNIT = `# PCP. Written by install.sh; running the installer again rewrites
 Description=PCP
 
 [Container]
-Image=${IMAGE}
+Image=${PINNED}
 ContainerName=pcp
 PublishPort=3000:3000
 Volume=pcp-data:/data
+Tmpfs=${TMPFS}
 Environment=PCP_HOST_UPDATER=2
 
 [Service]
@@ -77,6 +92,11 @@ type Host = {
   system?: string
   /** What `inspect` says about the container after it was started. */
   state?: "running" | "exited"
+  /**
+   * The image id the running container was started from
+   * (`inspect -f {{.Image}} pcp`); the pulled image's when absent.
+   */
+  runningImage?: string
   /** Whether the health check answers. */
   healthy?: boolean
   /** net.ipv4.ip_unprivileged_port_start: the first port a user without root may open. */
@@ -110,6 +130,13 @@ type Host = {
    * absent, other text, or no such file.
    */
   imageInstaller?: string | "missing"
+  /**
+   * What cosign says of the pulled image's signature: it checks out, or
+   * it does not (#98).
+   */
+  signature?: "good" | "bad"
+  /** Whether the pulled image has a digest from its registry (a local build has none). */
+  digest?: boolean
 }
 
 const roots: string[] = []
@@ -138,6 +165,7 @@ function host({
   uid = 1000,
   system = "Linux",
   state = "running",
+  runningImage,
   healthy = true,
   portStart = 1024,
   compose = false,
@@ -151,6 +179,8 @@ function host({
   ociRuntime = "crun",
   dockerRootless = false,
   imageInstaller,
+  signature = "good",
+  digest = true,
 }: Host = {}) {
   const root = mkdtempSync(join(tmpdir(), "pcp-install-"))
   roots.push(root)
@@ -196,7 +226,19 @@ function host({
     writeFileSync(join(root, "image-install.sh"), imageInstaller)
     carried = `cat "${join(root, "image-install.sh")}"`
   }
-  const run = `run) case "$*" in *--entrypoint*) ${carried} ;; esac ;;`
+  // `run --rm <cosign> verify … <image>@<digest>`: the signature's check.
+  const verify =
+    signature === "good"
+      ? 'echo "[{}]"; echo "Verification for $last --" >&2'
+      : 'echo "Error: no matching signatures: none of the expected identities matched" >&2; exit 1'
+  const run = `run) for arg; do last=$arg; done
+    case "$*" in *--entrypoint*) ${carried} ;; *" verify "*) ${verify} ;; esac ;;`
+  // `image inspect -f '{{range .RepoDigests}}…'`: the digests the image was
+  // pulled by, as repository@sha256:…; `{{.Id}}`, its id.
+  const digests = digest
+    ? `for arg; do last=$arg; done; repo=\${last%:*}; echo "\${repo%@*}@${DIGEST}"`
+    : ":"
+  const image_ = `image) case "$*" in *RepoDigests*) ${digests} ;; *) ${imageId} ;; esac ;;`
 
   if (docker !== "absent") {
     const version =
@@ -215,8 +257,8 @@ function host({
       `case "$1" in
   --version) echo "${version}" ;;
   info) ${dockerRootless ? 'echo "[name=seccomp,profile=builtin name=rootless name=cgroupns]"; ' : ""}${info} ;;
-  inspect) echo "${state}" ;;
-  image) ${imageId} ;;
+  inspect) case "$*" in *.Image*) echo "${runningImage ?? image ?? ""}" ;; *) echo "${state}" ;; esac ;;
+  ${image_}
   exec) ${request} ;;
   ps) ${ps} ;;
   ${run}
@@ -229,8 +271,8 @@ esac`,
       `case "$1" in
   --version) echo "podman version ${podman}" ;;
   info) echo "${ociRuntime}" ;;
-  inspect) echo "${state}" ;;
-  image) ${imageId} ;;
+  inspect) case "$*" in *.Image*) echo "${runningImage ?? image ?? ""}" ;; *) echo "${state}" ;; esac ;;
+  ${image_}
   exec) ${request} ;;
   ps) ${ps} ;;
   ${run}
@@ -459,7 +501,7 @@ describe("install.sh with Docker", () => {
     expect(result.status).toBe(0)
     expect(result.calls).toContain("docker pull example.com/pcp:1.2.3")
     expect(result.calls).toContain(
-      "docker run -d --name pcp --restart unless-stopped -p 127.0.0.1:8080:3000 -p 80:8080 -p 443:8443 -v vault:/data example.com/pcp:1.2.3",
+      `docker run -d --name pcp --restart unless-stopped --tmpfs ${TMPFS} -p 127.0.0.1:8080:3000 -p 80:8080 -p 443:8443 -v vault:/data example.com/pcp@${DIGEST}`,
     )
     expect(result.calls).toContain(
       "curl -fs -o /dev/null --max-time 3 http://127.0.0.1:8080/api/health",
@@ -481,13 +523,13 @@ describe("install.sh with Docker", () => {
     const again = machine.run()
     expect(again.status).toBe(0)
     expect(again.calls).toContain(
-      `docker run -d --name pcp --restart unless-stopped -p 127.0.0.1:8080:3000 -p 80:8080 -p 443:8443 -e PCP_HOST_UPDATER=2 -v pcp-data:/data ${IMAGE}`,
+      `docker run -d --name pcp --restart unless-stopped --tmpfs ${TMPFS} -p 127.0.0.1:8080:3000 -p 80:8080 -p 443:8443 -e PCP_HOST_UPDATER=2 -v pcp-data:/data ${PINNED}`,
     )
 
     const without = machine.run([], { PCP_HTTPS: "0" })
     expect(without.status).toBe(0)
     expect(without.calls).toContain(
-      `docker run -d --name pcp --restart unless-stopped -p 8080:3000 -e PCP_HOST_UPDATER=2 -v pcp-data:/data ${IMAGE}`,
+      `docker run -d --name pcp --restart unless-stopped --tmpfs ${TMPFS} -p 8080:3000 -e PCP_HOST_UPDATER=2 -v pcp-data:/data ${PINNED}`,
     )
   })
 
@@ -497,7 +539,7 @@ describe("install.sh with Docker", () => {
     expect(result.status).toBe(0)
     expect(result.calls).toContain("docker pull ghcr.io/kaperkunde/pcp:develop")
     expect(result.calls).toContain(
-      "docker run -d --name pcp --restart unless-stopped -p 3000:3000 -e PCP_HOST_UPDATER=2 -v pcp-data:/data ghcr.io/kaperkunde/pcp:develop",
+      `docker run -d --name pcp --restart unless-stopped --tmpfs ${TMPFS} -p 3000:3000 -e PCP_HOST_UPDATER=2 -v pcp-data:/data ${PINNED}`,
     )
     expect(result.stdout).toContain("develop's builds")
     expect(readFileSync(machine.conf, "utf8")).toContain(
@@ -553,7 +595,8 @@ describe("install.sh with Podman", () => {
     expect(result.calls).toContain("systemctl --user daemon-reload")
     expect(result.calls).toContain("systemctl --user restart pcp.service")
     expect(result.calls).toContain("loginctl enable-linger")
-    expect(result.calls.some((call) => call.startsWith("podman run"))).toBe(
+    // The only podman run is the signature's check.
+    expect(result.calls.some((call) => call.startsWith("podman run -d"))).toBe(
       false,
     )
     expect(result.stdout).toContain("journalctl --user -u pcp -f")
@@ -575,6 +618,22 @@ describe("install.sh with Podman", () => {
     expect(result.stderr).toContain("net.ipv4.ip_unprivileged_port_start=80")
     expect(started(result.calls)).toBe(false)
     expect(existsSync(machine.unit)).toBe(false)
+  })
+
+  // #100: /tmp in memory, so what the browser keeps there never reaches
+  // the disk. Quadlet knows Tmpfs= from 4.5; 4.4 has VolatileTmp= only.
+  it("puts /tmp in memory, with VolatileTmp= on Podman 4.4", () => {
+    const current = host({ podman: "4.5.0" })
+    expect(current.run().status).toBe(0)
+    expect(readFileSync(current.unit, "utf8")).toContain(
+      `Volume=pcp-data:/data\nTmpfs=${TMPFS}\n`,
+    )
+
+    const older = host({ podman: "4.4.2" })
+    expect(older.run().status).toBe(0)
+    const unit = readFileSync(older.unit, "utf8")
+    expect(unit).toContain("Volume=pcp-data:/data\nVolatileTmp=yes\n")
+    expect(unit).not.toContain("Tmpfs=")
   })
 
   it("falls back to podman run on Podman older than 4.4", () => {
@@ -638,7 +697,7 @@ describe("install.sh updating PCP by itself", () => {
     const result = machine.run([], { PCP_AUTO_UPDATE: "1" })
     expect(result.status).toBe(0)
     expect(result.calls).toContain(
-      `docker run -d --name pcp --restart unless-stopped -p 3000:3000 -e PCP_AUTO_UPDATE=1 -e PCP_HOST_UPDATER=2 -v pcp-data:/data ${IMAGE}`,
+      `docker run -d --name pcp --restart unless-stopped --tmpfs ${TMPFS} -p 3000:3000 -e PCP_AUTO_UPDATE=1 -e PCP_HOST_UPDATER=2 -v pcp-data:/data ${PINNED}`,
     )
     expect(readFileSync(machine.updater, "utf8")).toBe(
       readFileSync(INSTALL_SH, "utf8"),
@@ -663,7 +722,7 @@ describe("install.sh updating PCP by itself", () => {
     const again = machine.run()
     expect(again.status).toBe(0)
     expect(again.calls).toContain(
-      `docker run -d --name pcp --restart unless-stopped -p 3000:3000 -e PCP_AUTO_UPDATE=1 -e PCP_HOST_UPDATER=2 -v pcp-data:/data ${IMAGE}`,
+      `docker run -d --name pcp --restart unless-stopped --tmpfs ${TMPFS} -p 3000:3000 -e PCP_AUTO_UPDATE=1 -e PCP_HOST_UPDATER=2 -v pcp-data:/data ${PINNED}`,
     )
     expect(existsSync(machine.timer)).toBe(true)
 
@@ -684,28 +743,41 @@ describe("install.sh updating PCP by itself", () => {
     expect(existsSync(machine.updater)).toBe(false)
   })
 
-  it("leaves it to Podman's own timer under Quadlet", () => {
+  // Podman's own timer (podman-auto-update) would pull and start whatever
+  // the tag names, with no signature checked: under Quadlet too, the daily
+  // update is this installer's, which checks it first (#98).
+  it("runs its own timer under Quadlet too, not Podman's, which checks no signature", () => {
     const machine = host({ podman: "5.2.2" })
     const result = machine.run([], { PCP_AUTO_UPDATE: "1" })
     expect(result.status).toBe(0)
-    expect(readFileSync(machine.unit, "utf8")).toContain(
-      "Environment=PCP_AUTO_UPDATE=1\nLabel=io.containers.autoupdate=registry\n",
-    )
-    expect(result.calls).toContain(
+    const unit = readFileSync(machine.unit, "utf8")
+    expect(unit).toContain("Environment=PCP_AUTO_UPDATE=1\n")
+    expect(unit).not.toContain("io.containers.autoupdate")
+    expect(unit).toContain(`Image=${PINNED}\n`)
+    expect(result.calls).not.toContain(
       "systemctl --user enable --now podman-auto-update.timer",
     )
-    expect(existsSync(machine.timer)).toBe(false)
+    expect(readFileSync(machine.service, "utf8")).toContain(
+      `ExecStart=/bin/sh "${machine.updater}" update`,
+    )
+    expect(result.calls).toContain(
+      "systemctl --user enable --now pcp-update.timer",
+    )
     expect(result.stdout).toContain("by itself, once a day")
   })
 
-  it("takes Podman's auto-update label away with PCP_AUTO_UPDATE=0", () => {
+  it("takes Podman's auto-update label away from a unit an older installer wrote", () => {
     const machine = host({ podman: "5.2.2" })
-    expect(machine.run([], { PCP_AUTO_UPDATE: "1" }).status).toBe(0)
-    expect(readFileSync(machine.unit, "utf8")).toContain(
-      "io.containers.autoupdate",
+    mkdirSync(dirname(machine.unit), { recursive: true })
+    writeFileSync(
+      machine.unit,
+      UNIT.replace(
+        "Volume=pcp-data:/data\n",
+        "Volume=pcp-data:/data\nEnvironment=PCP_AUTO_UPDATE=1\nLabel=io.containers.autoupdate=registry\n",
+      ),
     )
 
-    expect(machine.run([], { PCP_AUTO_UPDATE: "0" }).status).toBe(0)
+    expect(machine.run([], { PCP_AUTO_UPDATE: "1" }).status).toBe(0)
     expect(readFileSync(machine.unit, "utf8")).not.toContain(
       "io.containers.autoupdate",
     )
@@ -753,6 +825,33 @@ describe("install.sh update", () => {
     expect(result.stdout).toContain("PCP is up to date")
   })
 
+  // A pull moves the tag before the signature is checked, so a check that
+  // failed (Sigstore out of reach) left the tag on the new image: the next
+  // day's tag before and after were the same, and PCP stayed on the old one
+  // for good. What counts is the image the container runs.
+  it("starts the image the tag names when the container runs another, even if the tag did not move", () => {
+    const machine = host({
+      docker: "works",
+      image: "sha256:new",
+      runningImage: "sha256:old",
+    })
+    expect(machine.run().status).toBe(0)
+
+    const result = machine.run(["update"])
+    expect(result.status).toBe(0)
+    expect(result.stdout).not.toContain("PCP is up to date")
+    expect(result.calls).toContain(`docker ${RUN}`)
+  })
+
+  it("compares the container's image with the checked digest's", () => {
+    const machine = host({ docker: "works", image: "sha256:abc" })
+    expect(machine.run().status).toBe(0)
+
+    const result = machine.run(["update"])
+    expect(result.calls).toContain("docker inspect -f {{.Image}} pcp")
+    expect(result.calls).toContain(`docker image inspect -f {{.Id}} ${PINNED}`)
+  })
+
   it("starts PCP again from a new image, with the remembered settings", () => {
     const machine = host({ docker: "works" })
     expect(machine.run([], { PCP_PORT: "8080" }).status).toBe(0)
@@ -761,10 +860,179 @@ describe("install.sh update", () => {
     expect(result.status).toBe(0)
     expect(result.calls).toContain(`docker pull -q ${IMAGE}`)
     expect(result.calls).toContain(
-      `docker run -d --name pcp --restart unless-stopped -p 8080:3000 -e PCP_HOST_UPDATER=2 -v pcp-data:/data ${IMAGE}`,
+      `docker run -d --name pcp --restart unless-stopped --tmpfs ${TMPFS} -p 8080:3000 -e PCP_HOST_UPDATER=2 -v pcp-data:/data ${PINNED}`,
     )
     expect(result.stdout).toContain("PCP is updated")
     expect(result.stdout).not.toContain("Open it now")
+  })
+})
+
+// Every image is pulled by its tag and then checked: its digest's
+// signature has to be one PCP's image workflow made (cosign, keyless, with
+// GitHub's OIDC), on main or develop, before anything runs it or reads the
+// installer out of it. From then on it is run by that digest, so the tag
+// moving in the meantime changes nothing (#98).
+describe("install.sh checking the image's signature", () => {
+  it("checks it after the pull and before anything is replaced, then runs that digest", () => {
+    const result = host({ docker: "works" }).run()
+    expect(result.status).toBe(0)
+    const pull = result.calls.indexOf(`docker pull ${IMAGE}`)
+    const verify = result.calls.indexOf(`docker ${VERIFY(PINNED)}`)
+    const remove = result.calls.indexOf("docker rm -f pcp")
+    const run = result.calls.indexOf(`docker ${RUN}`)
+    expect(pull).toBeGreaterThanOrEqual(0)
+    expect(verify).toBeGreaterThan(pull)
+    expect(remove).toBeGreaterThan(verify)
+    expect(run).toBeGreaterThan(remove)
+    expect(
+      result.calls.filter((call) => call.includes(" verify ")),
+    ).toHaveLength(1)
+  })
+
+  it("pins the Quadlet unit to that digest", () => {
+    const machine = host({ podman: "5.2.2" })
+    const result = machine.run()
+    expect(result.status).toBe(0)
+    expect(result.calls).toContain(`podman ${VERIFY(PINNED)}`)
+    expect(readFileSync(machine.unit, "utf8")).toContain(`Image=${PINNED}\n`)
+  })
+
+  it("refuses an image whose signature does not check out, and leaves PCP as it was", () => {
+    const machine = host({ docker: "works", signature: "bad" })
+    const result = machine.run()
+    expect(result.status).toBe(1)
+    expect(result.stderr).toContain("no matching signatures")
+    expect(result.stderr).toContain(
+      `The image ${IMAGE} (${DIGEST}) is not one PCP's release workflow signed`,
+    )
+    expect(result.stderr).toContain("PCP_INSECURE_SKIP_VERIFY=1")
+    expect(result.calls).not.toContain("docker rm -f pcp")
+    expect(result.calls.some((call) => call.startsWith("docker run -d"))).toBe(
+      false,
+    )
+    expect(existsSync(machine.conf)).toBe(false)
+  })
+
+  it("refuses it in an update before reading the installer out of it", () => {
+    const machine = host({ docker: "works", image: "sha256:abc" })
+    expect(machine.run().status).toBe(0)
+    const copy = readFileSync(machine.updater, "utf8")
+
+    const bad = host({
+      docker: "works",
+      image: "sha256:def",
+      signature: "bad",
+      imageInstaller: `${copy}\n# changed\n`,
+    })
+    expect(bad.run([], { PCP_INSECURE_SKIP_VERIFY: "1" }).status).toBe(0)
+    const result = bad.run(["update"])
+    expect(result.status).toBe(1)
+    expect(result.stderr).toContain("not one PCP's release workflow signed")
+    expect(result.calls.some((call) => call.includes("--entrypoint"))).toBe(
+      false,
+    )
+    expect(result.calls).not.toContain("docker rm -f pcp")
+    expect(readFileSync(bad.updater, "utf8")).toBe(copy)
+  })
+
+  it("refuses an image that has no digest from its registry", () => {
+    const result = host({ docker: "works", digest: false }).run()
+    expect(result.status).toBe(1)
+    expect(result.stderr).toContain(`no digest from its registry`)
+    expect(result.calls.some((call) => call.startsWith("docker run -d"))).toBe(
+      false,
+    )
+  })
+
+  it("runs it unchecked with PCP_INSECURE_SKIP_VERIFY=1, says so, and does not remember it", () => {
+    const machine = host({ docker: "works", signature: "bad" })
+    const result = machine.run([], { PCP_INSECURE_SKIP_VERIFY: "1" })
+    expect(result.status).toBe(0)
+    expect(result.stderr).toContain("WARNING")
+    expect(result.calls.some((call) => call.includes(" verify "))).toBe(false)
+    expect(result.calls).toContain(`docker ${RUN}`)
+    expect(readFileSync(machine.conf, "utf8")).not.toContain("VERIFY")
+
+    // The next run checks again.
+    expect(machine.run().status).toBe(1)
+  })
+
+  it("runs a local image without a digest by its tag only with PCP_INSECURE_SKIP_VERIFY=1", () => {
+    const result = host({ docker: "works", digest: false }).run([], {
+      PCP_INSECURE_SKIP_VERIFY: "1",
+    })
+    expect(result.status).toBe(0)
+    expect(result.calls).toContain(
+      `docker run -d --name pcp --restart unless-stopped --tmpfs ${TMPFS} -p 3000:3000 -e PCP_HOST_UPDATER=2 -v pcp-data:/data ${IMAGE}`,
+    )
+  })
+
+  // Behind a proxy, cosign reaches ghcr.io and Sigstore only through it.
+  it("hands cosign the proxy settings it was given, by name", () => {
+    const result = host({ docker: "works" }).run([], {
+      HTTPS_PROXY: "http://proxy.lan:3128",
+      no_proxy: "localhost",
+    })
+    expect(result.status).toBe(0)
+    expect(result.calls).toContain(
+      `docker ${VERIFY(PINNED, "-e HTTPS_PROXY -e no_proxy ")}`,
+    )
+    // Never the value on a command line: a proxy's address may hold a login.
+    expect(result.calls.join("\n")).not.toContain("proxy.lan")
+  })
+
+  it("checks a digest by hand with verify-image, as the image workflow does", () => {
+    const sandbox = `ghcr.io/kaperkunde/pcp-sandbox@${DIGEST}`
+    const machine = host({ docker: "works" })
+    const result = machine.run(["verify-image", sandbox])
+    expect(result.status).toBe(0)
+    // Nothing pulled, run or written but the check.
+    expect(result.calls.filter((call) => / (run|pull|rm) /.test(call))).toEqual(
+      [`docker ${VERIFY(sandbox)}`],
+    )
+    expect(existsSync(machine.conf)).toBe(false)
+
+    const bad = host({ docker: "works", signature: "bad" }).run([
+      "verify-image",
+      PINNED,
+    ])
+    expect(bad.status).toBe(1)
+
+    for (const ref of [
+      IMAGE,
+      "ghcr.io/x@sha256:abc",
+      "-x@sha256:" + "a".repeat(64),
+    ]) {
+      expect(machine.run(["verify-image", ref]).status, ref).toBe(2)
+    }
+  })
+
+  it("refuses an override it does not understand", () => {
+    const result = host({ docker: "works" }).run([], {
+      PCP_INSECURE_SKIP_VERIFY: "yes",
+    })
+    expect(result.status).toBe(2)
+    expect(result.stderr).toContain("PCP_INSECURE_SKIP_VERIFY must be 0 or 1")
+  })
+
+  it("checks the image the copy it adopts runs again, in its own run", () => {
+    const machine = host({
+      docker: "works",
+      image: "sha256:abc",
+      imageInstaller: readFileSync(INSTALL_SH, "utf8").replace(
+        'say "PCP is updated: $IMAGE."',
+        'say "PCP is updated by the installer from the image: $IMAGE."',
+      ),
+    })
+    expect(machine.run().status).toBe(0)
+
+    const result = machine.run(["update"])
+    expect(result.status).toBe(0)
+    // Once before the installer is read, once by the copy before it installs.
+    expect(
+      result.calls.filter((call) => call === `docker ${VERIFY(PINNED)}`),
+    ).toHaveLength(2)
+    expect(result.calls).toContain(`docker ${RUN}`)
   })
 })
 
@@ -784,7 +1052,7 @@ describe("install.sh update with the installer in the image", () => {
       'say "PCP is updated by the installer from the image: $IMAGE."',
     )
 
-  it("reads it out of the image it pulled, by its id, and keeps the copy when it is the same", () => {
+  it("reads it out of the image it pulled, by its digest, and keeps the copy when it is the same", () => {
     const machine = host({ docker: "works", image: "sha256:abc" })
     expect(machine.run().status).toBe(0)
 
@@ -792,7 +1060,7 @@ describe("install.sh update with the installer in the image", () => {
     expect(result.status).toBe(0)
     const pull = result.calls.indexOf(`docker pull -q ${IMAGE}`)
     const reading = result.calls.indexOf(
-      `docker ${READ} sha256:abc /app/install.sh`,
+      `docker ${READ} ${PINNED} /app/install.sh`,
     )
     expect(pull).toBeGreaterThanOrEqual(0)
     expect(reading).toBeGreaterThan(pull)
@@ -868,13 +1136,11 @@ describe("install.sh update with the installer in the image", () => {
 
     const result = machine.run(["update"])
     expect(result.status).toBe(0)
-    expect(result.calls).toContain(`podman ${READ} abc123 /app/install.sh`)
+    expect(result.calls).toContain(`podman ${READ} ${PINNED} /app/install.sh`)
     expect(readFileSync(machine.unit, "utf8")).toContain(
       "# PCP. Written by the installer from the image;",
     )
-    expect(readFileSync(machine.unit, "utf8")).toContain(
-      "Image=ghcr.io/kaperkunde/pcp:develop\n",
-    )
+    expect(readFileSync(machine.unit, "utf8")).toContain(`Image=${PINNED}\n`)
     expect(result.calls).toContain("systemctl --user restart pcp.service")
   })
 
@@ -934,7 +1200,7 @@ describe("install.sh update with the installer in the image", () => {
 
     const result = machine.run(["update"], { PCP_VERSION: "1.2.3" })
     expect(result.status).toBe(0)
-    expect(result.calls).toContain(`docker ${READ} ${pinned} /app/install.sh`)
+    expect(result.calls).toContain(`docker ${READ} ${PINNED} /app/install.sh`)
     expect(result.stdout).toContain(
       `PCP is updated by the installer from the image: ${pinned}.`,
     )
@@ -956,9 +1222,9 @@ describe("install.sh update with the installer in the image", () => {
 
     const result = machine.run(["watch"])
     expect(result.status).toBe(0)
-    expect(result.calls).toContain(`docker ${READ} ${develop} /app/install.sh`)
+    expect(result.calls).toContain(`docker ${READ} ${PINNED} /app/install.sh`)
     expect(result.calls).toContain(
-      `docker run -d --name pcp --restart unless-stopped -p 3000:3000 -e PCP_HOST_UPDATER=2 -v pcp-data:/data ${develop}`,
+      `docker run -d --name pcp --restart unless-stopped --tmpfs ${TMPFS} -p 3000:3000 -e PCP_HOST_UPDATER=2 -v pcp-data:/data ${PINNED}`,
     )
     expect(result.stdout).toContain(
       `PCP is updated by the installer from the image: ${develop}.`,
@@ -1052,7 +1318,7 @@ describe("install.sh as root", () => {
 
     const again = machine.run([], user(machine))
     expect(again.calls).toContain(
-      `docker run -d --name pcp --restart unless-stopped -p 8080:3000 -e PCP_HOST_UPDATER=2 -v pcp-data:/data ${IMAGE}`,
+      `docker run -d --name pcp --restart unless-stopped --tmpfs ${TMPFS} -p 8080:3000 -e PCP_HOST_UPDATER=2 -v pcp-data:/data ${PINNED}`,
     )
   })
 
@@ -1062,7 +1328,7 @@ describe("install.sh as root", () => {
     mkdirSync(dirname(machine.conf), { recursive: true })
     writeFileSync(machine.conf, text)
   }
-  const HTTPS_RUN = `docker run -d --name pcp --restart unless-stopped -p 127.0.0.1:8080:3000 -p 80:8080 -p 443:8443 -e PCP_HOST_UPDATER=2 -v pcp-data:/data ${IMAGE}`
+  const HTTPS_RUN = `docker run -d --name pcp --restart unless-stopped --tmpfs ${TMPFS} -p 127.0.0.1:8080:3000 -p 80:8080 -p 443:8443 -e PCP_HOST_UPDATER=2 -v pcp-data:/data ${PINNED}`
 
   it("carries the settings of an older install over from HOME, once", () => {
     const machine = host({ docker: "works", uid: 0 })
@@ -1090,7 +1356,7 @@ describe("install.sh as root", () => {
     const result = machine.run([], { ...user(machine), PCP_PORT: "7000" })
     expect(result.status).toBe(0)
     expect(result.calls).toContain(
-      `docker run -d --name pcp --restart unless-stopped -p 127.0.0.1:7000:3000 -p 80:8080 -p 443:8443 -e PCP_HOST_UPDATER=2 -v vault:/data ${IMAGE}`,
+      `docker run -d --name pcp --restart unless-stopped --tmpfs ${TMPFS} -p 127.0.0.1:7000:3000 -p 80:8080 -p 443:8443 -e PCP_HOST_UPDATER=2 -v vault:/data ${PINNED}`,
     )
     expect(readFileSync(machine.sys.conf, "utf8")).toContain("PCP_PORT=7000\n")
   })
@@ -1341,7 +1607,7 @@ describe("install.sh installing when PCP asks", () => {
     const off = machine.run([], { PCP_UPDATE_BUTTON: "0" })
     expect(off.status).toBe(0)
     expect(off.calls).toContain(
-      `docker run -d --name pcp --restart unless-stopped -p 3000:3000 -v pcp-data:/data ${IMAGE}`,
+      `docker run -d --name pcp --restart unless-stopped --tmpfs ${TMPFS} -p 3000:3000 -v pcp-data:/data ${PINNED}`,
     )
     expect(off.calls).toContain(
       "systemctl --user disable --now pcp-update-request.timer",
@@ -1365,16 +1631,18 @@ describe("install.sh installing when PCP asks", () => {
     const result = machine.run([], { PCP_VERSION: "1.2.3" })
     expect(result.status).toBe(0)
     expect(result.calls).toContain(
-      "docker run -d --name pcp --restart unless-stopped -p 3000:3000 -v pcp-data:/data ghcr.io/kaperkunde/pcp:1.2.3",
+      `docker run -d --name pcp --restart unless-stopped --tmpfs ${TMPFS} -p 3000:3000 -v pcp-data:/data ${PINNED}`,
     )
     expect(existsSync(machine.watchTimer)).toBe(false)
   })
 
-  it("keeps the copy for the request when the daily update goes to Podman", () => {
+  it("keeps the copy for the daily update under Podman without the request", () => {
     const machine = host({ podman: "5.2.2" })
-    expect(machine.run([], { PCP_AUTO_UPDATE: "1" }).status).toBe(0)
-    expect(existsSync(machine.timer)).toBe(false)
-    expect(existsSync(machine.watchTimer)).toBe(true)
+    expect(
+      machine.run([], { PCP_AUTO_UPDATE: "1", PCP_UPDATE_BUTTON: "0" }).status,
+    ).toBe(0)
+    expect(existsSync(machine.timer)).toBe(true)
+    expect(existsSync(machine.watchTimer)).toBe(false)
     expect(existsSync(machine.updater)).toBe(true)
   })
 
@@ -1416,7 +1684,7 @@ describe("install.sh installing when PCP asks", () => {
     expect(result.status).toBe(0)
     expect(result.calls).toContain(`docker pull -q ${develop}`)
     expect(result.calls).toContain(
-      `docker run -d --name pcp --restart unless-stopped -p 3000:3000 -e PCP_HOST_UPDATER=2 -v pcp-data:/data ${develop}`,
+      `docker run -d --name pcp --restart unless-stopped --tmpfs ${TMPFS} -p 3000:3000 -e PCP_HOST_UPDATER=2 -v pcp-data:/data ${PINNED}`,
     )
     expect(readFileSync(machine.conf, "utf8")).toContain(
       "PCP_CHANNEL=develop\n",
@@ -1519,9 +1787,9 @@ describe("install.sh installing when PCP asks", () => {
 describe("install.sh passing on the host's time zone and language", () => {
   const BERLIN = { TZ: "Europe/Berlin", LANG: "de_DE.UTF-8" }
   const runLine = (...env: string[]) =>
-    `docker run -d --name pcp --restart unless-stopped -p 3000:3000 -e PCP_HOST_UPDATER=2${env
+    `docker run -d --name pcp --restart unless-stopped --tmpfs ${TMPFS} -p 3000:3000 -e PCP_HOST_UPDATER=2${env
       .map((entry) => ` -e ${entry}`)
-      .join("")} -v pcp-data:/data ${IMAGE}`
+      .join("")} -v pcp-data:/data ${PINNED}`
   const put = (file: string, text: string) => {
     mkdirSync(dirname(file), { recursive: true })
     writeFileSync(file, text)
@@ -1550,7 +1818,7 @@ describe("install.sh passing on the host's time zone and language", () => {
       PCP_AUTO_UPDATE: "1",
     })
     expect(result.calls).toContain(
-      `docker run -d --name pcp --restart unless-stopped -p 3000:3000 -e PCP_AUTO_UPDATE=1 -e PCP_HOST_UPDATER=2 -e TZ=Europe/Berlin -e LANG=de_DE.UTF-8 -v pcp-data:/data ${IMAGE}`,
+      `docker run -d --name pcp --restart unless-stopped --tmpfs ${TMPFS} -p 3000:3000 -e PCP_AUTO_UPDATE=1 -e PCP_HOST_UPDATER=2 -e TZ=Europe/Berlin -e LANG=de_DE.UTF-8 -v pcp-data:/data ${PINNED}`,
     )
   })
 
@@ -1573,11 +1841,11 @@ describe("install.sh passing on the host's time zone and language", () => {
     )
   })
 
-  it("puts them after the auto-update label in the unit", () => {
+  it("puts them after the daily update's setting in the unit", () => {
     const machine = host({ podman: "5.2.2" })
     expect(machine.run([], { ...BERLIN, PCP_AUTO_UPDATE: "1" }).status).toBe(0)
     expect(readFileSync(machine.unit, "utf8")).toContain(
-      "Environment=PCP_AUTO_UPDATE=1\nLabel=io.containers.autoupdate=registry\nEnvironment=PCP_HOST_UPDATER=2\nEnvironment=TZ=Europe/Berlin\nEnvironment=LANG=de_DE.UTF-8\n\n[Service]",
+      "Environment=PCP_AUTO_UPDATE=1\nEnvironment=PCP_HOST_UPDATER=2\nEnvironment=TZ=Europe/Berlin\nEnvironment=LANG=de_DE.UTF-8\n\n[Service]",
     )
   })
 
@@ -1720,9 +1988,9 @@ describe("install.sh passing on the host's graphics card", () => {
   const OPEN = { mode: "crw-rw-rw-", gid: 105, group: "render" }
   const GROUP_ONLY = { mode: "crw-rw----+", gid: 105, group: "render" }
   const runLine = (...gpu: string[]) =>
-    `docker run -d --name pcp --restart unless-stopped -p 3000:3000 -e PCP_HOST_UPDATER=2${gpu
+    `docker run -d --name pcp --restart unless-stopped --tmpfs ${TMPFS} -p 3000:3000 -e PCP_HOST_UPDATER=2${gpu
       .map((entry) => ` ${entry}`)
-      .join("")} -v pcp-data:/data ${IMAGE}`
+      .join("")} -v pcp-data:/data ${PINNED}`
   const note = (stderr: string) =>
     stderr.includes("draws in software rather than with this computer's")
 

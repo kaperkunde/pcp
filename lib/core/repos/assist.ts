@@ -7,6 +7,7 @@ import { readRepo, refOf, serializeItem, type ItemDocument } from "./documents"
 import { localHash } from "./hash"
 import { isOneFileKind, itemRoot, type ItemRef, type RepoFiles } from "./layout"
 import { MAX_REVIEW_CHARS } from "./limits"
+import { reviewInVault } from "./found-review"
 import { reviewItem, type FileChange, type ReviewFlag } from "./review"
 import {
   getRepoItem,
@@ -18,6 +19,7 @@ import {
 import { applyMerged, pendingChange, type ChangeShown } from "./sync"
 import { localItem } from "./local"
 import { hiddenCharacter } from "../memories"
+import { TOKEN_NAME_SELECT, tokenName } from "../token-names"
 
 /**
  * Assistants helping with what sync left for the owner: a conflict, or a
@@ -139,7 +141,7 @@ export async function searchRepoChanges(
         description:
           pending.kind === "conflict"
             ? "Both the vault and the repository changed it; the owner may want help merging."
-            : "Waiting for the owner's review; describe it for the files and PCP's flags.",
+            : "Waiting for the owner's review; search with its ref for the files and PCP's flags.",
       })
     }
   }
@@ -488,7 +490,12 @@ async function propose(
   // Read as the repository's files are: every check an item goes through.
   const document = await documentOf(pending.ref, files)
   const final = serializeItem(document)
-  const against = reviewItem(change.local, document)
+  const against = await reviewInVault(
+    scope.ctx,
+    change.local,
+    document,
+    change.item.itemId,
+  )
   const fromTheirs = reviewItem(change.incoming.document, document)
   const label = `${repo.owner}/${repo.name}`
   const shown: RepoShown = {
@@ -586,11 +593,14 @@ export async function applyRepoChange(
   const document = await documentOf(ask.ref, ask.files)
   const token = await db().apiToken.findFirst({
     where: { id: tokenId, vaultId: ctx.vaultId },
-    select: { name: true },
+    select: TOKEN_NAME_SELECT,
   })
   const notes = await applyMerged(ctx, item, document, {
     remoteSha: ask.pendingSha,
-    proposer: { by: "assistant", tokenName: token?.name ?? "an assistant" },
+    proposer: {
+      by: "assistant",
+      tokenName: token ? tokenName(ctx, token) : "an assistant",
+    },
   })
 
   return [`Applied ${item.data.path} as you were shown it.`, ...notes].join(" ")

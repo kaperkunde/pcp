@@ -13,6 +13,7 @@ import { instructionsBlock } from "./instructions-block"
 import { newId } from "./ids"
 import { openRequestFor, type OpenRequest } from "./permission-fold"
 import { canonicalJson } from "./permission-rules"
+import { TOKEN_NAME_SELECT, tokenName } from "./token-names"
 
 /**
  * Memories: notes an assistant keeps for the owner through the gateway's
@@ -179,7 +180,7 @@ export const MEMORY_MIGRATION_STEPS = [
   "1. Look for what this client keeps for the owner outside PCP: its own memory or saved preferences, a memory snapshot in your context, the owner's personal instruction files (a user-level CLAUDE.md or the like), skills of their own. Leave what belongs to a project, such as a repository's CLAUDE.md or skills, where it is. If you can see none, call migration_done and stop here.",
   "2. Tell the owner briefly what you found and ask whether to move it into PCP. Move nothing until they say yes; if they say no, call migration_done.",
   `3. Move each with the memory tool, keeping its structure: a memory per file or topic under ${MEMORY_ROOT}/…, what every assistant should read under ${MEMORY_ROOT}/${SHARED}/… (which asks the owner), a skill as /skills/<name>/SKILL.md (which asks the owner). Never a secret or a password.`,
-  "4. Read each one back with read_memory and check it says what the original did.",
+  "4. Read each one back (search with its path as ref) and check it says what the original did.",
   "5. Ask the owner again before deleting the originals, and delete nothing without that second yes.",
   "6. Then delete the client's copies if this client lets you; if it does not, tell the owner exactly what to remove, and where.",
   `7. Call memory with command "migration_done": it turns this off for this token, and only the owner can turn it on again.`,
@@ -307,7 +308,14 @@ function seal(ctx: VaultContext, id: string, body: MemoryBody) {
   )
 }
 
-type Row = Memory & { token: { name: string; revokedAt: Date | null } | null }
+type Row = Memory & {
+  token: {
+    id: string
+    plainName: string
+    sealedName: Uint8Array | null
+    revokedAt: Date | null
+  } | null
+}
 
 function unseal(ctx: VaultContext, row: Row): Entry {
   const body = JSON.parse(
@@ -319,7 +327,7 @@ function unseal(ctx: VaultContext, row: Row): Entry {
     path: body.path,
     text: body.text,
     tokenId: row.tokenId,
-    tokenName: row.token?.name ?? null,
+    tokenName: row.token ? tokenName(ctx, row.token) : null,
     tokenRevoked: row.token?.revokedAt != null,
     author: row.author === "owner" ? "owner" : "assistant",
     visibility: row.visibility === "shared" ? "shared" : "private",
@@ -340,7 +348,7 @@ async function load(ctx: VaultContext, tokenId?: string): Promise<Entry[]> {
           }
         : {}),
     },
-    include: { token: { select: { name: true, revokedAt: true } } },
+    include: { token: { select: { ...TOKEN_NAME_SELECT, revokedAt: true } } },
   })
 
   return rows
@@ -1598,7 +1606,7 @@ export async function instructionMemories(
         { visibility: "private", tokenId, always: true },
       ],
     },
-    include: { token: { select: { name: true, revokedAt: true } } },
+    include: { token: { select: { ...TOKEN_NAME_SELECT, revokedAt: true } } },
   })
   const entries = rows
     .map((row) => unseal(ctx, row))
@@ -1847,13 +1855,13 @@ export async function setMemoriesAccess(
       (token.expiresAt !== null && token.expiresAt.getTime() < Date.now())
     ) {
       throw invalid(
-        `The token ${token.name} is revoked or expired, so it reads nothing.`,
+        `The token ${tokenName(ctx, token)} is revoked or expired, so it reads nothing.`,
       )
     }
 
     if (!token.keepMemories) {
       throw invalid(
-        `The token ${token.name} cannot keep memories, so it would never read these. Turn that on for the token first.`,
+        `The token ${tokenName(ctx, token)} cannot keep memories, so it would never read these. Turn that on for the token first.`,
       )
     }
   }

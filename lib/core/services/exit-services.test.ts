@@ -42,6 +42,7 @@ import {
 import { startFakeDocker, type FakeDocker } from "./fake-docker"
 import { prepareServiceProposal } from "./proposals"
 import { serviceView, type ServiceLaunchInput } from "./services"
+import { secretNameWhere } from "../secret-meta"
 
 // VPN services as exits, end to end in the core: launched by the owner on
 // the test SSH server (whose login runs a fake `docker` in a real sh), the
@@ -183,7 +184,7 @@ async function launchInput(
   change: Partial<ServiceLaunchInput> = {},
 ): Promise<ServiceLaunchInput> {
   const secret = async (name: string, value: string) =>
-    (await db().secret.findFirst({ where: { name } })) ??
+    (await db().secret.findFirst({ where: secretNameWhere(ctx, name) })) ??
     (await createSecret(ctx, { name, value }))
   const user = await secret("vpn-user", "p1234567")
   const password = await secret("vpn-password", "vpn-password-value-9876")

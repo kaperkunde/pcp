@@ -63,7 +63,8 @@ into `main` when it is ready to ship.
 Versions are `MAJOR.MINOR.PATCH`, held in `package.json` and read by the app
 (`lib/core/version.ts`). On each push to `main`, `.github/workflows/release.yml`
 raises the patch (`0.1.0` → `0.1.1`), commits it to `main` as
-`Release vX.Y.Z`, tags it, drafts a GitHub Release with generated notes, and
+`Release vX.Y.Z` with the release's section of [CHANGELOG.md](CHANGELOG.md)
+(below), tags it, drafts a GitHub Release whose notes are that section, and
 fast-forwards `develop` to it. If `develop` has commits `main` lacks by then,
 the fast-forward is skipped; merge `main` into `develop` before the next
 release. The desktop apps are then built on macOS and Windows runners and
@@ -85,6 +86,33 @@ is re-run. The package's visibility is set on GitHub, not here: a package
 takes the repository's visibility when it is first pushed, and anonymous
 pulls need it public.
 
+Both images are signed by the job that pushed them (`build-images.yml`):
+cosign, keyless, with the run's GitHub OIDC token, over each image's digest
+and each platform's (`--recursive`), and GitHub's build provenance is
+attested and pushed beside them (`id-token: write` and `attestations: write`,
+granted by both callers). The publish job adds both digests to the release
+notes, with the command that checks them. `install.sh` checks that signature
+before it runs an image, accepting only `build-images.yml` run from `main`
+or `develop`; so the workflow's file name and those branches are part of
+what installs trust, and renaming either is a change to `IMAGE_SIGNER` in
+`install.sh` in the same release (`scripts/docker.test.ts` checks they
+agree). The actions are pinned by commit, as everywhere here. Right after
+signing, the job checks both digests with `install.sh verify-image`, the
+same function, cosign image, identity and issuer installs use, so a build
+whose signature an install would refuse fails there; that check reads the
+signatures anonymously, as installs do, so the packages stay public.
+`release.yml` runs only from `main` (`if: github.ref == 'refs/heads/main'`),
+so a run started by hand on another branch neither signs nor moves `latest`.
+
+When this reaches a release, its notes have to say what an existing install
+does not get by itself: a Quadlet install that left its daily update to
+Podman's `podman-auto-update.timer` (`PCP_AUTO_UPDATE=1` under Podman 4.4
+or newer) keeps that timer, which pulls and restarts with no signature
+checked, until the owner runs the install line again or uses **Install and
+restart**; then the installer's own timer takes over. Put that in the
+pull request's `## Changelog` section, which is where the release notes
+come from.
+
 Every push to `develop` gets the same, ahead of the releases
 (`.github/workflows/develop.yml`): the checks a pull request runs (`ci.yml`),
 and once they pass, the apps and images built from that commit as a GitHub
@@ -104,6 +132,32 @@ release page. `release.yml` and `develop.yml` share the app and image builds
 (`build-desktop.yml`, `build-images.yml`), and `release.yml` ignores the `-dev`
 tags, so merging `develop` into `main` still releases.
 
+**The changelog** is written from pull requests, never by hand
+(`scripts/changelog.mjs`, tested in `scripts/changelog.test.ts`). The
+workflow lists the commits since the release before and the pull requests
+merged into `develop` around them (`gh pr list`), and the script keeps
+those whose merge commit is in the range: each gives the lines of its
+`## Changelog` section (the pull request template has one), or its title when
+that is empty; a section that says `none` leaves it out. Commits pushed to
+`develop` without a pull request are listed by subject. So write that
+section for the people who run PCP: a line or a few, plain words, what they
+will notice. Each build of `develop` gets the same lines, from the build
+before, as its pre-release's notes (`develop.yml`, which commits nothing);
+a release's section covers every build that led to it. `CHANGELOG.md` is
+left out of Prettier, so the file stays as the script wrote it.
+
+The releases before the changelog existed are filled in once, by hand, from
+a checkout with every tag (`git fetch --tags`) and `gh` signed in:
+
+```bash
+gh pr list --repo kaperkunde/pcp --base develop --state merged --limit 1000 \
+  --json number,title,body,url,mergedAt,mergeCommit,commits > /tmp/prs.json
+node scripts/changelog.mjs backfill --repo kaperkunde/pcp --prs /tmp/prs.json > CHANGELOG.md
+```
+
+then committed on `develop` like any change; the next release adds its
+section on top.
+
 MAJOR and MINOR are raised by hand, in a commit on `develop`, when the
 maintainer decides a release warrants one; a contributor does not bump, and
 an automated assistant does so only when asked to in so many words:
@@ -120,6 +174,16 @@ The workflow pushes with the workflow token and asks for `contents: write`
 itself, so the read-only default under Settings → Actions → "Workflow
 permissions" can stay. What would stop it is a branch rule on `main` that
 refuses pushes from GitHub Actions.
+
+Since a signature from `main` or `develop` is what installs accept, who can
+push there is who can ship. The repository's settings (not in this
+repository) should hold to that: rulesets on `main`, `develop` and the `v*`
+tags that require a reviewed pull request and refuse force pushes and
+deletion, with GitHub Actions as a bypass actor (`release.yml` pushes the
+release commit, the tag and the fast-forward of `develop` with the workflow
+token, and `develop.yml` deletes old builds' tags); and the packages'
+**Manage Actions access** limited to this repository, so no other
+repository's workflow can push to `ghcr.io/kaperkunde/pcp`.
 
 ## Desktop app
 
@@ -257,6 +321,7 @@ helper, and change it there.
 | `lib/core/updates/`                  | The daily check for a newer release; what it found                    |
 | `lib/core/version.ts`                | `PCP_VERSION`, read from `package.json`                               |
 | `scripts/version.mjs`                | The next release's version; `pnpm version:bump`                       |
+| `scripts/changelog.mjs`              | CHANGELOG.md and the release notes, from merged pull requests         |
 | `lib/core/request-log.ts`            | The request log: writing, reading a page, pruning old days            |
 | `lib/core/activity.ts`               | The Log page's lines: token names, how a request was answered         |
 | `lib/core/cleanup/`                  | The scheduled cleanup (node-cron): schedule, parts, status            |
@@ -294,5 +359,5 @@ Next.js 15 (App Router, Server Actions), React 19, TypeScript, Tailwind CSS 4
 with shadcn/ui primitives, Prisma 7 on SQLite (`better-sqlite3`), the
 `@modelcontextprotocol` v2 SDK for both the gateway and the upstream client,
 Kaperkunde's shared `@kaperkunde/*` packages, QuickJS in WebAssembly for
-`run_code`, `patchright-core` driving Chromium for
+the `run` tools, `patchright-core` driving Chromium for
 the browser, Electron for the desktop apps, Vitest, Playwright, pnpm.

@@ -3,6 +3,7 @@ import type { Repo, RepoItem } from "@/lib/generated/prisma/client"
 import type { VaultContext } from "../context"
 import { asBytes, decryptString, encryptString } from "../crypto"
 import { db } from "../db"
+import { SERVER_META_SELECT, serverName } from "../server-meta"
 import { invalid, notFound, PcpError } from "../errors"
 import { newId } from "../ids"
 import { ensureDefinition } from "../definition-rows"
@@ -26,6 +27,7 @@ import {
   SYNC_FREQUENCIES,
   type SyncFrequency,
 } from "./limits"
+import { SECRET_META_SELECT, secretName, secretNameWhere } from "../secret-meta"
 
 /**
  * The repositories the owner linked and the items linked to them, as rows:
@@ -129,7 +131,7 @@ async function viewOf(ctx: VaultContext, row: Repo): Promise<RepoView> {
   const secret = row.secretId
     ? await db().secret.findFirst({
         where: { id: row.secretId, vaultId: ctx.vaultId },
-        select: { name: true, kind: true },
+        select: { ...SECRET_META_SELECT, kind: true },
       })
     : null
 
@@ -140,7 +142,8 @@ async function viewOf(ctx: VaultContext, row: Repo): Promise<RepoView> {
     access: row.access === "write" ? "write" : "read",
     signIn: !secret ? "none" : secret.kind === "oauth" ? "github" : "token",
     secretId: secret ? row.secretId : null,
-    secretName: secret && secret.kind === "text" ? secret.name : null,
+    secretName:
+      secret && secret.kind === "text" ? secretName(ctx, secret) : null,
     visibility:
       row.private === null ? "unknown" : row.private ? "private" : "public",
     createdAt: row.createdAt,
@@ -195,14 +198,15 @@ async function checkSecret(
 
   const secret = await db().secret.findFirst({
     where: { id: secretId, vaultId: ctx.vaultId },
-    select: { kind: true, name: true },
+    select: { ...SECRET_META_SELECT, kind: true },
   })
 
   if (
     !secret ||
     !(
       secret.kind === "text" ||
-      (secret.kind === "oauth" && secret.name === GITHUB_SIGNIN_SECRET)
+      (secret.kind === "oauth" &&
+        secretName(ctx, secret) === GITHUB_SIGNIN_SECRET)
     )
   ) {
     throw invalid(
@@ -217,10 +221,8 @@ async function checkSecret(
 export async function githubSignInSecret(
   ctx: VaultContext,
 ): Promise<string | null> {
-  const row = await db().secret.findUnique({
-    where: {
-      vaultId_name: { vaultId: ctx.vaultId, name: GITHUB_SIGNIN_SECRET },
-    },
+  const row = await db().secret.findFirst({
+    where: secretNameWhere(ctx, GITHUB_SIGNIN_SECRET),
     select: { id: true, kind: true },
   })
 
@@ -615,11 +617,11 @@ export async function linkedItemNames(
           .map((item) => item.itemId),
       },
     },
-    select: { id: true, name: true },
+    select: SERVER_META_SELECT,
   })
 
   for (const server of servers) {
-    names.set(server.id, server.name)
+    names.set(server.id, serverName(ctx, server))
   }
 
   return names
@@ -659,7 +661,7 @@ async function exclusionTarget(
     where: { id: itemId, vaultId: ctx.vaultId },
     select: { id: true },
   })
-  const definitionId = server ? await ensureDefinition(server.id) : null
+  const definitionId = server ? await ensureDefinition(ctx, server.id) : null
 
   if (!definitionId) {
     throw notFound("That server")

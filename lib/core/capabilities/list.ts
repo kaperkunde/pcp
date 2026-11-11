@@ -2,12 +2,12 @@ import { stem, tokenize } from "../search"
 
 /**
  * Capabilities: things an assistant asks for by what they are (read the
- * text in a picture, fill in a PDF's form, turn a document into Markdown)
- * rather than by a tool's name. Each is one of PCP's own tools, always
+ * text in a picture, fill in a PDF's form, turn a document into Markdown
+ * or a PDF's page into a picture) rather than by a tool's name. Each is one of PCP's own tools, always
  * there for every token (read_image, edit_pdf, convert_document); what does
  * the work is a provider: a tool among the token's own that the words in
  * providers.ts find, called at the token's own levels and tiers as
- * call_tool_* would (gateway.ts forwardCall). With no provider, the tool
+ * execute_* would (gateway.ts forwardCall). With no provider, the tool
  * answers with a link to PCP's page for it (/plugins/<id>), which offers
  * the common items that provide it in one click.
  *
@@ -129,7 +129,7 @@ export const CAPABILITIES: readonly Capability[] = [
     summary:
       "Turns a PDF, Word, PowerPoint, Excel or HTML document into Markdown or plain text.",
     explain:
-      "An assistant cannot read a document's file as it is. convert_document turns it into Markdown it can read, quote and summarise, with tables kept as tables where the provider can.",
+      "An assistant cannot read a document's file as it is. convert_document turns it into Markdown it can read, quote and summarise, with tables kept as tables where the provider can. It also turns a PDF's page into a picture for view_image to show, with a tool that renders pages, which none of these offer yet: add a server or API endpoint of your own that does.",
     label: "Set up document conversion in PCP",
     queryWords: [
       "convert document",
@@ -146,6 +146,10 @@ export const CAPABILITIES: readonly Capability[] = [
       "read pdf",
       "read document",
       "extract text",
+      "pdf to image",
+      "pdf to png",
+      "pdf page image",
+      "render pdf",
     ],
     items: [DOCLING, PDF_MCP],
   },

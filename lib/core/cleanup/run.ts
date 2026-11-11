@@ -1,4 +1,6 @@
 import { pruneAllowances } from "../allowances"
+import { pruneScratchDirs } from "../browser/scratch"
+import { pruneCallRecords } from "../calls/guard"
 import { pruneEmbeddingVectors } from "../embeddings/index"
 import { pruneFileLinks } from "../file-links"
 import { pruneOAuthStates } from "../oauth"
@@ -55,9 +57,12 @@ const PARTS: Part[] = [
   {
     key: "requests",
     label: "old permission requests",
-    // With the answers kept a little while for a call made again.
+    // With the answers kept a little while for a call made again, and the
+    // calls the duplicate guard remembers (calls/guard.ts).
     run: async (_, now) =>
-      (await prunePermissionRequests(now)) + (await pruneReusableAnswers(now)),
+      (await prunePermissionRequests(now)) +
+      (await pruneReusableAnswers(now)) +
+      (await pruneCallRecords(now)),
   },
   {
     key: "results",
@@ -96,6 +101,15 @@ const PARTS: Part[] = [
     },
   },
   {
+    key: "browser",
+    label: "the browser's leftover temporary folders",
+    // What a browser or virtual display that did not close left in the
+    // system's temporary folder: a crashed or killed PCP's, by its process
+    // id (browser/scratch.ts); one from before the id was in the name once
+    // it has not changed for a day.
+    run: () => pruneScratchDirs(),
+  },
+  {
     key: "logDays",
     label: "old days of the log",
     run: (logDays, now) => pruneRequestLog(logDays, now),
@@ -117,6 +131,7 @@ export async function runCleanup(
     allowances: 0,
     vectors: 0,
     storage: 0,
+    browser: 0,
     logDays: 0,
   }
   const problems: string[] = []

@@ -1,12 +1,22 @@
 import { TOOL_TIERS, type ToolTier } from "./constants"
 import type { VaultContext } from "./context"
 import { db } from "./db"
+import {
+  openTools,
+  TOOL_SCHEMA_SELECT,
+  TOOL_NAME_SELECT,
+  TOOL_ABOUT_SELECT,
+  toolNameWhere,
+  toolName,
+  byToolName,
+} from "./tool-rows"
 import { ensureDefinition } from "./definition-rows"
 import { invalid, notFound } from "./errors"
 import { newId } from "./ids"
 import { getSetting, setSetting } from "./settings"
 import type { ToolAnnotations } from "./tools/define"
 import { readWrapperOperation } from "./wrappers/definition"
+import { openServers, SERVER_META_SELECT, byServerSlug } from "./server-meta"
 
 /**
  * How much a tool can do, in three tiers, and the one place that says which
@@ -25,7 +35,7 @@ import { readWrapperOperation } from "./wrappers/definition"
  *      tool without hints is Destructive).
  *
  * Everything that asks whether a tool reads, writes or destroys asks here:
- * the entry tools' gate (call_tool_<tier>, run_code_<tier>), markedReadOnly
+ * the entry tools' gate (execute_<tier>, run_<tier>), markedReadOnly
  * (read-only.ts: pacing, a run's trace), the permission page's warning,
  * the wrapper review's badges, describe, list_tools, search and pcp.tools,
  * and the annotations PCP advertises for its own tools. Derived tiers are
@@ -81,14 +91,44 @@ export function tierAllows(entry: ToolTier, tool: ToolTier): boolean {
   return RANK[tool] <= RANK[entry]
 }
 
-/** The entry tool that runs a tool of this tier by call_handle. */
+/**
+ * The entry tool that runs a tool of this tier: one of the owner's by
+ * call_handle, or one of PCP's own by its name.
+ */
 export function callEntryFor(tier: ToolTier): string {
-  return `call_tool_${tier}`
+  return `execute_${tier}`
 }
 
 /** The entry tool whose programs may call tools of this tier. */
 export function runEntryFor(tier: ToolTier): string {
-  return `run_code_${tier}`
+  return `run_${tier}`
+}
+
+/** search and the execute and run entries, whose tiers are their names. */
+export function isEntryName(name: string): boolean {
+  return (
+    name === "search" ||
+    name in RETIRED_ENTRIES ||
+    TOOL_TIERS.some(
+      (tier) => name === callEntryFor(tier) || name === runEntryFor(tier),
+    )
+  )
+}
+
+/**
+ * The entry tools' names before PCP's tools were collapsed into search,
+ * execute_<tier> and run_<tier> (#113), each with the one that took over:
+ * still answered for one release, unlisted, with a line saying so
+ * (docs/breaking-changes.md), then refused.
+ */
+export const RETIRED_ENTRIES: Readonly<Record<string, string>> = {
+  describe: "search",
+  call_tool_read: "execute_read",
+  call_tool_write: "execute_write",
+  call_tool_destructive: "execute_destructive",
+  run_code_read: "run_read",
+  run_code_write: "run_write",
+  run_code_destructive: "run_destructive",
 }
 
 /** Annotations as stored (JSON text), read; anything else as none. */
@@ -187,7 +227,7 @@ type ToolFacts = { annotations: string | null; operation: string | null }
  * Works out tiers for one vault, reading each server and tool once and the
  * owner's choices once: for a request's whole catalogue, or one call.
  */
-function tierResolver(overrides: OverrideRow[]) {
+function tierResolver(ctx: VaultContext, overrides: OverrideRow[]) {
   const byDefinition = new Map<string, OverrideRow>()
   const byServer = new Map<string, OverrideRow>()
 
@@ -218,10 +258,9 @@ function tierResolver(overrides: OverrideRow[]) {
       db().mcpTool.findMany({
         where: { serverId: { in: fresh } },
         select: {
-          serverId: true,
-          name: true,
+          ...TOOL_SCHEMA_SELECT,
+          ...TOOL_NAME_SELECT,
           annotations: true,
-          operation: true,
         },
       }),
     ])
@@ -234,7 +273,7 @@ function tierResolver(overrides: OverrideRow[]) {
       places.set(server.id, server)
     }
 
-    for (const row of rows) {
+    for (const row of openTools(ctx, rows)) {
       tools.set(accessKey(row.serverId, row.name), row)
     }
   }
@@ -322,6 +361,7 @@ async function overridesOf(vaultId: string): Promise<OverrideRow[]> {
 
 /** One tool's tier and where it comes from. */
 export async function toolTierInfo(
+  ctx: VaultContext,
   serverId: string,
   toolName: string,
 ): Promise<TierInfo> {
@@ -339,7 +379,7 @@ export async function toolTierInfo(
     }
   }
 
-  return tierResolver(await overridesOf(server.vaultId)).tierOf(
+  return tierResolver(ctx, await overridesOf(server.vaultId)).tierOf(
     serverId,
     toolName,
   )
@@ -347,10 +387,11 @@ export async function toolTierInfo(
 
 /** One tool's effective tier. */
 export async function toolTier(
+  ctx: VaultContext,
   serverId: string,
   toolName: string,
 ): Promise<ToolTier> {
-  return (await toolTierInfo(serverId, toolName)).tier
+  return (await toolTierInfo(ctx, serverId, toolName)).tier
 }
 
 /**
@@ -358,10 +399,10 @@ export async function toolTier(
  * for a request's catalogue (gateway-servers.ts) and the owner's pages.
  */
 export async function loadToolTiers(
-  vaultId: string,
+  ctx: VaultContext,
   servers: Array<{ id: string; tools: Array<{ name: string }> }>,
 ): Promise<Map<string, TierInfo>> {
-  const resolver = tierResolver(await overridesOf(vaultId))
+  const resolver = tierResolver(ctx, await overridesOf(ctx.vaultId))
   await resolver.load(servers.map((server) => server.id))
   const found = new Map<string, TierInfo>()
 
@@ -385,7 +426,7 @@ export async function tierOfCalls(
   ctx: VaultContext,
   calls: Array<{ serverId: string; tool: string }>,
 ): Promise<ToolTier> {
-  const resolver = tierResolver(await overridesOf(ctx.vaultId))
+  const resolver = tierResolver(ctx, await overridesOf(ctx.vaultId))
   await resolver.load(calls.map((call) => call.serverId))
   const tiers: ToolTier[] = []
 
@@ -413,7 +454,7 @@ async function placeFor(
     throw notFound("That server")
   }
 
-  const definitionId = await ensureDefinition(serverId)
+  const definitionId = await ensureDefinition(ctx, serverId)
   return definitionId ? { definitionId } : { serverId }
 }
 
@@ -443,8 +484,8 @@ export async function setToolTier(
     return
   }
 
-  const tool = await db().mcpTool.findUnique({
-    where: { serverId_name: { serverId, name: toolName } },
+  const tool = await db().mcpTool.findFirst({
+    where: toolNameWhere(ctx, serverId, toolName),
     select: { id: true },
   })
 
@@ -452,7 +493,7 @@ export async function setToolTier(
     throw notFound(`A tool called ${toolName}`)
   }
 
-  const info = await toolTierInfo(serverId, toolName)
+  const info = await toolTierInfo(ctx, serverId, toolName)
   const server = await db().mcpServer.findUnique({
     where: { id: serverId },
     select: { kind: true },
@@ -545,7 +586,9 @@ export async function readOwnToolTiers(
 
     if (typeof parsed === "object" && parsed !== null) {
       for (const [name, tier] of Object.entries(parsed)) {
-        if (isToolTier(tier)) {
+        // An entry's tier is its name (#113): a choice saved for one, or for
+        // an old entry's name, is no choice, and the next save drops it.
+        if (isToolTier(tier) && !isEntryName(name)) {
           found[name] = tier
         }
       }
@@ -623,21 +666,24 @@ export async function wrapperTiersBelowCalls(
     return []
   }
 
-  const wrappers = await db().mcpServer.findMany({
-    where: { vaultId: ctx.vaultId, kind: "wrapper" },
-    select: {
-      id: true,
-      slug: true,
-      definitionId: true,
-      tools: { select: { name: true } },
-    },
-    orderBy: { slug: "asc" },
-  })
-  const resolver = tierResolver(overrides)
+  const wrappers = openServers(
+    ctx,
+    await db().mcpServer.findMany({
+      where: { vaultId: ctx.vaultId, kind: "wrapper" },
+      select: {
+        ...SERVER_META_SELECT,
+        definitionId: true,
+        tools: { select: TOOL_ABOUT_SELECT },
+      },
+    }),
+  ).sort(byServerSlug)
+  const resolver = tierResolver(ctx, overrides)
   const found: TierBelowCalls[] = []
 
   for (const wrapper of wrappers) {
-    for (const tool of wrapper.tools) {
+    for (const tool of wrapper.tools
+      .map((row) => ({ name: toolName(ctx, row) }))
+      .sort(byToolName)) {
       const info = await resolver.tierOf(wrapper.id, tool.name)
 
       if (tierBelowCalls(info)) {

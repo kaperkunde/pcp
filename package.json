@@ -36,7 +36,7 @@
     "@kaperkunde/mcp": "0.2.0",
     "@kaperkunde/next-kit": "0.1.1",
     "@kaperkunde/pcpgg-protocol": "0.1.1",
-    "@kaperkunde/security": "0.3.0",
+    "@kaperkunde/security": "0.4.0",
     "@kaperkunde/ui": "0.1.1",
     "@mixmark-io/domino": "^2.2.0",
     "@modelcontextprotocol/client": "^2.2.0",

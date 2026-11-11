@@ -12,7 +12,7 @@ import {
   DEFAULT_HEADER_NAME,
   DEFAULT_VALUE_TEMPLATE,
 } from "@/lib/core/constants"
-import { db } from "@/lib/core/db"
+import { byServerName, findServers } from "@/lib/core/server-meta"
 import { isPcpError } from "@/lib/core/errors"
 import { oauthRedirectUrl } from "@/lib/core/oauth-client"
 import type {
@@ -26,6 +26,7 @@ import {
   listRemote,
   type FetchedItem,
 } from "@/lib/core/repos/remote"
+import { reviewInVault } from "@/lib/core/repos/found-review"
 import { reviewItem } from "@/lib/core/repos/review"
 import { specServerUrls } from "@/lib/core/repos/share-review"
 import { clientFor, getRepo } from "@/lib/core/repos/store"
@@ -147,11 +148,9 @@ export default async function ImportPage({
     const service = fetched.document
     const review = reviewItem(null, service)
     const hosts = (
-      await db().mcpServer.findMany({
-        where: { vaultId: ctx.vaultId, kind: "ssh" },
-        orderBy: { name: "asc" },
-      })
+      await findServers(ctx, { vaultId: ctx.vaultId, kind: "ssh" })
     )
+      .sort(byServerName)
       // A service's commands go only to a server whose host key is pinned.
       .filter((server) => server.sshHostKey)
       .map((server) => ({
@@ -225,7 +224,7 @@ export default async function ImportPage({
     )
   }
 
-  const review = reviewItem(null, document)
+  const review = await reviewInVault(ctx, null, document, null)
   const secrets = (await listSecrets(ctx))
     .filter((secret) => secret.kind === "text")
     .map(({ id: secretId, name }) => ({ id: secretId, name }))

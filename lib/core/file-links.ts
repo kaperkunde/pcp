@@ -12,6 +12,7 @@ import {
   sha256Hex,
 } from "./crypto"
 import { db } from "./db"
+import { openLinkName, sealLinkName } from "./link-names"
 import { invalid, notFound } from "./errors"
 import { newId } from "./ids"
 import {
@@ -21,7 +22,7 @@ import {
   isTextBytes,
   isTextType,
 } from "./media-types"
-import { appendRequestLog } from "./request-log"
+import { appendKeylessLog, type KeylessTool } from "./request-log"
 import { loadResourceLimits } from "./resources/state"
 import { describeResults, openResult, RESULT_TTL_MS } from "./tool-results"
 
@@ -97,6 +98,8 @@ export function fileAad(id: string): string {
 export function keyAad(id: string): string {
   return `file_link_key:${id}`
 }
+
+export { openLinkName, sealLinkName }
 
 /** An upload's store folder, then its path there (store-uploads.ts). */
 export function storePathAad(id: string): string {
@@ -179,7 +182,7 @@ export async function shareResult(
       kind: "download",
       secretHash: sha256Hex(secret),
       resultId: opened.id,
-      name: opened.name,
+      sealedName: sealLinkName(linkKey(secret, id), id, opened.name),
       mediaType,
       length: bytes.length,
       ciphertext: asBytes(encrypt(linkKey(secret, id), bytes, fileAad(id))),
@@ -237,7 +240,7 @@ export async function receiveFile(
       kind: "upload",
       secretHash: sha256Hex(secret),
       resultId,
-      name: input.name ?? null,
+      sealedName: sealLinkName(linkKey(secret, id), id, input.name ?? null),
       mediaType: input.type ?? "",
       wrappedKey: asBytes(encrypt(ctx.dek, linkKey(secret, id), keyAad(id))),
       maxUses: 1,
@@ -319,11 +322,12 @@ export function tokenCanUseLinks(
 
 export function logUse(
   link: Pick<FileLink, "vaultId" | "tokenId">,
-  tool: string,
+  tool: KeylessTool,
   ok: boolean,
   started: number,
 ): Promise<void> {
-  return appendRequestLog({
+  // A link's request holds no vault key: the name is PCP's own.
+  return appendKeylessLog({
     vaultId: link.vaultId,
     tokenId: link.tokenId,
     tool,
@@ -365,14 +369,16 @@ export async function downloadByLink(
     }
   }
 
-  const bytes = decrypt(
-    linkKey(secret, link.id),
-    Buffer.from(link.ciphertext),
-    fileAad(link.id),
-  )
+  const key = linkKey(secret, link.id)
+  const bytes = decrypt(key, Buffer.from(link.ciphertext), fileAad(link.id))
 
   await logUse(link, "file_link/download", true, started)
-  return { ok: true, name: link.name, mediaType: link.mediaType, bytes }
+  return {
+    ok: true,
+    name: openLinkName(key, link),
+    mediaType: link.mediaType,
+    bytes,
+  }
 }
 
 /** Types a sender sets for any bytes, which say nothing of the file. */
@@ -519,10 +525,11 @@ export async function uploadByLink(
   }
 
   const { bytes } = read
+  const name = openLinkName(linkKey(secret, link.id), link)
   const mediaType = sentMediaType({
     asked: link.mediaType,
     contentType,
-    name: link.name,
+    name,
     bytes,
   })
   const readableUntil = new Date(now.getTime() + RESULT_TTL_MS)
@@ -554,7 +561,7 @@ export async function uploadByLink(
   return {
     ok: true,
     resultId: link.resultId,
-    name: link.name,
+    name,
     mediaType,
     size: bytes.length,
     readableUntil,

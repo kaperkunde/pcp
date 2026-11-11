@@ -1,6 +1,7 @@
 import type { CallToolResult } from "@modelcontextprotocol/server"
 
 import { decideScript, scriptSiteOf, takeScriptOnce } from "../browser-scripts"
+import type { VaultContext } from "../context"
 import { siteKey } from "../fetch/rules"
 import { handleOf, type ResultKeeper } from "../tool-results"
 import { familyError, textAnswer } from "../tools/family"
@@ -225,10 +226,10 @@ async function closePopupsSince(
   before: number,
 ): Promise<void> {
   const vault = runningBrowser(vaultId)
-  const ids = tab.popups.splice(before)
+  const notes = tab.popups.splice(before)
 
-  for (const id of ids) {
-    const popup = vault?.tabs.get(id)
+  for (const note of notes) {
+    const popup = note.tabId ? vault?.tabs.get(note.tabId) : undefined
     if (vault && popup) {
       await withVault(vault, () => closeTab(vault, popup)).catch(() => {})
     }
@@ -236,6 +237,7 @@ async function closePopupsSince(
 }
 
 export type EvaluateScope = {
+  ctx: VaultContext
   vaultId: string
   tokenId: string
   serverId: string
@@ -296,7 +298,7 @@ export async function evaluateInTab(
     )
   }
 
-  const level = await decideScript(scope.vaultId, scope.tokenId, site)
+  const level = await decideScript(scope.ctx, scope.tokenId, site)
 
   if (level === "blocked") {
     return refused(

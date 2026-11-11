@@ -1,5 +1,6 @@
 import type { VaultContext } from "../context"
 import { db } from "../db"
+import { SERVER_META_SELECT, serverName } from "../server-meta"
 import { invalid, PcpError } from "../errors"
 import type { ShownText } from "../permission-rules"
 import { imageRepository, IMAGE_BY_DIGEST } from "./definition"
@@ -191,7 +192,7 @@ export async function prepareServiceUpdate(
           id: { not: loaded.server.id },
           kind: "service",
         },
-        select: { name: true },
+        select: SERVER_META_SELECT,
         orderBy: { createdAt: "asc" },
       })
     : []
@@ -209,7 +210,7 @@ export async function prepareServiceUpdate(
     to,
     source,
     basis: loaded.spec.hash,
-    instances: instances.map((each) => each.name),
+    instances: instances.map((each) => serverName(loaded.ctx, each)),
   }
 }
 

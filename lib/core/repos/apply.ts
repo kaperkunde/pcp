@@ -1,6 +1,17 @@
 import type { VaultContext } from "../context"
 import { db } from "../db"
-import { shareDescription, uniqueDefinitionSlug } from "../definition-rows"
+import {
+  openTools,
+  TOOL_OVERRIDE_SELECT,
+  TOOL_NAME_SELECT,
+  TOOL_ABOUT_SELECT,
+  toolName,
+} from "../tool-rows"
+import {
+  shareDescription,
+  uniqueDefinitionSlug,
+  writeDefinition,
+} from "../definition-rows"
 import type { CloneInput } from "../definitions"
 import {
   changeEndpoint,
@@ -11,6 +22,13 @@ import {
 import { invalid, PcpError } from "../errors"
 import { checkPersonalNote, setPersonalNote } from "../personal-notes"
 import { findTextSecretByName } from "../secrets"
+import {
+  writeServer,
+  openServers,
+  SERVER_META_SELECT,
+  serverSlugsWhere,
+  serverSlugTaken,
+} from "../server-meta"
 import {
   createServer,
   getServer,
@@ -115,6 +133,7 @@ export function wrapperInput(document: WrapperDocument): WrapperInput {
     name: document.displayName,
     description: document.description,
     callLevels: document.callLevels,
+    pace: document.pace ?? null,
     tools: document.tools.map((tool) => ({
       name: tool.name,
       title: tool.title,
@@ -207,16 +226,21 @@ async function wrapperProblems(
       }),
     ),
   ]
-  const servers = await db().mcpServer.findMany({
-    where: { vaultId: ctx.vaultId, slug: { in: slugs } },
-    select: { id: true, slug: true, kind: true },
-  })
+  const servers = openServers(
+    ctx,
+    await db().mcpServer.findMany({
+      where: serverSlugsWhere(ctx, slugs),
+      select: { ...SERVER_META_SELECT, kind: true },
+    }),
+  )
   const bySlug = new Map(servers.map((server) => [server.slug, server]))
   const tools = await db().mcpTool.findMany({
     where: { serverId: { in: servers.map((server) => server.id) } },
-    select: { serverId: true, name: true },
+    select: TOOL_NAME_SELECT,
   })
-  const has = new Set(tools.map((tool) => `${tool.serverId}\n${tool.name}`))
+  const has = new Set(
+    tools.map((tool) => `${tool.serverId}\n${toolName(ctx, tool)}`),
+  )
   const problems: string[] = []
 
   for (const ref of [...refs].sort()) {
@@ -344,17 +368,15 @@ async function settle(
     const free =
       (await uniqueDefinitionSlug(
         db(),
+        ctx,
         ctx.vaultId,
         document.name,
         row.definitionId,
       )) === document.name
 
-    await db().serverDefinition.update({
-      where: { id: row.definitionId },
-      data: {
-        name: document.displayName,
-        ...(free ? { slug: document.name } : {}),
-      },
+    await writeDefinition(ctx, row.definitionId, {
+      name: document.displayName,
+      ...(free ? { slug: document.name } : {}),
     })
   }
 
@@ -376,12 +398,7 @@ async function firstName(
   const row = await getServer(ctx, id)
 
   if (!named && row.slug !== document.name) {
-    const taken = await db().mcpServer.findUnique({
-      where: { vaultId_slug: { vaultId: ctx.vaultId, slug: document.name } },
-      select: { id: true },
-    })
-
-    if (!taken) {
+    if (!(await serverSlugTaken(ctx, document.name))) {
       await renameServerSlug(ctx, id, document.name)
     }
   }
@@ -400,10 +417,10 @@ async function writeDescription(
   }).description
 
   if (row.description !== text) {
-    await db().mcpServer.update({ where: { id }, data: { description: text } })
+    await writeServer(ctx, id, { description: text })
   }
 
-  await shareDescription(id)
+  await shareDescription(ctx, id)
 }
 
 async function applySkill(
@@ -617,10 +634,13 @@ async function setToolDescriptions(
   id: string,
   wanted: Record<string, string>,
 ): Promise<void> {
-  const tools = await db().mcpTool.findMany({
-    where: { serverId: id },
-    select: { name: true, descriptionOverride: true },
-  })
+  const tools = openTools(
+    ctx,
+    await db().mcpTool.findMany({
+      where: { serverId: id },
+      select: { ...TOOL_OVERRIDE_SELECT, ...TOOL_ABOUT_SELECT },
+    }),
+  )
 
   for (const tool of tools) {
     const description = wanted[tool.name] ?? null
@@ -675,7 +695,7 @@ async function applyEndpoint(
   } else {
     // What the definition holds, and nothing of the instance's own.
     const existing = await getServer(ctx, id)
-    const stored = await storedSpec(id)
+    const stored = await storedSpec(ctx, id)
     const newText = stored?.text !== document.spec.text
 
     await changeEndpoint(ctx, id, {
@@ -783,7 +803,7 @@ async function applyService(
   }
 
   // What the definition holds, and nothing of the instance's own.
-  await writeServiceDefinition(id, document.definition)
+  await writeServiceDefinition(ctx, id, document.definition)
   await writeDescription(ctx, id, document.description)
   await settle(ctx, id, document)
 

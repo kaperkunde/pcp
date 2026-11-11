@@ -1,10 +1,9 @@
-import { createHash } from "node:crypto"
-
 import {
   PERMISSION_DECISIONS,
   type PermissionDecision,
   type PermissionKind,
 } from "./constants"
+import { keyedHash } from "./crypto"
 import { invalid } from "./errors"
 
 /**
@@ -110,19 +109,30 @@ export function canonicalJson(value: unknown): string {
   return `{${entries.map(([key, item]) => `${JSON.stringify(key)}:${canonicalJson(item)}`).join(",")}}`
 }
 
+/** Marks a request hash keyed under the vault key (`requestHash`). */
+export const REQUEST_HASH_PREFIX = "h1:"
+
+const REQUEST_HASH_LABEL = "pcp permission request v1"
+
 /**
  * What makes two requests the same one: the kind, what it targets (the
  * server and tool for a call, the address for a new server) and the
- * arguments.
+ * arguments. An HMAC under a key derived from the vault key, so the stored
+ * column (and a backup's copy) cannot confirm a guess at the arguments
+ * without it. Rows from before carry a plain SHA-256 without the `h1:`
+ * prefix and match nothing; they end within PERMISSION_TTL_MS anyway.
  */
 export function requestHash(
+  dek: Buffer,
   kind: PermissionKind,
   target: string,
   args: unknown,
 ): string {
-  return createHash("sha256")
-    .update(`${kind}\n${target}\n${canonicalJson(args)}`)
-    .digest("hex")
+  return `${REQUEST_HASH_PREFIX}${keyedHash(
+    dek,
+    REQUEST_HASH_LABEL,
+    `${kind}\n${target}\n${canonicalJson(args)}`,
+  )}`
 }
 
 /**
@@ -401,6 +411,12 @@ const DECISION_LABELS: Record<PermissionKind, Record<string, string>> = {
     allow_once: "Run it once",
     always: "Allow scripts at this site",
     block: "Block scripts at this site",
+    decline: "Not now",
+  },
+  // An assistant's pace for one tab outside the bounds you set: it applies
+  // to that tab only, while it is open.
+  tab_pace: {
+    allow_once: "Use this pace in the tab",
     decline: "Not now",
   },
   // A secret the owner types in for the browser, and how its uses go: the

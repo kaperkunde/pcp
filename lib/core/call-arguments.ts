@@ -1,5 +1,3 @@
-import type { McpServer } from "@/lib/generated/prisma/client"
-
 import { tabHint, tabProblem } from "./browser/call"
 import { browserToolSpec } from "./browser/tools"
 import { calendarToolSpec } from "./caldav/tools"
@@ -17,12 +15,14 @@ import { runCommandTool, RUN_COMMAND } from "./ssh/tools"
 import { storageTool } from "./storage/tools"
 import { applyAliases } from "./tools/define"
 import type { InnerTool, Rename } from "./tools/family"
+import { answerHint } from "./tools/answer-hint"
 import { validate } from "./tools/validate"
+import type { OpenServer } from "./server-meta"
 
 /**
  * The one check of a call's arguments before anything runs or the owner is
- * asked, for every way a call reaches a tool: call_tool_<tier>,
- * run_code_<tier>'s pcp.call, a wrapper's program and a
+ * asked, for every way a call reaches a tool: execute_<tier>,
+ * run_<tier>'s pcp.call, a wrapper's program and a
  * browser flow (wrappers/run.ts). A tool of PCP's own families (the
  * browser, mail and calendar accounts, SSH servers, services, storage
  * roots) is checked by
@@ -52,7 +52,7 @@ export type CallArgumentCheck =
 
 /** A family's tool by its server's kind and its name; undefined for others. */
 export function familyTool(
-  server: Pick<McpServer, "kind">,
+  server: Pick<OpenServer, "kind">,
   toolName: string,
 ): InnerTool | undefined {
   if (server.kind === "browser") {
@@ -83,7 +83,7 @@ export function familyTool(
 }
 
 export async function checkCallArguments(
-  server: Pick<McpServer, "kind">,
+  server: Pick<OpenServer, "kind">,
   toolName: string,
   /** The catalogue row's inputSchema, as JSON text. */
   storedSchema: string | null | undefined,
@@ -123,7 +123,11 @@ export async function checkCallArguments(
         ? await tabHint(tabs.ctx, tabs.tokenId, tabs.publicUrl)
         : undefined
 
-    return { ...checked, ...(hint ? { hint } : {}) }
+    const full = [hint, answerHint(sent, checked.problems)]
+      .filter(Boolean)
+      .join("\n")
+
+    return { ...checked, ...(full ? { hint: full } : {}) }
   }
 
   let schema: unknown
@@ -137,9 +141,19 @@ export async function checkCallArguments(
 
   const problems = validate(schema, args, secretAt ? { secretAt } : {})
 
-  return problems.length === 0
-    ? { fits: true, args, notes: [], renames: [] }
-    : { fits: false, problems, notes: [], renames: [] }
+  if (problems.length === 0) {
+    return { fits: true, args, notes: [], renames: [] }
+  }
+
+  const hint = answerHint(args, problems)
+
+  return {
+    fits: false,
+    problems,
+    notes: [],
+    renames: [],
+    ...(hint ? { hint } : {}),
+  }
 }
 
 /**

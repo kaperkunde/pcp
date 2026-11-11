@@ -333,9 +333,9 @@ describe("proposing tool levels", () => {
         data: {
           id: randomUUID(),
           serverId: id,
-          name: tool,
-          description: `${tool} does one thing.`,
-          inputSchema: JSON.stringify({ type: "object" }),
+          plainName: tool,
+          plainDescription: `${tool} does one thing.`,
+          plainInputSchema: JSON.stringify({ type: "object" }),
         },
       })
     }
@@ -591,7 +591,7 @@ describe("proposing tool levels", () => {
     const id = (await db().permissionRequest.findFirstOrThrow()).id
 
     // Nothing is written before the save.
-    expect(await toolTier(billing, "list_invoices")).toBe("destructive")
+    expect(await toolTier(ctx, billing, "list_invoices")).toBe("destructive")
     expect(await db().toolTier.count()).toBe(0)
     const proposal = await getAccessProposal(ctx, id)
     expect(proposal?.proposedTiers).toHaveLength(3)
@@ -619,9 +619,9 @@ describe("proposing tool levels", () => {
       },
     )
 
-    expect(await toolTier(billing, "list_invoices")).toBe("read")
-    expect(await toolTier(twin, "list_invoices")).toBe("read")
-    expect(await toolTier(billing, "list_clients")).toBe("destructive")
+    expect(await toolTier(ctx, billing, "list_invoices")).toBe("read")
+    expect(await toolTier(ctx, twin, "list_invoices")).toBe("read")
+    expect(await toolTier(ctx, billing, "list_clients")).toBe("destructive")
     expect(
       (await db().toolTier.findMany()).map((row) => row.definitionId),
     ).toEqual([definitionId, definitionId])
@@ -654,18 +654,19 @@ describe("proposing tool levels", () => {
       applyAccessRequest(ctx, id, [], {
         publicUrl: PUBLIC_URL,
         tiers: [{ serverId: null, tool: "web_fetch", tier: "read" }],
-        ownNames: async () => ["search"],
+        ownNames: async () => ["memory"],
       }),
     ).rejects.toThrow(/no longer reaches web_fetch/)
     expect(await db().toolTier.count()).toBe(0)
 
-    // PCP's own tool, known: its tier goes in the vault's setting.
+    // PCP's own tool, known: its tier goes in the vault's setting. (Not an
+    // entry such as search, whose tier is its name since #113.)
     await applyAccessRequest(ctx, id, [], {
       publicUrl: PUBLIC_URL,
-      tiers: [{ serverId: null, tool: "search", tier: "write" }],
-      ownNames: async () => ["search"],
+      tiers: [{ serverId: null, tool: "memory", tier: "write" }],
+      ownNames: async () => ["memory"],
     })
-    expect(await readOwnToolTiers(ctx)).toEqual({ search: "write" })
+    expect(await readOwnToolTiers(ctx)).toEqual({ memory: "write" })
     await setToolTier(ctx, billing, "list_invoices", null)
   })
 })

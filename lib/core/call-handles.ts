@@ -1,9 +1,10 @@
-import { createHash, createHmac, hkdfSync, timingSafeEqual } from "node:crypto"
+import { createHash, createHmac, timingSafeEqual } from "node:crypto"
 
+import { labelKey } from "./crypto"
 import { canonicalJson } from "./permission-rules"
 
 /**
- * Call handles: what describe hands an assistant and call_tool_<tier> takes in
+ * Call handles: what describe hands an assistant and execute_<tier> takes in
  * place of a server and a tool name, so a tool is always described before
  * it is called. A handle is stateless (/mcp keeps no session): it names the
  * tool's catalogue row and carries two MACs under a key derived from the
@@ -119,7 +120,7 @@ function decodeRef(ref: string): string | null {
 
 /** The key handles are made with: the vault's, never stored. */
 function handleKey(dek: Buffer): Buffer {
-  return Buffer.from(hkdfSync("sha256", dek, Buffer.alloc(0), KEY_LABEL, 32))
+  return labelKey(dek, KEY_LABEL)
 }
 
 /** The hash of a stored inputSchema (JSON text), key order aside. */

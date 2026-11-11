@@ -7,9 +7,12 @@ import {
 } from "./constants"
 import type { VaultContext } from "./context"
 import { db } from "./db"
+import { byServerName, openServer } from "./server-meta"
+import { openTools, TOOL_ABOUT_SELECT, byToolName } from "./tool-rows"
 import { invalid, notFound } from "./errors"
 import { newId } from "./ids"
 import { getServer } from "./servers"
+import { openRuleKey, sealedRuleKey } from "./fetch-rule-keys"
 
 /**
  * What each API token may do with each tool: allowed, ask (the default) or
@@ -322,16 +325,20 @@ export async function copyTokenAccess(
     ...(fetchRules.length > 0
       ? [
           db().webFetchRule.createMany({
-            data: fetchRules.map((rule) => ({
-              id: newId(),
-              vaultId: ctx.vaultId,
-              tokenId: targetId,
-              scope: targetId,
-              kind: rule.kind,
-              key: rule.key,
-              access: rule.access,
-              addedBy: rule.addedBy,
-            })),
+            data: fetchRules.map((rule) => {
+              // A site's key is sealed to its row: sealed again for the copy.
+              const id = newId()
+              return {
+                id,
+                vaultId: ctx.vaultId,
+                tokenId: targetId,
+                scope: targetId,
+                kind: rule.kind,
+                ...sealedRuleKey(ctx, id, rule.kind, openRuleKey(ctx, rule)),
+                access: rule.access,
+                addedBy: rule.addedBy,
+              }
+            }),
           }),
         ]
       : []),
@@ -356,28 +363,33 @@ export async function listTokenToolAccess(
         : { id: { in: token.servers.map((link) => link.serverId) } }),
     },
     include: {
-      tools: { select: { name: true, title: true }, orderBy: { name: "asc" } },
+      tools: { select: TOOL_ABOUT_SELECT },
     },
-    orderBy: { name: "asc" },
   })
   const stored = await loadToolAccess(ctx.vaultId, tokenId)
 
-  return servers.map((server) => ({
-    id: server.id,
-    name: server.name,
-    slug: server.slug,
-    enabled: server.enabled,
-    refreshable: canRereadTools(server),
-    tools: server.tools.map((tool) => {
-      const key = accessKey(server.id, tool.name)
+  return servers
+    .map((row) => ({
+      ...openServer(ctx, row),
+      tools: openTools(ctx, row.tools).sort(byToolName),
+    }))
+    .sort(byServerName)
+    .map((server) => ({
+      id: server.id,
+      name: server.name,
+      slug: server.slug,
+      enabled: server.enabled,
+      refreshable: canRereadTools(server),
+      tools: server.tools.map((tool) => {
+        const key = accessKey(server.id, tool.name)
 
-      return {
-        name: tool.name,
-        title: tool.title,
-        access: effectiveAccess(stored, server.id, tool.name),
-        own: stored.own.get(key) ?? null,
-        shared: stored.shared.get(key) ?? null,
-      }
-    }),
-  }))
+        return {
+          name: tool.name,
+          title: tool.title,
+          access: effectiveAccess(stored, server.id, tool.name),
+          own: stored.own.get(key) ?? null,
+          shared: stored.shared.get(key) ?? null,
+        }
+      }),
+    }))
 }

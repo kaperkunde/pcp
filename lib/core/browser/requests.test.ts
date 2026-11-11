@@ -1,8 +1,6 @@
 import type { CallToolResult } from "@modelcontextprotocol/server"
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
 
-import type { McpServer } from "@/lib/generated/prisma/client"
-
 import { createApiToken, resolveApiToken } from "../api-tokens"
 import type { VaultContext } from "../context"
 import { db } from "../db"
@@ -27,6 +25,7 @@ import {
 } from "../browser-scripts"
 import { createBrowserServer, findBrowserServer } from "./server"
 import { OwnerNeeded } from "./types"
+import type { OpenServer } from "../server-meta"
 
 // The browser's requests to the owner, with the browser itself replaced:
 // a site to open, asked like a web fetch and answered per site, and a tab
@@ -35,7 +34,7 @@ import { OwnerNeeded } from "./types"
 let cleanup: () => Promise<void>
 let ctx: VaultContext
 let tokenId: string
-let server: McpServer
+let server: OpenServer
 let token = ""
 
 async function resolveApiTokenFor() {
@@ -103,7 +102,7 @@ describe("the browser in the registry and the instructions", () => {
       slug: "browser",
     })
     expect(await db().mcpTool.count({ where: { serverId: server.id } })).toBe(
-      23,
+      24,
     )
 
     const scope = { ...(await resolveApiTokenFor()), publicUrl: PUBLIC_URL }
@@ -211,7 +210,7 @@ describe("opening a site the owner has not decided", () => {
       run,
     )
     expect(textOf(answer)).toBe("opened https://news.example/today")
-    const rules = await loadFetchRules(ctx.vaultId, tokenId)
+    const rules = await loadFetchRules(ctx, tokenId)
     expect(resolveFetchAccess(rules, "news.example", "GET").access).toBe(
       "allowed",
     )
@@ -486,7 +485,7 @@ describe("an assistant's script the owner has not allowed at a site", () => {
     return {
       ran,
       callTool: async (_ctx, _server, _tool, args) => {
-        const level = await decideScript(ctx.vaultId, tokenId, ask.site)
+        const level = await decideScript(ctx, tokenId, ask.site)
         const once = takeScriptOnce({
           tokenId,
           tabId: ask.tabId,
@@ -554,7 +553,7 @@ describe("an assistant's script the owner has not allowed at a site", () => {
     )
     expect(textOf(answer)).toContain("ran: 3")
     expect(run.ran).toEqual([ask.script])
-    expect(await decideScript(ctx.vaultId, tokenId, ask.site)).toBeNull()
+    expect(await decideScript(ctx, tokenId, ask.site)).toBeNull()
     await asked(run)
     expect(run.ran).toHaveLength(1)
   })
@@ -583,7 +582,7 @@ describe("an assistant's script the owner has not allowed at a site", () => {
     expect(run.ran).toEqual([ask.script, "1 + 1"])
 
     await removeScriptSite(ctx, tokenId, "shop.example")
-    expect(await decideScript(ctx.vaultId, tokenId, ask.site)).toBeNull()
+    expect(await decideScript(ctx, tokenId, ask.site)).toBeNull()
   })
 
   it("Block scripts at this site runs nothing and blocks scripts there, not the tool", async () => {
@@ -601,7 +600,7 @@ describe("an assistant's script the owner has not allowed at a site", () => {
       "The owner blocked scripts at shop.example for this token, so the script was not run.",
     )
     expect(run.ran).toEqual([])
-    expect(await decideScript(ctx.vaultId, tokenId, ask.site)).toBe("blocked")
+    expect(await decideScript(ctx, tokenId, ask.site)).toBe("blocked")
     expect(
       await db().apiTokenToolAccess.count({ where: { toolName: "evaluate" } }),
     ).toBe(0)

@@ -1,14 +1,20 @@
-import type {
-  McpServer as McpServerRow,
-  McpTool,
-} from "@/lib/generated/prisma/client"
-
 import { allowanceHolds, loadToolAllowances } from "./allowances"
 import type { ResolvedToken } from "./api-tokens"
 import type { DetectedClient } from "./clients/detect"
 import type { ToolAccess, ToolTier } from "./constants"
+import type { VaultContext } from "./context"
 import { db } from "./db"
 import { readServerNote } from "./personal-notes"
+import { byServerName, openServer, type OpenServer } from "./server-meta"
+import {
+  openTools,
+  type OpenTool,
+  TOOL_ABOUT_SELECT,
+  TOOL_OVERRIDE_SELECT,
+  TOOL_SCHEMA_SELECT,
+  byToolName,
+  TOOL_NAME_SELECT,
+} from "./tool-rows"
 import { accessKey, effectiveAccess, loadToolAccess } from "./tool-access"
 import { loadToolTiers } from "./tool-tiers"
 import { readWrapperOperation } from "./wrappers/definition"
@@ -36,13 +42,13 @@ export type GatewayScope = ResolvedToken & {
  * schema, which for a large endpoint is megabytes.
  */
 export type GatewayTool = Pick<
-  McpTool,
+  OpenTool,
   "id" | "name" | "title" | "description" | "descriptionOverride"
 > & {
   access: ToolAccess
   /**
    * Its effective tier (lib/core/tool-tiers.ts): which entry tools run it
-   * (call_tool_<tier> and the ones above).
+   * (execute_<tier> and the ones above).
    */
   tier: ToolTier
   /** The owner's tier for it, when they chose one (else its default). */
@@ -54,7 +60,7 @@ export type GatewayTool = Pick<
   hiddenBy?: string
 }
 
-export type GatewayServer = McpServerRow & {
+export type GatewayServer = OpenServer & {
   tools: GatewayTool[]
   /**
    * The owner's own note on the server (lib/core/personal-notes.ts),
@@ -96,24 +102,22 @@ export async function loadGatewayServers(
       },
       include: {
         tools: {
-          orderBy: { name: "asc" },
-          select: {
-            id: true,
-            name: true,
-            title: true,
-            description: true,
-            descriptionOverride: true,
-          },
+          select: { ...TOOL_ABOUT_SELECT, ...TOOL_OVERRIDE_SELECT },
         },
       },
-      orderBy: { name: "asc" },
     }),
     loadToolAccess(scope.ctx.vaultId, scope.tokenId),
     loadToolAllowances(scope.tokenId, now),
   ])
 
-  const tiers = await loadToolTiers(scope.ctx.vaultId, servers)
-  const loaded: GatewayServer[] = servers.map((server) => ({
+  const opened = servers
+    .map((row) => ({
+      ...openServer(scope.ctx, row),
+      tools: openTools(scope.ctx, row.tools).sort(byToolName),
+    }))
+    .sort(byServerName)
+  const tiers = await loadToolTiers(scope.ctx, opened)
+  const loaded: GatewayServer[] = opened.map((server) => ({
     ...server,
     note: readServerNote(scope.ctx, server),
     tools: server.tools.map((tool) => {
@@ -133,11 +137,12 @@ export async function loadGatewayServers(
     }),
   }))
 
-  return applyWrappers(loaded)
+  return applyWrappers(scope.ctx, loaded)
 }
 
 /** A wrapper's tools at the strictest level, and what they hide. */
 async function applyWrappers(
+  ctx: VaultContext,
   servers: GatewayServer[],
 ): Promise<GatewayServer[]> {
   const wrappers = servers.filter((server) => server.kind === "wrapper")
@@ -148,10 +153,10 @@ async function applyWrappers(
 
   const operations = await db().mcpTool.findMany({
     where: { serverId: { in: wrappers.map((server) => server.id) } },
-    select: { serverId: true, name: true, operation: true },
+    select: { ...TOOL_SCHEMA_SELECT, ...TOOL_NAME_SELECT },
   })
   const opOf = new Map(
-    operations.map((row) => [
+    openTools(ctx, operations).map((row) => [
       accessKey(row.serverId, row.name),
       readWrapperOperation(row.operation),
     ]),

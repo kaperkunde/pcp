@@ -21,7 +21,7 @@ import { WrapperForm } from "@/components/wrapper-form"
 import { db } from "@/lib/core/db"
 import { isPcpError } from "@/lib/core/errors"
 import { oauthRedirectUrl } from "@/lib/core/oauth-client"
-import { readStoredPatches } from "@/lib/core/openapi/patch"
+import { storedSpec } from "@/lib/core/endpoints"
 import { readCallPlan } from "@/lib/core/openapi/plan"
 import { pacingOverview, serverPacing } from "@/lib/core/pacing/config"
 import { listSecrets } from "@/lib/core/secrets"
@@ -102,15 +102,17 @@ export default async function ServerPage({
   const service = kind === "service" ? await serviceView(ctx, id) : null
   const replaced = await replacedTools(ctx, server.id)
   // Each tool's tier, and whether the owner chose it (tool-tiers.ts).
-  const tiers = await loadToolTiers(ctx.vaultId, [server])
+  const tiers = await loadToolTiers(ctx, [server])
   const about = await itemAbout(ctx, "server", server.id)
   const spec = endpoint
     ? await db().openApiSpec.findUnique({
         where: { serverId: server.id },
-        select: { fetchedAt: true, patches: true },
+        select: { fetchedAt: true },
       })
     : null
-  const patches = readStoredPatches(spec?.patches)
+  const patches = endpoint
+    ? ((await storedSpec(ctx, server.id))?.patches ?? [])
+    : []
 
   const authExtraHeaders = await extraAuthHeaders(server.id)
 
@@ -187,12 +189,43 @@ export default async function ServerPage({
           description: wrapper.description,
           callLevels: wrapper.callLevels,
           definition: JSON.stringify(
-            { tools: wrapper.tools, secrets: wrapper.secrets },
+            {
+              tools: wrapper.tools,
+              secrets: wrapper.secrets,
+              ...(wrapper.pace ? { pace: wrapper.pace } : {}),
+            },
             null,
             2,
           ),
         }}
         secretNames={secrets.map((secret) => secret.name)}
+        found={
+          wrapper.foundSecrets.length > 0 ? (
+            <p
+              id="found-secrets"
+              className="text-[13px] leading-relaxed text-muted-foreground"
+            >
+              Typed into pages, found in the program:{" "}
+              {wrapper.foundSecrets.map((entry, index) => (
+                <span key={entry.secret}>
+                  {index > 0 ? ", " : null}
+                  <span className="font-medium text-foreground">
+                    {entry.secret}
+                  </span>{" "}
+                  (
+                  {entry.parts
+                    .map((part) =>
+                      part === "username" ? "login name" : "password",
+                    )
+                    .join(" and ")}
+                  )
+                </span>
+              ))}
+              . PCP types them only at the sites you bound them to, or after
+              asking you.
+            </p>
+          ) : null
+        }
       />
     ) : browser ? (
       <BrowserDescribeForm
@@ -413,7 +446,16 @@ async function pacingDefaults(
   const { classes } = await pacingOverview(ctx)
 
   return browser
-    ? [{ label: "per site,", pace: classes.browser_act.pace }]
+    ? [
+        {
+          label: "actions in a page, per site:",
+          pace: classes.browser_act.pace,
+        },
+        {
+          label: "opening a page, per site:",
+          pace: classes.browser_navigate.pace,
+        },
+      ]
     : [
         {
           label: "calls that change things:",

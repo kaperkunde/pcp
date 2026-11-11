@@ -1,8 +1,8 @@
-import { createHmac, hkdfSync } from "node:crypto"
+import { createHmac } from "node:crypto"
 
 import type { EmbeddedKinds } from "../constants"
 import type { VaultContext } from "../context"
-import { asBytes, decryptString, encryptString } from "../crypto"
+import { asBytes, decryptString, encryptString, labelKey } from "../crypto"
 import { db } from "../db"
 import { newId } from "../ids"
 import {
@@ -108,7 +108,7 @@ const HASH_LABEL = "pcp embedding vector hash v1"
 
 /** The key a vector's hash is made with: the vault's, never stored. */
 function hashKey(dek: Buffer): Buffer {
-  return Buffer.from(hkdfSync("sha256", dek, Buffer.alloc(0), HASH_LABEL, 32))
+  return labelKey(dek, HASH_LABEL)
 }
 
 /** What a vector is found by: the provider and model, and the text. */
@@ -375,7 +375,7 @@ export async function searchSimilarities(
   open: ProviderOpener,
   options: SemanticOptions = {},
 ): Promise<Map<string, number> | null> {
-  const config = await readEmbeddingsConfig(ctx.vaultId)
+  const config = await readEmbeddingsConfig(ctx)
 
   if (!config) {
     return null

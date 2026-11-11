@@ -1,9 +1,25 @@
-import type { McpServer, Prisma } from "@/lib/generated/prisma/client"
+import type { Prisma } from "@/lib/generated/prisma/client"
 
 import type { VaultContext } from "./context"
+import { keyedHash } from "./crypto"
 import { db } from "./db"
 import { invalid, notFound } from "./errors"
 import { newId } from "./ids"
+import {
+  groupSelect,
+  openRow,
+  readFields,
+  sealFields,
+  type SealedGroup,
+} from "./sealed-fields"
+import {
+  openServer,
+  openServers,
+  type OpenServer,
+  SERVER_META_SELECT,
+  writeServer,
+} from "./server-meta"
+import { toolOverrides, writeToolOverride, toolNameWhere } from "./tool-rows"
 
 /**
  * The rows behind definitions and instances (lib/core/definitions.ts has the
@@ -36,9 +52,95 @@ export function hasDefinition(kind: string): kind is DefinitionKind {
 
 type Client = Prisma.TransactionClient | ReturnType<typeof db>
 
-/** A definition slug no other definition in the vault has. */
+/**
+ * A definition's name, short name and description, sealed (#96) as JSON
+ * in `meta` under the vault's key as "server_definition:<id>:meta", the
+ * short name found by its keyed hash (`slugKey`, unique in the vault). A
+ * row from before holds them in plainName, plainSlug and plainDescription
+ * until the vault's rows are sealed (lib/core/sealing/convert.ts).
+ */
+export type DefinitionMeta = { name: string; slug: string; description: string }
+
+export const DEFINITION_META: SealedGroup<DefinitionMeta, "meta"> = {
+  column: "meta",
+  idKey: "id",
+  aad: (id) => `server_definition:${id}:meta`,
+  blank: { name: "", slug: "", description: "" },
+}
+
+const SLUG_LABEL = "pcp definition slug"
+
+/** A definition's short name's keyed hash: what slugKey holds. */
+export function definitionSlugKey(ctx: VaultContext, slug: string): string {
+  return keyedHash(ctx.dek, SLUG_LABEL, slug)
+}
+
+/** The vault's definitions with this short name: by its hash, or from before. */
+export function definitionSlugWhere(
+  ctx: VaultContext,
+  slug: string,
+): Prisma.ServerDefinitionWhereInput {
+  return {
+    vaultId: ctx.vaultId,
+    AND: [
+      {
+        OR: [
+          { slugKey: definitionSlugKey(ctx, slug) },
+          { slugKey: null, plainSlug: slug },
+        ],
+      },
+    ],
+  }
+}
+
+export const DEFINITION_META_SELECT = groupSelect(DEFINITION_META)
+
+/** A definition row (whole or selected) with its name and description opened. */
+export function openDefinition<
+  T extends { id: string; meta: Uint8Array | null },
+>(ctx: VaultContext, row: T) {
+  return openRow(ctx.dek, DEFINITION_META, row)
+}
+
+/** A definition's name and description, from a row that selected them. */
+export function definitionMeta(
+  ctx: VaultContext,
+  row: Parameters<typeof readFields<DefinitionMeta, "meta", "id">>[2],
+): DefinitionMeta {
+  return readFields(ctx.dek, DEFINITION_META, row)
+}
+
+/** What a definition row stores for its name and description. */
+export function sealedDefinitionMeta(
+  ctx: VaultContext,
+  id: string,
+  meta: DefinitionMeta,
+): {
+  meta: Uint8Array<ArrayBuffer>
+  slugKey: string
+  plainName: string
+  plainSlug: string
+  plainDescription: string
+} {
+  return {
+    ...(sealFields(ctx.dek, DEFINITION_META, id, meta) as {
+      meta: Uint8Array<ArrayBuffer>
+      plainName: string
+      plainSlug: string
+      plainDescription: string
+    }),
+    slugKey: definitionSlugKey(ctx, meta.slug),
+  }
+}
+
+/**
+ * A definition slug no other definition in the vault has. Without the
+ * vault's key (a restore that holds none) only the rows from before are
+ * compared; the sealed ones are compared by their hash.
+ */
 export async function uniqueDefinitionSlug(
   client: Client,
+  ctx: VaultContext | null,
   vaultId: string,
   base: string,
   exceptId?: string,
@@ -47,12 +149,17 @@ export async function uniqueDefinitionSlug(
   let slug = start
 
   for (let n = 2; ; n++) {
-    const clash = await client.serverDefinition.findUnique({
-      where: { vaultId_slug: { vaultId, slug } },
+    const clash = await client.serverDefinition.findFirst({
+      where: {
+        ...(ctx
+          ? definitionSlugWhere(ctx, slug)
+          : { vaultId, slugKey: null, plainSlug: slug }),
+        ...(exceptId ? { id: { not: exceptId } } : {}),
+      },
       select: { id: true },
     })
 
-    if (!clash || clash.id === exceptId) {
+    if (!clash) {
       return slug
     }
 
@@ -66,21 +173,42 @@ export async function uniqueDefinitionSlug(
  * as the migration that made the first ones did.
  */
 export async function newDefinitionFor(
+  /**
+   * The vault's key, to seal the name and description; null in a restore
+   * that holds none, of a server from before (whose name is in plain text
+   * already, until the vault's rows are sealed).
+   */
+  ctx: VaultContext | null,
   client: Client,
   server: Pick<
-    McpServer,
+    OpenServer,
     "id" | "vaultId" | "kind" | "slug" | "name" | "description"
   >,
   id: string = newId(),
 ): Promise<string> {
+  const slug = await uniqueDefinitionSlug(
+    client,
+    ctx,
+    server.vaultId,
+    server.slug,
+  )
+
   await client.serverDefinition.create({
     data: {
       id,
       vaultId: server.vaultId,
       kind: server.kind,
-      slug: await uniqueDefinitionSlug(client, server.vaultId, server.slug),
-      name: server.name,
-      description: server.description,
+      ...(ctx
+        ? sealedDefinitionMeta(ctx, id, {
+            name: server.name,
+            slug,
+            description: server.description,
+          })
+        : {
+            plainName: server.name,
+            plainSlug: slug,
+            plainDescription: server.description,
+          }),
     },
   })
   await client.mcpServer.update({
@@ -97,19 +225,21 @@ export async function newDefinitionFor(
  * does not know about definitions). Null for the other kinds.
  */
 export async function ensureDefinition(
+  ctx: VaultContext,
   serverId: string,
 ): Promise<string | null> {
-  const server = await db().mcpServer.findUnique({ where: { id: serverId } })
+  const row = await db().mcpServer.findUnique({ where: { id: serverId } })
 
-  if (!server || !hasDefinition(server.kind)) {
+  if (!row || !hasDefinition(row.kind)) {
     return null
   }
 
-  if (server.definitionId) {
-    return server.definitionId
+  if (row.definitionId) {
+    return row.definitionId
   }
 
-  return db().$transaction((tx) => newDefinitionFor(tx, server))
+  const server = openServer(ctx, row)
+  return db().$transaction((tx) => newDefinitionFor(ctx, tx, server))
 }
 
 /**
@@ -121,8 +251,10 @@ export async function ensureDefinition(
 export async function backfillDefinitions(
   tx: Prisma.TransactionClient,
   vaultId: string,
+  /** The vault's key, when the restore holds it. */
+  ctx: VaultContext | null,
 ): Promise<number> {
-  const servers = await tx.mcpServer.findMany({
+  const rows = await tx.mcpServer.findMany({
     where: {
       vaultId,
       definitionId: null,
@@ -130,13 +262,39 @@ export async function backfillDefinitions(
     },
     orderBy: { createdAt: "asc" },
   })
+  // A sealed row is given one by its first use with the key
+  // (ensureDefinition) when the restore holds none; a row from before
+  // names itself in plain text.
+  const servers: Array<
+    Pick<
+      OpenServer,
+      "id" | "vaultId" | "kind" | "slug" | "name" | "description"
+    >
+  > = []
+
+  for (const row of rows) {
+    if (row.meta !== null) {
+      try {
+        if (ctx) servers.push(openServer(ctx, row))
+      } catch {
+        // Not under this key: given one by its first use.
+      }
+    } else {
+      servers.push({
+        ...row,
+        name: row.plainName,
+        slug: row.plainSlug,
+        description: row.plainDescription,
+      })
+    }
+  }
 
   for (const server of servers) {
     const taken = await tx.serverDefinition.findUnique({
       where: { id: server.id },
       select: { id: true },
     })
-    await newDefinitionFor(tx, server, taken ? newId() : server.id)
+    await newDefinitionFor(ctx, tx, server, taken ? newId() : server.id)
   }
 
   return servers.length
@@ -151,13 +309,15 @@ export async function definitionForNew(
   definitionId: string,
   kind: DefinitionKind,
 ) {
-  const definition = await db().serverDefinition.findFirst({
+  const row = await db().serverDefinition.findFirst({
     where: { id: definitionId, vaultId: ctx.vaultId },
   })
 
-  if (!definition) {
+  if (!row) {
     throw notFound("That definition")
   }
+
+  const definition = openDefinition(ctx, row)
 
   if (definition.kind !== kind) {
     throw invalid(
@@ -173,20 +333,26 @@ export async function definitionForNew(
  * that is not `exceptId`. Null when it has no other.
  */
 export async function contentInstance(
+  ctx: VaultContext,
   definitionId: string,
   exceptId?: string,
-): Promise<McpServer | null> {
-  return db().mcpServer.findFirst({
+): Promise<OpenServer | null> {
+  const row = await db().mcpServer.findFirst({
     where: {
       definitionId,
       ...(exceptId ? { id: { not: exceptId } } : {}),
     },
     orderBy: { createdAt: "asc" },
   })
+
+  return row ? openServer(ctx, row) : null
 }
 
 /** The other instances of a server's definition, oldest first. */
-export async function siblingInstances(serverId: string): Promise<McpServer[]> {
+export async function siblingInstances(
+  ctx: VaultContext,
+  serverId: string,
+): Promise<OpenServer[]> {
   const server = await db().mcpServer.findUnique({
     where: { id: serverId },
     select: { definitionId: true },
@@ -196,44 +362,53 @@ export async function siblingInstances(serverId: string): Promise<McpServer[]> {
     return []
   }
 
-  return db().mcpServer.findMany({
-    where: { definitionId: server.definitionId, id: { not: serverId } },
-    orderBy: { createdAt: "asc" },
-  })
+  return openServers(
+    ctx,
+    await db().mcpServer.findMany({
+      where: { definitionId: server.definitionId, id: { not: serverId } },
+      orderBy: { createdAt: "asc" },
+    }),
+  )
 }
 
 /**
  * Copies a server's description to its definition and every other instance
  * of it: called after anything writes one. Nothing for a server without a
- * definition.
+ * definition. The descriptions are sealed, so each is opened and compared
+ * here, and only one that differs is written.
  */
-export async function shareDescription(serverId: string): Promise<void> {
-  const server = await db().mcpServer.findUnique({
+export async function shareDescription(
+  ctx: VaultContext,
+  serverId: string,
+): Promise<void> {
+  const row = await db().mcpServer.findUnique({
     where: { id: serverId },
-    select: { definitionId: true, description: true },
+    select: { ...SERVER_META_SELECT, definitionId: true },
   })
 
-  if (!server?.definitionId) {
+  if (!row?.definitionId) {
     return
   }
 
-  await db().$transaction([
-    db().serverDefinition.updateMany({
-      where: {
-        id: server.definitionId,
-        description: { not: server.description },
-      },
-      data: { description: server.description },
-    }),
-    db().mcpServer.updateMany({
-      where: {
-        definitionId: server.definitionId,
-        id: { not: serverId },
-        description: { not: server.description },
-      },
-      data: { description: server.description },
-    }),
-  ])
+  const { description } = openServer(ctx, row)
+  const definition = await db().serverDefinition.findUnique({
+    where: { id: row.definitionId },
+    select: DEFINITION_META_SELECT,
+  })
+
+  if (definition) {
+    const meta = definitionMeta(ctx, definition)
+
+    if (meta.description !== description) {
+      await writeDefinition(ctx, definition.id, { description })
+    }
+  }
+
+  for (const sibling of await siblingInstances(ctx, serverId)) {
+    if (sibling.description !== description) {
+      await writeServer(ctx, sibling.id, { description })
+    }
+  }
 }
 
 /**
@@ -241,23 +416,26 @@ export async function shareDescription(serverId: string): Promise<void> {
  * has the tool. The instance's own row is the caller's to write.
  */
 export async function shareToolDescription(
+  ctx: VaultContext,
   serverId: string,
   toolName: string,
   override: string | null,
 ): Promise<void> {
-  const siblings = await siblingInstances(serverId)
+  const siblings = await siblingInstances(ctx, serverId)
 
   if (siblings.length === 0) {
     return
   }
 
-  await db().mcpTool.updateMany({
-    where: {
-      serverId: { in: siblings.map((sibling) => sibling.id) },
-      name: toolName,
-    },
-    data: { descriptionOverride: override },
-  })
+  await writeToolOverride(
+    ctx,
+    toolNameWhere(
+      ctx,
+      siblings.map((sibling) => sibling.id),
+      toolName,
+    ),
+    override,
+  )
 }
 
 /**
@@ -266,26 +444,23 @@ export async function shareToolDescription(
  * starts with (catalogue.ts storeTools).
  */
 export async function inheritedToolDescriptions(
+  ctx: VaultContext,
   serverId: string,
 ): Promise<Map<string, string>> {
-  const siblings = await siblingInstances(serverId)
+  const siblings = await siblingInstances(ctx, serverId)
   const found = new Map<string, string>()
 
   if (siblings.length === 0) {
     return found
   }
 
-  const tools = await db().mcpTool.findMany({
-    where: {
-      serverId: { in: siblings.map((sibling) => sibling.id) },
-      descriptionOverride: { not: null },
-    },
-    select: { name: true, descriptionOverride: true },
+  const tools = await toolOverrides(ctx, {
+    serverId: { in: siblings.map((sibling) => sibling.id) },
   })
 
   for (const tool of tools) {
     if (!found.has(tool.name)) {
-      found.set(tool.name, tool.descriptionOverride!)
+      found.set(tool.name, tool.descriptionOverride)
     }
   }
 
@@ -296,8 +471,11 @@ export async function inheritedToolDescriptions(
  * Switches off every other instance of a server's definition: for a change
  * to what they share that waits for the owner to enable it again.
  */
-export async function disableOtherInstances(serverId: string): Promise<void> {
-  const siblings = await siblingInstances(serverId)
+export async function disableOtherInstances(
+  ctx: VaultContext,
+  serverId: string,
+): Promise<void> {
+  const siblings = await siblingInstances(ctx, serverId)
 
   if (siblings.length > 0) {
     await db().mcpServer.updateMany({
@@ -320,4 +498,46 @@ export async function forgetUnusedDefinition(
   if (left === 0) {
     await db().serverDefinition.deleteMany({ where: { id: definitionId } })
   }
+}
+
+/**
+ * Changes a definition's name or description (and any other column given),
+ * keeping the other sealed value as it is.
+ */
+export async function writeDefinition(
+  ctx: VaultContext,
+  id: string,
+  patch: Partial<DefinitionMeta>,
+  data: Omit<
+    Prisma.ServerDefinitionUncheckedUpdateInput,
+    "id" | "meta" | "plainName" | "plainSlug" | "plainDescription" | "slugKey"
+  > = {},
+  client?: Client,
+): Promise<void> {
+  // The read and the write in one transaction: a change made at the same
+  // time is read, never written over.
+  if (!client) {
+    await db().$transaction((tx) => writeDefinition(ctx, id, patch, data, tx))
+    return
+  }
+
+  const row = await client.serverDefinition.findUnique({
+    where: { id },
+    select: DEFINITION_META_SELECT,
+  })
+
+  if (!row) {
+    throw notFound("That definition")
+  }
+
+  await client.serverDefinition.update({
+    where: { id },
+    data: {
+      ...data,
+      ...sealedDefinitionMeta(ctx, id, {
+        ...definitionMeta(ctx, row),
+        ...patch,
+      }),
+    },
+  })
 }

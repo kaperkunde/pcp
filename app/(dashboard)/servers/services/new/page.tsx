@@ -7,7 +7,7 @@ import { ServiceLaunchForm } from "@/components/service-form"
 import { ButtonLink } from "@kaperkunde/ui/button"
 import { Card } from "@kaperkunde/ui/card"
 import { IconTile } from "@/components/ui/icon-tile"
-import { db } from "@/lib/core/db"
+import { byServerName, findServers } from "@/lib/core/server-meta"
 import { isCommonRepository } from "@/lib/core/repos/common"
 import { listRepos } from "@/lib/core/repos/store"
 import { listSecrets } from "@/lib/core/secrets"
@@ -41,12 +41,8 @@ export default async function NewServicePage({
   const another = definitionId
     ? await serviceOfDefinition(ctx, definitionId).catch(() => null)
     : null
-  const hosts = (
-    await db().mcpServer.findMany({
-      where: { vaultId: ctx.vaultId, kind: "ssh" },
-      orderBy: { name: "asc" },
-    })
-  )
+  const hosts = (await findServers(ctx, { vaultId: ctx.vaultId, kind: "ssh" }))
+    .sort(byServerName)
     // A service's commands go only to a server whose host key is pinned.
     .filter((server) => server.sshHostKey)
     .map((server) => ({

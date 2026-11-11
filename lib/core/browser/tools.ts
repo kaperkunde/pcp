@@ -28,6 +28,8 @@ import {
   MAX_READ_CHARS,
   MAX_ROLE_CHARS,
   MAX_CALL_TIMEOUT_MS,
+  MAX_FULL_PAGE_HEIGHT,
+  MAX_PDF_PAGE_RANGES_CHARS,
   MAX_SCREENSHOT_QUALITY,
   MAX_SECRET_PURPOSE_CHARS,
   MAX_SECRET_REQUEST_ORIGINS,
@@ -44,6 +46,7 @@ import {
   TAB_IDLE_TTL_MS,
   VIEWPORT,
 } from "./limits"
+import { browserPaceInput } from "../pacing/input"
 import { REF_PATTERN } from "./snapshot"
 
 /**
@@ -86,6 +89,7 @@ export type BrowserToolName =
   | "scroll"
   | "wait_for"
   | "screenshot"
+  | "print_pdf"
   | "download"
   | "handle_dialog"
   | "hand_over"
@@ -298,12 +302,12 @@ const INPUTS: readonly BrowserToolInput[] = [
   {
     name: "tabs",
     title: "Browser tabs",
-    description: `Lists, opens, closes or resets this token's browser tabs (each assistant sees only the tabs it opened). open: a new tab at url, answered first with its id (every other tool needs it as tab) and then its snapshot. list: each with its id, title, address and the link where the owner can watch it. close: the tab, even while a call on it hangs. reset: closes the tab's page and opens it again at its address, for a page that stopped responding (what the page held is gone). The browser keeps at most ${MAX_TABS} tabs, shared by every assistant: every answer says how many are open ("5 of ${MAX_TABS} tabs open"), and list says which run or wrapper opened each tab and how long it has been idle. A tab nobody used for ${TAB_IDLE_TTL_MS / 60_000} minutes, or whose run (run_code's or a wrapper's) has ended, is closed. ${ASKS_FIRST}`,
+    description: `Lists, opens, closes, resets or paces this token's browser tabs (each assistant sees only the tabs it opened). open: a new tab at url, answered first with its id (every other tool needs it as tab) and then its snapshot. list: each with its id, title, address, its pace and the link where the owner can watch it. close: the tab, even while a call on it hangs. reset: closes the tab's page and opens it again at its address, for a page that stopped responding (what the page held is gone). pace: how long the tab waits before each action in its page and before it opens a page, a random wait between min_ms and max_ms after the previous action at the site ended (leave out pace to follow the owner's again); for this tab only, while it is open. Within what the owner lets assistants set it applies at once and the answer says what the tab follows; outside it answers "Not done yet" with a link for the owner. From a wrapper's program it is held within the wrapper's own pace. The browser keeps at most ${MAX_TABS} tabs, shared by every assistant: every answer says how many are open ("5 of ${MAX_TABS} tabs open"), and list says which run or wrapper opened each tab and how long it has been idle. A tab nobody used for ${TAB_IDLE_TTL_MS / 60_000} minutes, or whose run (a program's from run_read, run_write or run_destructive, or a wrapper's) has ended, is closed. ${ASKS_FIRST}`,
     input: z.strictObject({
       action: z
-        .enum(["list", "open", "close", "reset"])
+        .enum(["list", "open", "close", "reset", "pace"])
         .describe(
-          "What to do: list, open (with url), close or reset (with tab).",
+          "What to do: list, open (with url), close, reset or pace (with tab).",
         ),
       url: url.optional().describe("For open: the address to open."),
       tab: tabId.optional().describe("The tab's id, for close and reset."),
@@ -313,6 +317,11 @@ const INPUTS: readonly BrowserToolInput[] = [
         .optional()
         .describe(
           "For open: an exit's name, to open the tab somewhere else than PCP's own address (an SSH server of the owner's, or a VPN). The tab then has a context of its own, signed in to nothing and saved nowhere, and every page of it goes through that exit. Only exits the owner allowed for this token.",
+        ),
+      pace: browserPaceInput
+        .optional()
+        .describe(
+          "For pace: the tab's own pace, per kind of action; a kind left out follows the owner's pace. Leave out pace to put the tab back on the owner's.",
         ),
     }),
     rules: [
@@ -337,13 +346,23 @@ const INPUTS: readonly BrowserToolInput[] = [
         },
       },
       {
-        says: "close and reset need the tab's id.",
+        says: "close, reset and pace need the tab's id.",
         schema: {
           if: {
-            properties: { action: { enum: ["close", "reset"] } },
+            properties: { action: { enum: ["close", "reset", "pace"] } },
             required: ["action"],
           },
           then: { required: ["tab"] },
+        },
+      },
+      {
+        says: "pace (the argument) is only for the action pace.",
+        schema: {
+          if: { required: ["pace"] },
+          then: {
+            properties: { action: { const: "pace" } },
+            required: ["action"],
+          },
         },
       },
     ],
@@ -617,7 +636,7 @@ const INPUTS: readonly BrowserToolInput[] = [
     name: "upload_file",
     title: "Choose files to upload",
     description:
-      "Puts files into a file field (ref or target: the field, or the button that opens its file picker), as a person choosing them would; the form is sent only as it would be then, usually by clicking its button. Each file is a result PCP kept for this token, named by its handle ({\"$result\": id}: from download, a mail attachment, or a run_code_* program's keep), with a name and type of your own if you like; its bytes never pass through you. Answers with the page's snapshot.",
+      "Puts files into a file field (ref or target: the field, or the button that opens its file picker), as a person choosing them would; the form is sent only as it would be then, usually by clicking its button. Each file is a result PCP kept for this token, named by its handle ({\"$result\": id}: from download, a mail attachment, or a run program's keep), with a name and type of your own if you like; its bytes never pass through you. Answers with the page's snapshot.",
     input: z.strictObject({
       tab,
       ref: ref.optional(),
@@ -709,11 +728,17 @@ const INPUTS: readonly BrowserToolInput[] = [
   {
     name: "screenshot",
     title: "Take a screenshot",
-    description: `A picture of what the tab shows now (its viewport, ${VIEWPORT.width} by ${VIEWPORT.height}), or of one element (ref, or target), as a JPEG. It is made smaller (its quality, then its size) until it can be passed on; max_width and quality ask for smaller from the start. The answer says how its pixels map to the viewport's CSS pixels, which click, scroll and drag take as x and y. To read the text in it, pass its handle to an OCR tool (the answer names one this token can call, when there is one); read_result does not show an image.`,
+    description: `Takes a picture of what the tab shows now (its viewport, ${VIEWPORT.width} by ${VIEWPORT.height}), of the whole page (full_page), or of one element (ref, or target), as a JPEG. It is made smaller (its quality, then its size) until it can be passed on; max_width and quality ask for smaller from the start. The answer says how its pixels map to the viewport's CSS pixels, which click, scroll and drag take as x and y. To read the text in it, pass its handle to an OCR tool (the answer names one this token can call, when there is one); read_result does not show an image, and view_image with crop shows you part of it closer. For a document to keep or send, print_pdf.`,
     input: z.strictObject({
       tab,
       ref: ref.optional(),
       target: target.optional(),
+      full_page: z
+        .boolean()
+        .optional()
+        .describe(
+          `true: the whole scrollable page, not only what fits in the viewport (up to ${MAX_FULL_PAGE_HEIGHT.toLocaleString("en")} CSS pixels down). Not with ref or target.`,
+        ),
       max_width: z
         .number()
         .int()
@@ -731,7 +756,48 @@ const INPUTS: readonly BrowserToolInput[] = [
     }),
     rules: [
       notTogether(["ref", "target"], "Give a ref or a target, not both."),
+      notTogether(
+        ["full_page", "ref"],
+        "full_page is the whole page: leave out ref.",
+      ),
+      notTogether(
+        ["full_page", "target"],
+        "full_page is the whole page: leave out target.",
+      ),
     ],
+    annotations: READS,
+    changes: false,
+  },
+  {
+    name: "print_pdf",
+    title: "Print the page to a PDF",
+    description:
+      "Prints the tab's page to a PDF, the whole page as the browser would print it, and keeps the file for this token for a day: the answer is its handle ({\"$result\": id}), to pass where a tool wants a file (send_email's attachments, save_file, convert_document) or read with read_result. It changes nothing on the page. Refused while a field holds a secret PCP typed, as screenshot is.",
+    input: z.strictObject({
+      tab,
+      paper: z
+        .enum(["letter", "legal", "tabloid", "a3", "a4", "a5"])
+        .optional()
+        .describe("The paper size: letter by default."),
+      landscape: z
+        .boolean()
+        .optional()
+        .describe("true: the paper turned sideways."),
+      print_background: z
+        .boolean()
+        .optional()
+        .describe(
+          "true: with the page's background colours and pictures, which printing leaves out by default.",
+        ),
+      page_ranges: z
+        .string()
+        .max(MAX_PDF_PAGE_RANGES_CHARS)
+        .regex(/^\s*\d+(\s*-\s*\d+)?(\s*,\s*\d+(\s*-\s*\d+)?)*\s*$/, {
+          message: "Pages as numbers and ranges, like 1-3, 5.",
+        })
+        .optional()
+        .describe("Only these pages, like 1-3, 5: every page by default."),
+    }),
     annotations: READS,
     changes: false,
   },
@@ -739,7 +805,7 @@ const INPUTS: readonly BrowserToolInput[] = [
     name: "download",
     title: "Download a file",
     description:
-      "Keeps the file a page offers for download: clicks the element (ref) that starts it, or opens its address (url, in the tab, at a site the tab may open now: navigate asks the owner for another), and waits for it. Answers with a handle to the file ({\"$result\": id}), kept for this token for a day: pass it where a tool wants a file (upload_file's files, send_email's attachments, a field that takes base64), or read it with read_result. A file larger than PCP keeps of one is stopped.",
+      "Keeps the file a page offers for download: clicks the element (ref) that starts it, or opens its address (url, in the tab, at a site the tab may open now: navigate asks the owner for another), and waits for it. Answers with a handle to the file ({\"$result\": id}), kept for this token for a day: pass it where a tool wants a file (upload_file's files, send_email's attachments, a field that takes base64), or read it with read_result. If you can analyse images yourself, call view_image with the handle to see a picture or a video's frame (a PDF's page: convert_document to \"png\" first). A file larger than PCP keeps of one is stopped.",
     input: z.strictObject({ tab, ref: ref.optional(), url: url.optional() }),
     rules: [exactlyOne(["ref", "url"], "Give a ref or a url, one of them.")],
     annotations: ACTS,

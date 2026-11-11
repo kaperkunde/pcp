@@ -12,8 +12,6 @@ import {
   vi,
 } from "vitest"
 
-import type { McpServer } from "@/lib/generated/prisma/client"
-
 import { createApiToken, resolveApiToken } from "../api-tokens"
 import {
   allowScriptOnce,
@@ -34,6 +32,8 @@ import { holdSecret, maskTyped, typedInto } from "./held"
 import { closeAllBrowsers, runningBrowser } from "./runtime"
 import { createBrowserServer } from "./server"
 import { isOwnerNeeded, type OwnerNeeded } from "./types"
+import type { OpenServer } from "../server-meta"
+import { openServer } from "../server-meta"
 
 // What #56 added to the browser: a point clicked, scrolled and dragged
 // with DevTools mouse events, evaluate (asked per site, kept at its site
@@ -57,7 +57,7 @@ let elsewhere: TestApi
 let sockets: { origin: string; upgrades: string[]; close: () => void }
 let ctx: VaultContext
 let tokenId: string
-let server: McpServer
+let server: OpenServer
 let kept: Array<{ text?: string; bytes?: Buffer; name?: string | null }>
 
 /** A page that draws on a canvas and says where the mouse did what. */
@@ -87,9 +87,12 @@ beforeEach(async () => {
     allowAllServers: true,
   })
   tokenId = (await resolveApiToken(token))!.tokenId
-  server = await db().mcpServer.findUniqueOrThrow({
-    where: { id: (await createBrowserServer(ctx)).id },
-  })
+  server = openServer(
+    ctx,
+    await db().mcpServer.findUniqueOrThrow({
+      where: { id: (await createBrowserServer(ctx)).id },
+    }),
+  )
   kept = []
   elsewhere = await startTestApi((_, res) => res.end("elsewhere"))
   const upgrades: string[] = []
@@ -343,13 +346,13 @@ describe.skipIf(!executable)(
       expect(textOf(once)).toContain('"App"')
       await owner(call("evaluate", { tab, script }))
 
-      await writeScriptAccess(ctx.vaultId, tokenId, site, "blocked")
+      await writeScriptAccess(ctx, tokenId, site, "blocked")
       const blocked = await call("evaluate", { tab, script })
       expect(blocked.isError).toBe(true)
       expect(textOf(blocked)).toContain("blocked scripts")
 
-      await writeScriptAccess(ctx.vaultId, tokenId, site, "allowed")
-      expect(await decideScript(ctx.vaultId, tokenId, site)).toBe("allowed")
+      await writeScriptAccess(ctx, tokenId, site, "allowed")
+      expect(await decideScript(ctx, tokenId, site)).toBe("allowed")
 
       const state = await call("evaluate", { tab, script: "window.appState" })
       expect(JSON.parse(textOf(state).split("Result (JSON):\n")[1]!)).toEqual({
@@ -390,12 +393,7 @@ describe.skipIf(!executable)(
 
     it("keeps the tab at its site while a script runs", async () => {
       const tab = await open("/app")
-      await writeScriptAccess(
-        ctx.vaultId,
-        tokenId,
-        new URL(api.origin).host,
-        "allowed",
-      )
+      await writeScriptAccess(ctx, tokenId, new URL(api.origin).host, "allowed")
       const before = elsewhere.requests.length
 
       const ran = await call("evaluate", {
@@ -440,12 +438,7 @@ describe.skipIf(!executable)(
 
     it("refuses a script while a field holds a typed secret", async () => {
       const tab = await open("/app")
-      await writeScriptAccess(
-        ctx.vaultId,
-        tokenId,
-        new URL(api.origin).host,
-        "allowed",
-      )
+      await writeScriptAccess(ctx, tokenId, new URL(api.origin).host, "allowed")
       const page = runningBrowser(ctx.vaultId)!.tabs.get(tab)!.page
       await page.locator("#field").fill("hunter2-hunter2")
       holdSecret(page, "Shop", "hunter2-hunter2")
@@ -520,12 +513,7 @@ describe.skipIf(!executable)(
         expect.objectContaining({ source: "network", level: "error" }),
       )
 
-      await writeScriptAccess(
-        ctx.vaultId,
-        tokenId,
-        new URL(api.origin).host,
-        "allowed",
-      )
+      await writeScriptAccess(ctx, tokenId, new URL(api.origin).host, "allowed")
       await call("evaluate", {
         tab,
         script:

@@ -114,7 +114,7 @@ export default async function LogPage({
             type="search"
             defaultValue={query.text ?? ""}
             maxLength={MAX_LOG_SEARCH_CHARS}
-            placeholder="call_tool_write, gmail, web_fetch…"
+            placeholder="execute_write, gmail, web_fetch…"
           />
         </Field>
         <div className="flex gap-2">
@@ -202,6 +202,11 @@ function LogLine({ entry }: { entry: ActivityEntry }) {
           {entry.exit ? (
             <span className="mt-0.5 block">
               Went out through the exit {entry.exit}
+            </span>
+          ) : null}
+          {entry.rerun ? (
+            <span className="mt-0.5 block">
+              Made again on purpose: the assistant said why it repeated it
             </span>
           ) : null}
           {entry.outcome === "error" && entry.error ? (

@@ -6,6 +6,7 @@ import { readServerNote, setPersonalNote } from "../definitions"
 import { createEndpoint, storedSpec } from "../endpoints"
 import { createSecret } from "../secrets"
 import { createSkill, getSkill, updateSkill } from "../skills"
+import { writeServer } from "../server-meta"
 import { scratchDatabase } from "../test-db"
 import { setupVault } from "../vault"
 
@@ -27,6 +28,8 @@ import {
   setExcluded,
 } from "./store"
 import { addService, PETS_SPEC } from "./test-vault"
+import { secretNameWhere } from "../secret-meta"
+import { openServer } from "../server-meta"
 
 // The review before a push: every file in full, what stays in the vault,
 // what looks personal and what fixes it, Confirm pushing exactly what was
@@ -65,7 +68,9 @@ async function writeRepo(
     private: hidden,
     files: { "README.md": "Shared things." },
   })
-  const secret = await db().secret.findFirst({ where: { name: "GitHub" } })
+  const secret = await db().secret.findFirst({
+    where: secretNameWhere(ctx, "GitHub"),
+  })
   const secretId =
     secret?.id ?? (await createSecret(ctx, { name: "GitHub", value: PAT })).id
 
@@ -159,10 +164,7 @@ describe("the review", () => {
       "endpoints/coolify-gaaf/pcp.yaml",
     )
 
-    await db().mcpServer.update({
-      where: { id },
-      data: { description: "Lists the apps." },
-    })
+    await writeServer(ctx, id, { description: "Lists the apps." })
     const second = await shareReview(ctx, repoId, item, {
       publicUrl: PUBLIC_URL,
     })
@@ -318,12 +320,15 @@ describe("fixing a hit", () => {
       description: "Lists the apps.",
       note: "Coolify on gaaf.kaperkun.de.",
     })
-    const row = await db().mcpServer.findUniqueOrThrow({ where: { id } })
+    const row = openServer(
+      ctx,
+      await db().mcpServer.findUniqueOrThrow({ where: { id } }),
+    )
     expect(row.description).toBe("Lists the apps.")
     expect(readServerNote(ctx, row)).toBe("Coolify on gaaf.kaperkun.de.")
 
     await keepAddressPrivate(ctx, id)
-    expect(JSON.parse((await storedSpec(id))!.text)).not.toHaveProperty(
+    expect(JSON.parse((await storedSpec(ctx, id))!.text)).not.toHaveProperty(
       "servers",
     )
     expect(row.url).toBe("https://gaaf.kaperkun.de/v1")
@@ -335,7 +340,8 @@ describe("fixing a hit", () => {
     expect(after.root).toBe("endpoints/coolify")
     expect(after.hits).toEqual([])
     expect(
-      (await db().mcpServer.findUniqueOrThrow({ where: { id } })).name,
+      openServer(ctx, await db().mcpServer.findUniqueOrThrow({ where: { id } }))
+        .name,
     ).toBe("Coolify gaaf")
   })
 
@@ -385,9 +391,8 @@ describe("a service", () => {
   it("pushes its definition only, lists what stays in the vault, and catches its own machine in its words", async () => {
     const repoId = await writeRepo("services")
     const { id } = await addService(ctx)
-    await db().mcpServer.update({
-      where: { id },
-      data: { description: "Docling on 192.168.7.20, our build box." },
+    await writeServer(ctx, id, {
+      description: "Docling on 192.168.7.20, our build box.",
     })
     const item = { kind: "service" as const, id }
     const review = await shareReview(ctx, repoId, item, {

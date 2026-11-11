@@ -1,7 +1,7 @@
 /**
  * The one interface every tool PCP exposes is written to is
  * @kaperkunde/mcp's defineTool: PCP's own tools at /mcp (gateway.ts), and
- * through defineInnerTool (family.ts) every family behind call_tool.
+ * through defineInnerTool (family.ts) every family behind execute.
  *
  *   defineTool({ name, title, description, input, output?, annotations,
  *                aliases?, log?, quiet?, invalidHint?, run })
@@ -15,7 +15,7 @@
  * - `output`: declared when every successful answer is one JSON shape: a
  *   tool that can wait for the owner lists NEEDS_OWNER (outcome.ts) among
  *   its shapes. A tool that answers in prose, or passes on another tool's
- *   answer (call_tool, run_code), has no output schema.
+ *   answer (execute, run_code), has no output schema.
  * - `annotations`: all four hints, always. A proposal that only asks the
  *   owner (it writes nothing until they agree, and each call is a new
  *   request) is not destructive and not idempotent.

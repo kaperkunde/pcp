@@ -3,7 +3,7 @@ import net, { type AddressInfo } from "node:net"
 
 import { afterEach, beforeEach, expect, it } from "vitest"
 
-import { proxyRequest } from "./proxy"
+import { forwardedHeaders, proxyRequest } from "./proxy"
 
 // What the edge listeners hand the app: a body framed by chunks stays one
 // request's body, and no connection to the app carries two clients.
@@ -137,4 +137,22 @@ it("passes a chunked POST's body on whole", async () => {
   expect(seen).toEqual([
     { method: "POST", url: "/mcp", forwardedFor: "127.0.0.1", body },
   ])
+})
+
+it("passes on no x-pcp-peer a client sent, and replaces what it forwarded", () => {
+  const req = {
+    headers: {
+      "x-pcp-peer": "6.6.6.6",
+      "x-pcp-forwarded": "1",
+      "x-forwarded-for": "6.6.6.6",
+      "x-real-ip": "6.6.6.6",
+    },
+    socket: { remoteAddress: "::ffff:203.0.113.7" },
+  } as unknown as http.IncomingMessage
+  const headers = forwardedHeaders(req, "https")
+
+  expect(headers["x-pcp-peer"]).toBeUndefined()
+  expect(headers["x-pcp-forwarded"]).toBeUndefined()
+  expect(headers["x-real-ip"]).toBeUndefined()
+  expect(headers["x-forwarded-for"]).toBe("203.0.113.7")
 })

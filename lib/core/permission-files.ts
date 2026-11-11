@@ -18,6 +18,7 @@ import { bareType, isTextType, sniffMediaType } from "./media-types"
 import { isOpen, visible } from "./permission-rules"
 import { collectHandleIds } from "./result-handles"
 import { describeResults, type ResultKind } from "./tool-results"
+import { SERVER_META_SELECT, serverSlug } from "./server-meta"
 
 /** How the owner's page can show a file before they download it. */
 export type FilePreview = "pdf" | "image" | "text" | null
@@ -98,10 +99,12 @@ export async function requestFiles(
   const servers = serverIds.length
     ? await db().mcpServer.findMany({
         where: { id: { in: serverIds }, vaultId: ctx.vaultId },
-        select: { id: true, slug: true },
+        select: SERVER_META_SELECT,
       })
     : []
-  const slugs = new Map(servers.map((server) => [server.id, server.slug]))
+  const slugs = new Map(
+    servers.map((server) => [server.id, serverSlug(ctx, server)]),
+  )
 
   return infos.map((info): RequestFile => {
     if (!info.found) {

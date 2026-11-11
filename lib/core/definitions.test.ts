@@ -40,6 +40,9 @@ import { createSkill, getSkill } from "./skills"
 import { scratchDatabase } from "./test-db"
 import { setToolAccess } from "./tool-access"
 import { setupVault } from "./vault"
+import { entryCall } from "./test-handles"
+import { writeServer } from "./server-meta"
+import { toolsWhere } from "./test-servers"
 
 // Definitions and instances: servers that are the same thing share one
 // definition (description, schema, edits, tool descriptions), each with its
@@ -92,12 +95,7 @@ async function endpoint(
 }
 
 const toolNames = async (serverId: string) =>
-  (
-    await db().mcpTool.findMany({
-      where: { serverId },
-      orderBy: { name: "asc" },
-    })
-  ).map((tool) => tool.name)
+  (await toolsWhere(ctx, { serverId })).map((tool) => tool.name)
 
 describe("a new server", () => {
   it("is the one instance of a definition of its own, named after it", async () => {
@@ -123,10 +121,7 @@ describe("a new server", () => {
       authType: "none",
     })
     // The server is renamed; its definition keeps the slug it had.
-    await db().mcpServer.update({
-      where: { id: first.id },
-      data: { slug: "old-docs" },
-    })
+    await writeServer(ctx, first.id, { slug: "old-docs" })
     const second = await createServer(ctx, {
       name: "Docs",
       url: "https://docs2.example.com/mcp",
@@ -227,7 +222,9 @@ describe("cloneServer", () => {
     expect(readServerNote(ctx, original)).toBeNull()
 
     expect(await toolNames(id)).toEqual(await toolNames(source))
-    expect((await storedSpec(id))!.hash).toBe((await storedSpec(source))!.hash)
+    expect((await storedSpec(ctx, id))!.hash).toBe(
+      (await storedSpec(ctx, source))!.hash,
+    )
     expect(
       clone.tools.find((tool) => tool.name === "listServers")
         ?.descriptionOverride,
@@ -321,7 +318,7 @@ describe("a change to the definition", () => {
     ])
     // Its own read-only setting still applies to the shared schema.
     expect(await toolNames(plekde)).toEqual(["listApplications"])
-    expect((await storedSpec(plekde))!.patches).toEqual([
+    expect((await storedSpec(ctx, plekde))!.patches).toEqual([
       { op: "remove", path: "/paths/~1servers" },
     ])
     expect((await getServer(ctx, plekde)).description).toBe("Coolify's API.")
@@ -657,7 +654,7 @@ describe("what assistants read", () => {
     await client.connect(clientSide)
     const say = async (name: string, args: Record<string, unknown>) =>
       (
-        (await client.callTool({ name, arguments: args })).content as Array<{
+        (await client.callTool(entryCall(name, args))).content as Array<{
           text?: string
         }>
       )[0]!.text!

@@ -2,7 +2,6 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest"
 
 import { createApiToken } from "./api-tokens"
 import type { VaultContext } from "./context"
-import { db } from "./db"
 import { createEndpoint } from "./endpoints"
 import { json, startTestApi, type TestApi } from "./openapi/test-api"
 import { runCall } from "./permissions"
@@ -10,6 +9,7 @@ import { getServer } from "./servers"
 import { scratchDatabase } from "./test-db"
 import { keepBytes, keepResult, openResult } from "./tool-results"
 import { setupVault } from "./vault"
+import { toolNamed } from "./test-servers"
 
 // A kept result named in a call's arguments reaches the upstream as what it
 // stands for: through runCall, an API endpoint and a real request.
@@ -370,9 +370,7 @@ describe("a file an endpoint answers", () => {
       authType: "none",
     })
     const server = await getServer(ctx, id)
-    const tool = await db().mcpTool.findUniqueOrThrow({
-      where: { serverId_name: { serverId: id, name: "getInvoicePdf" } },
-    })
+    const tool = await toolNamed(ctx, "getInvoicePdf", id)
     expect(tool.output).toMatch(/^\{file: \{\$result: string/)
 
     const answer = await runCall(

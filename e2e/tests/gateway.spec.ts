@@ -101,32 +101,41 @@ test("issues an API token and describes the servers behind it", async ({
 }) => {
   token = await createToken(page, TOKEN_NAME)
 
-  const { instructions, tools } = await initialize(baseURL!, token)
-  expect(tools).toEqual([
+  const { instructions, listed, tools } = await initialize(baseURL!, token)
+  // A client lists the entries alone (#113); PCP's own tools are behind them.
+  expect(listed).toEqual([
     "search",
-    "list_tools",
-    "describe",
-    "call_tool_read",
-    "call_tool_write",
-    "call_tool_destructive",
-    "read_image",
-    "convert_document",
-    "edit_pdf",
-    // PCP's own store, and the others by store (#90).
-    "list_folder",
-    "find_files",
-    "get_file",
-    "save_file",
-    "make_folder",
-    "move",
-    "delete",
-    "check_permission",
-    "withdraw_request",
-    "check_server",
-    "read_result",
-    "register_server",
-    "propose_tool_access",
+    "execute_read",
+    "execute_write",
+    "execute_destructive",
   ])
+  expect([...tools].sort()).toEqual(
+    [
+      "search",
+      "list_tools",
+      "execute_read",
+      "execute_write",
+      "execute_destructive",
+      "read_image",
+      "view_image",
+      "convert_document",
+      "edit_pdf",
+      // PCP's own store, and the others by store (#90).
+      "list_folder",
+      "find_files",
+      "get_file",
+      "save_file",
+      "make_folder",
+      "move",
+      "delete",
+      "check_permission",
+      "withdraw_request",
+      "check_server",
+      "read_result",
+      "register_server",
+      "propose_tool_access",
+    ].sort(),
+  )
   expect(instructions).toContain(
     `${SLUG}: Sends postcards and adds numbers. (3 tools)`,
   )
@@ -167,7 +176,7 @@ test("finds, describes and calls an upstream tool with the secret added by PCP",
     `${SLUG}: 3 tools, 3 allowed and 0 ask the owner first.`,
     // Each with its tier and the entry that runs it.
     expect.stringMatching(
-      new RegExp(`^${SLUG}/add_numbers \\[allowed, read: call_tool_read\\]`),
+      new RegExp(`^${SLUG}/add_numbers \\[allowed, read: execute_read\\]`),
     ),
     expect.stringMatching(new RegExp(`^${SLUG}/echo_auth \\[allowed, `)),
     expect.stringMatching(new RegExp(`^${SLUG}/send_postcard \\[allowed, `)),
@@ -185,11 +194,11 @@ test("finds, describes and calls an upstream tool with the secret added by PCP",
   }
   expect(Object.keys(description.inputSchema.properties)).toEqual(["a", "b"])
   expect(description.annotations?.readOnlyHint).toBe(true)
-  // A Read tool: call_tool_read runs it.
+  // A Read tool: execute_read runs it.
   expect(description.tier).toBe("read")
-  expect(description.run_with).toBe("call_tool_read")
+  expect(description.run_with).toBe("execute_read")
 
-  const sum = await callTool(baseURL!, token, "call_tool_read", {
+  const sum = await callTool(baseURL!, token, "execute_read", {
     server: SLUG,
     tool: "add_numbers",
     arguments: { a: 19, b: 23 },
@@ -199,7 +208,7 @@ test("finds, describes and calls an upstream tool with the secret added by PCP",
 
   // The upstream saw the stored secret; a server that repeats it back hands
   // the assistant "[redacted]" in its place.
-  const echoed = await callTool(baseURL!, token, "call_tool_destructive", {
+  const echoed = await callTool(baseURL!, token, "execute_destructive", {
     server: SLUG,
     tool: "echo_auth",
     arguments: {},
@@ -210,7 +219,7 @@ test("finds, describes and calls an upstream tool with the secret added by PCP",
     `Bearer ${upstream.expectedToken}`,
   )
 
-  const unknown = await callTool(baseURL!, token, "call_tool_destructive", {
+  const unknown = await callTool(baseURL!, token, "execute_destructive", {
     server: SLUG,
     tool: "no_such_tool",
     arguments: {},
@@ -218,17 +227,17 @@ test("finds, describes and calls an upstream tool with the secret added by PCP",
   expect(unknown.body.result?.isError).toBe(true)
   expect(toolText(unknown)).toContain("no tool called no_such_tool")
 
-  // call_tool takes only describe's call_handle. A name in its place
+  // execute takes only search's call_handle. A name in its place
   // answers with the tool described, so the next call can be the right one.
-  const named = await callTool(baseURL!, token, "call_tool_destructive", {
+  const named = await callTool(baseURL!, token, "execute_destructive", {
     call_handle: `${SLUG}/add_numbers`,
     arguments: { a: 1, b: 2 },
   })
   expect(named.body.result?.isError).toBe(true)
-  expect(toolText(named)).toContain("not a tool's name")
+  expect(toolText(named)).toContain("not its name")
   const handle = /"call_handle": "(ch_[a-z0-9_]+)"/.exec(toolText(named))?.[1]
   expect(handle, toolText(named)).toBeTruthy()
-  const retried = await callTool(baseURL!, token, "call_tool_destructive", {
+  const retried = await callTool(baseURL!, token, "execute_destructive", {
     call_handle: handle,
     arguments: { a: 1, b: 2 },
   })
@@ -236,7 +245,7 @@ test("finds, describes and calls an upstream tool with the secret added by PCP",
 
   // Arguments that do not fit the schema never reach the server.
   const calls = upstream.calls.length
-  const wrong = await callTool(baseURL!, token, "call_tool_destructive", {
+  const wrong = await callTool(baseURL!, token, "execute_destructive", {
     call_handle: handle,
     arguments: { a: "one" },
   })
@@ -245,7 +254,7 @@ test("finds, describes and calls an upstream tool with the secret added by PCP",
   expect(upstream.calls.length).toBe(calls)
 })
 
-test("your tier for a tool decides which call_tool runs it", async ({
+test("your tier for a tool decides which execute entry runs it", async ({
   page,
   baseURL,
 }) => {
@@ -257,13 +266,13 @@ test("your tier for a tool decides which call_tool runs it", async ({
 
   await tier.selectOption("destructive")
   await expect(page.getByText("set by you")).toBeVisible()
-  const refused = await callTool(baseURL!, token, "call_tool_read", add)
+  const refused = await callTool(baseURL!, token, "execute_read", add)
   expect(refused.body.result?.isError).toBe(true)
-  expect(toolText(refused)).toContain("run it with call_tool_destructive")
+  expect(toolText(refused)).toContain("run it with execute_destructive")
 
   await page.getByLabel("Tier of add_numbers").selectOption("default")
   await expect(page.getByText("set by you")).toHaveCount(0)
-  expect(toolText(await callTool(baseURL!, token, "call_tool_read", add))).toBe(
+  expect(toolText(await callTool(baseURL!, token, "execute_read", add))).toBe(
     "3",
   )
 })
@@ -303,7 +312,7 @@ test("keeps long answers and files for this token only", async ({
   await allowAllTools(page, TOKEN_NAME, SLUG)
 
   // A long answer is kept whole and read in pieces with read_result.
-  const long = await callTool(baseURL!, token, "call_tool_destructive", {
+  const long = await callTool(baseURL!, token, "execute_destructive", {
     server: SLUG,
     tool: "long_text",
     arguments: { length: 150_000 },
@@ -321,7 +330,7 @@ test("keeps long answers and files for this token only", async ({
 
   // A file comes back as a handle, never as its bytes, and a later call
   // that names the handle gets the file in its place.
-  const picture = await callTool(baseURL!, token, "call_tool_destructive", {
+  const picture = await callTool(baseURL!, token, "execute_destructive", {
     server: SLUG,
     tool: "picture",
   })
@@ -334,7 +343,7 @@ test("keeps long answers and files for this token only", async ({
   const handle = answer.data.$result
   const link = `pcp://results/${handle}`
 
-  const measured = await callTool(baseURL!, token, "call_tool_destructive", {
+  const measured = await callTool(baseURL!, token, "execute_destructive", {
     server: SLUG,
     tool: "measure",
     arguments: { text: { $result: handle } },
@@ -356,7 +365,7 @@ test("keeps long answers and files for this token only", async ({
   expect(toolText(refused)).toContain("No result with that id for this token")
 
   const before = upstream.calls.length
-  const borrowed = await callTool(baseURL!, other, "call_tool_destructive", {
+  const borrowed = await callTool(baseURL!, other, "execute_destructive", {
     server: SLUG,
     tool: "measure",
     arguments: { text: { $result: handle } },
@@ -391,7 +400,7 @@ test("a token scoped to other servers cannot see this one", async ({
   const { instructions } = await initialize(baseURL!, scoped.token)
   expect(instructions).not.toContain(SLUG)
 
-  const call = await callTool(baseURL!, scoped.token, "call_tool_destructive", {
+  const call = await callTool(baseURL!, scoped.token, "execute_destructive", {
     server: SLUG,
     tool: "add_numbers",
     arguments: { a: 1, b: 1 },

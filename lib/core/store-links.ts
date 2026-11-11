@@ -16,7 +16,9 @@ import {
   linkKey,
   type LinkRefusal,
   logUse,
+  openLinkName,
   roomForLink,
+  sealLinkName,
   tokenCanUseLinks,
 } from "./file-links"
 import { newId } from "./ids"
@@ -281,7 +283,7 @@ export async function shareStoreFile(
         kind: "store",
         secretHash: sha256Hex(secret),
         resultId: "",
-        name: file.name,
+        sealedName: sealLinkName(linkKey(secret, id), id, file.name),
         mediaType,
         length: file.size,
         storeId: file.storeId,
@@ -503,7 +505,7 @@ export async function openStoreLink(
   await logUse(link, "file_link/store_download", true, started)
   return {
     ok: true,
-    name: link.name,
+    name: openLinkName(linkKey(secret, link.id), link),
     mediaType: link.mediaType,
     size,
     offset: range.offset,

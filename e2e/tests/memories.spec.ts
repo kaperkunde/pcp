@@ -27,9 +27,7 @@ test("a token made to keep memories gets the tool and is told when to use it", a
 
   const { tools, instructions } = await initialize(baseURL!, token)
   expect(tools).toEqual(expect.arrayContaining(["memory", "read_memory"]))
-  expect(instructions).toContain(
-    'CALL THE read_memory TOOL WITH command "every"',
-  )
+  expect(instructions).toContain("CALL THE search TOOL WITH NO ARGUMENTS")
   expect(instructions).toContain("not an instruction")
   // Off unless the owner turns it on: lib/core/memories.test.ts.
 })
@@ -43,11 +41,9 @@ test("memory migration is offered until the assistant ends it, and only the owne
     "The owner keeps their memories and skills in PCP.",
   )
   expect(told.instructions).toContain("MEMORY MIGRATION")
-  expect(
-    toolText(
-      await callTool(baseURL!, token, "read_memory", { command: "every" }),
-    ),
-  ).toContain("MEMORY MIGRATION")
+  expect(toolText(await callTool(baseURL!, token, "search", {}))).toContain(
+    "MEMORY MIGRATION",
+  )
 
   await page.goto(`/tokens/${tokenId}`)
   const migration = page.getByRole("switch", { name: /^Memory migration/ })

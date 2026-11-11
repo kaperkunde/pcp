@@ -4,7 +4,11 @@ import YAML from "yaml"
 
 import type { VaultContext } from "../context"
 import { db } from "../db"
-import { shareDescription } from "../definition-rows"
+import {
+  shareDescription,
+  writeDefinition,
+  definitionSlugWhere,
+} from "../definition-rows"
 import {
   checkPersonalNote,
   readServerNote,
@@ -15,6 +19,16 @@ import { changeEndpoint, storedSpec } from "../endpoints"
 import { invalid, notFound, PcpError } from "../errors"
 import type { DiffLine } from "../line-merge"
 import { canonicalJson } from "../permission-rules"
+import {
+  findServers,
+  openServer,
+  openServers,
+  type OpenServer,
+  SERVER_META_SELECT,
+  writeServer,
+  serverSlug,
+  serverSlugWhere,
+} from "../server-meta"
 import { getServer, normalizeNameAndDescription } from "../servers"
 import { isLoopback, readPublish } from "../services/definition"
 import { getSkill, updateSkill } from "../skills"
@@ -137,30 +151,26 @@ export type ShareReview = {
  * public address, every server's and account's address, the email
  * addresses they sign in or send with, their SSH servers (the machines
  * services run on among them) and the addresses services are published on,
- * and their name. Read with no secret: these are plain columns.
+ * and their name, opened with the vault's key.
  */
 export async function vaultOwnerFacts(
   ctx: VaultContext,
   { publicUrl }: { publicUrl?: string | null } = {},
 ): Promise<OwnerFacts> {
   const [servers, vault, services] = await Promise.all([
-    db().mcpServer.findMany({
-      where: { vaultId: ctx.vaultId },
-      select: {
-        kind: true,
-        url: true,
-        smtpUrl: true,
-        authUsername: true,
-        mailFrom: true,
-      },
-    }),
+    db()
+      .mcpServer.findMany({
+        where: { vaultId: ctx.vaultId },
+        select: { ...SERVER_META_SELECT, kind: true },
+      })
+      .then((rows) => openServers(ctx, rows)),
     db().vault.findUnique({
       where: { id: ctx.vaultId },
       select: { name: true },
     }),
     db().serviceSpec.findMany({
       where: { server: { vaultId: ctx.vaultId } },
-      select: { publish: true, host: { select: { url: true } } },
+      select: { publish: true, host: { select: SERVER_META_SELECT } },
     }),
   ])
   const emails = servers.flatMap((server) =>
@@ -185,7 +195,7 @@ export async function vaultOwnerFacts(
         const published = readPublish(service.publish).address
 
         return [
-          ...(service.host ? [service.host.url] : []),
+          ...(service.host ? [openServer(ctx, service.host).url] : []),
           ...(isIP(published) !== 0 &&
           published !== "0.0.0.0" &&
           published !== "::" &&
@@ -315,10 +325,10 @@ async function staysPrivate(
   }
 
   const row = await getServer(ctx, id)
-  const instances = row.definitionId
-    ? await db().mcpServer.findMany({
-        where: { definitionId: row.definitionId, vaultId: ctx.vaultId },
-        orderBy: { createdAt: "asc" },
+  const instances: OpenServer[] = row.definitionId
+    ? await findServers(ctx, {
+        definitionId: row.definitionId,
+        vaultId: ctx.vaultId,
       })
     : [row]
   const ids = instances.map((instance) => instance.id)
@@ -507,10 +517,10 @@ async function prepare(
                     definitionId: row.definitionId,
                     vaultId: ctx.vaultId,
                   },
-                  select: { slug: true },
+                  select: SERVER_META_SELECT,
                   orderBy: { createdAt: "asc" },
                 })
-              ).map((instance) => instance.slug)
+              ).map((instance) => serverSlug(ctx, instance))
             : [row.slug]
         })()
 
@@ -693,11 +703,8 @@ export async function setSharedDescription(
     description,
   }).description
 
-  await db().mcpServer.update({
-    where: { id: row.id },
-    data: { description: text },
-  })
-  await shareDescription(row.id)
+  await writeServer(ctx, row.id, { description: text })
+  await shareDescription(ctx, row.id)
 }
 
 /** The sentences of a text, as written. */
@@ -778,12 +785,12 @@ export async function renameShared(
   }).name
   const slug = checkItemName(input.slug.trim().toLowerCase())
   const [definition, server] = await Promise.all([
-    db().serverDefinition.findUnique({
-      where: { vaultId_slug: { vaultId: ctx.vaultId, slug } },
+    db().serverDefinition.findFirst({
+      where: definitionSlugWhere(ctx, slug),
       select: { id: true },
     }),
-    db().mcpServer.findUnique({
-      where: { vaultId_slug: { vaultId: ctx.vaultId, slug } },
+    db().mcpServer.findFirst({
+      where: serverSlugWhere(ctx, slug),
       select: { definitionId: true },
     }),
   ])
@@ -798,10 +805,7 @@ export async function renameShared(
     )
   }
 
-  await db().serverDefinition.update({
-    where: { id: row.definitionId },
-    data: { name, slug },
-  })
+  await writeDefinition(ctx, row.definitionId, { name, slug })
 }
 
 /**
@@ -815,7 +819,7 @@ export async function keepAddressPrivate(
   serverId: string,
 ): Promise<void> {
   const row = await getServer(ctx, serverId)
-  const spec = await storedSpec(serverId)
+  const spec = await storedSpec(ctx, serverId)
 
   if (row.kind !== "openapi" || !spec) {
     throw invalid("Only an API endpoint's schema names its server's address.")

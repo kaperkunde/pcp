@@ -29,6 +29,7 @@ import {
 import { openRequestFor, type OpenRequest } from "./permission-fold"
 import { canonicalJson } from "./permission-rules"
 import { readStrictYaml } from "./strict-yaml"
+import { TOKEN_NAME_SELECT, tokenName } from "./token-names"
 
 /**
  * Skills: procedures the owner approved, for an assistant to follow when a
@@ -831,9 +832,9 @@ async function summaries(
       ? (
           await db().apiToken.findMany({
             where: { vaultId: ctx.vaultId, id: { in: tokenIds } },
-            select: { id: true, name: true },
+            select: TOKEN_NAME_SELECT,
           })
-        ).map((token) => [token.id, token.name])
+        ).map((token) => [token.id, tokenName(ctx, token)])
       : [],
   )
 
@@ -2445,7 +2446,7 @@ function asShown(after: SkillBody): Omit<SkillBody, "version"> {
 function stale(entry: SkillEntry, basis: number | null): PcpError {
   return new PcpError(
     "conflict",
-    `The skill ${entry.name} changed since the owner was asked (they were shown a change to version ${basis ?? 0}; it is at version ${entry.version} now), so nothing was written. Describe it again (ref "${SKILL_REF}${entry.name}") and propose your change anew on top of version ${entry.version}.`,
+    `The skill ${entry.name} changed since the owner was asked (they were shown a change to version ${basis ?? 0}; it is at version ${entry.version} now), so nothing was written. Read it again with search (ref "${SKILL_REF}${entry.name}") and propose your change anew on top of version ${entry.version}.`,
   )
 }
 
@@ -2473,7 +2474,7 @@ export async function applySkillChange(
     if (taken(entries, ask.after.name, null)) {
       throw new PcpError(
         "conflict",
-        `A skill called ${ask.after.name} was added since the owner was asked, so nothing was written. Describe it (ref "${SKILL_REF}${ask.after.name}") and propose your change on top of it, or pick another name.`,
+        `A skill called ${ask.after.name} was added since the owner was asked, so nothing was written. Read it with search (ref "${SKILL_REF}${ask.after.name}") and propose your change on top of it, or pick another name.`,
       )
     }
 
@@ -2500,7 +2501,7 @@ export async function applySkillChange(
         : []),
     ])
 
-    return `The owner agreed: the skill ${skill.name} is added, at version ${ask.after.version}. Read it with describe and ref "${SKILL_REF}${skill.name}".`
+    return `The owner agreed: the skill ${skill.name} is added, at version ${ask.after.version}. Read it with search and ref "${SKILL_REF}${skill.name}".`
   }
 
   const entry = entries.find(
@@ -2590,5 +2591,5 @@ async function applyShare(
     ciphertext: seal(ctx, entry.id, { ...skill, version: ask.after.version }),
   })
 
-  return `The owner agreed: your skill is shared as ${skill.name}, at version ${ask.after.version}, and ${skillPath(entry.pathName)} is gone. Read it with describe and ref "${SKILL_REF}${skill.name}".`
+  return `The owner agreed: your skill is shared as ${skill.name}, at version ${ask.after.version}, and ${skillPath(entry.pathName)} is gone. Read it with search and ref "${SKILL_REF}${skill.name}".`
 }

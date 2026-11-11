@@ -372,7 +372,7 @@ const INPUTS: readonly MailToolInput[] = [
     name: "get_attachment",
     title: "Read an attachment",
     description:
-      "Reads one attachment of an email and keeps it as a handle, to pass to another tool or to send_email or create_draft as an attachment. Text (plain text, CSV, JSON, XML, HTML, calendar files and the like) comes back as text too; any other file, such as an image or a PDF, only as the handle.",
+      'Reads one attachment of an email and keeps it as a handle, to pass to another tool or to send_email or create_draft as an attachment: pass the answer\'s result handle, {"$result": "<id>"}, never the whole answer. Text (plain text, CSV, JSON, XML, HTML, calendar files and the like) comes back as text too; any other file, such as an image or a PDF, only as the handle.',
     args: () =>
       z.strictObject({
         id,

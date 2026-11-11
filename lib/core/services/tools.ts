@@ -228,7 +228,7 @@ const SPECS: Spec[] = [
     name: "get_file",
     title: "Get a file from the service",
     description: ({ service, host, files }) =>
-      `Gets one file the service ${service} on ${host} keeps in its files folder${files ? ` ${files}` : ""} (what its own tools wrote there) as a kept result's handle, {"$result": "<id>"}, to pass on whole to another tool. A file larger than PCP keeps is refused.`,
+      `Gets one file the service ${service} on ${host} keeps in its files folder${files ? ` ${files}` : ""} (what its own tools wrote there) as a kept result's handle, {"$result": "<id>"}, to pass on whole to another tool; view_image shows you a picture. A file larger than PCP keeps is refused.`,
     args: getFileArgs,
     annotations: {
       readOnlyHint: true,

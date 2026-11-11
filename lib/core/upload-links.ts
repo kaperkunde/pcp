@@ -1,6 +1,7 @@
 import type { VaultContext } from "./context"
 import {
   asBytes,
+  decrypt,
   decryptString,
   encrypt,
   encryptString,
@@ -23,7 +24,9 @@ import {
   tokenCanUseLinks,
 } from "./file-links"
 import { newId } from "./ids"
-import { RESULT_TTL_MS } from "./tool-results"
+import { openLinkName, sealLinkName } from "./link-names"
+import { TOKEN_NAME_SELECT, tokenName } from "./token-names"
+import { RESULT_TTL_MS, resultName } from "./tool-results"
 
 /**
  * Upload links: a page the owner opens on their phone or computer
@@ -74,6 +77,10 @@ const MAX_NAME_CHARS = 255
 
 function purposeAad(id: string): string {
   return `upload_link:${id}`
+}
+
+function assistantAad(id: string): string {
+  return `upload_link_assistant:${id}`
 }
 
 function destinationAad(id: string): string {
@@ -236,6 +243,13 @@ export async function createUploadLink(
   const id = newId()
   const secret = randomSecret()
   const acceptUntil = new Date(now.getTime() + minutes * 60_000)
+  // The page has the link's key only: the token's name goes on it sealed
+  // under that.
+  const token = await db().apiToken.findFirst({
+    where: { id: input.tokenId, vaultId: ctx.vaultId },
+    select: TOKEN_NAME_SELECT,
+  })
+  const assistant = token ? tokenName(ctx, token) : "An assistant"
   const slots = Array.from({ length: maxFiles }, () => ({
     id: newId(),
     resultId: newId(),
@@ -265,6 +279,9 @@ export async function createUploadLink(
               ),
             )
           : null,
+        assistant: asBytes(
+          encryptString(linkKey(secret, id), assistant, assistantAad(id)),
+        ),
         createdAt: now,
         acceptUntil,
         expiresAt: new Date(acceptUntil.getTime() + RESULT_TTL_MS),
@@ -278,7 +295,6 @@ export async function createUploadLink(
         kind: "upload",
         secretHash: slotHash(secret, slot.id),
         resultId: slot.resultId,
-        name: null,
         mediaType: "",
         wrappedKey: asBytes(
           encrypt(ctx.dek, linkKey(secret, slot.id), keyAad(slot.id)),
@@ -325,7 +341,8 @@ async function findPage(secret: string) {
     include: {
       token: {
         select: {
-          name: true,
+          plainName: true,
+          sealedName: true,
           revokedAt: true,
           expiresAt: true,
           shareFiles: true,
@@ -375,6 +392,17 @@ export type ArrivedFile = {
 async function arrivedFiles(
   page: { id: string; vaultId: string; tokenId: string; resultIds: string },
   now: Date,
+  /**
+   * The key a waiting file's name is sealed under (link-names.ts): from the
+   * page's secret, or the slot's wrapped key with the vault's. Without it,
+   * waiting files are counted, unnamed.
+   */
+  slotKey?: (slot: { id: string; wrappedKey: Uint8Array | null }) => Buffer,
+  /**
+   * The vault's key, which a kept file's name is sealed under: without
+   * it (the page itself), a file the token took already is unnamed.
+   */
+  ctx?: VaultContext,
 ): Promise<ArrivedFile[]> {
   const ids = resultIdsOf(page)
   const [waiting, kept] = await Promise.all([
@@ -385,8 +413,11 @@ async function arrivedFiles(
         expiresAt: { gt: now },
       },
       select: {
+        id: true,
         resultId: true,
-        name: true,
+        plainName: true,
+        sealedName: true,
+        wrappedKey: true,
         mediaType: true,
         length: true,
         expiresAt: true,
@@ -401,7 +432,8 @@ async function arrivedFiles(
       },
       select: {
         id: true,
-        name: true,
+        plainName: true,
+        sealedName: true,
         mediaType: true,
         length: true,
         expiresAt: true,
@@ -413,7 +445,7 @@ async function arrivedFiles(
   for (const row of waiting) {
     byId.set(row.resultId, {
       resultId: row.resultId,
-      name: row.name,
+      name: slotKey ? openLinkName(slotKey(row), row) : null,
       mediaType: row.mediaType,
       size: row.length,
       readableUntil: row.expiresAt,
@@ -423,7 +455,7 @@ async function arrivedFiles(
   for (const row of kept) {
     byId.set(row.id, {
       resultId: row.id,
-      name: row.name,
+      name: ctx ? resultName(ctx, row) : row.plainName,
       mediaType: row.mediaType,
       size: row.length,
       readableUntil: row.expiresAt,
@@ -500,14 +532,21 @@ export async function uploadPageView(
 
   const [empty, files] = await Promise.all([
     emptySlots(page),
-    arrivedFiles(page, now),
+    arrivedFiles(page, now, (slot) => linkKey(secret, slot.id)),
   ])
   const open = takesFiles(page, empty.length, now)
 
   return {
     state: open ? "open" : "closed",
     purpose,
-    assistant: page.token.name,
+    assistant: page.assistant
+      ? decryptString(
+          linkKey(secret, page.id),
+          Buffer.from(page.assistant),
+          assistantAad(page.id),
+        )
+      : // A page from before: the name as it was, while it is in plain text.
+        (page.token.sealedName ? null : page.token.plainName) || "An assistant",
     maxFiles: page.maxFiles,
     remaining: open ? empty.length : 0,
     acceptUntil: page.acceptUntil,
@@ -617,7 +656,7 @@ export async function uploadToPage(
       data: {
         receivedAt: now,
         uses: 1,
-        name,
+        sealedName: sealLinkName(linkKey(secret, slot.id), slot.id, name),
         length: bytes.length,
         mediaType,
         ciphertext: asBytes(
@@ -739,7 +778,13 @@ export async function uploadStatus(
 
   const [empty, files] = await Promise.all([
     emptySlots(page),
-    arrivedFiles(page, now),
+    arrivedFiles(
+      page,
+      now,
+      (slot) =>
+        decrypt(ctx.dek, Buffer.from(slot.wrappedKey!), keyAad(slot.id)),
+      ctx,
+    ),
   ])
   const open = takesFiles(page, empty.length, now)
 

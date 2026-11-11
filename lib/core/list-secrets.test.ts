@@ -10,8 +10,10 @@ import { newId } from "./ids"
 import { MAX_LISTED_SECRETS, secretUses } from "./secret-uses"
 import { createSecret, writeManagedSecret } from "./secrets"
 import { createServer } from "./servers"
+import { serverCreateData } from "./server-meta"
 import { scratchDatabase } from "./test-db"
 import { setupVault } from "./vault"
+import { entryCall, listEveryTool } from "./test-handles"
 
 // list_secrets as an assistant meets it: only for a token that may manage
 // endpoints, with every secret's name and what uses it, never a value.
@@ -58,10 +60,7 @@ async function connect(manageEndpoints: boolean): Promise<Client> {
 }
 
 async function listSecrets(args: Record<string, unknown> = {}) {
-  const result = await client!.callTool({
-    name: "list_secrets",
-    arguments: args,
-  })
+  const result = await client!.callTool(entryCall("list_secrets", args))
   const text = (result.content as Array<{ type: string; text?: string }>)
     .map((part) => part.text ?? "")
     .join("")
@@ -89,7 +88,7 @@ async function wrapperBinding(secretId: string, serverId: string) {
   }
 
   await db().mcpServer.create({
-    data: {
+    data: serverCreateData(ctx, {
       id,
       vaultId: ctx.vaultId,
       kind: "wrapper",
@@ -97,19 +96,19 @@ async function wrapperBinding(secretId: string, serverId: string) {
       slug: "linear-lookup",
       url: "pcp:wrapper",
       wrapperSpec: {
-        create: { definition: JSON.stringify(definition), hash: "x" },
+        create: { plainDefinition: JSON.stringify(definition), hash: "x" },
       },
-    },
+    }),
   })
 }
 
 describe("list_secrets", () => {
   it("is offered only to a token that may manage endpoints, and says it only reads", async () => {
-    const without = await (await connect(false)).listTools()
+    const without = await listEveryTool(await connect(false))
     expect(without.tools.map((tool) => tool.name)).not.toContain("list_secrets")
     await client!.close()
 
-    const { tools } = await (await connect(true)).listTools()
+    const { tools } = await listEveryTool(await connect(true))
     const tool = tools.find((each) => each.name === "list_secrets")
     expect(tool?.annotations?.readOnlyHint).toBe(true)
 

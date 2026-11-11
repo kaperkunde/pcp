@@ -13,8 +13,6 @@ import {
   vi,
 } from "vitest"
 
-import type { McpServer } from "@/lib/generated/prisma/client"
-
 import { createApiToken, resolveApiToken } from "../api-tokens"
 import type { VaultContext } from "../context"
 import { db } from "../db"
@@ -27,7 +25,7 @@ import {
   saveResourceConfig,
 } from "../resources/state"
 import { scratchDatabase } from "../test-db"
-import { describedHandle } from "../test-handles"
+import { describedHandle, entryCall } from "../test-handles"
 import { writeToolAccess } from "../tool-access"
 import {
   keepBytes,
@@ -37,12 +35,16 @@ import {
 } from "../tool-results"
 import { callServerTool } from "../upstream"
 import { setupVault } from "../vault"
-import { setFetchPrivate, setFetchSite } from "../web-fetch"
-import { callBrowserTool } from "./call"
+import { listFetchRules, setFetchPrivate, setFetchSite } from "../web-fetch"
+import { callBrowserTool, printPdfTimeout } from "./call"
+import { PRINT_PDF_MAX_MS } from "./limits"
 import { chromiumExecutable } from "./executable"
+import { holdSecret } from "./held"
 import { closeAllBrowsers, runningBrowser } from "./runtime"
 import { createBrowserServer } from "./server"
 import { browserTools } from "./tools"
+import type { OpenServer } from "../server-meta"
+import { openServer } from "../server-meta"
 
 // Files in and out of the browser, against a real headless Chromium and
 // pages served on this machine: a download kept as the token's result (and
@@ -54,25 +56,49 @@ import { browserTools } from "./tools"
 vi.mock("./limits", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./limits")>()),
   DOWNLOAD_START_MS: 1_500,
+  // A file a window shows is handed back to it up to this much, here.
+  MAX_HELD_DOCUMENT_BYTES: 64 * 1024,
   ACTION_TIMEOUT_MS: 3_000,
 }))
 
 const executable = await chromiumExecutable()
 const PUBLIC_URL = "http://pcp.test"
 const PDF = Buffer.from("%PDF-1.4\n% an invoice\n")
+/** A PDF of `size` bytes, its header first. */
+function pdfOf(size: number): Buffer {
+  const body = Buffer.alloc(size, 0x20)
+  body.write("%PDF-1.4\n")
+  return body
+}
+
+/** A code a site puts in an address, which no answer may carry. */
+const CODE = "Zq81SECRETcodeVALUE7x"
+
+/** A PDF a site shows rather than offers (no attachment). */
+const STATEMENT = Buffer.from("%PDF-1.4\n% a statement\n")
 
 let cleanup: () => Promise<void>
 let api: TestApi
 let elsewhere: TestApi
 let ctx: VaultContext
 let tokenId: string
-let server: McpServer
+let server: OpenServer
 
 const FILES = `<!doctype html><title>Files</title>
 <a href="/invoice">Invoice</a>
 <a id="csv">Export</a>
 <a href="/big">Big</a>
 <button>Nothing</button>
+<button onclick="window.open('/invoice')">Invoice window</button>
+<button onclick="window.open('/statement')">Statement window</button>
+<button onclick="window.open('/closes')">Closing window</button>
+<button onclick="window.open('__ELSEWHERE__/x')">Elsewhere window</button>
+<button onclick="const w = window.open(); setTimeout(() => { w.location = '/to-elsewhere' }, 500)">Redirecting window</button>
+<button onclick="window.open('/fake-pdf')">Fake window</button>
+<button onclick="window.open('/big-statement')">Big statement window</button>
+<button onclick="window.open('/streamed-statement')">Streamed statement window</button>
+<button onclick="window.open('/wide-statement')">Wide statement window</button>
+<button onclick="window.open('/to-statement')">Moved statement window</button>
 <script>
 const link = document.getElementById("csv")
 link.href = URL.createObjectURL(new Blob(["name,amount\\nAda,12\\n"], { type: "text/csv" }))
@@ -88,6 +114,33 @@ const FORM = `<!doctype html><title>Upload</title>
 <button>Send</button>
 </form>`
 
+/** A page three viewports tall, with a field a secret can be typed into. */
+const LONG = `<!doctype html><title>Statement: March</title>
+<h1>Statement</h1>
+<label>Code <input id="code"></label>
+<div style="height: 2400px; background: linear-gradient(#fff, #9cf)"></div>
+<p>The end</p>`
+
+/** A page of pictures that do not compress: its PDF is several megabytes. */
+const NOISE = `<!doctype html><title>Noise</title>
+<div id="pictures"></div>
+<script>
+for (let n = 0; n < 2; n++) {
+  const canvas = document.createElement("canvas")
+  canvas.width = 800
+  canvas.height = 800
+  const context = canvas.getContext("2d")
+  const image = context.createImageData(800, 800)
+  for (let i = 0; i < image.data.length; i++) image.data[i] = Math.random() * 256
+  context.putImageData(image, 0, 0)
+  const picture = document.createElement("img")
+  picture.src = canvas.toDataURL("image/png")
+  picture.style.width = "600px"
+  document.getElementById("pictures").append(picture)
+}
+document.title = "Noise ready"
+</script>`
+
 beforeEach(async () => {
   ;({ cleanup } = await scratchDatabase())
   forgetResourceLimits()
@@ -100,9 +153,12 @@ beforeEach(async () => {
     allowAllServers: true,
   })
   tokenId = (await resolveApiToken(token))!.tokenId
-  server = await db().mcpServer.findUniqueOrThrow({
-    where: { id: (await createBrowserServer(ctx)).id },
-  })
+  server = openServer(
+    ctx,
+    await db().mcpServer.findUniqueOrThrow({
+      where: { id: (await createBrowserServer(ctx)).id },
+    }),
+  )
   elsewhere = await startTestApi((_, res) => {
     res.setHeader("content-type", "application/pdf")
     res.setHeader("content-disposition", 'attachment; filename="other.pdf"')
@@ -118,6 +174,54 @@ beforeEach(async () => {
       return res.end(PDF)
     }
 
+    // A sign-in's way back to another site, with a code in its address.
+    if (request.url.startsWith("/to-elsewhere")) {
+      res.statusCode = 302
+      res.setHeader("location", `${elsewhere.origin}/cb?token=${CODE}`)
+      return res.end()
+    }
+
+    if (request.url.startsWith("/to-statement")) {
+      res.statusCode = 302
+      res.setHeader("location", "/statement")
+      return res.end()
+    }
+
+    // A page that says it is a PDF and is not.
+    if (request.url.startsWith("/fake-pdf")) {
+      res.setHeader("content-type", "application/pdf")
+      return res.end("<!doctype html><title>Not a PDF</title><h1>Hello</h1>")
+    }
+
+    // PDFs past the largest file (1 MB in its test): one that says so
+    // up front, one that does not.
+    if (request.url.startsWith("/big-statement")) {
+      const body = pdfOf(2 * 1024 * 1024)
+      res.setHeader("content-type", "application/pdf")
+      res.setHeader("content-length", String(body.length))
+      return res.end(body)
+    }
+
+    if (request.url.startsWith("/streamed-statement")) {
+      const body = pdfOf(2 * 1024 * 1024)
+      res.setHeader("content-type", "application/pdf")
+      for (let at = 0; at < body.length; at += 256 * 1024) {
+        res.write(body.subarray(at, at + 256 * 1024))
+      }
+      return res.end()
+    }
+
+    // A PDF within the largest file, but more than a window is handed back.
+    if (request.url.startsWith("/wide-statement")) {
+      res.setHeader("content-type", "application/pdf")
+      return res.end(pdfOf(200 * 1024))
+    }
+
+    if (request.url.startsWith("/statement")) {
+      res.setHeader("content-type", "application/pdf")
+      return res.end(STATEMENT)
+    }
+
     if (request.url.startsWith("/big")) {
       res.setHeader("content-type", "application/octet-stream")
       res.setHeader("content-disposition", 'attachment; filename="big.bin"')
@@ -127,11 +231,24 @@ beforeEach(async () => {
     res.setHeader("content-type", "text/html; charset=utf-8")
 
     if (request.url.startsWith("/files")) {
-      return res.end(FILES)
+      return res.end(FILES.replace("__ELSEWHERE__", elsewhere.origin))
+    }
+
+    // A window that closes itself as soon as it opens, with no file.
+    if (request.url.startsWith("/closes")) {
+      return res.end("<title>Closing</title><script>window.close()</script>")
     }
 
     if (request.url.startsWith("/form")) {
       return res.end(FORM)
+    }
+
+    if (request.url.startsWith("/long")) {
+      return res.end(LONG)
+    }
+
+    if (request.url.startsWith("/noise")) {
+      return res.end(NOISE)
     }
 
     if (request.url.startsWith("/sent")) {
@@ -196,10 +313,16 @@ function tabOf(result: CallToolResult | string): string {
   return id
 }
 
+type Window = { tab?: string; url: string; closed?: true; refused?: true }
+
 type Downloaded = {
   tab: string
   file: { $result: string; type: string; size: number; name: string }
   from?: string
+  /** The new window the file came from. */
+  window?: Window
+  /** Other windows the page opened meanwhile. */
+  popups?: Window[]
   note: string
 }
 
@@ -218,6 +341,152 @@ describe.skipIf(!executable)(
   "files in the browser",
   { timeout: 90_000 },
   () => {
+    it("prints a page to a PDF kept as the token's result, and refuses while a field holds a typed secret", async () => {
+      const tab = tabOf(
+        await call("tabs", { action: "open", url: `${api.origin}/long` }),
+      )
+
+      const printed = downloaded(
+        await call("print_pdf", {
+          tab,
+          paper: "a4",
+          landscape: true,
+          print_background: true,
+        }),
+      )
+      expect(printed.file).toMatchObject({
+        type: "application/pdf",
+        name: "Statement March.pdf",
+      })
+      expect(printed.from).toBe(`${api.origin}/long`)
+      const kept = await openResult(ctx, {
+        tokenId,
+        id: printed.file.$result,
+      })
+      const bytes = kept!.bytes()
+      expect(bytes.subarray(0, 5).toString()).toBe("%PDF-")
+      // Landscape A4 is 842 by 595 points.
+      expect(bytes.toString("latin1")).toMatch(
+        /\/MediaBox \[0 0 841\.\d+ 595\.\d+\]/,
+      )
+
+      // One page of it, and a page it does not have.
+      const first = downloaded(
+        await call("print_pdf", { tab, page_ranges: "1" }),
+      )
+      const one = await openResult(ctx, { tokenId, id: first.file.$result })
+      expect(one!.bytes().length).toBeGreaterThan(0)
+      const missing = await call("print_pdf", { tab, page_ranges: "40-41" })
+      expect(missing.isError).toBe(true)
+      expect(textOf(missing)).toContain("The page has no 40-41")
+
+      // A PDF is a picture of the page: none while a field holds a secret.
+      const page = runningBrowser(ctx.vaultId)!.tabs.get(tab)!.page
+      await page.locator("#code").fill("hunter2-hunter2")
+      holdSecret(page, "Bank code", "hunter2-hunter2")
+      const before = await db().toolResult.count()
+
+      for (const refused of [
+        await call("print_pdf", { tab }),
+        await call("screenshot", { tab, full_page: true }),
+      ]) {
+        expect(refused.isError).toBe(true)
+        expect(textOf(refused)).toContain('holds the secret "Bank code"')
+        expect(refused.content.some((part) => part.type === "image")).toBe(
+          false,
+        )
+      }
+
+      expect(await db().toolResult.count()).toBe(before)
+    })
+
+    it("takes no picture or PDF of a page that shows a secret PCP typed, after its field let go", async () => {
+      const tab = tabOf(
+        await call("tabs", { action: "open", url: `${api.origin}/long` }),
+      )
+      const page = runningBrowser(ctx.vaultId)!.tabs.get(tab)!.page
+      await page.locator("#code").fill("hunter2-hunter2")
+      holdSecret(page, "Bank code", "hunter2-hunter2")
+      // The field lets go, and the page repeats the value as its text.
+      await page.locator("#code").fill("")
+      await page.locator("h1").evaluate((heading) => {
+        const code = document.createElement("code")
+        code.textContent = "Your code: hunter2-hunter2"
+        heading.after(code)
+      })
+      const before = await db().toolResult.count()
+
+      for (const refused of [
+        await call("print_pdf", { tab }),
+        await call("screenshot", { tab, full_page: true }),
+        await call("screenshot", { tab }),
+      ]) {
+        expect(refused.isError, textOf(refused)).toBe(true)
+        expect(textOf(refused)).toContain('shows the secret "Bank code"')
+        expect(refused.content.some((part) => part.type === "image")).toBe(
+          false,
+        )
+      }
+
+      expect(await db().toolResult.count()).toBe(before)
+
+      // Once the page no longer shows it, pictures go again.
+      await page.locator("code").evaluate((code) => code.remove())
+      const picture = await call("screenshot", { tab })
+      expect(picture.isError, textOf(picture)).toBeUndefined()
+    })
+
+    it("stops a PDF larger than PCP keeps of one file as it comes, and keeps nothing", async () => {
+      await saveResourceConfig({ ...EMPTY_CONFIG, fileMb: 1 })
+      const tab = tabOf(
+        await call("tabs", { action: "open", url: `${api.origin}/noise` }),
+      )
+      await expect
+        .poll(() => runningBrowser(ctx.vaultId)!.tabs.get(tab)!.page.title())
+        .toBe("Noise ready")
+      const before = await db().toolResult.count()
+
+      const big = await call("print_pdf", { tab, print_background: true })
+
+      expect(big.isError).toBe(true)
+      expect(textOf(big)).toContain(
+        "The PDF of the page is larger than PCP keeps of one file",
+      )
+      expect(await db().toolResult.count()).toBe(before)
+      // A longer page is given longer to print, within a bound.
+      expect(printPdfTimeout(40_000)).toBeGreaterThan(printPdfTimeout(800))
+      expect(printPdfTimeout(10_000_000)).toBe(PRINT_PDF_MAX_MS)
+    })
+
+    it("takes a screenshot of the whole page with full_page", async () => {
+      const tab = tabOf(
+        await call("tabs", { action: "open", url: `${api.origin}/long` }),
+      )
+      const size = (result: CallToolResult) => {
+        const [, width, height] = textOf(result).match(/(\d+) by (\d+)/)!
+        return { width: Number(width), height: Number(height) }
+      }
+
+      const viewport = await call("screenshot", { tab })
+      expect(size(viewport)).toEqual({ width: 1280, height: 800 })
+
+      const whole = await call("screenshot", { tab, full_page: true })
+      expect(whole.isError, textOf(whole)).toBeUndefined()
+      expect(textOf(whole)).toContain("the whole page")
+      expect(textOf(whole)).toContain("The whole page from its top")
+      expect(whole.content.some((part) => part.type === "image")).toBe(true)
+      const { width, height } = size(whole)
+      // Taller than the viewport, in the page's proportions, whatever size
+      // it was made to pass on.
+      expect(height / width).toBeGreaterThan(2400 / 1280)
+
+      // The tab stays where it was.
+      const scrolled = await runningBrowser(ctx.vaultId)!
+        .tabs.get(tab)!
+        .page.evaluate(() => window.scrollY)
+      expect(scrolled).toBe(0)
+    })
+
     it("keeps a download as the token's result and leaves nothing on disk", async () => {
       const page = await call("tabs", {
         action: "open",
@@ -355,6 +624,202 @@ describe.skipIf(!executable)(
       expect(page2.isError).toBeUndefined()
     })
 
+    it("takes the file a new window brings: its download once Chromium closed it, or the PDF it shows", async () => {
+      const page = await call("tabs", {
+        action: "open",
+        url: `${api.origin}/files`,
+      })
+      const tab = tabOf(page)
+
+      // The window's address was a download: Chromium closes the blank
+      // window as the download begins, before PCP can ask whose it was.
+      const fromGone = downloaded(
+        await call("download", {
+          tab,
+          ref: refOf(page, /button "Invoice window"/),
+        }),
+      )
+      expect(fromGone.file).toMatchObject({
+        type: "application/pdf",
+        size: PDF.length,
+        name: "invoice-42.pdf",
+      })
+      expect(fromGone.window).toMatchObject({
+        url: `${api.origin}/invoice`,
+        closed: true,
+      })
+      expect(fromGone.note).toContain("a new window the page opened")
+
+      // A window that shows a PDF: what it was answered with is the file,
+      // and the window shows it still, as a tab of the token's.
+      const shown = downloaded(
+        await call("download", {
+          tab,
+          ref: refOf(page, /button "Statement window"/),
+        }),
+      )
+      expect(shown.file).toMatchObject({
+        type: "application/pdf",
+        size: STATEMENT.length,
+        name: "statement.pdf",
+      })
+      expect(shown.from).toBe(`${api.origin}/statement`)
+      expect(shown.window?.url).toBe(`${api.origin}/statement`)
+      expect(shown.window?.closed).toBeUndefined()
+      const kept = await openResult(ctx, { tokenId, id: shown.file.$result })
+      expect(kept!.bytes().equals(STATEMENT)).toBe(true)
+      const popup = runningBrowser(ctx.vaultId)!.tabs.get(shown.window!.tab!)
+      expect(popup?.page.url()).toBe(`${api.origin}/statement`)
+
+      // The tab's own address showing a PDF, as a tab showing one is told
+      // to download it: kept the same way.
+      const byAddress = downloaded(
+        await call("download", { tab, url: `${api.origin}/statement?again` }),
+      )
+      expect(byAddress.file.name).toBe("statement.pdf")
+      expect(byAddress.window).toBeUndefined()
+
+      expect(await leftOnDisk()).toEqual([])
+    })
+
+    it("names the windows a click opened that brought no file: one that closed itself, one at a site the tab may not open", async () => {
+      const page = await call("tabs", {
+        action: "open",
+        url: `${api.origin}/files`,
+      })
+      const tab = tabOf(page)
+      const other = new URL(elsewhere.origin).host
+
+      const closing = await call("download", {
+        tab,
+        ref: refOf(page, /button "Closing window"/),
+      })
+      expect(closing.isError).toBe(true)
+      expect(textOf(closing)).toContain("Nothing started a download")
+      expect(textOf(closing)).toMatch(
+        new RegExp(
+          `A new window opened at ${api.origin}/closes( \\(tab \\S+\\))? and closed itself\\.`,
+        ),
+      )
+
+      const refused = await call("download", {
+        tab,
+        ref: refOf(page, /button "Elsewhere window"/),
+      })
+      expect(refused.isError).toBe(true)
+      expect(textOf(refused)).toContain(
+        `The page opened a new window at ${other}, which this token may not open yet, so it was closed.`,
+      )
+      expect(elsewhere.requests).toHaveLength(0)
+      expect(
+        (await listFetchRules(ctx, tokenId)).sites.map((site) => site.host),
+      ).toContain(other)
+
+      // A click with no download call waiting names the window too, and
+      // the file it offered.
+      const clicked = await call("click", {
+        tab,
+        ref: refOf(page, /button "Invoice window"/),
+      })
+      const waited = await call("wait_for", { tab, ms: 1_000 })
+      const both = `${textOf(clicked)}\n${textOf(waited)}`
+      expect(both).toContain(`A new window opened at ${api.origin}/invoice`)
+      expect(both).toContain("closed itself")
+      expect(both).toContain(
+        "The page offered a file to download (invoice-42.pdf)",
+      )
+      expect(await db().toolResult.count()).toBe(0)
+    })
+
+    it("keeps an address the gate refused out of what it says of a window", async () => {
+      const page = await call("tabs", {
+        action: "open",
+        url: `${api.origin}/files`,
+      })
+      const tab = tabOf(page)
+
+      // The window is a tab of the token's before its address sends it on
+      // to a site the tab may not open.
+      const redirected = await call("download", {
+        tab,
+        ref: refOf(page, /button "Redirecting window"/),
+      })
+      expect(redirected.isError).toBe(true)
+      expect(textOf(redirected)).toContain("A new window opened")
+      expect(textOf(redirected)).not.toContain(CODE)
+      expect(textOf(redirected)).not.toContain(
+        `A new window opened at ${elsewhere.origin}`,
+      )
+      expect(elsewhere.requests).toHaveLength(0)
+    })
+
+    it("takes a file a window shows only when its bytes are one, and never breaks the window's page", async () => {
+      const page = await call("tabs", {
+        action: "open",
+        url: `${api.origin}/files`,
+      })
+      const tab = tabOf(page)
+
+      // HTML said to be a PDF: not taken, and the page gets it as it was.
+      const fake = await call("download", {
+        tab,
+        ref: refOf(page, /button "Fake window"/),
+      })
+      expect(fake.isError).toBe(true)
+      expect(textOf(fake)).toContain("Nothing started a download")
+      expect(await db().toolResult.count()).toBe(0)
+
+      // Through a redirect while the answer is held.
+      const moved = downloaded(
+        await call("download", {
+          tab,
+          ref: refOf(page, /button "Moved statement window"/),
+        }),
+      )
+      expect(moved.file.name).toBe("statement.pdf")
+      expect(moved.from).toBe(`${api.origin}/statement`)
+
+      // More than a window is handed back: kept, and the answer says the
+      // window could not show it.
+      const wide = downloaded(
+        await call("download", {
+          tab,
+          ref: refOf(page, /button "Wide statement window"/),
+        }),
+      )
+      expect(wide.file).toMatchObject({
+        type: "application/pdf",
+        size: 200 * 1024,
+      })
+      expect(wide.note).toContain("could not show it")
+
+      await saveResourceConfig({ ...EMPTY_CONFIG, fileMb: 1 })
+
+      // Too large, said up front: not held, so the window loads it.
+      const big = await call("download", {
+        tab,
+        ref: refOf(page, /button "Big statement window"/),
+      })
+      expect(big.isError).toBe(true)
+      expect(textOf(big)).toContain(
+        "big-statement.pdf is larger than PCP keeps",
+      )
+      expect(textOf(big)).not.toContain("shows nothing")
+
+      // Too large, found as it comes: given up, and the answer says the
+      // window shows nothing of it.
+      const streamed = await call("download", {
+        tab,
+        ref: refOf(page, /button "Streamed statement window"/),
+      })
+      expect(streamed.isError).toBe(true)
+      expect(textOf(streamed)).toContain(
+        "streamed-statement.pdf is larger than PCP keeps",
+      )
+      expect(textOf(streamed)).toContain("shows nothing of it")
+      expect(await leftOnDisk()).toEqual([])
+    })
+
     it("puts kept files into a file field and its picker, read from handles through the gateway's path", async () => {
       // A file kept for the token, as a mail attachment read would be.
       const pdf = await keepBytes(ctx, {
@@ -443,7 +908,7 @@ describe.skipIf(!executable)(
       )
     })
 
-    it("lets a run_code program download a file and upload its handle, the bytes never in the program", async () => {
+    it("lets a program (run_destructive) download a file and upload its handle, the bytes never in the program", async () => {
       const { token } = await createApiToken(ctx, {
         name: "Coder",
         allowAllServers: true,
@@ -474,7 +939,7 @@ describe.skipIf(!executable)(
 
       try {
         const result = await client.callTool({
-          name: "run_code_destructive",
+          name: "run_destructive",
           arguments: {
             code: `
 const form = await pcp.call("browser", "tabs", { action: "open", url: "${api.origin}/form" })
@@ -545,7 +1010,7 @@ return { file: got.file, sent: sent.includes("Thank you") }
       }
       const browser = async (tool: string, args: Record<string, unknown>) =>
         client.callTool({
-          name: "call_tool_destructive",
+          name: "execute_destructive",
           arguments: {
             call_handle: await describedHandle(client, "browser", tool),
             arguments: args,
@@ -558,10 +1023,9 @@ return { file: got.file, sent: sent.includes("Thank you") }
         // In: a file from the assistant's computer, into the page's form.
         const receive = JSON.parse(
           answer(
-            await client.callTool({
-              name: "receive_file",
-              arguments: { name: "scan.pdf" },
-            }),
+            await client.callTool(
+              entryCall("receive_file", { name: "scan.pdf" }),
+            ),
           ),
         ) as { url: string; result: { $result: string } }
         const sentByCurl = await uploadByLink(
@@ -603,10 +1067,9 @@ return { file: got.file, sent: sent.includes("Thank you") }
         expect(got.note).toContain("share_result")
         const shared = JSON.parse(
           answer(
-            await client.callTool({
-              name: "share_result",
-              arguments: { id: got.file.$result },
-            }),
+            await client.callTool(
+              entryCall("share_result", { id: got.file.$result }),
+            ),
           ),
         ) as { url: string; name: string; curl: string }
         expect(shared.name).toBe("invoice-42.pdf")

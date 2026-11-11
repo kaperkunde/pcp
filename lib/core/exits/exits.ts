@@ -1,4 +1,4 @@
-import type { Exit } from "@/lib/generated/prisma/client"
+import type { Prisma } from "@/lib/generated/prisma/client"
 
 import { requireLiveToken } from "../api-tokens"
 import { TOOL_ACCESS_LEVELS, type ToolAccess } from "../constants"
@@ -6,6 +6,7 @@ import type { VaultContext } from "../context"
 import { db } from "../db"
 import { invalid, notFound, PcpError } from "../errors"
 import { newId } from "../ids"
+import { openServer, SERVER_META_SELECT, serverName } from "../server-meta"
 import { closeSshConnections } from "../ssh/client"
 import { forgetExitAnswers } from "./dial"
 import { MAX_EXITS } from "./limits"
@@ -47,30 +48,29 @@ export type ExitView = {
   service: { name: string; status: string; statusMessage: string } | null
 }
 
-type ExitRow = Exit & {
-  server: { name: string }
-  service: { name: string; status: string; statusMessage: string } | null
-}
-
 const INCLUDE = {
-  server: { select: { name: true } },
-  service: { select: { name: true, status: true, statusMessage: true } },
+  server: { select: SERVER_META_SELECT },
+  service: { select: { ...SERVER_META_SELECT, status: true } },
 } as const
 
-function view(row: ExitRow): ExitView {
+type ExitRow = Prisma.ExitGetPayload<{ include: typeof INCLUDE }>
+
+function view(ctx: VaultContext, row: ExitRow): ExitView {
+  const service = row.service ? openServer(ctx, row.service) : null
+
   return {
     id: row.id,
     name: row.name,
     label: row.label,
     kind: row.kind === "service" ? "service" : "ssh",
     serverId: row.serverId,
-    serverName: row.server.name,
+    serverName: serverName(ctx, row.server),
     serviceId: row.serviceId,
-    service: row.service
+    service: service
       ? {
-          name: row.service.name,
-          status: row.service.status,
-          statusMessage: row.service.statusMessage,
+          name: service.name,
+          status: service.status,
+          statusMessage: service.statusMessage,
         }
       : null,
   }
@@ -94,7 +94,7 @@ export async function listExits(
     orderBy: { name: "asc" },
   })
 
-  return rows.map(view)
+  return rows.map((row) => view(ctx, row))
 }
 
 /** The exit an assistant named, or null. */
@@ -109,7 +109,7 @@ export async function findExitByName(
     include: INCLUDE,
   })
 
-  return row ? view(row) : null
+  return row ? view(ctx, row) : null
 }
 
 export async function getExit(
@@ -125,7 +125,7 @@ export async function getExit(
     throw notFound("That exit")
   }
 
-  return view(row)
+  return view(ctx, row)
 }
 
 /**

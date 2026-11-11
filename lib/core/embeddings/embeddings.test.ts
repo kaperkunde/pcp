@@ -8,6 +8,7 @@ import type { VaultContext } from "../context"
 import { db } from "../db"
 import { searchEverything, semanticBoosts, semanticKey } from "../search"
 import { createSecret } from "../secrets"
+import { serverCreateData } from "../server-meta"
 import { scratchDatabase } from "../test-db"
 import { embeddingProvider } from "../upstream"
 import { setupVault } from "../vault"
@@ -432,7 +433,7 @@ describe("the provider", () => {
   it("takes an API endpoint's address and credential", async () => {
     const secret = await createSecret(ctx, { name: "tei", value: "tei-key" })
     await db().mcpServer.create({
-      data: {
+      data: serverCreateData(ctx, {
         id: "tei",
         vaultId: ctx.vaultId,
         kind: "openapi",
@@ -443,7 +444,7 @@ describe("the provider", () => {
         authHeaderName: "Authorization",
         authValueTemplate: "Bearer {{secret}}",
         authSecretId: secret.id,
-      },
+      }),
     })
     const config: EmbeddingsConfig = {
       provider: "endpoint",
@@ -554,7 +555,7 @@ describe("the setting", () => {
     }
 
     await writeEmbeddingsConfig(ctx, config)
-    expect(await readEmbeddingsConfig(ctx.vaultId)).toEqual(config)
+    expect(await readEmbeddingsConfig(ctx)).toEqual(config)
     expect(
       await db().setting.findFirst({ where: { key: "embeddings" } }),
     ).toBeTruthy()
@@ -563,10 +564,10 @@ describe("the setting", () => {
       where: { vaultId_key: { vaultId: ctx.vaultId, key: "embeddings" } },
       data: { value: "{" },
     })
-    expect(await readEmbeddingsConfig(ctx.vaultId)).toBeNull()
+    expect(await readEmbeddingsConfig(ctx)).toBeNull()
 
     await writeEmbeddingsConfig(ctx, null)
-    expect(await readEmbeddingsConfig(ctx.vaultId)).toBeNull()
+    expect(await readEmbeddingsConfig(ctx)).toBeNull()
   })
 
   it("finds the /embeddings address from a base address", () => {

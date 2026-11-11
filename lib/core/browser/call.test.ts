@@ -9,8 +9,6 @@ import {
   vi,
 } from "vitest"
 
-import type { McpServer } from "@/lib/generated/prisma/client"
-
 import { createApiToken, resolveApiToken } from "../api-tokens"
 import type { VaultContext } from "../context"
 import { db } from "../db"
@@ -37,6 +35,8 @@ import { closeAllBrowsers, closeBrowser, runningBrowser } from "./runtime"
 import { refsOf } from "./refs"
 import { createBrowserServer } from "./server"
 import { isOwnerNeeded, type OwnerNeeded } from "./types"
+import type { OpenServer } from "../server-meta"
+import { openServer } from "../server-meta"
 
 // The browser's tools against a real headless Chromium and pages served on
 // this machine. Skipped where no Chromium is installed (`pnpm exec
@@ -61,7 +61,7 @@ let api: TestApi
 let elsewhere: TestApi
 let ctx: VaultContext
 let tokenId: string
-let server: McpServer
+let server: OpenServer
 
 const FORM = `<!doctype html><title>Form</title>
 <h1 id="greeting">Who are you?</h1>
@@ -194,9 +194,12 @@ beforeEach(async () => {
     allowAllServers: true,
   })
   tokenId = (await resolveApiToken(token))!.tokenId
-  server = await db().mcpServer.findUniqueOrThrow({
-    where: { id: (await createBrowserServer(ctx)).id },
-  })
+  server = openServer(
+    ctx,
+    await db().mcpServer.findUniqueOrThrow({
+      where: { id: (await createBrowserServer(ctx)).id },
+    }),
+  )
   elsewhere = await startTestApi((_, res) => {
     res.setHeader("content-type", "text/html; charset=utf-8")
     res.end("<title>Elsewhere</title><h1>Elsewhere</h1>")
@@ -219,6 +222,12 @@ window.open("/redirect")
 window.open().location = "${elsewhere.origin}/later"
 setTimeout(() => window.open("/page"), 300)
 </script>`)
+    }
+
+    // A window opened with "noopener", at a site the token may open.
+    if (request.url.startsWith("/noopener")) {
+      return res.end(`<!doctype html><title>Noopener</title>
+<script>window.open("/page?n", "_blank", "noopener")</script>`)
     }
 
     if (request.url.startsWith("/frame")) {
@@ -523,19 +532,49 @@ describe.skipIf(!executable)("the browser's tools", { timeout: 90_000 }, () => {
     ).toEqual([])
     expect(api.requests.map((request) => request.url)).toContain("/redirect")
 
-    // The tab whose page tried says so, and the site is on the token's page.
+    // The tab whose page opened them names each window it refused, and the
+    // site is on the token's page.
     const snapshot = await call("snapshot", { tab: parentId })
-    expect(`${textOf(opened)}\n${textOf(snapshot)}`).toContain(
-      `The page tried to open ${other}`,
+    const both = `${textOf(opened)}\n${textOf(snapshot)}`
+    expect(both).toContain(
+      `The page opened a new window at ${other}, which this token may not open yet, so it was closed.`,
     )
     // The popup is named as a new tab; it is not the one the answer is about.
-    expect(`${textOf(opened)}\n${textOf(snapshot)}`).toContain(
-      `The page opened a new tab, ${popupId} (${api.origin}/page).`,
+    expect(both).toContain(
+      `A new window opened at ${api.origin}/page (tab ${popupId}).`,
     )
     expect(tabOf(snapshot)).toBe(parentId)
     expect(
       (await listFetchRules(ctx, tokenId)).sites.map((site) => site.host),
     ).toContain(other)
+  })
+
+  it("makes a window opened with noopener a tab of the token's, by the page Chromium says opened it", async () => {
+    await setFetchSite(ctx, tokenId, new URL(api.origin).host, "allowed")
+    await setFetchPrivate(ctx, tokenId, "allowed")
+
+    const opened = await call("tabs", {
+      action: "open",
+      url: `${api.origin}/noopener`,
+    })
+    const parentId = tabOf(opened)
+    const vault = runningBrowser(ctx.vaultId)!
+    let popupId = ""
+    await vi.waitFor(
+      () => {
+        const popup = [...vault.tabs.values()].find(
+          (tab) => tab.page.url() === `${api.origin}/page?n`,
+        )
+        expect(popup?.tokenId).toBe(tokenId)
+        popupId = popup!.id
+      },
+      { timeout: 10_000, interval: 50 },
+    )
+
+    const snapshot = await call("snapshot", { tab: parentId })
+    expect(`${textOf(opened)}\n${textOf(snapshot)}`).toContain(
+      `A new window opened at ${api.origin}/page?n (tab ${popupId}).`,
+    )
   })
 
   it("keeps the sign-ins in the vault across a restart of the browser", async () => {
@@ -1350,7 +1389,7 @@ describe.skipIf(!executable)(
       })
       const tab = tabOf(opened)
       const frame = refOf(opened, /- iframe/)
-      const line = `1 cross-origin iframe (ref ${frame}), 1 closed shadow root and 1 canvas not included: the page shows more than this. Take a screenshot and OCR it to see them (pass its handle to read_image, which runs the OCR providers this token may use or answers with a link to set one up); click with a point (x, y) from the screenshot reaches into them.`
+      const line = `1 cross-origin iframe (ref ${frame}), 1 closed shadow root and 1 canvas not included: the page shows more than this. Take a screenshot to see them (view_image with crop shows you part of it closer) and OCR it to read their text (pass its handle to read_image, which runs the OCR providers this token may use or answers with a link to set one up); click with a point (x, y) from the screenshot reaches into them.`
 
       expect(textOf(opened)).toContain(line)
       expect(textOf(await call("snapshot", { tab }))).toContain(line)
@@ -1394,7 +1433,7 @@ describe.skipIf(!executable)(
       })
       const picture = await call("screenshot", { tab: tabOf(opened) })
       expect(textOf(picture)).toContain(
-        "To read the text in this picture, pass its handle to read_image, which runs the OCR providers this token may use or answers with a link to set one up; read_result does not show an image.",
+        "To read the text in this picture, pass its handle to read_image, which runs the OCR providers this token may use or answers with a link to set one up; read_result does not show an image, and view_image with crop shows you part of it closer.",
       )
     })
 

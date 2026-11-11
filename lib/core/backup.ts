@@ -20,6 +20,7 @@ import {
   RESTORE_CHUNK_ROWS,
   RESTORE_SPEC_CHUNK_ROWS,
   rowJson,
+  ScryptParamsSchema,
 } from "./backup-format"
 import {
   EXPORT_FILE_SUFFIX,
@@ -33,8 +34,12 @@ import {
   deriveKek,
   encrypt,
   newScryptParams,
+  unwrapDek,
 } from "./crypto"
 import { withBrowserClosed } from "./browser/runtime"
+import { scrubFreedPages } from "./cleanup/runtime"
+import { forgetSealedVault } from "./sealing/state"
+import { forgetVaultUpkeep } from "./vault-upkeep"
 import { db } from "./db"
 import { backfillDefinitions } from "./definition-rows"
 import { invalid, isPcpError, PcpError } from "./errors"
@@ -209,7 +214,12 @@ async function readVault(vaultId: string): Promise<ExportPayloadJson> {
           ).map(rowJson),
           memories: (await tx.memory.findMany(byVault)).map(rowJson),
           skills: (await tx.skill.findMany(byVault)).map(rowJson),
-          secrets: (await tx.secret.findMany(byVault)).map(rowJson),
+          secrets: (
+            await tx.secret.findMany({
+              ...byVault,
+              orderBy: { createdAt: "asc" },
+            })
+          ).map(rowJson),
           secretBrowserOrigins: (
             await tx.secretBrowserOrigin.findMany({
               where: { secret: { vaultId } },
@@ -296,6 +306,15 @@ export async function readExport(
   file: Buffer,
   exportPassword: string,
   target: RestoreTarget = { into: "fresh" },
+  {
+    vaultPassword,
+  }: {
+    /**
+     * The password of the vault in the file: the names sealed in it (#96)
+     * are shown only with it. A wrong one is refused.
+     */
+    vaultPassword?: string
+  } = {},
 ): Promise<{ payload: ExportPayload; preview: ExportPreview }> {
   if (file.length > MAX_EXPORT_FILE_BYTES) {
     throw invalid(
@@ -376,7 +395,58 @@ export async function readExport(
     await replacedTokens(db(), parsed.data, target),
   )
 
-  return { payload: parsed.data, preview: previewOf(parsed.data, carried) }
+  const dek = vaultPassword
+    ? await fileVaultKey(parsed.data, vaultPassword)
+    : null
+
+  return {
+    payload: parsed.data,
+    preview: previewOf(parsed.data, carried, dek),
+  }
+}
+
+export const WRONG_VAULT_PASSWORD =
+  "That is not the password of the vault in this file."
+
+/**
+ * The file's vault key, unwrapped from its password grant: only to show the
+ * owner what the file holds by name, never kept. The grant's parameters
+ * come from the file, so they are held to what an export's own may be.
+ */
+async function fileVaultKey(
+  payload: ExportPayload,
+  password: string,
+): Promise<Buffer> {
+  const grant = payload.tables.keyGrants
+    .filter((row) => row.kind === "password")
+    .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())[0]
+  let params: unknown
+
+  try {
+    params = grant ? JSON.parse(grant.kdfParams) : null
+  } catch {
+    params = null
+  }
+
+  const kdf = ScryptParamsSchema.safeParse(params)
+
+  if (!grant || !kdf.success) {
+    throw new PcpError("unauthorized", WRONG_VAULT_PASSWORD)
+  }
+
+  try {
+    return unwrapDek(
+      Buffer.from(grant.wrappedDek),
+      await deriveKek(password, kdf.data),
+      grant.id,
+    )
+  } catch (error) {
+    if (error instanceof CryptoError) {
+      throw new PcpError("unauthorized", WRONG_VAULT_PASSWORD)
+    }
+
+    throw error
+  }
 }
 
 function parseJson(buffer: Buffer, orElse: string): unknown {
@@ -402,14 +472,28 @@ export async function restoreExport(
   options: { restoreHostSettings: boolean },
 ): Promise<void> {
   if (target.into === "fresh") {
-    return writeExport(payload, target, options)
+    await writeExport(payload, target, options)
+    // What this process knew of the vault's sealing was of rows now gone.
+    forgetSealedVault(payload.vault.id)
+    forgetVaultUpkeep(payload.vault.id)
+    return
   }
 
   // The vault's browser holds sign-ins from before and would save them over
   // the profile written here: closed first (its profile saved, so a restore
   // that fails loses nothing) and kept from starting until the rows are in.
-  return withBrowserClosed(target.ctx, () =>
+  await withBrowserClosed(target.ctx, () =>
     writeExport(payload, target, options),
+  )
+  // What this process knew of the vault's sealing was of the rows replaced.
+  forgetSealedVault(target.ctx.vaultId)
+  forgetSealedVault(payload.vault.id)
+  forgetVaultUpkeep(target.ctx.vaultId)
+  forgetVaultUpkeep(payload.vault.id)
+  // The replaced vault's rows were zeroed as they went; the log's older
+  // pages and anything freed before secure_delete go with a rebuild.
+  await scrubFreedPages({ rebuild: true }).catch((error) =>
+    console.error("[restore] could not rebuild the database file", error),
   )
 }
 
@@ -509,8 +593,17 @@ async function writeExport(
         await inChunks(tables.servers, (data) =>
           tx.mcpServer.createMany({ data }),
         )
-        // A file from before definitions: each server its own.
-        await backfillDefinitions(tx, vault.id)
+        // A file from before definitions: each server its own. A sealed row
+        // is opened only with the vault's own key (the same vault's file);
+        // otherwise it gets one on its first use.
+        await backfillDefinitions(
+          tx,
+          vault.id,
+          // The same vault's own file is under the key the owner holds.
+          target.into === "vault" && target.ctx.vaultId === vault.id
+            ? target.ctx
+            : null,
+        )
         await inChunks(tables.serverAuthHeaders, (data) =>
           tx.serverAuthHeader.createMany({ data }),
         )
@@ -614,6 +707,8 @@ export async function wipeVault(
   // Answers kept for read_result are not exported: a day's cache, bound to
   // the tokens this restore replaces.
   await tx.toolResult.deleteMany(byVault)
+  // Nor are the calls the duplicate guard remembers, half an hour's worth.
+  await tx.callRecord.deleteMany(byVault)
   // Nor are the links that move them to and from an assistant's computer,
   // or the pages the owner uploads them from.
   await tx.fileLink.deleteMany(byVault)

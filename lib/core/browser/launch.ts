@@ -92,6 +92,12 @@ export function launchArgs(
     "--disable-popup-blocking",
     "--disable-back-forward-cache",
     "--disable-dev-shm-usage",
+    // The contexts are off the record (newBrowserContext), so their cache
+    // is in memory; this keeps the one of Chromium's own profile, in
+    // Playwright's folder under the temporary folder, from holding pages
+    // a crash would leave on disk (#100). No --media-cache-size: Chromium
+    // no longer has it.
+    "--disk-cache-size=1",
     // UDP would go around the proxy: no QUIC, and WebRTC only through it.
     "--disable-quic",
     "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",

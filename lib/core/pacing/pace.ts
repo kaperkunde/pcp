@@ -57,10 +57,18 @@ const REAL_CLOCK: PacingClock = {
 }
 
 type DestinationState = {
-  /** The latest slot given, or null before the first. */
+  /**
+   * The latest slot given, or null before the first; for a turn
+   * (takeTurn), when the action that held it ended.
+   */
   last: number | null
   /** Slots given, oldest first, back to PACING_STATE_TTL_MS before the last. */
   slots: number[]
+  /**
+   * Settles when the turn taken last is over: the next one waits for it
+   * (takeTurn). Null when no turn was ever taken.
+   */
+  turn: Promise<void> | null
 }
 
 type Store = { clock: PacingClock; states: Map<string, DestinationState> }
@@ -122,7 +130,7 @@ function stateFor(key: string, now: number): DestinationState {
     }
   }
 
-  state = { last: null, slots: [] }
+  state = { last: null, slots: [], turn: null }
   states.set(key, state)
   return state
 }
@@ -240,6 +248,25 @@ export function pacedMessage(
 }
 
 /**
+ * What a call is told when the action before it at the destination is
+ * still going after all it could wait: no pause can be named, only when to
+ * look again.
+ */
+export function busyMessage(
+  label: string,
+  retryAfterMs: number,
+  budgetMs: number,
+): string {
+  const waited =
+    budgetMs >= 1000
+      ? `for the ${Math.floor(budgetMs / 1000)} s this call can wait`
+      : "and this call has no time left to wait"
+  const seconds = wholeSeconds(retryAfterMs)
+
+  return `Paced: another action at ${label} is still running, ${waited}. Nothing was sent and no turn was kept for it; try again in about ${seconds} s.`
+}
+
+/**
  * How long a call may wait for its turn: up to `deadline` (pacing's clock,
  * in milliseconds) less what the call itself needs, never past
  * PACING_LONGEST_WAIT_MS, and PACING_MAX_WAIT_MS for a caller that names
@@ -310,4 +337,135 @@ export async function waitForSlot(
   }
 
   return null
+}
+
+/** A turn taken: `release` once the action is done, whatever it came to. */
+export type Turn = { release: () => void }
+
+/** Rejects with the signal's reason when it aborts; never settles otherwise. */
+function aborted(signal: AbortSignal | undefined): Promise<never> {
+  return new Promise<never>((_, reject) => {
+    if (!signal) return
+    if (signal.aborted) {
+      reject(signal.reason)
+      return
+    }
+    signal.addEventListener("abort", () => reject(signal.reason), {
+      once: true,
+    })
+  })
+}
+
+/** Settles true after `ms` of real time, false if `done` settles first. */
+function within(done: Promise<void>, ms: number): Promise<boolean> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+
+  return Promise.race([
+    done.then(() => true),
+    new Promise<boolean>((resolve) => {
+      timer = setTimeout(() => resolve(false), ms)
+    }),
+  ]).finally(() => clearTimeout(timer))
+}
+
+/**
+ * A turn at the destination for an action that takes time (a browser
+ * action): one at a time, and each only once the previous one ended and
+ * its pause under `policy` (null: no pause) went by, measured from that
+ * end. So however many callers act on one place at once (parallel calls, a
+ * run_code program, a wrapper), no two actions follow closer than the
+ * pause: the turn is the reservation, and it is held until `release`.
+ *
+ * Waiting for the previous turn counts against the caller's budget
+ * (waitBudget) as the pause does; a turn further off than that is not
+ * taken, and the answer is what to tell the caller. A signal that aborts
+ * while the call waits rejects with its reason, and the turn passes on.
+ */
+export async function takeTurn(
+  key: string,
+  label: string,
+  policy: PacingPolicy | null,
+  { signal, deadline }: { signal?: AbortSignal; deadline?: number } = {},
+): Promise<PacedRefusal | Turn> {
+  signal?.throwIfAborted()
+
+  const { clock } = store()
+  const asked = clock.now()
+  const state = stateFor(key, asked)
+  const budget = waitBudget(deadline, asked)
+  const before = state.turn
+  let free!: () => void
+  const mine = new Promise<void>((resolve) => {
+    free = resolve
+  })
+  // Ours is next: the one after waits for ours, which passes on only once
+  // the one before it has, should this caller give up first.
+  state.turn = mine
+  const passOn = () => {
+    if (before) void before.then(free)
+    else free()
+  }
+
+  if (before) {
+    let came: boolean
+
+    try {
+      came = await Promise.race([within(before, budget), aborted(signal)])
+    } catch (error) {
+      passOn()
+      throw error
+    }
+
+    if (!came) {
+      passOn()
+      // When it ends is not known: as long again as this one waited is a
+      // fair guess (a second, when it could not wait at all).
+      const retryAfterMs = budget > 0 ? budget : 1000
+      return {
+        message: busyMessage(label, retryAfterMs, budget),
+        retryAfterMs,
+      }
+    }
+  }
+
+  const now = clock.now()
+
+  if (policy) {
+    const slot = nextSlot(state, policy, now, clock.random)
+    const waitMs = slot - now
+    const left = Math.max(0, budget - (now - asked))
+
+    if (waitMs > left) {
+      free()
+      return {
+        message: pacedMessage(label, waitMs, left),
+        retryAfterMs: waitMs,
+      }
+    }
+
+    state.slots.push(slot)
+    state.last = slot
+    prune(state)
+
+    if (waitMs > 0) {
+      try {
+        await clock.sleep(waitMs, signal)
+      } catch (error) {
+        free()
+        throw error
+      }
+    }
+  }
+
+  let released = false
+
+  return {
+    release: () => {
+      if (released) return
+      released = true
+      // The pause after it runs from when it ended.
+      state.last = Math.max(state.last ?? 0, clock.now())
+      free()
+    },
+  }
 }

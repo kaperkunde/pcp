@@ -14,8 +14,9 @@ import {
   type Outcome,
 } from "../tools/outcome"
 import { capabilityPage, type Capability, type CommonItem } from "./list"
-import { MAX_READ_PROVIDERS, MAX_TRIED_PROVIDERS } from "./limits"
+import { MAX_READ_PROVIDERS, MAX_TRIED_PROVIDERS, PAGE_DPI } from "./limits"
 import {
+  countsFromZero,
   OPERATIONS,
   optionPath,
   providerName,
@@ -54,7 +55,7 @@ export type Bridge = (call: {
   server: string
   tool: string
   args: Record<string, unknown>
-  /** Only these parts of a JSON answer (call_tool's fields). */
+  /** Only these parts of a JSON answer (execute's fields). */
   fields?: string[]
 }) => Promise<BridgeOutcome>
 
@@ -131,9 +132,21 @@ export const READ_IMAGE_OUTPUT = z.discriminatedUnion("kind", [
   NEEDS_OWNER,
   READINGS,
 ])
+/** A page of a PDF made into a picture (convert_document's to "png"). */
+export const PAGE_IMAGE = z.object({
+  kind: z.literal("page_image"),
+  provider: z.string(),
+  /** The page, counted from 1. */
+  page: z.number(),
+  /** The picture, as a handle for view_image. */
+  file: RESULT_HANDLE,
+  failed: z.array(z.object({ provider: z.string(), error: z.string() })),
+})
+
 export const CONVERT_OUTPUT = z.discriminatedUnion("kind", [
   NEEDS_OWNER,
   CONVERTED,
+  PAGE_IMAGE,
 ])
 export const EDIT_OUTPUT = z.discriminatedUnion("kind", [NEEDS_OWNER, EDITED])
 
@@ -156,6 +169,8 @@ export function setupOutcome(
   cap: Capability,
   publicUrl: string,
   why: string,
+  /** The common items that would do it, when not all of the capability's. */
+  { items = cap.items }: { items?: CommonItem[] } = {},
 ): Outcome {
   const url = capabilityPage(publicUrl, cap.id)
 
@@ -168,7 +183,11 @@ export function setupOutcome(
       label: cap.label,
       capability: cap.id,
     },
-    `Not done yet: ${why} PCP's page at the link below offers ${itemNames(cap.items)} for the owner to launch on one of their SSH servers, in a few clicks. Once it runs, call ${cap.tool} again with the same arguments: it uses what they launched, at the levels they give this token. ${nextMessageCheck(`${cap.tool} again`, "nothing is set up yet")}\n\n${linkLastText(url, cap.label)}`,
+    `Not done yet: ${why} ${
+      items.length > 0
+        ? `PCP's page at the link below offers ${itemNames(items)} for the owner to launch on one of their SSH servers, in a few clicks. Once it runs, call ${cap.tool} again with the same arguments: it uses what they launched, at the levels they give this token.`
+        : `PCP's page at the link below says what the owner can add for it. Once they have, call ${cap.tool} again with the same arguments: it uses what they added, at the levels they give this token.`
+    } ${nextMessageCheck(`${cap.tool} again`, "nothing is set up yet")}\n\n${linkLastText(url, cap.label)}`,
   )
 }
 
@@ -387,7 +406,7 @@ export async function runProvider(
   // a provider on paths), in the folder as its tools see it.
   const output =
     provider.output && seenFolder
-      ? `${seenFolder}/${provider.operation}.${op.output === "file" ? "pdf" : "md"}`
+      ? `${seenFolder}/${provider.operation}.${op.extension ?? (op.output === "file" ? "pdf" : "md")}`
       : null
 
   if (provider.output && output) {
@@ -399,7 +418,13 @@ export async function runProvider(
     const path = value === undefined ? null : optionPath(provider, option)
 
     if (path) {
-      setAt(args, path, value)
+      setAt(
+        args,
+        path,
+        typeof value === "number" && countsFromZero(provider, option, path)
+          ? value - 1
+          : value,
+      )
     }
   }
 
@@ -588,7 +613,7 @@ async function firstThatWorks(
     value: unknown,
     files: Handle[],
     failed: Array<{ provider: string; error: string }>,
-  ) => Outcome | null,
+  ) => Outcome | null | Promise<Outcome | null>,
 ): Promise<Outcome> {
   const failed: Array<{ provider: string; error: string }> = []
   const skipped: string[] = []
@@ -610,7 +635,7 @@ async function firstThatWorks(
       continue
     }
 
-    const answer = done(provider, run.value, run.files, failed)
+    const answer = await done(provider, run.value, run.files, failed)
 
     if (answer) {
       return answer
@@ -668,6 +693,55 @@ export function convertDocument(
         format: read.format,
         text: read.text,
         files,
+        failed,
+      })
+    },
+  )
+}
+
+/** The pictures a page may come back as, by their first bytes. */
+const PAGE_PICTURES = new Set(["image/png", "image/jpeg", "image/webp"])
+
+/**
+ * convert_document's to "png": the best provider that turns a PDF's page
+ * into a picture, which comes back as a handle (from the path it wrote, or
+ * an image in its answer) for view_image to show. What it made counts only
+ * when its first bytes are a PNG, JPEG or WebP (`pictureType` sniffs the
+ * token's kept result); anything else is that provider failing.
+ */
+export function pdfPageImage(
+  cap: Capability,
+  providers: Provider[],
+  file: InputFile,
+  page: number,
+  bridge: Bridge,
+  publicUrl: string,
+  pictureType: (handle: Handle) => Promise<string | null>,
+): Promise<Outcome> {
+  return firstThatWorks(
+    cap,
+    providers,
+    { main: [file] },
+    { page, dpi: PAGE_DPI, format: "png" },
+    bridge,
+    publicUrl,
+    async (provider, value, files, failed) => {
+      const made = files[0] ?? firstHandle(value)
+      const type = made ? await pictureType(made) : null
+
+      if (!made || !type || !PAGE_PICTURES.has(type)) {
+        failed.push({
+          provider: providerName(provider),
+          error: `the renderer answered with no picture${made ? ` (${type ?? "a file PCP does not know"})` : ""}.`,
+        })
+        return null
+      }
+
+      return ok({
+        kind: "page_image",
+        provider: providerName(provider),
+        page,
+        file: made,
         failed,
       })
     },

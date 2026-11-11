@@ -30,6 +30,7 @@ import {
 } from "./personal-notes"
 import { createSecret } from "./secrets"
 import { createServer, getServer, type ExtraAuthHeaderInput } from "./servers"
+import { writeServer, serverSlugWhere } from "./server-meta"
 import { scratchDatabase } from "./test-db"
 import { callServerTool } from "./upstream"
 import { setupVault } from "./vault"
@@ -96,7 +97,7 @@ const enable = (id: string) =>
   db().mcpServer.update({ where: { id }, data: { enabled: true } })
 
 const rowOf = (slug: string) =>
-  db().mcpServer.findFirstOrThrow({ where: { slug } })
+  db().mcpServer.findFirstOrThrow({ where: serverSlugWhere(ctx, slug) })
 
 /**
  * What an owner's "yes" does to an assistant's register_server with OpenAPI
@@ -380,9 +381,10 @@ describe("registering an endpoint from text", () => {
     })
     expect(JSON.stringify(details)).not.toContain(password.id)
     expect(JSON.stringify(details)).not.toContain("ada@example.com")
-    expect(
-      await db().mcpServer.findUniqueOrThrow({ where: { id } }),
-    ).toMatchObject({ authType: "basic", authUsername: "ada@example.com" })
+    expect(await getServer(ctx, id)).toMatchObject({
+      authType: "basic",
+      authUsername: "ada@example.com",
+    })
   })
 
   it("notes a private address it can see, and does not look up names", async () => {
@@ -1436,7 +1438,7 @@ describe("the owner's note and detach, as an assistant asks for them", () => {
     await sibling(source.definitionId!)
 
     const renamed = await proposeEndpointDetach(scope, slug)
-    await db().mcpServer.update({ where: { id }, data: { name: "Renamed" } })
+    await writeServer(ctx, id, { name: "Renamed" })
     await expect(applyEndpointChange(ctx, renamed)).rejects.toThrow(
       /has changed since this was asked/,
     )
