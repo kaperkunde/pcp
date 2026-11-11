@@ -3,7 +3,7 @@ import type { McpServer, Prisma } from "@/lib/generated/prisma/client"
 import type { VaultContext } from "./context"
 import { keyedHash } from "./crypto"
 import { db } from "./db"
-import { notFound, PcpError } from "./errors"
+import { notFound } from "./errors"
 import {
   groupSelect,
   type Opened,
@@ -279,55 +279,28 @@ export type ServerWrite = Omit<
 
 /**
  * Writes a change to a server, sealing the values among it that are
- * sealed. Those are one JSON object, so a change to some reads the others
- * and writes them back only over what it read: a write that came between
- * is read again, never lost. A row from before is sealed whole by its
- * first such write.
+ * sealed, in one statement with the rest. The sealed values are one JSON
+ * object, so a change to some reads the others and writes them back: the
+ * read and the write are one transaction (SQLite runs them one at a time),
+ * so a write that came between is never lost and a status never goes out
+ * without its own message. A caller that passes its transaction keeps it
+ * for the whole. A row from before is sealed whole by its first such write.
  */
 export async function writeServer(
   ctx: VaultContext,
   id: string,
   data: ServerWrite,
-  client: Client = db(),
+  client?: Client,
 ): Promise<void> {
+  if (!client) {
+    await db().$transaction((tx) => writeServer(ctx, id, data, tx))
+    return
+  }
+
   const { meta, rest } = split(data as Record<string, unknown>)
+  let sealed: Record<string, unknown> = {}
 
   if (Object.keys(meta).length > 0) {
-    await writeMeta(ctx, id, meta, client)
-  }
-
-  if (Object.keys(rest).length > 0) {
-    await client.mcpServer.update({
-      where: { id },
-      data: rest as Prisma.McpServerUncheckedUpdateInput,
-    })
-  }
-}
-
-/** writeServer, answering the row as it is now, opened. */
-export async function updateServerRow(
-  ctx: VaultContext,
-  id: string,
-  data: ServerWrite,
-  client: Client = db(),
-): Promise<OpenServer> {
-  await writeServer(ctx, id, data, client)
-  return openServer(
-    ctx,
-    await client.mcpServer.findUniqueOrThrow({ where: { id } }),
-  )
-}
-
-/** Writes over a conflicting write this many times before giving up. */
-const META_ATTEMPTS = 8
-
-async function writeMeta(
-  ctx: VaultContext,
-  id: string,
-  patch: Partial<ServerMeta>,
-  client: Client,
-): Promise<void> {
-  for (let attempt = 0; attempt < META_ATTEMPTS; attempt++) {
     const row = await client.mcpServer.findUnique({
       where: { id },
       select: SERVER_META_SELECT,
@@ -337,23 +310,31 @@ async function writeMeta(
       throw notFound("That server")
     }
 
-    const next = { ...readFields(ctx.dek, SERVER_META, row), ...patch }
-    const { count } = await client.mcpServer.updateMany({
-      where: { id, meta: row.meta === null ? null : { equals: row.meta } },
-      data: sealedColumns(ctx, id, next) as Omit<
-        Prisma.McpServerUncheckedUpdateManyInput,
-        "id"
-      >,
+    sealed = sealedColumns(ctx, id, {
+      ...readFields(ctx.dek, SERVER_META, row),
+      ...meta,
     })
-
-    if (count === 1) {
-      return
-    }
   }
 
-  throw new PcpError(
-    "conflict",
-    "The server changed while this was saved; try again.",
+  if (Object.keys(rest).length + Object.keys(sealed).length > 0) {
+    await client.mcpServer.update({
+      where: { id },
+      data: { ...rest, ...sealed } as Prisma.McpServerUncheckedUpdateInput,
+    })
+  }
+}
+
+/** writeServer, answering the row as it is now, opened. */
+export async function updateServerRow(
+  ctx: VaultContext,
+  id: string,
+  data: ServerWrite,
+  client?: Client,
+): Promise<OpenServer> {
+  await writeServer(ctx, id, data, client)
+  return openServer(
+    ctx,
+    await (client ?? db()).mcpServer.findUniqueOrThrow({ where: { id } }),
   )
 }
 

@@ -1342,7 +1342,10 @@ export async function setToolDescription(
 /**
  * What the last contact with a server found. The message is sealed with
  * the server's other values, so only a request that holds the vault's key
- * writes one.
+ * writes one. Best effort: it follows what happened (a command that ran, a
+ * call that failed) and never takes its place, so a write that fails (the
+ * server removed meanwhile) is logged, by the server's id only, and passed
+ * over.
  */
 export async function setServerStatus(
   ctx: VaultContext,
@@ -1351,9 +1354,15 @@ export async function setServerStatus(
   message = "",
   extra: { lastSyncedAt?: Date } = {},
 ): Promise<void> {
-  await writeServer(ctx, serverId, {
-    status,
-    statusMessage: message.slice(0, 500),
-    ...extra,
-  })
+  try {
+    await writeServer(ctx, serverId, {
+      status,
+      statusMessage: message.slice(0, 500),
+      ...extra,
+    })
+  } catch {
+    console.error("[servers] could not record a server's status", {
+      server: serverId,
+    })
+  }
 }

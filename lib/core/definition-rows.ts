@@ -400,13 +400,7 @@ export async function shareDescription(
     const meta = definitionMeta(ctx, definition)
 
     if (meta.description !== description) {
-      await db().serverDefinition.update({
-        where: { id: definition.id },
-        data: sealedDefinitionMeta(ctx, definition.id, {
-          ...meta,
-          description,
-        }),
-      })
+      await writeDefinition(ctx, definition.id, { description })
     }
   }
 
@@ -514,8 +508,15 @@ export async function writeDefinition(
     Prisma.ServerDefinitionUncheckedUpdateInput,
     "id" | "meta" | "plainName" | "plainSlug" | "plainDescription" | "slugKey"
   > = {},
-  client: Client = db(),
+  client?: Client,
 ): Promise<void> {
+  // The read and the write in one transaction: a change made at the same
+  // time is read, never written over.
+  if (!client) {
+    await db().$transaction((tx) => writeDefinition(ctx, id, patch, data, tx))
+    return
+  }
+
   const row = await client.serverDefinition.findUnique({
     where: { id },
     select: DEFINITION_META_SELECT,

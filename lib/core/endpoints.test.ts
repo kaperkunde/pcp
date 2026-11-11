@@ -1,8 +1,12 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import { openSpec, sealedSpecPatches } from "./spec-rows"
 import { readFileSync } from "node:fs"
-import { catchUpVault, forgetVaultUpkeeps } from "./vault-upkeep"
+import {
+  catchUpVault,
+  forgetVaultUpkeeps,
+  RETRY_AFTER_MS,
+} from "./vault-upkeep"
 import { editTools } from "./test-servers"
 import { createApiToken, resolveApiToken } from "./api-tokens"
 import { db } from "./db"
@@ -698,6 +702,40 @@ describe("tools an earlier PCP built", () => {
       (await getServer(ctx, id)).tools.find((tool) => tool.name === "listPets")!
         .description,
     ).toBe("stale")
+  })
+
+  it("are tried again by a later request when catching up failed, at most once a minute", async () => {
+    const id = await builtByEarlierPcp()
+    const browser = await import("./browser/server")
+    const failing = vi
+      .spyOn(browser, "syncVaultBrowserTools")
+      .mockRejectedValueOnce(new Error("down"))
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {})
+
+    try {
+      forgetVaultUpkeeps()
+      const start = Date.now()
+      await catchUpVault(ctx, start)
+      expect(failing).toHaveBeenCalledTimes(1)
+
+      // Within the minute: not tried again.
+      await catchUpVault(ctx, start + 1_000)
+      expect(failing).toHaveBeenCalledTimes(1)
+
+      // After it: tried again, and done.
+      await catchUpVault(ctx, start + RETRY_AFTER_MS + 1)
+      expect(failing).toHaveBeenCalledTimes(2)
+      await catchUpVault(ctx, start + 2 * RETRY_AFTER_MS + 2)
+      expect(failing).toHaveBeenCalledTimes(2)
+      expect(
+        (await getServer(ctx, id)).tools.find(
+          (tool) => tool.name === "listPets",
+        )!.description,
+      ).not.toBe("stale")
+    } finally {
+      failing.mockRestore()
+      logged.mockRestore()
+    }
   })
 
   it("are rebuilt from the kept copy once, and nothing else about the endpoint changes", async () => {
