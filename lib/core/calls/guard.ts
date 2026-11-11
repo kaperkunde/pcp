@@ -30,7 +30,8 @@ import {
  * renamed) is not run: it is answered with how the first one went,
  * running, succeeded (with its answer when it was short, or the kept
  * result a long one already was), failed, or asking the owner. An assistant that means to do it twice says so (`rerun` with a
- * reason). The same tool with other arguments is only noted.
+ * reason). The same tool with other arguments is only noted, and only
+ * while the earlier call's outcome is unknown.
  *
  * It sits where a call is resolved, its arguments checked and before it
  * asks or runs: execute_write and execute_destructive (gateway.ts
@@ -366,7 +367,11 @@ export async function guardCall(
       toolName: recordedTool(scope.ctx.dek, target.server.id, target.tool),
       startedAt: { gte: since },
       argsHash: { not: argsHash },
-      status: { not: "asked" },
+      // Only an earlier call whose outcome PCP does not know: one that
+      // answered (or failed plainly) needs no word, and a note on every
+      // second call of a tool (a second email to someone else) is noise
+      // that also breaks answers read as JSON.
+      status: { in: ["running", "may_have_happened"] },
       id: { not: id },
     },
     orderBy: { startedAt: "desc" },
@@ -381,7 +386,7 @@ export async function guardCall(
       tool: target.tool,
     },
     warning: near
-      ? `Note: you called ${name} ${ago(Math.max(0, now.getTime() - near.startedAt.getTime()))} ago with other arguments; if this is the same action, check that one did not already do it.`
+      ? `Note: you called ${name} ${ago(Math.max(0, now.getTime() - near.startedAt.getTime()))} ago with other arguments, and it is not known whether that one went through; if this is the same action, check that it did not already happen.`
       : null,
   }
 }

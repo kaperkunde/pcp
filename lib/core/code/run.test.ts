@@ -2093,14 +2093,12 @@ describe("the same call again (#115)", () => {
     expect(JSON.stringify(line)).not.toContain("wrong box")
   })
 
-  it("notes the same tool with other arguments, without holding it back", async () => {
+  it("runs the same tool with other arguments, with no note once the first one answered", async () => {
     await callTool("archive", { id: 7 })
 
     const other = await callTool("archive", { id: 8 })
     expect(other.isError).toBe(false)
-    expect(other.text).toContain(
-      "Note: you called postcards/archive 0 seconds ago with other arguments",
-    )
+    expect(other.text).not.toContain("with other arguments")
     expect(ran).toHaveLength(2)
   })
 

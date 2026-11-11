@@ -275,7 +275,7 @@ describe("guardCall", () => {
 })
 
 describe("a call's record", () => {
-  it("keeps the tool as a keyed hash, and still notes a call with other arguments", async () => {
+  it("keeps the tool as a keyed hash, and notes a call with other arguments while the first one's outcome is unknown", async () => {
     const scope = () => ({ ctx, tokenId })
     const made = await guardCall(
       scope(),
@@ -284,7 +284,7 @@ describe("a call's record", () => {
       { again: AGAIN },
     )
     await endCall("ticket" in made ? made.ticket : null, {
-      status: "succeeded",
+      status: "may_have_happened",
     })
 
     const [row] = await db().$queryRawUnsafe<Array<{ tool_name: string }>>(
@@ -310,6 +310,27 @@ describe("a call's record", () => {
       { again: AGAIN },
     )
     expect("warning" in elsewhere && elsewhere.warning).toBeNull()
+  })
+
+  it("says nothing of an earlier call with other arguments that answered", async () => {
+    const scope = () => ({ ctx, tokenId })
+    const made = await guardCall(
+      scope(),
+      { ...target(), tool: "send_quiet_tool" },
+      { to: "Ada" },
+      { again: AGAIN },
+    )
+    await endCall("ticket" in made ? made.ticket : null, {
+      status: "succeeded",
+    })
+
+    const other = await guardCall(
+      scope(),
+      { ...target(), tool: "send_quiet_tool" },
+      { to: "Bob" },
+      { again: AGAIN },
+    )
+    expect("warning" in other && other.warning).toBeNull()
   })
 })
 
