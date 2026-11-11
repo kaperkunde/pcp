@@ -1,7 +1,8 @@
 import { readFileSync } from "node:fs"
 
+import { writeDefinition } from "../definition-rows"
 import { createHash } from "node:crypto"
-import { afterEach, beforeEach, describe, expect, it } from "vitest"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import { cleanupIdle, stopCleanup } from "../cleanup/runtime"
 import type { VaultContext } from "../context"
@@ -124,6 +125,51 @@ describe("servers", () => {
       description: "Both",
       statusMessage: "Kept too",
       sshHostKey: "ssh-ed25519 AAAA",
+    })
+  })
+
+  it("keeps every one of many writes at once, each status with its own message", async () => {
+    const id = await addServer()
+
+    await Promise.all(
+      Array.from({ length: 20 }, (_, n) =>
+        setServerStatus(ctx, id, n % 2 ? "ok" : "error", `message ${n}`),
+      ),
+    )
+
+    const server = await getServer(ctx, id)
+    const n = Number(server.statusMessage.replace("message ", ""))
+    expect(server.statusMessage).toMatch(/^message \d+$/)
+    // The status and its message come from the same write.
+    expect(server.status).toBe(n % 2 ? "ok" : "error")
+    expect(server.name).toBe("SERVER-NAME-MARKER")
+  })
+
+  it("never lets a status write that fails change what happened", async () => {
+    const id = await addServer()
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {})
+
+    try {
+      await db().mcpServer.delete({ where: { id } })
+      // Gone between the call and its status: the call's outcome stands.
+      await expect(setServerStatus(ctx, id, "ok", "")).resolves.toBeUndefined()
+    } finally {
+      logged.mockRestore()
+    }
+  })
+
+  it("keeps both of two changes to a definition made at once", async () => {
+    const id = await addServer()
+    const { id: definitionId } = (await definitionOf(ctx, id))!
+
+    await Promise.all([
+      writeDefinition(ctx, definitionId, { name: "Renamed" }),
+      writeDefinition(ctx, definitionId, { description: "Described" }),
+    ])
+
+    expect(await definitionOf(ctx, id)).toMatchObject({
+      name: "Renamed",
+      description: "Described",
     })
   })
 
