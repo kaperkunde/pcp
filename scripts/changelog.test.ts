@@ -12,6 +12,7 @@ import {
   HEADER,
   insertSection,
   parseCommits,
+  branchOf,
   renderEntries,
   renderSection,
   searchSince,
@@ -174,6 +175,26 @@ describe("collect and renderEntries", () => {
         `- Pushed straight to develop ([0000000](https://github.com/${REPO}/commit/${oid(3)}))`,
       ].join("\n"),
     )
+  })
+
+  it("takes a pull request's commits from the range's own graph, with none listed", () => {
+    // develop: 1 ← 2 (merge of the branch 3 ← 4) ; 5 pushed after it.
+    const line = (n: number, parents: number[], subject: string) =>
+      `${oid(n)}\t${parents.map(oid).join(" ")}\t2026-11-0${n}T10:00:00Z\t${subject}`
+    const graph = parseCommits(
+      [
+        line(5, [2], "Pushed after the merge"),
+        line(2, [1, 4], "Merge pull request #20 from x/y"),
+        line(4, [3], "Second commit of #20"),
+        line(3, [1], "First commit of #20"),
+        line(1, [], "Before"),
+      ].join("\n"),
+    )
+    expect(branchOf(oid(2), graph).sort()).toEqual([oid(3), oid(4)].sort())
+    const collected = collect([pr(20, 2, null)], graph.slice(0, 4))
+    expect(collected.others.map((c) => c.subject)).toEqual([
+      "Pushed after the merge",
+    ])
   })
 
   it("counts the commits without a pull request past the first thirty", () => {

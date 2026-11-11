@@ -108,7 +108,7 @@ jobs:
           git log --format='%H%x09%P%x09%cI%x09%s' "$range" > "$RUNNER_TEMP/commits.txt"
           since="$(node scripts/changelog.mjs since --commits "$RUNNER_TEMP/commits.txt")"
           set -- --base develop --state merged --limit 1000 \
-            --json number,title,body,url,mergedAt,mergeCommit,commits
+            --json number,title,body,url,mergedAt,mergeCommit
           if [ -n "$since" ]; then
             set -- "$@" --search "merged:>=$since"
           fi

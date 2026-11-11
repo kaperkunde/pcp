@@ -49,7 +49,7 @@ section; each also has its own notes on its pre-release.
 `
 
 /**
- * @typedef {{ oid: string, merge: boolean, date: string, subject: string }} Commit
+ * @typedef {{ oid: string, parents: string[], merge: boolean, date: string, subject: string }} Commit
  * @typedef {{
  *   number: number,
  *   title: string,
@@ -72,11 +72,14 @@ export function parseCommits(text) {
     .split("\n")
     .filter((line) => line.trim() !== "")
     .map((line) => {
-      const [oid = "", parents = "", date = "", ...subject] = line.split("\t")
+      const [oid = "", parentList = "", date = "", ...subject] =
+        line.split("\t")
       if (!OID.test(oid)) throw new Error(`Not a commit line: ${line}`)
+      const parents = parentList.trim().split(/\s+/).filter(Boolean)
       return {
         oid,
-        merge: parents.trim().split(/\s+/).length > 1,
+        parents,
+        merge: parents.length > 1,
         date,
         subject: subject.join("\t"),
       }
@@ -219,12 +222,45 @@ export function collect(prs, commits) {
     merged.flatMap((pr) => [
       pr.mergeCommit?.oid,
       ...(pr.commits ?? []).map((commit) => commit.oid),
+      ...branchOf(pr.mergeCommit?.oid, commits),
     ]),
   )
   const others = commits
     .filter((commit) => !commit.merge && !covered.has(commit.oid))
     .reverse()
   return { prs: merged, others }
+}
+
+/**
+ * The range's commits a merge brought in: reachable from its other parents
+ * and not from its first, read from the range's own graph (so a pull
+ * request with more commits than GitHub lists is still whole). A squash or
+ * a commit outside the range brings in nothing.
+ *
+ * @param {string | undefined} oid
+ * @param {Commit[]} commits
+ * @returns {string[]}
+ */
+export function branchOf(oid, commits) {
+  const byOid = new Map(commits.map((commit) => [commit.oid, commit]))
+  const merge = oid ? byOid.get(oid) : undefined
+  if (!merge || merge.parents.length < 2) return []
+  /** @param {string[]} start */
+  const reach = (start) => {
+    const seen = new Set()
+    const queue = [...start]
+    while (queue.length > 0) {
+      const next = queue.pop()
+      if (next === undefined || seen.has(next)) continue
+      const commit = byOid.get(next)
+      if (!commit) continue
+      seen.add(next)
+      queue.push(...commit.parents)
+    }
+    return seen
+  }
+  const main = reach([merge.parents[0] ?? ""])
+  return [...reach(merge.parents.slice(1))].filter((each) => !main.has(each))
 }
 
 /** @param {string} repo */
