@@ -66,7 +66,7 @@ import {
 } from "../tools/family"
 import { decideSite, loadFetchRules } from "../web-fetch"
 import { parseSecretRef, scrubResult } from "../wrappers/placeholders"
-import { consoleLog, networkLog } from "./devtools"
+import { consoleLog, maskUrl, networkLog } from "./devtools"
 import { catchDownload, offeredName, tabOwnsFrame } from "./downloads"
 import { evaluateInTab } from "./evaluate"
 import { atStep, callClock, timeoutMessage, type CallClock } from "./clock"
@@ -96,6 +96,7 @@ import {
   MAX_TABS,
   MAX_UPLOAD_BYTES,
   MAX_FULL_PAGE_HEIGHT,
+  MAX_HELD_DOCUMENT_BYTES,
   MAX_URL_LENGTH,
   WINDOW_SETTLE_MS,
   PACED_TAB_DEADLINE_MS,
@@ -574,6 +575,22 @@ function offeredLead(tab: Tab): string[] {
     : []
 }
 
+/**
+ * Whether a page is another tab, through which no window is taken for this
+ * one's download: another token's, or one the owner has.
+ */
+function othersTab(vault: VaultBrowser, tab: Tab, targetId: string): boolean {
+  const other = [...vault.tabs.values()].find(
+    (candidate) => candidate.mainFrameId === targetId,
+  )
+
+  return (
+    other !== undefined &&
+    other !== tab &&
+    (other.tokenId !== tab.tokenId || other.control !== "assistant")
+  )
+}
+
 /** Whether a window is still open as a tab of the vault's. */
 function windowOpen(
   vault: VaultBrowser | null,
@@ -597,7 +614,7 @@ function windowClosed(vault: VaultBrowser | null, note: PopupNote): boolean {
 
 /** A window a page opened, in a line of an answer. */
 function windowWords(vault: VaultBrowser | null, note: PopupNote): string {
-  const at = note.url ? ` at ${note.url.slice(0, MAX_URL_LENGTH)}` : ""
+  const at = note.url ? ` at ${maskUrl(note.url)}` : ""
   const named = note.tabId ? ` (tab ${note.tabId})` : ""
 
   if (note.ended?.by === "gate") {
@@ -670,10 +687,7 @@ async function windowSettled(note: PopupNote): Promise<void> {
 function windowJson(vault: VaultBrowser | null, note: PopupNote) {
   return {
     ...(note.tabId ? { tab: note.tabId } : {}),
-    url:
-      note.ended?.by === "gate"
-        ? note.ended.host
-        : note.url.slice(0, MAX_URL_LENGTH),
+    url: note.ended?.by === "gate" ? note.ended.host : maskUrl(note.url),
     ...(windowClosed(vault, note) ? { closed: true as const } : {}),
     ...(note.ended?.by === "gate" ? { refused: true as const } : {}),
   }
@@ -2335,7 +2349,9 @@ async function downloadFile(
     tabSession: tab.cdp,
     mainFrameId: tab.mainFrameId,
     judge: async (frameId, address) =>
-      !(await tabOwnsFrame(vault.downloads, tab, frameId))
+      !(await tabOwnsFrame(vault.downloads, tab, frameId, (targetId) =>
+        othersTab(vault, tab, targetId),
+      ))
         ? "other"
         : mayOpen(vault, tab, address)
           ? "take"
@@ -2387,7 +2403,7 @@ async function downloadFile(
     }
     case "too_large":
       return failedWith(
-        `${offeredName(caught.name)} is larger than PCP keeps of one file (${fileBytes.toLocaleString("en")} bytes), so the download was stopped. The owner can raise that in PCP's settings, under Resources.`,
+        `${offeredName(caught.name)} is larger than PCP keeps of one file (${fileBytes.toLocaleString("en")} bytes), so the download was stopped${caught.blank ? "; the page it was shown in shows nothing of it now" : ""}. The owner can raise that in PCP's settings, under Resources.`,
       )
     case "timeout":
       return failedWith(
@@ -2429,11 +2445,16 @@ async function downloadFile(
     ? ""
     : ` It came from a new window the page opened${
         windowOpen(vault, source.note)
-          ? `, tab ${source.note.tabId}, which shows it still`
-          : windowClosed(vault, source.note)
+          ? `, tab ${source.note.tabId}${caught.blank ? "" : ", which shows it still"}`
+          : source.note.ended?.by === "itself"
             ? ", which closed itself"
-            : ""
+            : windowClosed(vault, source.note)
+              ? ", which has closed"
+              : ""
       }.`
+  const blank = caught.blank
+    ? ` The ${source ? "window" : "tab"} could not show it: it is larger than PCP hands back to a page (${MAX_HELD_DOCUMENT_BYTES.toLocaleString("en")} bytes), so it shows nothing of it.`
+    : ""
 
   return text(
     JSON.stringify(
@@ -2445,7 +2466,7 @@ async function downloadFile(
         ...(others.length > 0
           ? { popups: others.map((note) => windowJson(vault, note)) }
           : {}),
-        note: `PCP keeps this file for you: pass {"$result": "${kept.id}"} where a tool wants a file (upload_file's files, send_email's or create_draft's attachments, a field that takes base64), read it with read_result, or get it onto your own computer with share_result's link where this token has it.${cameFrom}`,
+        note: `PCP keeps this file for you: pass {"$result": "${kept.id}"} where a tool wants a file (upload_file's files, send_email's or create_draft's attachments, a field that takes base64), read it with read_result, or get it onto your own computer with share_result's link where this token has it.${cameFrom}${blank}`,
       },
       null,
       2,

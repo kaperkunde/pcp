@@ -2904,8 +2904,12 @@ address and tab id. Each window a page opens is a note on its tab
 (`PopupNote`, from Chromium's own targets, so one that closed before
 Playwright reported it is still there), said once in that tab's next
 answer: open as tab N, closed itself, closed by PCP and why (no room, a
-script running), or refused by the gate at a site the token may not open,
-which also puts the site on the token's page. The gate is the browser's, not a tab's (`Fetch`
+script running), or refused by the gate at a site the token may not open
+(named by its site only; a note takes an address only once the gate let
+it through, and shows it masked as the logs do), which also puts the site
+on the token's page. A window still opening, no tab yet and not closed,
+waits up to `WINDOW_SETTLE_MS` for a later answer; a tab keeps the newest
+`MAX_WINDOW_NOTES`, the oldest dropped. The gate is the browser's, not a tab's (`Fetch`
 on the browser's own DevTools session, on before the first page exists), so
 it holds a popup from its very first request, before Playwright has
 reported the popup: until then the popup opens only what the tab that
@@ -3317,14 +3321,22 @@ from an address the tab may open (`mayOpen`; a page's own blob or data file
 is the page's). A popup is known to be the tab's by the page that opened it,
 as Chromium named it when it made the window (`Target.targetCreated` on that
 session, kept for the newest `MAX_REMEMBERED_WINDOWS` and followed back
-`MAX_WINDOW_DEPTH` openers): Chromium closes a blank window whose address
+`MAX_WINDOW_DEPTH` openers, never through another tab that another token
+drives or the owner has): Chromium closes a blank window whose address
 turned out to be a download as the download begins, before anyone could ask
-it whose it was. A file a page shows rather than offers, a PDF or a picture
-(no `attachment`) its tab or such a popup is answered with, is taken the
-same way: while the call waits, the gate continues that document's request
-with its answer held (`interceptResponse`), and `takeDocument` reads the
-body in chunks, stopped past the largest file PCP keeps, then hands it on
-to the page as it was, so the window still shows it. Every other download
+it whose it was. A file a page shows rather than offers, a PDF, PNG, JPEG,
+GIF or WebP (never SVG; no `attachment`) that the main frame of its tab or
+such a popup is answered with, is taken the same way: while the call waits,
+the gate continues that document's request with its answer held
+(`interceptResponse`), and `takeDocument` reads the body in chunks. It is
+taken only when its first bytes are what its type says; otherwise the page
+gets the body unchanged. A body is handed back to the page only up to
+`MAX_HELD_DOCUMENT_BYTES` (DevTools carries it whole, as base64); one
+larger is kept and the page answered with nothing, which the call's answer
+says. One said to be past the largest file PCP keeps is never held, so the
+page loads it as usual; one found to be as it comes is given up, read on
+only as far as it can still be handed back, and the answer says when the
+page shows nothing of it. A held answer is never aborted. Every other download
 is cancelled as it begins, and the one
 taken is cancelled once Chromium says it is larger than PCP keeps of one file
 or slower than `DOWNLOAD_TIMEOUT_MS`. Its bytes are read and the file removed

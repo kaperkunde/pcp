@@ -241,6 +241,12 @@ export const WINDOW_SETTLE_MS = 2_000
 /** A PDF or picture a window shows, read in chunks of this many bytes. */
 export const DOCUMENT_READ_BYTES = 1024 * 1024
 /**
+ * The most of a PDF or picture a page was shown that PCP hands back to the
+ * page once it has read it (Fetch.fulfillRequest carries the body whole, as
+ * base64): one larger is kept, and the page shows nothing of it.
+ */
+export const MAX_HELD_DOCUMENT_BYTES = 32 * 1024 * 1024
+/**
  * How long one tool call may hold its tab (calls on one tab run one at a
  * time, each tab apart from the others). Past it the tab is taken to have
  * stopped responding: its page is closed and opened again at its address,

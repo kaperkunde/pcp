@@ -743,11 +743,14 @@ embeddingProvider`, which hands `embeddings/provider.ts` the header;
   as the token's kept results, never a path on the machine: Chromium refuses
   every download but while `download` waits for one (`downloads.ts`, on a
   DevTools session of PCP's own), which takes the first from its tab or a
-  popup of it (known by its opener even once closed) at an address the tab
-  may open, or a PDF or picture one of them is shown, held at the gate and
-  read in chunks, cancels every other and one past the largest file, and
+  popup of it (known by its opener even once closed, never through another
+  token's tab) at an address the tab may open, or a PDF or picture one of
+  them is shown whose first bytes agree, held at the gate, read in chunks
+  and handed back to the page within `MAX_HELD_DOCUMENT_BYTES` (never an
+  aborted load), cancels every other and one past the largest file, and
   reads and removes the file before answering; every window a page opens
-  is named in its tab's next answer, closed or refused ones too;
+  is named in its tab's next answer (the newest `MAX_WINDOW_NOTES`),
+  closed or refused ones too, a refused one by its site only;
   `upload_file` reads kept results as bytes, and no file chooser ever opens
   a window. A
   refusal that names a site is a tool error, never a thrown `PcpError` (the

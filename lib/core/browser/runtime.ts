@@ -651,9 +651,10 @@ async function start(
         if (tab) tab.offeredFile = name
       },
       {
-        opened: (targetId, openerId, url) => {
-          const note = vault && notePopup(vault, targetId, openerId)
-          if (note && isShownUrl(url)) note.url = url
+        // Its address only once the gate let it through (startGate), or
+        // as it shows it (moved): never one it was refused.
+        opened: (targetId, openerId) => {
+          if (vault) notePopup(vault, targetId, openerId)
         },
         moved: (targetId, url) => {
           const note = vault && findPopup(vault, targetId)?.note
@@ -1209,16 +1210,19 @@ async function judge(
   const note = info.openerId
     ? notePopup(vault, info.targetId, info.openerId)
     : undefined
-  const parent = info.openerId ? tabOfFrame(vault, info.openerId) : undefined
+  // The tab whose page opened it, or, for a window a window opened that is
+  // no tab yet, that window's tab.
+  const parent = info.openerId
+    ? (tabOfFrame(vault, info.openerId) ??
+      findPopup(vault, info.openerId)?.parent)
+    : undefined
   const allowed = parent !== undefined && mayOpen(vault, parent, url)
-
-  if (note) note.url = url
 
   if (allowed && vault.tabs.size < MAX_TABS) {
     return { allow: true }
   }
 
-  if (note && parent && !allowed) {
+  if (note && !allowed) {
     // Named in the next answer about the tab whose page opened it.
     let host = "another site"
 
@@ -1300,14 +1304,16 @@ async function startGate(
 
     const vault = current()
 
-    if (vault && event.frameId) {
-      const note = findPopup(vault, event.frameId)?.note
-      if (note) note.url = event.request.url
-    }
-
     void (vault ? judge(vault, gate, event) : Promise.resolve({ allow: false }))
       .catch((): Verdict => ({ allow: false }))
       .then(async (verdict: Verdict) => {
+        // A window's address, once the gate let it through: an address it
+        // refused is named by its site only (judge).
+        if (verdict.allow && vault && event.frameId) {
+          const note = findPopup(vault, event.frameId)?.note
+          if (note) note.url = event.request.url
+        }
+
         // While a download call waits, the answer to its tab's (or a
         // popup's) page is held, in case it is a file shown.
         const hold =

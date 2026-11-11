@@ -3,11 +3,13 @@ import path from "node:path"
 
 import type { Browser, CDPSession } from "patchright-core"
 
+import { sniffMediaType } from "../media-types"
 import { mediaTypeOf } from "./challenge"
 import {
   DOCUMENT_READ_BYTES,
   DOWNLOAD_START_MS,
   DOWNLOAD_TIMEOUT_MS,
+  MAX_HELD_DOCUMENT_BYTES,
   MAX_REMEMBERED_WINDOWS,
   MAX_WINDOW_DEPTH,
 } from "./limits"
@@ -32,10 +34,10 @@ import {
  * Chromium closes a blank window whose address turned out to be a download
  * as the download begins, before anyone could ask it whose it was. A file
  * a page shows rather than offers (a PDF or a picture its tab or such a
- * popup is answered with, no attachment) is taken too: the gate holds that
- * answer while a call waits (`wantsDocument`), and `takeDocument` reads it
- * in chunks, past the largest file never whole, and hands it on to the
- * page as it was.
+ * popup is answered with, no attachment, its first bytes agreeing) is
+ * taken too: the gate holds that answer while a call waits
+ * (`wantsDocument`), and `takeDocument` reads it in chunks and hands it on
+ * to the page within MAX_HELD_DOCUMENT_BYTES, never aborting its load.
  *
  * The events come to a DevTools session of PCP's own, as the gate's do:
  * Playwright's download objects can read nothing in a context made with
@@ -67,6 +69,11 @@ type ShownFile = {
   state: "reading" | "done" | "too_large" | "failed"
   size: number
   bytes: Buffer | null
+  /**
+   * Whether the page could not be handed what it was answered with (more
+   * than MAX_HELD_DOCUMENT_BYTES), so its window shows nothing of it.
+   */
+  blank: boolean
 }
 
 type Waiter = {
@@ -77,6 +84,8 @@ type Waiter = {
   taken: Entry | null
   /** A file shown rather than offered, taken instead of a download. */
   shown: ShownFile | null
+  /** A held answer being read to see whether it is a file (takeDocument). */
+  holding: boolean
   /** Set once the call stopped waiting: a file still being read is let go. */
   over: boolean
   /** The address of a download of the tab's that was refused. */
@@ -105,7 +114,7 @@ export type Downloads = {
 /** What PCP hears of the windows (page targets) Chromium makes and ends. */
 export type WindowHooks = {
   /** A page opened a window (`openerId` is the opener's target). */
-  opened: (targetId: string, openerId: string, url: string) => void
+  opened: (targetId: string, openerId: string) => void
   /** A window shows another address. */
   moved: (targetId: string, url: string) => void
   /** A page or window is gone. */
@@ -120,12 +129,20 @@ export type CaughtDownload =
       bytes: Buffer
       /** The frame it came from: the tab's, or a popup's. */
       frameId: string
+      /** A file shown: the page could not be handed it, and shows nothing. */
+      blank?: boolean
     }
   /** Nothing started a download in time. */
   | { kind: "none" }
   /** The tab's download came from an address it may not open. */
   | { kind: "refused"; url: string }
-  | { kind: "too_large"; name: string; size: number }
+  | {
+      kind: "too_large"
+      name: string
+      size: number
+      /** The page it was shown in shows nothing of it (read past the largest). */
+      blank?: boolean
+    }
   | { kind: "timeout"; name: string }
   | { kind: "failed"; name: string }
   /** Another tab's download call is waiting for one now. */
@@ -227,7 +244,7 @@ export async function openDownloads(
   session.on("Target.targetCreated", ({ targetInfo }) => {
     if (targetInfo.type !== "page" || !targetInfo.openerId) return
     rememberOpener(downloads, targetInfo.targetId, targetInfo.openerId)
-    windows?.opened(targetInfo.targetId, targetInfo.openerId, targetInfo.url)
+    windows?.opened(targetInfo.targetId, targetInfo.openerId)
   })
   session.on("Target.targetInfoChanged", ({ targetInfo }) => {
     if (targetInfo.type === "page") {
@@ -354,14 +371,24 @@ export function watchDownloads(
   return downloads.contextId
 }
 
-/** Whether a frame is the tab's, by its main frame and its session. */
+/**
+ * Whether a frame is the tab's, by its main frame and its session, or a
+ * window it opened (followed back through openers). `othersTab` says which
+ * page is another tab no window of this one may be taken through: one
+ * another token drives, or the owner.
+ */
 export async function tabOwnsFrame(
   downloads: Downloads,
   tab: { mainFrameId: string; cdp: CDPSession },
   frameId: string,
+  othersTab: (targetId: string) => boolean = () => false,
 ): Promise<boolean> {
   if (frameId === tab.mainFrameId) {
     return true
+  }
+
+  if (othersTab(frameId)) {
+    return false
   }
 
   type FrameTree = { frame: { id: string }; childFrames?: FrameTree[] }
@@ -389,6 +416,10 @@ export async function tabOwnsFrame(
 
     if (opener === tab.mainFrameId) {
       return true
+    }
+
+    if (othersTab(opener)) {
+      return false
     }
 
     target = opener
@@ -467,7 +498,13 @@ export async function wantsDocument(
 ): Promise<boolean> {
   const waiter = downloads.waiter
 
-  if (!waiter || waiter.taken || waiter.shown || waiter.over) {
+  if (
+    !waiter ||
+    waiter.taken ||
+    waiter.shown ||
+    waiter.holding ||
+    waiter.over
+  ) {
     return false
   }
 
@@ -480,12 +517,29 @@ export async function wantsDocument(
   return (await waiter.judge(frameId, url).catch(() => "other")) === "take"
 }
 
+/** The media types a page shows that are taken as a file: never SVG. */
+const SHOWN_TYPES = new Set([
+  "application/pdf",
+  "image/png",
+  "image/jpeg",
+  "image/gif",
+  "image/webp",
+])
+
+/** First bytes read before a held answer is judged a file or not. */
+const SNIFF_BYTES = 16
+
 /**
- * A document answer the gate held (wantsDocument): a PDF or a picture
- * shown rather than offered is taken as the waiting call's file, read in
- * chunks and stopped past the largest file, then handed on to the page as
- * it was. True when it answered the request; false when the gate should
- * let the answer go on as it is.
+ * A document answer the gate held (wantsDocument). A PDF or a picture shown
+ * rather than offered, whose first bytes are one, is taken as the waiting
+ * call's file. The body is read in chunks and handed on to the page as it
+ * came, while it is no more than MAX_HELD_DOCUMENT_BYTES; one larger is
+ * kept but answered with nothing (a 204: the window shows nothing, which
+ * the call's answer says). Past the largest file PCP keeps, the file is
+ * given up: one said to be that large up front is never held, so the page
+ * loads it as it would; one found to be as it comes is read on only as far
+ * as it can still be handed back. True when it answered the request; false
+ * when the gate should let the answer go on as it is.
  */
 export async function takeDocument(
   downloads: Downloads,
@@ -503,13 +557,14 @@ export async function takeDocument(
     !frameId ||
     event.responseStatusCode !== 200 ||
     !type ||
-    !(type === "application/pdf" || type.startsWith("image/")) ||
+    !SHOWN_TYPES.has(type) ||
     // Offered as a file: Chromium makes it a download, taken as one.
     /^\s*attachment/i.test(disposition ?? "") ||
     (await waiter.judge(frameId, url).catch(() => "other")) !== "take" ||
     downloads.waiter !== waiter ||
     waiter.taken ||
     waiter.shown ||
+    waiter.holding ||
     waiter.over
   ) {
     return false
@@ -522,27 +577,62 @@ export async function takeDocument(
     state: "reading",
     size: 0,
     bytes: null,
+    blank: false,
   }
-  waiter.shown = shown
-  waiter.update()
   const declared = Number(headerOf(event, "content-length"))
 
   if (Number.isFinite(declared) && declared > waiter.maxBytes) {
-    // Too large to keep: the page gets it as it would, and nothing is read.
+    // Too large to keep: never held, the page gets it as it would.
     shown.state = "too_large"
     shown.size = declared
+    waiter.shown = shown
     waiter.update()
     return false
   }
 
-  let stream: string | null = null
+  // Claimed before anything is awaited, so no second answer is held.
+  waiter.holding = true
+  let stream: string
 
   try {
     ;({ stream } = await gate.send("Fetch.takeResponseBodyAsStream", {
       requestId: event.requestId,
     }))
-    const chunks: Buffer[] = []
+  } catch {
+    waiter.holding = false
+    return false
+  }
 
+  const answer = (body: Buffer | null) =>
+    gate
+      .send(
+        "Fetch.fulfillRequest",
+        body
+          ? {
+              requestId: event.requestId,
+              responseCode: 200,
+              responseHeaders: (event.responseHeaders ?? []).filter(
+                (header) =>
+                  !/^(content-length|content-encoding|transfer-encoding)$/i.test(
+                    header.name,
+                  ),
+              ),
+              body: body.toString("base64"),
+            }
+          : {
+              requestId: event.requestId,
+              responseCode: 204,
+              responseHeaders: [],
+            },
+      )
+      .catch(() => {})
+  const chunks: Buffer[] = []
+  let size = 0
+  /** Whether its first bytes are what it says: null until read. */
+  let isFile: boolean | null = null
+  let tooLarge = false
+
+  try {
     for (;;) {
       const piece = await gate.send("IO.read", {
         handle: stream,
@@ -552,56 +642,60 @@ export async function takeDocument(
         piece.data,
         piece.base64Encoded ? "base64" : "latin1",
       )
-      shown.size += bytes.length
+      chunks.push(bytes)
+      size += bytes.length
 
-      if (shown.size > waiter.maxBytes || waiter.over) {
-        shown.state = shown.size > waiter.maxBytes ? "too_large" : "failed"
-        waiter.update()
-        await gate
-          .send("Fetch.failRequest", {
-            requestId: event.requestId,
-            errorReason: "Aborted",
-          })
-          .catch(() => {})
-        return true
+      if (isFile === null && (size >= SNIFF_BYTES || piece.eof)) {
+        isFile = sniffMediaType(Buffer.concat(chunks)) === type
+
+        if (isFile) {
+          waiter.shown = shown
+          waiter.update()
+        }
       }
 
-      chunks.push(bytes)
+      if (isFile !== false && size > waiter.maxBytes) {
+        tooLarge = true
+      }
 
-      if (piece.eof) break
+      // What can no longer be handed back is read no further.
+      if (size > MAX_HELD_DOCUMENT_BYTES && (tooLarge || isFile === false)) {
+        await answer(null)
+        shown.blank = true
+        break
+      }
+
+      if (piece.eof) {
+        const body = Buffer.concat(chunks)
+        const handed = body.length <= MAX_HELD_DOCUMENT_BYTES
+        await answer(handed ? body : null)
+        shown.blank = !handed
+        shown.bytes = body
+        break
+      }
     }
-
-    shown.bytes = Buffer.concat(chunks)
-    shown.state = "done"
-    waiter.update()
-    // The page shows what it was answered with, as it would have.
-    await gate
-      .send("Fetch.fulfillRequest", {
-        requestId: event.requestId,
-        responseCode: 200,
-        responseHeaders: (event.responseHeaders ?? []).filter(
-          (header) =>
-            !/^(content-length|content-encoding|transfer-encoding)$/i.test(
-              header.name,
-            ),
-        ),
-        body: shown.bytes.toString("base64"),
-      })
-      .catch(() => {})
-    return true
   } catch {
-    shown.state = "failed"
-    waiter.update()
-    await gate
-      .send("Fetch.failRequest", {
-        requestId: event.requestId,
-        errorReason: "Failed",
-      })
-      .catch(() => {})
-    return true
+    // The page is answered all the same: with nothing, as it came no further.
+    await answer(null)
+    shown.blank = true
+    if (isFile) shown.state = "failed"
   } finally {
-    if (stream) await gate.send("IO.close", { handle: stream }).catch(() => {})
+    await gate.send("IO.close", { handle: stream }).catch(() => {})
+    waiter.holding = false
   }
+
+  if (isFile) {
+    if (tooLarge) {
+      shown.state = "too_large"
+      shown.size = size
+      shown.bytes = null
+    } else if (shown.state === "reading") {
+      shown.state = "done"
+    }
+  }
+
+  waiter.update()
+  return true
 }
 
 /** Waits until `done`, re-checked on every download event, or `ms`. */
@@ -660,6 +754,7 @@ export async function catchDownload(
     maxBytes,
     taken: null,
     shown: null,
+    holding: false,
     over: false,
     refused: null,
     update: () => {},
@@ -792,9 +887,15 @@ async function shownFile(
         url: shown.url,
         bytes: shown.bytes!,
         frameId: shown.frameId,
+        ...(shown.blank ? { blank: true } : {}),
       }
     case "too_large":
-      return { kind: "too_large", name: shown.name, size: shown.size }
+      return {
+        kind: "too_large",
+        name: shown.name,
+        size: shown.size,
+        ...(shown.blank ? { blank: true } : {}),
+      }
     case "failed":
       return { kind: "failed", name: shown.name }
     default:

@@ -24,13 +24,7 @@ const TAB = {
   } as unknown as CDPSession,
 }
 
-// Its last argument is said by what the call takes; the red test predates it.
-const owns = tabOwnsFrame as unknown as (
-  downloads: Downloads,
-  tab: typeof TAB,
-  frameId: string,
-  othersTab?: (targetId: string) => boolean,
-) => Promise<boolean>
+const owns = tabOwnsFrame
 
 describe("a frame a download call takes", () => {
   it("is the tab's, or a window it opened, however many openers back and once closed", async () => {
