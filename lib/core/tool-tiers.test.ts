@@ -5,7 +5,11 @@ import { storeTools } from "./catalogue"
 import type { VaultContext } from "./context"
 import { db } from "./db"
 import { detachServer } from "./definitions"
-import { chooseOwnToolTier, listOwnToolTiers } from "./own-tool-tiers"
+import {
+  chooseOwnToolTier,
+  listGuardedOwnTools,
+  listOwnToolTiers,
+} from "./own-tool-tiers"
 import { createServer } from "./servers"
 import { scratchDatabase } from "./test-db"
 import {
@@ -263,6 +267,19 @@ describe("the owner's tiers", () => {
     ).rejects.toThrow(/no tool called execute_destructive/)
     await chooseOwnToolTier(ctx, "memory", null)
     expect(await readOwnToolTiers(ctx)).toEqual({})
+  })
+
+  it("lists PCP's own tools for Settings → Repeated calls at the tier the owner chose", async () => {
+    const names = async () =>
+      (await listGuardedOwnTools(ctx)).map((tool) => tool.name)
+    expect(await names()).toContain("register_server")
+
+    // Moved to Read, a tool's repeats are no longer held back.
+    await chooseOwnToolTier(ctx, "register_server", "read")
+    expect(await names()).not.toContain("register_server")
+
+    await chooseOwnToolTier(ctx, "register_server", null)
+    expect(await names()).toContain("register_server")
   })
 
   it("ignores a choice saved for an entry or an old entry's name, and drops it on the next save (#113)", async () => {
