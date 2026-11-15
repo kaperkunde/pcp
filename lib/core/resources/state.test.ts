@@ -42,6 +42,7 @@ describe("what PCP picks itself", () => {
       browserIdleMinutes: 60,
       // A quarter of the whole disk.
       storeMb: 128_000,
+      specMb: 64,
     })
     expect(chooseResources(EMPTY_CONFIG, tiny)).toEqual({
       programMemoryMb: 128,
@@ -50,6 +51,7 @@ describe("what PCP picks itself", () => {
       keptMb: 102,
       browserIdleMinutes: 60,
       storeMb: 2048,
+      specMb: 16,
     })
   })
 
@@ -77,6 +79,22 @@ describe("what PCP picks itself", () => {
     ).toBe(4000)
   })
 
+  it("lets an API schema as large as GitHub's on any machine, within what the machine can spare", () => {
+    expect(chooseResources(EMPTY_CONFIG, tiny).specMb).toBeGreaterThanOrEqual(
+      16,
+    )
+    expect(limitsOf(chooseResources(EMPTY_CONFIG, laptop)).specBytes).toBe(
+      64 * MB,
+    )
+    // 100 MB read takes about 1.6 GB: more than half of a 1 GB machine.
+    expect(() =>
+      checkResourceConfig({ ...EMPTY_CONFIG, specMb: 100 }, tiny),
+    ).toThrow(/more than this machine can spare/)
+    expect(
+      checkResourceConfig({ ...EMPTY_CONFIG, specMb: 100 }, laptop).specMb,
+    ).toBe(100)
+  })
+
   it("keeps room for a file in a token's results, and guesses without a disk", () => {
     expect(
       chooseResources({ ...EMPTY_CONFIG, fileMb: 900 }, { ...tiny, disk: null })
@@ -92,6 +110,7 @@ describe("what PCP picks itself", () => {
       keptMb: 10,
       browserIdleMinutes: 5,
       storeMb: 100,
+      specMb: 16,
     })
     expect(small).toMatchObject({
       textChars: 4_000_000,
@@ -108,6 +127,7 @@ describe("what PCP picks itself", () => {
       keptMb: 1000,
       browserIdleMinutes: 60,
       storeMb: 1000,
+      specMb: 16,
     })
     expect(large.storeBytes).toBe(1000 * MB)
     expect(large.answerChars).toBeGreaterThan(

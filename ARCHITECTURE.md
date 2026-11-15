@@ -554,13 +554,44 @@ withPublicOnlyLink`, added in `upstream.ts` where the server and PCP's
   parse, the assistant is told that much and not the parser's message, which
   quotes the text. An endpoint the owner reads from a URL they typed keeps
   following it, as before.
-- **Bounded.** Fifty endpoints per vault, 5 MB of schema per registration,
-  the same as an upload (it is held, encrypted, on the request until
-  answered), a thousand edits and a million characters of them, 4 MB of
+- **Bounded.** Fifty endpoints per vault, a schema per registration of at most the
+  owner's limit (`resourceLimits().specBytes`, Settings → Resources, see
+  "Large schemas" below), the same as an upload (it is held, encrypted and
+  compressed, on the request until answered), a thousand edits and a million characters of them, 4 MB of
   stored tools per endpoint, twenty registrations and twenty changes per token
   per ten minutes, no JSON-RPC batches at the gateway (one POST would be many
   calls), and the catalogue a request loads leaves out tool schemas, which are
   read when a tool is described or called.
+- **Large schemas (#141).** GitHub's whole REST description (14 MB as JSON,
+  1,278 operations) registers by `openapi_schema`, by `openapi_url`, by an
+  upload and by a repository's document. There is no fixed cap: the limit is
+  `resourceLimits().specBytes` (a sixty-fourth of the machine's memory, 16 to
+  64 MB, the owner's to set within what `checkResourceConfig` lets the machine
+  spare at sixteen times the size). The download is streamed against it, the
+  zod input has only the highest value the owner may set (`SPEC_TEXT_CEILING`;
+  `endpoint-admin.ts` checks the exact one), and a linked repository's spec
+  file and item are bounded by the same value (`repos/limits.ts`; one browse's
+  total, `MAX_BROWSE_BYTES`, still caps what one read fetches). The node limit
+  (`specNodeLimit`) follows it. Measured on GitHub's description: JSON parses
+  in 70 ms; YAML took 3.1 s and 530 MB with the `yaml` package and 0.35 s and
+  230 MB with js-yaml, which now reads schemas (core schema, no tags; aliases
+  share values, so an expanding document is refused by counting its nodes
+  before it is written out). YAML is turned into compact JSON text first,
+  by `prepareSpecText` in a worker thread (`openapi/yaml-worker.cjs`, not a
+  child process, so the desktop app runs it; memory capped by
+  `resourceLimits`, 60 s limit): the loop's longest gap was 29 ms while
+  GitHub's YAML was read, and everything after reads JSON. The worker's file
+  and js-yaml are carried into the standalone output (`next.config.ts`,
+  `scripts/standalone.test.ts`); where the file is missing the same
+  conversion runs in place, slower for others and never wrong. The two latest
+  conversions are kept ten minutes (no timer), so registration's repeated
+  reads (preview, lint, create) do not read it again. A schema at rest is
+  Brotli-compressed from 64 KB inside the sealed value (`spec-rows.ts`
+  `packed`: 14 MB to 0.9 MB, rows from before still open), and so are a
+  permission request's arguments (`sealed-args.ts`), so the waiting request
+  and the endpoint hold about 1 MB each, not 14. The permission page shows
+  the preview, never the schema. An edit (`applyPatches`) on a freshly read
+  document works in place (`consume`) instead of copying it.
 - A token limited to some servers only sees endpoints in its scope, and what
   it registers is added to that scope.
 
@@ -826,8 +857,34 @@ into Drafts with no EmailSubmission after it, and marks nothing.
 **IMAP** (`mail/imap.ts`, on imapflow and nodemailer): `url` is
 `imaps://host:port`, or `imap://` for STARTTLS; `smtp_url` the same for
 SMTP. A connection that is not encrypted after it is made is dropped, and
-STARTTLS is required, never optional. Each call connects, signs in, works
-and logs out. An email's id is `<uid>.<uidvalidity>.<mailbox path>`, so an id
+STARTTLS is required, never optional. An account keeps one signed-in
+session for its calls (`mail/imap-pool.ts`, after the SSH pool; deleting or changing the account drops it, and PCP has no shutdown hook that closes the pools, as the SSH pool has none): a call leases
+a connection, works and hands it back without a LOGOUT, so a call costs a
+command, not a TCP and TLS connect, a login and a logout (against a server
+that takes seconds for each, a call took over a minute). Opened only by a
+call that brings the login in its request, never in the background; at most
+`IMAP_MAX_CONNECTIONS` per account (2), the others queue for one within the
+call's own time and share it; closed when idle two minutes (a timer only
+closes) or ten minutes old, when a command broke it, when the server closed
+it, or when a NOOP asked of one that sat 30 seconds goes unanswered; keyed by
+the account and a hash of its address and login, so a changed password,
+address or secret starts over. Anything else that asks the server for less:
+the mailbox names every call needs to find a mailbox by role come from a LIST
+without STATUS, kept 30 seconds per account (only `list_mailboxes` asks for
+counts, and a delete of a mailbox asks STATUS of that one); a search with no
+filter fetches the newest page by sequence number from the count SELECT gave
+instead of UID SEARCH ALL (an expunge between the SELECT and the FETCH can shift that page by one row); a LOGOUT never waits more than 3 seconds before the
+socket is closed. The time each phase took (connect, login, select, command,
+logout) and what the server said by itself ([ALERT], [THROTTLED], BYE,
+scrubbed of the login, addresses and links, cut short) are kept in memory
+only, a small ring per account (`mail/diagnostics.ts`, `mailDiagnostics(serverId)`),
+never on disk. A server's own "slow down" (IMAP `[THROTTLED]`, a BYE or
+`[LIMIT]`/`[UNAVAILABLE]` that is about rate, JMAP HTTP 429 or the
+`maxConcurrentRequests` limit error, CalDAV 429 or 503 with Retry-After)
+comes out as an Error carrying `pcpThrottle` (`lib/core/throttle-signal.ts`)
+for the call gate to read; JMAP also keeps to the session's
+`maxConcurrentRequests` and `maxCallsInRequest` once it has read them. An
+email's id is `<uid>.<uidvalidity>.<mailbox path>`, so an id
 from before a mailbox was rebuilt is refused rather than naming another
 email. Sending goes over SMTP, attachments included, written by nodemailer.
 The copy in Sent (Bcc kept) is the account's setting, `mailSaveSent`:
@@ -844,8 +901,8 @@ nothing deletes either. The look runs once the call has answered (`savedTo`
 is `"pending"`), inside the same request: the call hands it to
 `lib/core/after-answer.ts`, whose scope the gateway's route and the owner's
 answer to a request open and drain through Next's `after()`, on a connection
-of its own with the login the call already holds; nothing is stored or timed
-past the request. Where no scope is open, the look runs in the call, for 10
+with the login the call already holds, leasing a session of the account's
+pool; nothing is stored or timed past the request. Where no scope is open, the look runs in the call, for 10
 seconds at most. A draft is the same message,
 appended to Drafts with `\Draft` and `\Seen` and sent nowhere; its id comes
 from APPENDUID, and is null without UIDPLUS.

@@ -1,4 +1,5 @@
 import type { Metadata } from "next"
+import { loadResourceLimits } from "@/lib/core/resources/state"
 import { notFound } from "next/navigation"
 
 import { BrowserDescribeForm } from "@/components/browser-describe-form"
@@ -335,6 +336,7 @@ export default async function ServerPage({
         }}
         secrets={secrets}
         redirectUrl={redirectUrl}
+        maxSpecMb={Math.round((await loadResourceLimits()).specBytes / 1048576)}
       />
     ) : (
       <ServerForm

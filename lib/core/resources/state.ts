@@ -14,12 +14,15 @@ import {
   AUTO_PROGRAM_MEMORY_SHARE,
   AUTO_PROGRAMS_AT_ONCE,
   AUTO_PROGRAMS_MEMORY_SHARE,
+  AUTO_SPEC_MB,
+  AUTO_SPEC_MEMORY_SHARE,
   AUTO_STORE_DISK_SHARE,
   AUTO_STORE_MB,
   type Bound,
   FALLBACK_KEPT_MB,
   FALLBACK_STORE_MB,
   MAX_PROGRAMS_MEMORY_SHARE,
+  MAX_SPEC_MEMORY_SHARE,
   MB,
   MIN_RESOLVED_CHARS,
   MIN_SANDBOX_MESSAGE_BYTES,
@@ -27,6 +30,7 @@ import {
   MIN_TEXT_CHARS,
   RESOURCE_BOUNDS,
   RESOURCES_TTL_MS,
+  SPEC_MEMORY_FACTOR,
 } from "./limits"
 
 /**
@@ -55,6 +59,7 @@ const FIELDS = [
   "keptMb",
   "browserIdleMinutes",
   "storeMb",
+  "specMb",
 ] as const
 
 export type ResourceField = (typeof FIELDS)[number]
@@ -103,6 +108,8 @@ export type ResourceLimits = {
   browserIdleMs: number
   /** What PCP's own store may hold (storage/quota.ts). */
   storeBytes: number
+  /** The largest OpenAPI schema read, as text (openapi/parse.ts). */
+  specBytes: number
 }
 
 export const EMPTY_CONFIG: ResourceConfig = {
@@ -112,6 +119,7 @@ export const EMPTY_CONFIG: ResourceConfig = {
   keptMb: null,
   browserIdleMinutes: null,
   storeMb: null,
+  specMb: null,
 }
 
 function clamp(value: number, { min, max }: Bound): number {
@@ -197,6 +205,10 @@ export function chooseResources(
         : FALLBACK_STORE_MB,
     )
 
+  const specMb =
+    config.specMb ??
+    clamp(Math.floor(memoryMb * AUTO_SPEC_MEMORY_SHARE), AUTO_SPEC_MB)
+
   return {
     programMemoryMb,
     programsAtOnce,
@@ -204,6 +216,7 @@ export function chooseResources(
     keptMb,
     browserIdleMinutes,
     storeMb,
+    specMb,
   }
 }
 
@@ -244,6 +257,7 @@ export function limitsOf(choice: ResourceChoice): ResourceLimits {
     resolvedChars: Math.max(MIN_RESOLVED_CHARS, answerChars * 2),
     browserIdleMs: choice.browserIdleMinutes * 60_000,
     storeBytes: choice.storeMb * MB,
+    specBytes: choice.specMb * MB,
   }
 }
 
@@ -254,6 +268,7 @@ const LABELS: Record<ResourceField, string> = {
   keptMb: "Kept results per token",
   browserIdleMinutes: "The browser's idle close (minutes)",
   storeMb: "PCP's own store",
+  specMb: "The largest API schema",
 }
 
 function megabytes(mb: number): string {
@@ -306,6 +321,17 @@ export function checkResourceConfig(
   if (chosen.keptMb < chosen.fileMb) {
     throw invalid(
       `Kept results per token (${megabytes(chosen.keptMb)}) have to hold at least the largest file (${megabytes(chosen.fileMb)}).`,
+    )
+  }
+
+  const specMemory = chosen.specMb * SPEC_MEMORY_FACTOR
+  const specAllowed = Math.floor(
+    (machine.memoryBytes / MB) * MAX_SPEC_MEMORY_SHARE,
+  )
+
+  if (checked.specMb !== null && specMemory > specAllowed) {
+    throw invalid(
+      `Reading an API schema of ${megabytes(chosen.specMb)} could take ${megabytes(specMemory)} of memory, more than this machine can spare for it (${megabytes(specAllowed)}). Choose a smaller limit.`,
     )
   }
 

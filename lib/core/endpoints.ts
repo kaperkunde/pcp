@@ -32,6 +32,7 @@ import {
 import {
   checkDocument,
   parseSpecText,
+  prepareSpecText,
   type OpenApiDocument,
 } from "./openapi/parse"
 import {
@@ -296,7 +297,7 @@ export function readDocument(
 ): OpenApiDocument {
   const parsed = parseSpecText(text)
   return patches.length > 0
-    ? checkDocument(applyPatches(parsed, patches))
+    ? checkDocument(applyPatches(parsed, patches, { consume: true }))
     : parsed
 }
 
@@ -777,8 +778,15 @@ async function storedSpecRow(
     where: { serverId },
     select: SPEC_SELECT,
   })
+  const spec = row ? openSpec(ctx, row) : null
 
-  return row ? openSpec(ctx, row) : null
+  if (spec) {
+    // A stored YAML schema is read in a worker, not on this thread; what
+    // the worker refuses (the owner may have lowered the limit) is refused.
+    await prepareSpecText(spec.text)
+  }
+
+  return spec
 }
 
 /** What PCP keeps of an endpoint's schema: the text and its edits. */
@@ -947,13 +955,16 @@ export async function createEndpoint(
     ;({ text, url: fetchedFrom } = input.fetched)
   } else {
     ;({ text, url: fetchedFrom } = await fetchSpec(data.specUrl!, {
+      maxBytes: (await loadResourceLimits()).specBytes,
       publicOnly: data.publicOnly,
       ...input.reach,
     }))
   }
 
-  // Everything that can be wrong with the schema is found before a row
-  // exists, so a bad one leaves nothing behind.
+  // Read off the main thread first (YAML), then everything that can be
+  // wrong with the schema is found before a row exists, so a bad one leaves
+  // nothing behind.
+  await prepareSpecText(text)
   const generated = generateEndpointTools(text, {
     readOnly: data.readOnly,
     authHeaderNames: sentHeaders(data),
@@ -1112,6 +1123,7 @@ export async function updateEndpoint(
     text = stored.text
   } else {
     ;({ text, url: fetchedFrom } = await fetchSpec(data.specUrl!, {
+      maxBytes: (await loadResourceLimits()).specBytes,
       publicOnly,
     }))
   }
@@ -1395,6 +1407,7 @@ export async function downloadSpec(
   }
 
   return fetchSpec(server.specUrl, {
+    maxBytes: (await loadResourceLimits()).specBytes,
     publicOnly: server.publicOnly,
     ...reach,
   })

@@ -3,7 +3,7 @@
 import { revalidatePath } from "next/cache"
 import { redirect } from "next/navigation"
 
-import { MAX_SPEC_BYTES } from "@/lib/core/constants"
+import { loadResourceLimits } from "@/lib/core/resources/state"
 import {
   createEndpoint,
   updateEndpoint,
@@ -59,9 +59,11 @@ async function inputFrom(formData: FormData): Promise<EndpointInput> {
 
     if (upload) {
       // Checked before reading, so an oversized file costs nothing.
-      if (upload.size > MAX_SPEC_BYTES) {
+      const { specBytes } = await loadResourceLimits()
+
+      if (upload.size > specBytes) {
         throw invalid(
-          `That file is larger than ${MAX_SPEC_BYTES / 1024 / 1024} MB.`,
+          `That file is larger than ${Math.round(specBytes / 1024 / 1024)} MB, the most PCP reads (Settings → Resources).`,
         )
       }
 

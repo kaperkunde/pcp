@@ -32,13 +32,13 @@ import {
   MAX_MEMORY_CHARS,
   MAX_PERSONAL_NOTE,
   MAX_SHARED_MEMORY_CHARS,
-  MAX_SPEC_BYTES,
   SECRET_PLACEHOLDER,
   TOOL_ACCESS_LEVELS,
   TOOL_TIER_LABELS,
   TOOL_TIERS,
   type ToolTier,
 } from "./constants"
+import { MB, RESOURCE_BOUNDS } from "./resources/limits"
 import { db } from "./db"
 import { findBindableDefinition } from "./definitions"
 import {
@@ -434,6 +434,13 @@ const ENDPOINT_CHANGES = { max: 20, windowMs: 10 * 60_000 }
  * Edits as a JSON Patch, for register_server and update_endpoint. The shape
  * is described here for assistants; endpoint-admin.ts checks it.
  */
+/**
+ * The most a schema's text can be, whatever the owner chose: the highest
+ * they may set (Settings → Resources). The exact limit is checked with the
+ * owner's own in endpoint-admin.ts, which a published schema cannot say.
+ */
+const SPEC_TEXT_CEILING = RESOURCE_BOUNDS.specMb.max * MB
+
 const PATCH_SCHEMA = z
   .array(
     z.object({
@@ -5046,17 +5053,17 @@ export function buildGatewayServer(
         ),
       openapi_schema: z
         .string()
-        .max(MAX_SPEC_BYTES)
+        .max(SPEC_TEXT_CEILING)
         .optional()
         .describe(
-          `For kind api: the whole OpenAPI 3.x document as JSON or YAML text. PCP turns each operation into a tool and makes the HTTP calls itself; a header parameter an operation declares becomes one of its arguments, except the headers that carry secrets and the ones PCP sets itself (Authorization, Content-Type, Accept and the like). Only references inside the document (#/components/…) are followed; PCP never fetches an address named in it. If the API has no OpenAPI document, write one from its documentation. Up to ${MAX_SPEC_BYTES / 1024 / 1024} MB.`,
+          `For kind api: the whole OpenAPI 3.x document as JSON or YAML text. PCP turns each operation into a tool and makes the HTTP calls itself; a header parameter an operation declares becomes one of its arguments, except the headers that carry secrets and the ones PCP sets itself (Authorization, Content-Type, Accept and the like). Only references inside the document (#/components/…) are followed; PCP never fetches an address named in it. If the API has no OpenAPI document, write one from its documentation. Large documents are fine: GitHub's whole REST API (14 MB, 1,000+ operations) works. The most PCP reads is the owner's limit (Settings → Resources); an address (openapi_url) avoids sending the text through your reply.`,
         ),
       openapi_url: z
         .string()
         .max(2048)
         .optional()
         .describe(
-          `For kind api: the address of its OpenAPI 3.x document instead of its text, such as a raw file in the API's repository. PCP downloads it now, from a public address only, so the owner sees what it adds, and they approve that copy; a later change to the document is not taken without them. Up to ${MAX_SPEC_BYTES / 1024 / 1024} MB.`,
+          `For kind api: the address of its OpenAPI 3.x document instead of its text, such as a raw file in the API's repository. PCP downloads it now, from a public address only, so the owner sees what it adds, and they approve that copy; a later change to the document is not taken without them. Large documents are fine, up to the owner's limit (Settings → Resources).`,
         ),
       spec_patches: PATCH_SCHEMA.optional().describe(
         "For kind api: edits applied to the document before tools are made from it, and kept, so they still apply when it is read again: a JSON Patch (RFC 6902) that fixes or narrows it (set the server, remove operations or parameters, add an oauth2 security scheme) without sending it all.",
@@ -5853,7 +5860,7 @@ export function buildGatewayServer(
         spec: z
           .string()
           .min(1)
-          .max(MAX_SPEC_BYTES)
+          .max(SPEC_TEXT_CEILING)
           .optional()
           .describe(
             "A whole new OpenAPI 3 document as JSON or YAML text; it replaces the old one, and tools are rebuilt from it with the endpoint's edits. Only for an endpoint registered with text.",

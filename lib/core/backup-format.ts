@@ -68,7 +68,7 @@ export const EXPORT_AAD = `${EXPORT_FORMAT}:${EXPORT_VERSION}`
 
 /** Rows per createMany on a restore: SQLite allows 999 variables a query. */
 export const RESTORE_CHUNK_ROWS = 50
-/** openapi_spec rows carry up to 5 MB of text each. */
+/** openapi_spec rows carry a schema each, compressed from 64 KB (spec-rows.ts). */
 export const RESTORE_SPEC_CHUNK_ROWS = 10
 
 // ---- Scalars -------------------------------------------------------------

@@ -27,6 +27,7 @@ const NAMES: Record<ResourceField, string> = {
   keptMb: "kept results per token",
   browserIdleMinutes: "the browser's idle minutes",
   storeMb: "PCP's own store",
+  specMb: "the largest API schema",
 }
 
 export async function saveResourcesAction(

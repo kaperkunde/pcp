@@ -4,9 +4,8 @@ import {
   MAX_PATCH_CHARS,
   MAX_PATCH_OPERATIONS,
   MAX_POINTER_LENGTH,
-  MAX_SPEC_NODES,
 } from "./limits"
-import { countNodes } from "./parse"
+import { countNodes, specNodeLimit } from "./parse"
 
 /**
  * An endpoint's edits: JSON Patch operations (RFC 6902) applied to its
@@ -234,20 +233,24 @@ function equal(a: unknown, b: unknown): boolean {
 export function applyPatches(
   document: unknown,
   patches: PatchOperation[],
+  { consume = false }: { consume?: boolean } = {},
 ): unknown {
   if (patches.length === 0) {
     return document
   }
 
-  // A copy, which also turns any shared YAML alias into its own value, so
-  // an edit at one place does not show up at another.
-  const box = { root: clone(document) }
-  let nodes = countNodes(box.root, MAX_SPEC_NODES)
+  const limit = specNodeLimit()
+  // A copy, so the document given is not changed. `consume` is for a
+  // document nothing else holds, a fresh parse: it is edited in place, which
+  // for a large schema saves a second copy and its time. JSON text never
+  // has the shared values a YAML alias can make.
+  const box = { root: consume ? document : clone(document) }
+  let nodes = countNodes(box.root, limit)
 
   const grow = (value: unknown) => {
-    nodes += countNodes(value, MAX_SPEC_NODES - nodes + 1)
+    nodes += countNodes(value, limit - nodes + 1)
 
-    if (nodes > MAX_SPEC_NODES) {
+    if (nodes > limit) {
       throw invalid("the schema would be too large with it.")
     }
   }
