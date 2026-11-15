@@ -6,6 +6,20 @@ release, with a note in front of the answer ("addPatches was renamed to
 add_patches; use add_patches."); after that it is refused like any other
 unknown key.
 
+## A paced call's code moves to `_meta`, like every tool error's
+
+A call PCP holds back (pacing, or the call gate: a server cooling down, its
+calls at once or its bytes a day) is a tool error with the code `paced` and
+`retryAfterMs` in `_meta["gg.pcp/error"]`, as `timeout` and `browser_busy`
+are. Read it there. The old `structuredContent` `{"code": "paced",
+"retry_after_ms": N}` is still sent beside it for this release and goes in
+the next. A program's `pcp.call` is unchanged: the Error it throws has
+`code` "paced" and `retryAfterMs` (Python: `.code`, `.retry_after_ms`).
+
+A call that runs past its server's time limit is now answered with a
+`timeout` tool error naming the server and the limit, for every kind (it
+was the browser's only); what it was asked may still happen there.
+
 ## Seven tools: search, execute_read/write/destructive, run_read/write/destructive
 
 A client lists PCP's entry tools alone: `search`, `execute_read`,

@@ -234,6 +234,28 @@ so in the summary; the bump itself waits for the request.
   (the setting's `assistant`) or as the owner allowed it (a `tab_pace`
   request for that tab alone; the `wrapper_change` page), never below the
   owner's own pace for the site, and never written into the setting.
+- The call gate (`lib/core/gate/`) applies where pacing does and only
+  there (`upstream.ts callServerTool` for every server kind but the
+  browser and a wrapper, the browser per site in `browser/call.ts`, web
+  fetch per site in `web-fetch.ts runFetch`), so every way in meets it: a
+  server cooling down (it asked to slow down: 429, Retry-After, rate-limit
+  headers, or `pcpThrottle: {reason, retryAfterMs?}` on an error or answer
+  from mail and calendar code; or a run of answers far slower than usual)
+  is refused at once, then bytes a day, pacing (the server's pause and
+  calls a minute as a floor, one spacing), calls at once, and the time
+  limit, past which the answer is a `timeout` tool error naming the server
+  and the limit. Every refusal is `paced` with `retryAfterMs` in
+  `_meta["gg.pcp/error"]`. Defaults are per class of place in
+  `gate/limits.ts`, never a vendor; a server's own limits are sealed in
+  `mcp_server.limits` (`mcp_server:<id>:limits`), the instance's own, set by
+  the owner on its page within the machine's bounds (`GATE_BOUNDS`). An
+  assistant only proposes them (`register_server`'s `limits`, stored on the
+  request and editable beside the approval; `propose_server_limits`, a
+  `limits_change` with its note, written over the limits shown, `basis`)
+  and reads them on demand (`get_server_limits`); limits and cool-downs
+  never go in search, tool descriptions or the instructions. Its state and
+  counters are in memory, never stored. Add a test for each new field or
+  signal (`gate/gate.test.ts`, `gate/entry-points.test.ts`).
 - Linked repositories (`lib/core/repos/`) share items, never secrets, and
   are never a backup. Their documents carry `pcp_format` and change only
   backward compatibly (add fields with defaults, never repurpose one).
@@ -245,8 +267,8 @@ so in the summary; the bump itself waits for the request.
   A token's own skill is never an item: not listed, pushed, imported onto
   or kept out. A server's document is its definition only (`PCP_FORMAT`
   2): sync never writes an instance's own fields (name and short name, address,
-  credential and secrets, read-only, public-only, enabled, pace, levels,
-  note; a service's SSH server, publish address, variables' secrets and
+  credential and secrets, read-only, public-only, enabled, pace, limits,
+  levels, note; a service's SSH server, publish address, variables' secrets and
   typed values, container, what it registered, its exit), and what a format-1 document says of its
   server only fills in a first instance. Format 3 adds `services/<name>.yaml`
   (a service's definition); every other kind is still written in the
