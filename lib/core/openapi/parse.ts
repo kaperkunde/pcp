@@ -35,9 +35,9 @@ function megabytes(bytes: number): string {
 }
 
 /** The error for a schema past the owner's limit. */
-export function specTooLarge() {
+export function specTooLarge(maxBytes = resourceLimits().specBytes) {
   return invalid(
-    `That schema is larger than ${megabytes(resourceLimits().specBytes)}, the most PCP reads (Settings → Resources).`,
+    `That schema is larger than ${megabytes(maxBytes)}, the most PCP reads (Settings → Resources).`,
   )
 }
 
@@ -86,9 +86,17 @@ function remember(text: string, json: string): void {
   }
 }
 
+/**
+ * Texts `prepareSpecText` refused (over the memory or time it may spend,
+ * or not YAML): a later parse of the same text refuses too, instead of
+ * reading it here on the main thread without those bounds.
+ */
+const refused = new Map<string, unknown>()
+
 /** Forgets what `prepareSpecText` kept (tests). */
 export function forgetPreparedSpecs(): void {
   ready.clear()
+  refused.clear()
 }
 
 function yamlFailure(error: unknown): never {
@@ -128,6 +136,12 @@ export async function prepareSpecText(raw: string): Promise<void> {
       }),
     )
   } catch (error) {
+    refused.set(text, error)
+
+    while (refused.size > READY_MAX) {
+      refused.delete(refused.keys().next().value!)
+    }
+
     yamlFailure(error)
   }
 }
@@ -147,6 +161,10 @@ export function parseSpecText(raw: string): OpenApiDocument {
       value = JSON.parse(text)
     } else {
       let json = readyJson(text)
+
+      if (json === null && refused.has(text)) {
+        yamlFailure(refused.get(text))
+      }
 
       if (json === null) {
         // Not prepared: read here, on this thread.

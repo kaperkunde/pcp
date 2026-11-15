@@ -1,6 +1,7 @@
 import { brotliCompressSync, brotliDecompressSync, constants } from "node:zlib"
 
 import { decrypt, encrypt } from "./crypto"
+import { resourceLimits } from "./resources/state"
 
 /**
  * A permission request's arguments, sealed. Most are a few hundred bytes;
@@ -39,7 +40,9 @@ export function openArgs<T = Record<string, unknown>>(
   if (plain[0] === PACKED) {
     return JSON.parse(
       brotliDecompressSync(plain.subarray(1), {
-        maxOutputLength: 1024 * 1024 * 1024,
+        // What a request's arguments can be: a schema within the owner's
+        // limit, with room for the rest.
+        maxOutputLength: resourceLimits().specBytes + 16 * 1024 * 1024,
       }).toString("utf8"),
     ) as T
   }

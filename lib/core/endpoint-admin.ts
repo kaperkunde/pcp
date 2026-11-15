@@ -723,7 +723,10 @@ export async function prepareRegistration(
   // the document itself; it is never sent to the assistant.
   const specUrl = fromUrl ? validateSpecUrl(input.specUrl!) : null
   const fetched = specUrl
-    ? await fetchSpec(specUrl, { publicOnly: true })
+    ? await fetchSpec(specUrl, {
+        publicOnly: true,
+        maxBytes: resourceLimits().specBytes,
+      })
     : null
   const text = fetched?.text ?? input.spec!
 

@@ -1,6 +1,7 @@
 import { brotliCompressSync, brotliDecompressSync, constants } from "node:zlib"
 
 import type { VaultContext } from "./context"
+import { resourceLimits } from "./resources/state"
 import { keyedHash, sha256Hex } from "./crypto"
 import { canonicalJson } from "./permission-rules"
 import {
@@ -58,9 +59,12 @@ export function packText(text: string): string {
  * The text of a packed value. The output is bounded (a sealed value is
  * authenticated, so this is a guard against a bug, not an attacker).
  */
-export function unpackText(packed: string): string {
+export function unpackText(
+  packed: string,
+  maxBytes = resourceLimits().specBytes + 16 * 1024 * 1024,
+): string {
   return brotliDecompressSync(Buffer.from(packed, "base64"), {
-    maxOutputLength: 1024 * 1024 * 1024,
+    maxOutputLength: maxBytes,
   }).toString("utf8")
 }
 

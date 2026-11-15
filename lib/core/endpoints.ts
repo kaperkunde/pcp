@@ -781,8 +781,9 @@ async function storedSpecRow(
   const spec = row ? openSpec(ctx, row) : null
 
   if (spec) {
-    // A stored YAML schema is read in a worker, not on this thread.
-    await prepareSpecText(spec.text).catch(() => undefined)
+    // A stored YAML schema is read in a worker, not on this thread; what
+    // the worker refuses (the owner may have lowered the limit) is refused.
+    await prepareSpecText(spec.text)
   }
 
   return spec
@@ -954,6 +955,7 @@ export async function createEndpoint(
     ;({ text, url: fetchedFrom } = input.fetched)
   } else {
     ;({ text, url: fetchedFrom } = await fetchSpec(data.specUrl!, {
+      maxBytes: (await loadResourceLimits()).specBytes,
       publicOnly: data.publicOnly,
       ...input.reach,
     }))
@@ -1121,6 +1123,7 @@ export async function updateEndpoint(
     text = stored.text
   } else {
     ;({ text, url: fetchedFrom } = await fetchSpec(data.specUrl!, {
+      maxBytes: (await loadResourceLimits()).specBytes,
       publicOnly,
     }))
   }
@@ -1404,6 +1407,7 @@ export async function downloadSpec(
   }
 
   return fetchSpec(server.specUrl, {
+    maxBytes: (await loadResourceLimits()).specBytes,
     publicOnly: server.publicOnly,
     ...reach,
   })

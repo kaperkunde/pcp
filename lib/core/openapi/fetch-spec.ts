@@ -1,6 +1,6 @@
 import { invalid } from "../errors"
 import { AddressBlockedError } from "./address"
-import { loadResourceLimits } from "../resources/state"
+import { resourceLimits } from "../resources/state"
 import { specTooLarge } from "./parse"
 import { describeFetchError, discard, readCapped } from "./http"
 import { SPEC_FETCH_TIMEOUT_MS, SPEC_MAX_REDIRECTS, USER_AGENT } from "./limits"
@@ -19,9 +19,13 @@ export async function fetchSpec(
     publicOnly = false,
     addressCheck,
     dial,
-  }: { timeoutMs?: number } & SendOptions = {},
+    maxBytes = resourceLimits().specBytes,
+  }: {
+    timeoutMs?: number
+    /** The owner's limit; callers read it with loadResourceLimits(). */
+    maxBytes?: number
+  } & SendOptions = {},
 ): Promise<{ text: string; url: string }> {
-  const maxBytes = (await loadResourceLimits()).specBytes
   let url = validateSpecUrl(rawUrl)
   const signal = AbortSignal.timeout(timeoutMs)
 
@@ -73,7 +77,7 @@ export async function fetchSpec(
     const declared = Number(response.headers.get("content-length") ?? "0")
     if (declared > maxBytes) {
       await discard(response)
-      throw specTooLarge()
+      throw specTooLarge(maxBytes)
     }
 
     let read: { bytes: Buffer; truncated: boolean }
@@ -87,7 +91,7 @@ export async function fetchSpec(
     }
 
     if (read.truncated) {
-      throw specTooLarge()
+      throw specTooLarge(maxBytes)
     }
 
     return { text: new TextDecoder().decode(read.bytes), url }

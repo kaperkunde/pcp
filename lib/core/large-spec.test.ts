@@ -438,3 +438,38 @@ describe("edits on a large schema", () => {
     )
   })
 })
+
+describe("what the worker refuses stays refused", () => {
+  it("is refused again by a later parse of the same text, not read in place", async () => {
+    const lines = [
+      'a0: &a0 ["lol","lol","lol","lol","lol","lol","lol","lol","lol"]',
+    ]
+    for (let i = 1; i < 14; i++) {
+      lines.push(
+        `a${i}: &a${i} [${Array(9)
+          .fill(`*a${i - 1}`)
+          .join(",")}]`,
+      )
+    }
+    const bomb = `openapi: 3.0.0\npaths: {}\nx:\n  ${lines.join("\n  ")}`
+
+    await expect(prepareSpecText(bomb)).rejects.toThrow(/too large/)
+    const started = performance.now()
+    expect(() => parseSpecText(bomb)).toThrow(/too large/)
+    expect(performance.now() - started).toBeLessThan(20)
+  })
+
+  it("surfaces a stored schema the owner's lowered limit no longer allows", async () => {
+    const { id } = await createEndpoint(ctx, {
+      name: "Uploaded",
+      specSource: "upload",
+      specText: LARGE_YAML,
+      baseUrl: "https://api.large.example/v1",
+      readOnly: false,
+      authType: "none",
+    })
+    useResourceConfig({ ...EMPTY_CONFIG, specMb: 1 })
+
+    await expect(storedSpec(ctx, id)).rejects.toThrow(/larger than 1 MB/)
+  }, 60_000)
+})
