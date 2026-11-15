@@ -3,12 +3,11 @@ import { hiddenCharacter } from "../memories"
 
 import {
   MAX_FILE_BYTES,
-  maxItemBytes,
   MAX_ITEM_FILES,
   MAX_ITEM_NAME_CHARS,
   MAX_PATH_CHARS,
-  maxSpecFileBytes,
 } from "./limits"
+import { maxItemBytes, maxSpecFileBytes } from "./spec-limit"
 
 /**
  * Where a shared item's files are in a linked repository. Plain folders

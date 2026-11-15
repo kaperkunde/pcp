@@ -34,8 +34,8 @@ import {
   MAX_BROWSE_FILES,
   MAX_FILE_BYTES,
   MAX_ITEM_FILES,
-  maxSpecFileBytes,
 } from "./limits"
+import { maxSpecFileBytes } from "./spec-limit"
 
 /**
  * A linked repository's items as GitHub lists them, before any file is
