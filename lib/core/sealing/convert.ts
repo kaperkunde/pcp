@@ -3,13 +3,22 @@ import { getCleanupConfig } from "../cleanup/state"
 import type { VaultContext } from "../context"
 import { db } from "../db"
 import { sealedSiteAllowance } from "../allowances"
+import { sealedLevelName } from "../level-names"
+import { pendingAccessAad } from "../proposed-access"
+import { sealFields } from "../sealed-fields"
+import {
+  readServiceOwn,
+  sealedServiceOwn,
+  SERVICE_OWN_SELECT,
+} from "../services/own-values"
 import { sealedAllowanceOrigin, sealedOrigin } from "../browser-secrets"
 import { isSealedKind, sealedRuleKey } from "../fetch-rule-keys"
 import { sealedSecretMeta } from "../secret-meta"
-import { isSealedText } from "../sealed"
+import { isSealedText, sealToText } from "../sealed"
 import { sealedTokenName } from "../token-names"
 import { sealedResultName } from "../tool-results"
 import {
+  AUTH_HEADER,
   readServerMeta,
   sealedServerMeta,
   SERVER_META_SELECT,
@@ -221,6 +230,179 @@ export const SEAL_CONVERTERS: Converter[] = [
     },
   }),
   converter({
+    table: "api_token_tool_access",
+    read: (ctx, limit) =>
+      db().apiTokenToolAccess.findMany({
+        where: { token: { vaultId: ctx.vaultId }, sealed: null },
+        take: limit,
+      }),
+    write: async (ctx, row) => {
+      const { key, sealed } = sealedLevelName(
+        ctx,
+        "api_token_tool_access",
+        `${row.tokenId}:${row.serverId}`,
+        row.serverId,
+        row.toolName,
+      )
+      return db().$transaction(async (tx) => {
+        const { count } = await tx.apiTokenToolAccess.deleteMany({
+          where: {
+            tokenId: row.tokenId,
+            serverId: row.serverId,
+            toolName: row.toolName,
+            sealed: null,
+          },
+        })
+
+        if (count === 0) {
+          return false
+        }
+
+        await tx.apiTokenToolAccess.upsert({
+          where: {
+            tokenId_serverId_toolName: {
+              tokenId: row.tokenId,
+              serverId: row.serverId,
+              toolName: key,
+            },
+          },
+          create: { ...row, toolName: key, sealed },
+          update: {},
+        })
+        return true
+      })
+    },
+  }),
+  converter({
+    table: "api_token_tool_allowance",
+    read: (ctx, limit) =>
+      db().apiTokenToolAllowance.findMany({
+        where: { token: { vaultId: ctx.vaultId }, sealed: null },
+        take: limit,
+      }),
+    write: async (ctx, row) => {
+      const { key, sealed } = sealedLevelName(
+        ctx,
+        "api_token_tool_allowance",
+        `${row.tokenId}:${row.serverId}`,
+        row.serverId,
+        row.toolName,
+      )
+      return db().$transaction(async (tx) => {
+        const { count } = await tx.apiTokenToolAllowance.deleteMany({
+          where: {
+            tokenId: row.tokenId,
+            serverId: row.serverId,
+            toolName: row.toolName,
+            sealed: null,
+          },
+        })
+
+        if (count === 0) {
+          return false
+        }
+
+        await tx.apiTokenToolAllowance.upsert({
+          where: {
+            tokenId_serverId_toolName: {
+              tokenId: row.tokenId,
+              serverId: row.serverId,
+              toolName: key,
+            },
+          },
+          create: { ...row, toolName: key, sealed },
+          update: {},
+        })
+        return true
+      })
+    },
+  }),
+  converter({
+    table: "vault_tool_access",
+    read: (ctx, limit) =>
+      db().vaultToolAccess.findMany({
+        where: { vaultId: ctx.vaultId, sealed: null },
+        take: limit,
+      }),
+    write: async (ctx, row) => {
+      const { key, sealed } = sealedLevelName(
+        ctx,
+        "vault_tool_access",
+        row.serverId,
+        row.serverId,
+        row.toolName,
+      )
+      return db().$transaction(async (tx) => {
+        const { count } = await tx.vaultToolAccess.deleteMany({
+          where: {
+            serverId: row.serverId,
+            toolName: row.toolName,
+            sealed: null,
+          },
+        })
+
+        if (count === 0) {
+          return false
+        }
+
+        await tx.vaultToolAccess.upsert({
+          where: {
+            serverId_toolName: { serverId: row.serverId, toolName: key },
+          },
+          create: { ...row, toolName: key, sealed },
+          update: {},
+        })
+        return true
+      })
+    },
+  }),
+  converter({
+    table: "tool_tier",
+    read: (ctx, limit) =>
+      db().toolTier.findMany({
+        where: { vaultId: ctx.vaultId, sealed: null },
+        take: limit,
+      }),
+    write: async (ctx, row) => {
+      const { key, sealed } = sealedLevelName(
+        ctx,
+        "tool_tier",
+        row.id,
+        (row.definitionId ?? row.serverId) as string,
+        row.toolName,
+      )
+      // Only a row still as it was read, its time kept.
+      const { count } = await db().toolTier.updateMany({
+        where: { id: row.id, sealed: null, toolName: row.toolName },
+        data: { toolName: key, sealed, updatedAt: row.updatedAt },
+      })
+      return count === 1
+    },
+  }),
+  converter({
+    table: "permission_request",
+    read: (ctx, limit) =>
+      db().permissionRequest.findMany({
+        where: { vaultId: ctx.vaultId, toolSealed: null },
+        select: { id: true, serverId: true, toolName: true },
+        take: limit,
+      }),
+    write: async (ctx, row) => {
+      const { key, sealed } = sealedLevelName(
+        ctx,
+        "permission_request",
+        `${row.id}:tool`,
+        row.serverId ?? "",
+        row.toolName,
+      )
+      const { count } = await db().permissionRequest.updateMany({
+        where: { id: row.id, toolSealed: null, toolName: row.toolName },
+        data: { toolName: key, toolSealed: sealed },
+      })
+      return count === 1
+    },
+  }),
+  converter({
     table: "api_token_secret_allowance",
     read: (ctx, limit) =>
       db().apiTokenSecretAllowance.findMany({
@@ -284,9 +466,17 @@ export const SEAL_CONVERTERS: Converter[] = [
     read: (ctx, limit) =>
       db().mcpServer.findMany({
         // A row sealed before its short name was still holds that in
-        // plain text, with no hash: sealed again whole.
-        where: { vaultId: ctx.vaultId, slugKey: null },
-        select: { ...SERVER_META_SELECT, updatedAt: true },
+        // plain text, with no hash: sealed again whole. So is one sealed
+        // before its header's name and template were.
+        where: {
+          vaultId: ctx.vaultId,
+          OR: [
+            { slugKey: null },
+            { plainAuthHeaderName: { not: null } },
+            { plainAuthValueTemplate: { not: null } },
+          ],
+        },
+        select: { ...SERVER_META_SELECT, slugKey: true, updatedAt: true },
         take: limit,
       }),
     write: async (ctx, row) => {
@@ -304,11 +494,92 @@ export const SEAL_CONVERTERS: Converter[] = [
       const { count } = await db().mcpServer.updateMany({
         where: {
           id: row.id,
-          slugKey: null,
+          slugKey: row.slugKey,
           meta: row.meta === null ? null : { equals: row.meta },
         },
         data: {
           ...sealedServerMeta(ctx, row.id, { ...meta, slug }),
+          updatedAt: row.updatedAt,
+        },
+      })
+      return count === 1
+    },
+  }),
+  converter({
+    table: "server_auth_header",
+    read: (ctx, limit) =>
+      db().serverAuthHeader.findMany({
+        where: { server: { vaultId: ctx.vaultId }, sealed: null },
+        take: limit,
+      }),
+    write: async (ctx, row) => {
+      const { count } = await db().serverAuthHeader.updateMany({
+        where: {
+          id: row.id,
+          sealed: null,
+          plainHeaderName: row.plainHeaderName,
+          plainValueTemplate: row.plainValueTemplate,
+        },
+        data: sealFields(ctx.dek, AUTH_HEADER, row.id, {
+          headerName: row.plainHeaderName,
+          valueTemplate: row.plainValueTemplate,
+        }) as never,
+      })
+      return count === 1
+    },
+  }),
+  converter({
+    table: "mcp_server_pending_access",
+    read: (ctx, limit) =>
+      db().mcpServer.findMany({
+        where: {
+          vaultId: ctx.vaultId,
+          pendingAccess: { not: null },
+          NOT: { pendingAccess: { startsWith: "pcp-sealed:" } },
+        },
+        select: { id: true, pendingAccess: true },
+        take: limit,
+      }),
+    write: async (ctx, row) => {
+      if (row.pendingAccess === null || isSealedText(row.pendingAccess)) {
+        return false
+      }
+
+      // Only over the value it read: one saved or cleared since stays.
+      const { count } = await db().mcpServer.updateMany({
+        where: { id: row.id, pendingAccess: row.pendingAccess },
+        data: {
+          pendingAccess: sealToText(
+            ctx.dek,
+            pendingAccessAad(row.id),
+            row.pendingAccess,
+          ),
+        },
+      })
+      return count === 1
+    },
+  }),
+  converter({
+    table: "service_spec",
+    read: (ctx, limit) =>
+      db().serviceSpec.findMany({
+        where: { server: { vaultId: ctx.vaultId }, sealedOwn: null },
+        select: { ...SERVICE_OWN_SELECT, updatedAt: true },
+        take: limit,
+      }),
+    write: async (ctx, row) => {
+      const values = readServiceOwn(ctx, row)
+      // Only a row still as it was read, its time kept.
+      const { count } = await db().serviceSpec.updateMany({
+        where: {
+          serverId: row.serverId,
+          sealedOwn: null,
+          plainContainerName: row.plainContainerName,
+          plainPublish: row.plainPublish,
+          plainValues: row.plainValues,
+        },
+        data: {
+          ...sealedServiceOwn(ctx, row.serverId, values),
           updatedAt: row.updatedAt,
         },
       })
@@ -362,6 +633,7 @@ export const SEAL_CONVERTERS: Converter[] = [
             { schema: null },
             { override: null },
             { nameKey: null },
+            { plainIcons: { not: null } },
           ],
         },
         take: limit,
@@ -393,6 +665,7 @@ export const SEAL_CONVERTERS: Converter[] = [
               title: values.title,
               description: values.description,
               annotationsTitle: annotations.annotationsTitle,
+              icons: row.plainIcons,
             }),
             annotations: annotations.annotations,
             updatedAt: row.updatedAt,
@@ -417,6 +690,32 @@ export const SEAL_CONVERTERS: Converter[] = [
       if (row.about !== null && row.nameKey === null) {
         const { count } = await db().mcpTool.updateMany({
           where: { id: row.id, nameKey: null, about: { equals: row.about } },
+          data: {
+            ...sealedToolAbout(
+              ctx,
+              row.id,
+              row.serverId,
+              readToolAbout(ctx, row as never),
+            ),
+            updatedAt: row.updatedAt,
+          },
+        })
+        sealed ||= count === 1
+      }
+
+      // Icons sealed with the rest of its words: a tool sealed before they
+      // were still holds them in plain text, which readToolAbout reads.
+      if (
+        row.about !== null &&
+        row.nameKey !== null &&
+        row.plainIcons !== null
+      ) {
+        const { count } = await db().mcpTool.updateMany({
+          where: {
+            id: row.id,
+            plainIcons: row.plainIcons,
+            about: { equals: row.about },
+          },
           data: {
             ...sealedToolAbout(
               ctx,

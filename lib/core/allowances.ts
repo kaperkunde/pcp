@@ -7,6 +7,7 @@ import { db } from "./db"
 import { SERVER_META_SELECT, serverName } from "./server-meta"
 import { invalid } from "./errors"
 import { openText, sealText, type Sealed } from "./sealed"
+import { levelNameKeys, openLevelName, sealedLevelName } from "./level-names"
 import { accessKey } from "./tool-access"
 
 /**
@@ -67,6 +68,7 @@ function untilFrom(minutes: AllowForMinutes, now: Date): Date {
 
 /** Lets one token run one tool without asking, for `minutes` from `now`. */
 export async function allowToolFor(
+  ctx: VaultContext,
   tokenId: string,
   serverId: string,
   toolName: string,
@@ -74,12 +76,27 @@ export async function allowToolFor(
   now = new Date(),
 ): Promise<Date> {
   const until = untilFrom(minutes, now)
+  const { key, sealed } = sealedLevelName(
+    ctx,
+    "api_token_tool_allowance",
+    `${tokenId}:${serverId}`,
+    serverId,
+    toolName,
+  )
 
-  await db().apiTokenToolAllowance.upsert({
-    where: { tokenId_serverId_toolName: { tokenId, serverId, toolName } },
-    create: { tokenId, serverId, toolName, until },
-    update: { until },
-  })
+  await db().$transaction([
+    // One from before, in plain text, gives way to the sealed one.
+    db().apiTokenToolAllowance.deleteMany({
+      where: { tokenId, serverId, toolName, sealed: null },
+    }),
+    db().apiTokenToolAllowance.upsert({
+      where: {
+        tokenId_serverId_toolName: { tokenId, serverId, toolName: key },
+      },
+      create: { tokenId, serverId, toolName: key, sealed, until },
+      update: { until },
+    }),
+  ])
 
   return until
 }
@@ -153,19 +170,33 @@ export async function allowSiteFor(
 
 /** The token's tools allowed for now, keyed by accessKey(), to when. */
 export async function loadToolAllowances(
+  ctx: VaultContext,
   tokenId: string,
   now = new Date(),
 ): Promise<Map<string, number>> {
   const rows = await db().apiTokenToolAllowance.findMany({
     where: { tokenId, until: { gt: now } },
-    select: { serverId: true, toolName: true, until: true },
+    select: { serverId: true, toolName: true, sealed: true, until: true },
   })
 
   return new Map(
     rows.map((row) => [
-      accessKey(row.serverId, row.toolName),
+      accessKey(row.serverId, openAllowanceName(ctx, tokenId, row)),
       row.until.getTime(),
     ]),
+  )
+}
+
+function openAllowanceName(
+  ctx: VaultContext,
+  tokenId: string,
+  row: { serverId: string; toolName: string; sealed: Uint8Array | null },
+): string {
+  return openLevelName(
+    ctx,
+    "api_token_tool_allowance",
+    `${tokenId}:${row.serverId}`,
+    { key: row.toolName, sealed: row.sealed },
   )
 }
 
@@ -217,7 +248,7 @@ export async function listTokenAllowances(
       kind: "tool",
       serverId: row.serverId,
       serverName: serverName(ctx, row.server),
-      toolName: row.toolName,
+      toolName: openAllowanceName(ctx, tokenId, row),
       until: row.until,
     })),
     ...sites.map((row): TokenAllowance => ({
@@ -259,7 +290,13 @@ export async function endAllowance(
     })
   } else if (target.kind === "tool") {
     await db().apiTokenToolAllowance.deleteMany({
-      where: { tokenId, serverId: target.serverId, toolName: target.toolName },
+      where: {
+        tokenId,
+        serverId: target.serverId,
+        toolName: {
+          in: levelNameKeys(ctx, target.serverId, target.toolName),
+        },
+      },
     })
   } else {
     await db().apiTokenSiteAllowance.deleteMany({

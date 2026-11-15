@@ -1123,14 +1123,11 @@ describe("a running service", { timeout: 30_000 }, () => {
       where: secretNameWhere(ctx, "docs-key"),
     })
     // The owner's own header, on the server's page.
-    await db().mcpServer.update({
-      where: { id: launched.registeredId! },
-      data: {
-        authType: "header",
-        authHeaderName: "X-Owner",
-        authValueTemplate: "{{secret}}",
-        authSecretId: secret.id,
-      },
+    await writeServer(ctx, launched.registeredId!, {
+      authType: "header",
+      authHeaderName: "X-Owner",
+      authValueTemplate: "{{secret}}",
+      authSecretId: secret.id,
     })
 
     await recreateService(ctx, launched.id, FAST)
@@ -1139,14 +1136,11 @@ describe("a running service", { timeout: 30_000 }, () => {
       authHeaderName: "X-Owner",
     })
 
-    await db().mcpServer.update({
-      where: { id: launched.registeredId! },
-      data: {
-        authType: "oauth",
-        authHeaderName: null,
-        authValueTemplate: null,
-        authSecretId: null,
-      },
+    await writeServer(ctx, launched.registeredId!, {
+      authType: "oauth",
+      authHeaderName: null,
+      authValueTemplate: null,
+      authSecretId: null,
     })
     await writeServiceDefinition(
       ctx,
@@ -1174,22 +1168,19 @@ describe("a running service", { timeout: 30_000 }, () => {
     })
     // The owner's own header, with a further one named as the definition's
     // header will be.
-    await db().mcpServer.update({
-      where: { id: launched.registeredId! },
-      data: {
-        authType: "header",
-        authHeaderName: "X-Owner",
-        authValueTemplate: "{{secret}}",
-        authSecretId: secret.id,
-      },
+    await writeServer(ctx, launched.registeredId!, {
+      authType: "header",
+      authHeaderName: "X-Owner",
+      authValueTemplate: "{{secret}}",
+      authSecretId: secret.id,
     })
     await db().serverAuthHeader.create({
       data: {
         id: "extra-authorization",
         serverId: launched.registeredId!,
         position: 0,
-        headerName: "authorization",
-        valueTemplate: "Bearer {{secret}}",
+        plainHeaderName: "authorization",
+        plainValueTemplate: "Bearer {{secret}}",
         secretId: secret.id,
       },
     })

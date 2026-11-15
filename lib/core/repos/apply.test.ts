@@ -1,3 +1,4 @@
+import { openServiceOwn } from "../services/own-values"
 import { afterEach, describe, expect, it } from "vitest"
 
 import { openServiceSpec } from "../spec-rows"
@@ -590,10 +591,12 @@ describe("applying a service", () => {
     expect(after).toMatchObject({
       hostId,
       engine: before.engine,
-      containerName: before.containerName,
-      publish: before.publish,
       env: before.env,
       registeredId,
+    })
+    expect(openServiceOwn(ctx, after)).toMatchObject({
+      containerName: openServiceOwn(ctx, before).containerName,
+      publish: openServiceOwn(ctx, before).publish,
     })
     const row = openServer(
       ctx,

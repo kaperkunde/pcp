@@ -108,6 +108,7 @@ export async function editTools(
         name: tool.name,
         title: tool.title,
         description: tool.description,
+        icons: tool.icons,
         inputSchema: tool.inputSchema,
         outputSchema: tool.outputSchema,
         operation: tool.operation,

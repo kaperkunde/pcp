@@ -205,7 +205,7 @@ describe("the owner's tiers", () => {
     await setToolTier(ctx, second, "list", "write")
     expect(await toolTier(ctx, first, "burn")).toBe("write")
 
-    await mergeToolTiers(ctx.vaultId, await definitionOf(first), [
+    await mergeToolTiers(ctx, await definitionOf(first), [
       await definitionOf(second),
     ])
     const kept = await db().toolTier.findMany({

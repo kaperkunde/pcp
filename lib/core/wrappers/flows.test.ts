@@ -203,7 +203,13 @@ async function approvedFlow(
   const wrapper = await db().mcpServer.findFirstOrThrow({
     where: { kind: "wrapper" },
   })
-  await writeToolAccess(scope.tokenId, wrapper.id, "post_message", "allowed")
+  await writeToolAccess(
+    scope.ctx,
+    scope.tokenId,
+    wrapper.id,
+    "post_message",
+    "allowed",
+  )
 }
 
 describe.skipIf(!executable)("a browser flow", { timeout: 90_000 }, () => {
@@ -356,7 +362,13 @@ describe.skipIf(!executable)("a browser flow", { timeout: 90_000 }, () => {
     const wrapper = await db().mcpServer.findFirstOrThrow({
       where: { kind: "wrapper" },
     })
-    await writeToolAccess(scope.tokenId, wrapper.id, "pace_tab", "allowed")
+    await writeToolAccess(
+      scope.ctx,
+      scope.tokenId,
+      wrapper.id,
+      "pace_tab",
+      "allowed",
+    )
 
     const result = await call("execute_destructive", {
       server: "chat",

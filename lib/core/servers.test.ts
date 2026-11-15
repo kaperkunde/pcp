@@ -322,8 +322,8 @@ describe("with a vault", () => {
         id: "extra-header",
         serverId: id,
         position: 0,
-        headerName: "X-Extra",
-        valueTemplate: "{{secret}}",
+        plainHeaderName: "X-Extra",
+        plainValueTemplate: "{{secret}}",
         secretId: extra.id,
       },
     })

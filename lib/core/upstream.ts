@@ -959,7 +959,7 @@ async function credential(
       headerName: server.authHeaderName,
       valueTemplate: server.authValueTemplate ?? "{{secret}}",
     },
-    ...(await extraAuthHeaders(server.id)),
+    ...(await extraAuthHeaders(ctx, server.id)),
   ]
   const headers: Record<string, string> = {}
   const redact: string[] = []

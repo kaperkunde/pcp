@@ -1102,7 +1102,13 @@ describe("update_secret_sites", () => {
   })
 
   it("always asks the owner, even where the tool is allowed", async () => {
-    await writeToolAccess(tokenId, serverId, "update_secret_sites", "allowed")
+    await writeToolAccess(
+      ctx,
+      tokenId,
+      serverId,
+      "update_secret_sites",
+      "allowed",
+    )
 
     const asked = await proposed({
       name: "Shop password",
@@ -1357,7 +1363,7 @@ describe("the owner's answer to a secret's use", () => {
   it("lifts no block: a type tool blocked since it asked types nothing", async () => {
     const id = await asked()
     const { calls, executor } = stub()
-    await writeToolAccess(tokenId, serverId, "type", "blocked")
+    await writeToolAccess(ctx, tokenId, serverId, "type", "blocked")
 
     const result = await decidePermission(
       ctx,

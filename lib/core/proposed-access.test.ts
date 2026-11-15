@@ -265,7 +265,7 @@ describe("writing what the owner saved", () => {
     ).toBeNull()
 
     // Applied once: a level the owner changes since is left alone.
-    await writeToolAccess(tokenId, id, "addPet", "ask")
+    await writeToolAccess(ctx, tokenId, id, "addPet", "ask")
     await syncServerTools(ctx, await getServer(ctx, id), {
       publicUrl: "http://localhost:3000",
     })
@@ -283,7 +283,7 @@ describe("writing what the owner saved", () => {
         }),
       },
     })
-    await writeToolAccess(tokenId, id, "addPet", "blocked")
+    await writeToolAccess(ctx, tokenId, id, "addPet", "blocked")
 
     await applyPendingAccess(ctx, id)
 

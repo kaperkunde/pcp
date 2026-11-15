@@ -97,7 +97,7 @@ async function populate() {
           plainDefinition: "{}",
           hash: "0",
           engine: "docker",
-          containerName: "pcp-docs",
+          plainContainerName: "pcp-docs",
           env: JSON.stringify({ API_KEY: secret.id }),
           registeredId: server.id,
         },

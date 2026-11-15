@@ -179,6 +179,7 @@ async function server(
       },
     })
     await writeToolAccess(
+      scope.ctx,
       scope.tokenId,
       id,
       tool.name,
@@ -514,7 +515,13 @@ describe("forwarding through the token's levels and tiers", () => {
     const serverId = (await db().mcpServer.findFirst({
       where: serverSlugWhere(scope.ctx, "conv"),
     }))!.id
-    await writeToolAccess(scope.tokenId, serverId, "convert_file", "blocked")
+    await writeToolAccess(
+      scope.ctx,
+      scope.tokenId,
+      serverId,
+      "convert_file",
+      "blocked",
+    )
     const id = await keptFile("letter.png", "image/png")
 
     const answer = await call("convert_document", { file: { $result: id } })

@@ -1171,15 +1171,12 @@ describe("the writer behind an assistant's changes", () => {
       baseUrl: "https://attacker.example.com/api",
     })
     await vi.waitFor(() => expect(downloadSpec).toHaveBeenCalled())
-    await db().mcpServer.update({
-      where: { id },
-      data: {
-        authType: "header",
-        authSecretId: secretId,
-        authHeaderName: "X-API-Key",
-        authValueTemplate: "{{secret}}",
-        enabled: true,
-      },
+    await writeServer(ctx, id, {
+      authType: "header",
+      authSecretId: secretId,
+      authHeaderName: "X-API-Key",
+      authValueTemplate: "{{secret}}",
+      enabled: true,
     })
     release()
 

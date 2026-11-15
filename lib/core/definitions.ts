@@ -18,6 +18,7 @@ import { checkPersonalNote, setPersonalNote } from "./personal-notes"
 import { canonicalJson } from "./permission-rules"
 import { createServer, getServer, type ExtraAuthHeaderInput } from "./servers"
 import { getSetting, setSetting } from "./settings"
+import { openLevelName, sealedLevelName } from "./level-names"
 import { copyToolTiers, mergeToolTiers } from "./tool-tiers"
 import { findServers, type OpenServer, writeServer } from "./server-meta"
 import { toolOverrides } from "./tool-rows"
@@ -264,7 +265,7 @@ export async function cloneServer(
     }))
   }
 
-  await copyLevels(source.id, id)
+  await copyLevels(ctx, source.id, id)
 
   if (note) {
     await setPersonalNote(ctx, "server", id, note)
@@ -274,7 +275,11 @@ export async function cloneServer(
 }
 
 /** The levels of one server's tools, for each token and for all, onto another. */
-async function copyLevels(fromId: string, toId: string): Promise<void> {
+async function copyLevels(
+  ctx: VaultContext,
+  fromId: string,
+  toId: string,
+): Promise<void> {
   const [own, shared] = await Promise.all([
     db().apiTokenToolAccess.findMany({ where: { serverId: fromId } }),
     db().vaultToolAccess.findMany({ where: { serverId: fromId } }),
@@ -286,7 +291,15 @@ async function copyLevels(fromId: string, toId: string): Promise<void> {
         data: {
           tokenId: row.tokenId,
           serverId: toId,
-          toolName: row.toolName,
+          // A name is hashed for its server and sealed to its row.
+          ...levelName(
+            ctx,
+            "api_token_tool_access",
+            `${row.tokenId}:${fromId}`,
+            `${row.tokenId}:${toId}`,
+            toId,
+            row,
+          ),
           access: row.access,
         },
       }),
@@ -296,12 +309,29 @@ async function copyLevels(fromId: string, toId: string): Promise<void> {
         data: {
           vaultId: row.vaultId,
           serverId: toId,
-          toolName: row.toolName,
+          ...levelName(ctx, "vault_tool_access", fromId, toId, toId, row),
           access: row.access,
         },
       }),
     ),
   ])
+}
+
+/** A level's name, moved from one server's row to another's. */
+function levelName(
+  ctx: VaultContext,
+  table: "api_token_tool_access" | "vault_tool_access",
+  fromOwner: string,
+  toOwner: string,
+  toId: string,
+  row: { toolName: string; sealed: Uint8Array | null },
+): { toolName: string; sealed: Uint8Array<ArrayBuffer> } {
+  const name = openLevelName(ctx, table, fromOwner, {
+    key: row.toolName,
+    sealed: row.sealed,
+  })
+  const { key, sealed } = sealedLevelName(ctx, table, toOwner, toId, name)
+  return { toolName: key, sealed }
 }
 
 // ---- Detach ----------------------------------------------------------------
@@ -337,7 +367,7 @@ export async function detachServer(
     newDefinitionFor(ctx, tx, server),
   )
   // The owner's tiers for its tools stay what they were (tool-tiers.ts).
-  await copyToolTiers(ctx.vaultId, definitionId, detached)
+  await copyToolTiers(ctx, definitionId, detached)
 
   return { definitionId: detached }
 }
@@ -574,7 +604,7 @@ export async function mergeDefinitions(
 
   // The owner's tiers: the kept definition's stay, and the others' come
   // along for tools it has none for, before their definitions go.
-  await mergeToolTiers(ctx.vaultId, keepId, others)
+  await mergeToolTiers(ctx, keepId, others)
 
   await db().$transaction(async (tx) => {
     const moving = await tx.mcpServer.findMany({

@@ -1022,6 +1022,7 @@ describe("another server of a definition", () => {
   it("makes it on approval from the definition's schema, edits and descriptions, public-only, with the note and no levels", async () => {
     const source = await ownerEndpoint()
     await writeToolAccess(
+      ctx,
       (await createApiToken(ctx, { name: "Other", allowAllServers: true })).id,
       source.id,
       "listPets",
@@ -1342,7 +1343,7 @@ describe("proposing a service", () => {
               hash: serviceDefinitionHash(ctx, definition),
               hostId: input.hostId,
               engine: "docker",
-              containerName: `pcp-${id}`,
+              plainContainerName: `pcp-${id}`,
               env: JSON.stringify(input.env),
             },
           },

@@ -414,7 +414,7 @@ async function detailsOf(
       select: { fetchedAt: true },
     }),
     storedSpec(ctx, server.id),
-    authHeaderNames(server),
+    authHeaderNames(ctx, server),
   ])
 
   const details: EndpointDetails = {
@@ -1295,7 +1295,7 @@ async function proposeChange(
   // Refused here, before the owner is asked, when it would not work.
   const generated = generateEndpointTools(fetched?.text ?? stored.text, {
     readOnly: readOnly ?? server.readOnly,
-    authHeaderNames: await authHeaderNames(server),
+    authHeaderNames: await authHeaderNames(scope.ctx, server),
     patches,
   })
   const after = new Map(generated.tools.map((tool) => [tool.name, tool]))

@@ -131,7 +131,7 @@ beforeEach(async () => {
     manageWrappers: true,
   })
   scope = { ...(await resolveApiToken(token))!, publicUrl: PUBLIC_URL }
-  await writeToolAccess(scope.tokenId, endpointId, "echo", "allowed")
+  await writeToolAccess(scope.ctx, scope.tokenId, endpointId, "echo", "allowed")
 })
 
 afterEach(async () => {
@@ -222,7 +222,13 @@ async function proposeAndApprove(tools = [SIGN_IN]) {
   const wrapper = await db().mcpServer.findFirstOrThrow({
     where: { kind: "wrapper" },
   })
-  await writeToolAccess(scope.tokenId, wrapper.id, "sign_in", "allowed")
+  await writeToolAccess(
+    scope.ctx,
+    scope.tokenId,
+    wrapper.id,
+    "sign_in",
+    "allowed",
+  )
   return { view, wrapper }
 }
 

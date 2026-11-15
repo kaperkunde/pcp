@@ -71,7 +71,7 @@ describe("allowances", () => {
     const { ctx, serverId, tokenId } = await setup()
     const now = new Date()
 
-    await allowToolFor(tokenId, serverId, "send_postcard", 480, now)
+    await allowToolFor(ctx, tokenId, serverId, "send_postcard", 480, now)
     await allowSiteFor(ctx, tokenId, "example.com", 15, now)
     await allowSiteFor(
       ctx,
@@ -96,7 +96,7 @@ describe("allowances", () => {
       },
     ])
 
-    await allowToolFor(tokenId, serverId, "send_postcard", 60, now)
+    await allowToolFor(ctx, tokenId, serverId, "send_postcard", 60, now)
     expect(
       (await listTokenAllowances(ctx, tokenId, now)).map((item) => item.until),
     ).toEqual([
@@ -108,7 +108,7 @@ describe("allowances", () => {
 
   it("the owner ends one early, and only in their own vault", async () => {
     const { ctx, serverId, tokenId } = await setup()
-    await allowToolFor(tokenId, serverId, "send_postcard", 60)
+    await allowToolFor(ctx, tokenId, serverId, "send_postcard", 60)
     await allowSiteFor(ctx, tokenId, "example.com", 60)
 
     await expect(
@@ -138,7 +138,7 @@ describe("allowances", () => {
     const now = new Date()
     const past = new Date(now.getTime() - 60 * 60_000)
 
-    await allowToolFor(tokenId, serverId, "send_postcard", 15, past)
+    await allowToolFor(ctx, tokenId, serverId, "send_postcard", 15, past)
     await allowSiteFor(ctx, tokenId, "old.example", 15, past)
     await allowSiteFor(ctx, tokenId, "example.com", 60, now)
 

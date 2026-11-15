@@ -177,9 +177,9 @@ async function connect(
     "flaky",
     "busy_tab",
   ]) {
-    await writeToolAccess(tokenId, serverId, name, "allowed")
+    await writeToolAccess(ctx, tokenId, serverId, name, "allowed")
   }
-  await writeToolAccess(tokenId, serverId, "burn_cards", "blocked")
+  await writeToolAccess(ctx, tokenId, serverId, "burn_cards", "blocked")
 
   scope = { ...(await resolveApiToken(token))!, publicUrl: PUBLIC_URL }
   const [clientSide, serverSide] = InMemoryTransport.createLinkedPair()
@@ -795,7 +795,13 @@ describe("a server the owner has to connect", () => {
       },
     })
     await connect()
-    await writeToolAccess(scope.tokenId, serverId, "list_events", "allowed")
+    await writeToolAccess(
+      scope.ctx,
+      scope.tokenId,
+      serverId,
+      "list_events",
+      "allowed",
+    )
     // A fresh gateway, so the level just written is read.
     await client.close()
     const [clientSide, serverSide] = InMemoryTransport.createLinkedPair()
@@ -2140,6 +2146,7 @@ describe("the same call again (#115)", () => {
     expect(await db().permissionRequest.count()).toBe(1)
 
     await writeToolAccess(
+      scope.ctx,
       scope.tokenId,
       await postcards(),
       "send_postcard",

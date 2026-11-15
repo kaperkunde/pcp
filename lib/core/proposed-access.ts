@@ -20,6 +20,7 @@ import {
   type ToolAccess,
   type ToolTier,
 } from "./constants"
+import { openFromText, sealToText } from "./sealed"
 import type { VaultContext } from "./context"
 import { db } from "./db"
 import { invalid, isPcpError } from "./errors"
@@ -534,10 +535,43 @@ export async function settleChosenAccess(
 
   await db().mcpServer.update({
     where: { id: serverId },
-    data: { pendingAccess: JSON.stringify({ tokenId, rules }) },
+    data: {
+      pendingAccess: sealedPendingAccess(ctx, serverId, { tokenId, rules }),
+    },
   })
 
   return "The owner saved levels and tiers for its tools by name; they apply once, to the tools PCP first reads from it."
+}
+
+/**
+ * What a server keeps of the owner's saved levels, sealed (#96): the
+ * names they are for say what it serves. In its own column as sealed text
+ * ("pcp-sealed:v1:…", "mcp_server:<id>:pending_access" as associated
+ * data); one from before holds the JSON as it is, until converted, and the
+ * clearing below compares the stored text either way.
+ */
+export function sealedPendingAccess(
+  ctx: VaultContext,
+  serverId: string,
+  pending: { tokenId: string; rules: AccessRule[] },
+): string {
+  return sealToText(
+    ctx.dek,
+    pendingAccessAad(serverId),
+    JSON.stringify(pending),
+  )
+}
+
+export function pendingAccessAad(serverId: string): string {
+  return `mcp_server:${serverId}:pending_access`
+}
+
+function openPendingAccess(
+  ctx: VaultContext,
+  serverId: string,
+  stored: string,
+): string {
+  return openFromText(ctx.dek, pendingAccessAad(serverId), stored)
 }
 
 function readPending(
@@ -595,7 +629,9 @@ export async function applyPendingAccess(
     return
   }
 
-  const pending = readPending(row.pendingAccess)
+  const pending = readPending(
+    openPendingAccess(ctx, serverId, row.pendingAccess),
+  )
 
   if (!pending) {
     return

@@ -234,7 +234,14 @@ model ApiTokenToolAccess {
   token     ApiToken  @relation(fields: [tokenId], references: [id], onDelete: Cascade)
   serverId  String    @map("server_id")
   server    McpServer @relation(fields: [serverId], references: [id], onDelete: Cascade)
+  /// The tool's name as a keyed hash under the vault's key, bound to the
+  /// server, the name itself in `sealed` (#96); a row from before holds the
+  /// name in plain text here and no sealed one.
   toolName  String    @map("tool_name")
+  /// The tool's name, AES-256-GCM under the vault's data key with
+  /// "api_token_tool_access:<token id>:<server id>:<name hash>" as
+  /// associated data.
+  sealed    Bytes?
   /// allowed | ask | blocked
   access    String
   updatedAt DateTime  @updatedAt @map("updated_at")
@@ -252,7 +259,14 @@ model ApiTokenToolAllowance {
   token     ApiToken  @relation(fields: [tokenId], references: [id], onDelete: Cascade)
   serverId  String    @map("server_id")
   server    McpServer @relation(fields: [serverId], references: [id], onDelete: Cascade)
+  /// The tool's name as a keyed hash under the vault's key, bound to the
+  /// server, the name itself in `sealed` (#96); a row from before holds the
+  /// name in plain text here and no sealed one.
   toolName  String    @map("tool_name")
+  /// The tool's name, AES-256-GCM under the vault's data key with
+  /// "api_token_tool_allowance:<token id>:<server id>:<name hash>" as
+  /// associated data.
+  sealed    Bytes?
   until     DateTime
   createdAt DateTime  @default(now()) @map("created_at")
 
@@ -318,7 +332,13 @@ model VaultToolAccess {
   vault     Vault     @relation(fields: [vaultId], references: [id], onDelete: Cascade)
   serverId  String    @map("server_id")
   server    McpServer @relation(fields: [serverId], references: [id], onDelete: Cascade)
+  /// The tool's name as a keyed hash under the vault's key, bound to the
+  /// server, the name itself in `sealed` (#96); a row from before holds the
+  /// name in plain text here and no sealed one.
   toolName  String    @map("tool_name")
+  /// The tool's name, AES-256-GCM under the vault's data key with
+  /// "vault_tool_access:<server id>:<name hash>" as associated data.
+  sealed    Bytes?
   /// allowed | ask | blocked
   access    String
   updatedAt DateTime  @updatedAt @map("updated_at")
@@ -417,6 +437,10 @@ model PermissionRequest {
   /// "propose_tool_access" for tool levels an assistant proposes;
   /// "web_fetch" for a web request.
   toolName             String     @map("tool_name")
+  /// The tool's name, AES-256-GCM under the vault's data key with
+  /// "permission_request:<id>:tool:<name hash>" as associated data (#96).
+  /// `toolName` holds a keyed hash of it once sealed.
+  toolSealed           Bytes?     @map("tool_sealed")
   /// The arguments (or the new server's settings) as JSON, AES-256-GCM under
   /// the vault's data key with "permission_request:<id>" as associated data.
   argsCiphertext       Bytes      @map("args_ciphertext")
@@ -662,15 +686,16 @@ model McpServer {
 
   /// none | header | oauth | basic | key (ssh: PCP's own key, in a managed
   /// secret)
-  authType          String  @default("none") @map("auth_type")
-  /// header auth: the header to send and how the secret goes into it.
-  authHeaderName    String? @map("auth_header_name")
-  authValueTemplate String? @map("auth_value_template")
-  authSecretId      String? @map("auth_secret_id")
-  authSecret        Secret? @relation("ServerAuthSecret", fields: [authSecretId], references: [id], onDelete: SetNull)
+  authType               String  @default("none") @map("auth_type")
+  /// header auth: the header to send and how the secret goes into it. From
+  /// before they were sealed (#96): null once they are in `meta`.
+  plainAuthHeaderName    String? @map("auth_header_name")
+  plainAuthValueTemplate String? @map("auth_value_template")
+  authSecretId           String? @map("auth_secret_id")
+  authSecret             Secret? @relation("ServerAuthSecret", fields: [authSecretId], references: [id], onDelete: SetNull)
   /// basic auth: the user name sent with the secret (a JMAP server's Basic
   /// authentication, an IMAP and SMTP login). key: the SSH login.
-  plainAuthUsername String? @map("auth_username")
+  plainAuthUsername      String? @map("auth_username")
 
   /// oauth (an MCP server, or a jmap account that signs in with OAuth): an
   /// optional pre-registered client. Without one PCP registers itself
@@ -903,7 +928,13 @@ model ToolTier {
   definition   ServerDefinition? @relation(fields: [definitionId], references: [id], onDelete: Cascade)
   serverId     String?           @map("server_id")
   server       McpServer?        @relation(fields: [serverId], references: [id], onDelete: Cascade)
+  /// The tool's name as a keyed hash under the vault's key, bound to the
+  /// definition (or the server, without one), the name itself in `sealed`
+  /// (#96); a row from before holds the name in plain text here.
   toolName     String            @map("tool_name")
+  /// The tool's name, AES-256-GCM under the vault's data key with
+  /// "tool_tier:<id>:<name hash>" as associated data.
+  sealed       Bytes?
   /// read | write | destructive
   tier         String
   /// A wrapper's tool: the tier its calls came to when the owner chose
@@ -922,14 +953,19 @@ model ToolTier {
 /// a secret key, each in its own header). The first header stays on the
 /// server row; these follow it in `position` order.
 model ServerAuthHeader {
-  id            String    @id
-  serverId      String    @map("server_id")
-  server        McpServer @relation(fields: [serverId], references: [id], onDelete: Cascade)
-  position      Int
-  headerName    String    @map("header_name")
-  valueTemplate String    @map("value_template")
-  secretId      String?   @map("secret_id")
-  secret        Secret?   @relation(fields: [secretId], references: [id], onDelete: SetNull)
+  id                 String    @id
+  serverId           String    @map("server_id")
+  server             McpServer @relation(fields: [serverId], references: [id], onDelete: Cascade)
+  position           Int
+  /// The header's name and the template its value is made from, sealed
+  /// (#96) as JSON with "server_auth_header:<id>:sealed" as associated
+  /// data; a row from before holds them in the plain columns, "" once
+  /// sealed.
+  plainHeaderName    String    @map("header_name")
+  plainValueTemplate String    @map("value_template")
+  sealed             Bytes?
+  secretId           String?   @map("secret_id")
+  secret             Secret?   @relation(fields: [secretId], references: [id], onDelete: SetNull)
 
   @@unique([serverId, position])
   @@index([secretId])
@@ -983,8 +1019,9 @@ model McpTool {
   schema                   Bytes?
   /// The owner's wording, sealed as "mcp_tool:<id>:override".
   override                 Bytes?
-  /// JSON: the icons an MCP server gave the tool (MCP's Icon objects).
-  icons                    String?
+  /// JSON: the icons an MCP server gave the tool (MCP's Icon objects). From
+  /// before they were sealed (#96): null once they are in `about`.
+  plainIcons               String?   @map("icons")
   createdAt                DateTime  @default(now()) @map("created_at")
   updatedAt                DateTime  @updatedAt @map("updated_at")
 
@@ -1054,56 +1091,66 @@ model WrapperSpec {
 /// or MCP server of its own (registeredId). Kept apart from the server row
 /// like a wrapper's program.
 model ServiceSpec {
-  serverId         String     @id @map("server_id")
-  server           McpServer  @relation("ServiceOwn", fields: [serverId], references: [id], onDelete: Cascade)
+  serverId           String     @id @map("server_id")
+  server             McpServer  @relation("ServiceOwn", fields: [serverId], references: [id], onDelete: Cascade)
   /// What the definition's instances share, as JSON
   /// (lib/core/services/definition.ts): the image by digest, its ports, the
   /// names of its environment variables, its named volumes, the health
   /// check and what it registers. Names no secret and no address. From
   /// before definitions were sealed (#96): "" once sealed.
-  plainDefinition  String     @map("definition")
+  plainDefinition    String     @map("definition")
   /// The definition, sealed: AES-256-GCM under the vault's data key with
   /// "service_spec:<server id>:sealedDefinition" as associated data.
-  sealedDefinition Bytes?     @map("sealed_definition")
+  sealedDefinition   Bytes?     @map("sealed_definition")
   /// A keyed hash of the definition's canonical JSON under the vault's key,
   /// hex; a row from before holds its plain SHA-256 until it is sealed.
-  hash             String
+  hash               String
   /// The SSH server the container runs on. Null once that server is
   /// deleted: the container stays there, and PCP no longer reaches it.
-  hostId           String?    @map("host_id")
-  host             McpServer? @relation("ServiceHost", fields: [hostId], references: [id], onDelete: SetNull)
+  hostId             String?    @map("host_id")
+  host               McpServer? @relation("ServiceHost", fields: [hostId], references: [id], onDelete: SetNull)
   /// docker | podman: the engine PCP found on the host.
-  engine           String
+  engine             String
   /// The engine's version as it reported it, for the owner.
-  engineVersion    String     @default("") @map("engine_version")
-  /// The container's name on the host: pcp-<name>.
-  containerName    String     @map("container_name")
+  engineVersion      String     @default("") @map("engine_version")
+  /// The container's name on the host: pcp-<name>. From before the owner's
+  /// own values were sealed (#96): "" once sealed (`sealedOwn`).
+  plainContainerName String     @map("container_name")
   /// Where the container's ports are published on the host, as JSON:
   /// {"address": "0.0.0.0", "ports": [{"container": 5001, "host": 5001}]}.
-  publish          String     @default("{}")
+  /// "{}" once sealed.
+  plainPublish       String     @default("{}") @map("publish")
   /// Which secret each environment variable takes, as JSON
   /// {"NAME": "<secret id>"}: by id, never a value. The values reach the
   /// host over standard input only (upstream.ts builds them).
-  env              String     @default("{}")
+  env                String     @default("{}")
   /// What the owner typed for the definition's plain variables (a VPN
   /// provider's name, a country), as JSON {"NAME": "value"}: no secrets.
-  plainValues      String     @default("{}") @map("plain_values")
+  /// "{}" once sealed.
+  plainValues        String     @default("{}") @map("plain_values")
+  /// The three values above that the owner or the launch form typed (the
+  /// container's name, where it is published, the plain variables' values),
+  /// sealed as one JSON object (lib/core/services/own-values.ts),
+  /// AES-256-GCM under the vault's data key with
+  /// "service_spec:<server id>:own" as associated data. Null on a row from
+  /// before, which holds them in the plain columns.
+  sealedOwn          Bytes?     @map("sealed_own")
   /// The API endpoint or MCP server launching it registered; null when it
   /// registers nothing, or once that server is deleted.
-  registeredId     String?    @unique @map("registered_id")
-  registered       McpServer? @relation("ServiceRegistered", fields: [registeredId], references: [id], onDelete: SetNull)
+  registeredId       String?    @unique @map("registered_id")
+  registered         McpServer? @relation("ServiceRegistered", fields: [registeredId], references: [id], onDelete: SetNull)
   /// How PCP reaches what the container publishes: "tunnel", a direct-tcpip
   /// channel through the SSH connection to the address its ports are bound
   /// to on the SSH server (every service launched, updated or made again
   /// since), or "direct", from PCP's machine to the published address (a
   /// service launched before, until then).
-  reach            String     @default("direct")
+  reach              String     @default("direct")
   /// What the owner (or an assistant's stop tool) last asked of it:
   /// "running" or "stopped". A call that finds it down starts it again, and
   /// the reconcile pass brings it back up, only while it is "running".
-  intendedState    String     @default("running") @map("intended_state")
-  createdAt        DateTime   @default(now()) @map("created_at")
-  updatedAt        DateTime   @updatedAt @map("updated_at")
+  intendedState      String     @default("running") @map("intended_state")
+  createdAt          DateTime   @default(now()) @map("created_at")
+  updatedAt          DateTime   @updatedAt @map("updated_at")
 
   @@index([hostId])
   @@map("service_spec")

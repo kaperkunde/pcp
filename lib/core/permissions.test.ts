@@ -1108,7 +1108,7 @@ describe("the owner's answer", () => {
         access: "allowed",
       },
     })
-    await writeToolAccess(tokenId, server.id, "send_postcard", "ask")
+    await writeToolAccess(ctx, tokenId, server.id, "send_postcard", "ask")
     await withPermission(scope, call(server, "send_postcard", { to: "Ada" }))
     await decidePermission(
       ctx,
@@ -1127,7 +1127,7 @@ describe("the owner's answer", () => {
     expect(await levelOf(new Date(Date.now() + 16 * 60_000))).toBe("ask")
 
     // A block the owner sets later wins over the allowance.
-    await writeToolAccess(tokenId, server.id, "send_postcard", "blocked")
+    await writeToolAccess(ctx, tokenId, server.id, "send_postcard", "blocked")
     expect(await levelOf(new Date())).toBe("blocked")
   })
 

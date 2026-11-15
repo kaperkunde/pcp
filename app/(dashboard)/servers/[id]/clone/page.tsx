@@ -83,7 +83,7 @@ export default async function ClonePage({
           authUsername: server.authUsername ?? "",
           authHeaderName: server.authHeaderName ?? DEFAULT_HEADER_NAME,
           authValueTemplate: server.authValueTemplate ?? DEFAULT_VALUE_TEMPLATE,
-          authExtraHeaders: (await extraAuthHeaders(server.id)).map(
+          authExtraHeaders: (await extraAuthHeaders(ctx, server.id)).map(
             (header) => ({
               secretId: "",
               headerName: header.headerName,
