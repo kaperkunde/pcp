@@ -238,13 +238,15 @@ so in the summary; the bump itself waits for the request.
   there (`upstream.ts callServerTool` for every server kind but the
   browser and a wrapper, the browser per site in `browser/call.ts`, web
   fetch per site in `web-fetch.ts runFetch`), so every way in meets it: a
-  server cooling down (it asked to slow down: 429, Retry-After, rate-limit
-  headers, or `pcpThrottle: {reason, retryAfterMs?}` on an error or answer
-  from mail and calendar code; or a run of answers far slower than usual)
-  is refused at once, then bytes a day, pacing (the server's pause and
+  server cooling down (it asked to slow down: 429, a 503 with Retry-After,
+  or its protocol's own words, each `pcpThrottle: {reason, retryAfterMs?}`
+  on an error or answer, `lib/core/throttle-signal.ts` the one module; or a
+  run of one tool's answers far slower than its usual, or of calls past
+  their time limit, as `SLOW_DETECTION` says per class) is refused at once,
+  a spent rate limit holds the next call until its reset, then bytes a day, pacing (the server's pause and
   calls a minute as a floor, one spacing), calls at once, and the time
   limit, past which the answer is a `timeout` tool error naming the server
-  and the limit. Every refusal is `paced` with `retryAfterMs` in
+  and the limit; a limit the owner set reaches each kind's own requests. Every refusal is `paced` with `retryAfterMs` in
   `_meta["gg.pcp/error"]`. Defaults are per class of place in
   `gate/limits.ts`, never a vendor; a server's own limits are sealed in
   `mcp_server.limits` (`mcp_server:<id>:limits`), the instance's own, set by

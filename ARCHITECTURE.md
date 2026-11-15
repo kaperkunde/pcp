@@ -3843,12 +3843,20 @@ bytes a day; its pace (pacing's `paceServerCall`, with the server's own
 pause and calls a minute as a floor under the class's pace, `withFloor`, so
 there is one spacing); a turn among its calls at once (`state.ts acquire`),
 waited for within what the caller's deadline leaves (`waitBudget`); then
-the call within its time limit. Past it the caller gets a `timeout` tool
-error naming the server and the limit ("… did not answer within 45 s, its
-time limit for a call …"), rather than the run's minutes; an MCP call is
-stopped a second later (`callTool`'s own timeout), and every kind keeps its
-turn until the call really ends, at most `LINGER_MS` more, so a place that
-hangs is not sent more at once. A refusal is `paced` with `retryAfterMs`.
+the call within its time limit. Before the pace, a server whose rate limit
+said it has nothing left until a reset holds the call until then (within
+its time, else `paced`), and after its turn a call is refused if a
+cool-down began while it waited. Past the time limit the caller gets a
+`timeout` tool error naming the server and the limit ("… did not answer
+within 45 s, its time limit for a call …"), rather than the run's minutes.
+A time limit the owner set reaches each kind's own requests too (an MCP
+call's `callTool` timeout a second past it, an API endpoint's
+`executeCall`, a calendar account's `DavClient`, a JMAP request, and an
+IMAP connection's socket timeout and the wait for a pooled one, with the
+pool's fingerprint changed by a longer limit); without one each kind keeps
+its own constant. Every kind keeps its turn until the call really ends, at
+most `LINGER_MS` more, so a place that hangs is not sent more at once. A
+refusal is `paced` with `retryAfterMs`.
 
 **Limits** (`gate/limits.ts`, `gate/config.ts`): calls at once, a pause,
 calls a minute, a time limit, bytes a day, and the first and longest
@@ -3872,30 +3880,47 @@ assistant reads them on demand with `get_server_limits`; nothing about
 limits or cool-downs is in `search`, a tool's description or the
 instructions, and a call hears of one only when it cannot go.
 
-**Slowing down** (`gate/signals.ts`, `state.ts recordEnd`). A place asks PCP
-to slow down with a 429, a 503 with Retry-After, or rate-limit headers with
-nothing left (`httpThrottle`, read from an API endpoint's answer in
-`openapi/call.ts` and an MCP server's refusal in `upstream.ts`); mail and
-calendar code raise their protocols' own signals as an Error (or an answer)
-carrying `pcpThrottle: {reason, retryAfterMs?}`, which the gate reads off
-the cause chain and takes off an answer before it is passed on. A run of
-`SLOW_RUN` answers each `SLOW_FACTOR` times the server's usual time (the
-median of its last successes, and at least `SLOW_FLOOR_MS`), or past their
-time limit, counts as one too; a site's slow pages do not. The place then
-cools down: for as long as it asked, else the first cool-down, doubling for
-each one that starts within `BACKOFF_MEMORY_MS` of the last, up to the
-longest; a success at its usual pace after it ends starts over. While it
+**Slowing down** (`lib/core/throttle-signal.ts`, the one module both sides
+use; `state.ts recordEnd`). A place asks PCP to slow down with a 429 or a
+503 with Retry-After (`httpThrottle`, read by JMAP and CalDAV requests, an
+API endpoint's answer in `openapi/call.ts`, an MCP server's refusal in
+`upstream.ts`, web fetch, and a browser tab's page), or with its protocol's
+own words (IMAP's [THROTTLED], a BYE about limits, JMAP's limit errors:
+`mail/throttle.ts`), each an Error (or an answer) carrying `pcpThrottle:
+{reason, retryAfterMs?}`, which the gate reads off the cause chain and
+takes off an answer before it is passed on. Rate-limit headers with nothing
+left on an answer that went through (`rateLimitHold`) are only a hold
+until the reset: the limit may be one bucket of many, so nothing cools
+down. What counts as slowness depends on the class (`SLOW_DETECTION`): for
+MCP servers, endpoints, mail and calendar accounts a run of `SLOW_RUN`
+answers of one tool each `SLOW_FACTOR` times that tool's usual time (the
+median of its last successes, at least `SLOW_FLOOR_MS`), so fast and slow
+tools of one server never mix; for SSH servers, services and storage
+folders, whose work takes as long as it does, only `SLOW_RUN` calls in a
+row past their time limit; for sites, nothing but their own "slow down".
+The place then cools down: for as long as it asked (no longer than its
+longest cool-down), else the first cool-down, doubling for each one that
+starts within `BACKOFF_MEMORY_MS` of the last, up to the longest; a success
+at its usual pace after it ends starts over. While it
 cools, its calls are refused at once ("<server> is cooling down: <reason>.
 Nothing was sent; try again in N s."), the first throttled answer says the
 cool-down began, `check_server` names it (`cooling` on the server's state),
 and the server's page shows it with a button that ends it. The browser and
-web fetch share a site's cool-down.
+web fetch share a site's cool-down and counters: each browser turn at a
+site is counted when it ends (`browser/call.ts pacedTurn`), with a 429 on
+the page a navigation opened.
 
 **Counters and state** are in this process's memory (`state.ts`), per vault
 and place, like pacing's: calls, errors, slow-downs, bytes where an answer
-has them, and latencies (sampled per minute) for the 50th and 95th
-percentile, over this minute and the one before, the last hour and the last
-day. They are not stored: a restart starts them again and says since when
+has them, and answer times for the 50th and 95th percentile (a reservoir
+sample per minute, each call as likely to be kept; minutes older than an
+hour merged into hours by weight), over this minute and the one before,
+the last hour and the last day. At most `MAX_GATED_PLACES` places are held,
+the least recently used idle one dropped first and none that is busy or
+cooling down; the comment there gives the memory this comes to. A mail
+account's last calls (`mail/diagnostics.ts`: each phase's time, whether it
+reused a connection, how it went and the server's own notices) are shown
+beside the counters on its page and in `get_server_limits`'s answer. They are not stored: a restart starts them again and says since when
 it counts, which keeps them out of the database, the export, the cleanup and
 `wipeVault`, and a cool-down a restart forgets is found again by the place's
 next "slow down". Nothing of a call is kept but its outcome, time and size.
