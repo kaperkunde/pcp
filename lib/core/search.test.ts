@@ -78,6 +78,39 @@ describe("searchTools", () => {
     expect(scoped.every((match) => match.server === "notion")).toBe(true)
   })
 
+  it("ranks a tool whose title the query gives exactly first, among many alike", () => {
+    // GitHub's REST API (#141): "Update a repository" is repos_update, with
+    // dozens of "Update … repository …" operations beside it.
+    const api = (name: string, title: string): ToolCandidate => ({
+      server: "github-rest",
+      serverName: "GitHub REST",
+      serverDescription: "GitHub's whole REST API.",
+      name,
+      title,
+      description: title,
+    })
+    const many = [
+      api(
+        "copilot_update-repository-code-review-settings",
+        "Update Copilot code review settings for a repository",
+      ),
+      api(
+        "dependabot_update-repository-access-for-org",
+        "Updates Dependabot's repository access list for an organization",
+      ),
+      api(
+        "security-advisories_update-repository-advisory",
+        "Update a repository security advisory",
+      ),
+      api("repos_update", "Update a repository"),
+      api("repos_update-invitation", "Update a repository invitation"),
+    ]
+
+    expect(searchTools(many, "Update a repository")[0]?.name).toBe(
+      "repos_update",
+    )
+  })
+
   it("lists everything, in order, for an empty query", () => {
     const all = searchTools(tools, "  ", { limit: 10 })
     expect(all.map((match) => `${match.server}/${match.name}`)).toEqual([
