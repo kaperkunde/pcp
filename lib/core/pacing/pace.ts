@@ -1,5 +1,7 @@
 import type { CallToolResult } from "@modelcontextprotocol/server"
 
+import { familyError } from "../tools/family"
+import { ERROR_META_KEY } from "../tools/outcome"
 import {
   MAX_PACED_DESTINATIONS,
   PACING_DEADLINE_MARGIN_MS,
@@ -196,26 +198,44 @@ function prune(state: DestinationState): void {
 export type PacedRefusal = { message: string; retryAfterMs: number }
 
 /**
- * A refusal as the tool error a caller answers with: its text, and
- * `{code: "paced", retry_after_ms}` as structuredContent, which run_code
- * hands on to the program (answers.ts answerValue).
+ * A refusal as the tool error a caller answers with: its text, and the
+ * code "paced" with `retryAfterMs` in `_meta["gg.pcp/error"]`, as every
+ * tool error carries its code (tools/outcome.ts), which run_code hands on
+ * to the program (answers.ts answerValue). `{code: "paced",
+ * retry_after_ms}` as structuredContent is the shape from before, kept for
+ * one release (docs/breaking-changes.md).
  */
 export function pacedResult(refusal: PacedRefusal): CallToolResult {
   return {
-    content: [{ type: "text", text: refusal.message }],
+    ...familyError(refusal.message, "paced", {
+      retryAfterMs: refusal.retryAfterMs,
+    }),
     structuredContent: { code: "paced", retry_after_ms: refusal.retryAfterMs },
-    isError: true,
   }
 }
 
-/** The wait a tool error pacing made names, or null for any other result. */
+/** The wait a tool error pacing or the gate made names, or null otherwise. */
 export function pacedRetryAfter(result: CallToolResult): number | null {
+  if (result.isError !== true) {
+    return null
+  }
+
+  const meta = result._meta?.[ERROR_META_KEY] as
+    { code?: unknown; retryAfterMs?: unknown } | undefined
+
+  if (
+    meta?.code === "paced" &&
+    typeof meta.retryAfterMs === "number" &&
+    Number.isFinite(meta.retryAfterMs)
+  ) {
+    return Math.max(0, Math.round(meta.retryAfterMs))
+  }
+
   const content = result.structuredContent as
     { code?: unknown; retry_after_ms?: unknown } | undefined
   const wait = content?.retry_after_ms
 
   if (
-    result.isError !== true ||
     content?.code !== "paced" ||
     typeof wait !== "number" ||
     !Number.isFinite(wait)

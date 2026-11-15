@@ -67,6 +67,7 @@ import { dropMailSession } from "./imap-pool"
 import { fetchJmapSession, openJmapBackend } from "./jmap"
 import {
   DEFAULT_SEARCH_LIMIT,
+  MAIL_CALL_TIMEOUT_MS,
   MAX_ATTACHMENT_TEXT_CHARS,
   MAX_BODY_CHARS,
   MAX_SEND_ATTACHMENT_BYTES,
@@ -487,7 +488,15 @@ const FINGERPRINT_KEY = randomBytes(32)
 function sessionFingerprint(
   config: ImapConfig,
   login: { username: string; password: string },
+  timeoutMs?: number,
 ): string {
+  // How long its connection waits for the server: only a limit above the
+  // usual one changes it (imap.ts connect).
+  const waits =
+    timeoutMs !== undefined && timeoutMs > MAIL_CALL_TIMEOUT_MS
+      ? [timeoutMs]
+      : []
+
   return createHmac("sha256", FINGERPRINT_KEY)
     .update(
       JSON.stringify([
@@ -496,6 +505,7 @@ function sessionFingerprint(
         config.imap.secure,
         login.username,
         login.password,
+        ...waits,
       ]),
     )
     .digest("hex")
@@ -519,9 +529,14 @@ async function openBackend(
         learnServerFilesSent(server.id, serverFilesSent),
       session: {
         account: server.id,
-        fingerprint: sessionFingerprint(config, login),
+        // A longer time limit than a pooled connection waits for gets a
+        // connection of its own (imap.ts connect's socketTimeoutMs).
+        fingerprint: sessionFingerprint(config, login, credential.timeoutMs),
       },
       trace,
+      ...(credential.timeoutMs !== undefined
+        ? { timeoutMs: credential.timeoutMs }
+        : {}),
     })
   }
 

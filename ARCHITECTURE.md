@@ -86,7 +86,9 @@ associated data (a ciphertext cannot be moved to another row):
   calendar addresses, SSH host and public keys) and its status message,
   as one JSON (`mcp_server.meta`, `mcp_server:<id>:meta`,
   `lib/core/server-meta.ts`) with its short name (`slug`, found by its
-  keyed hash in `mcp_server.slug_key`, unique in the vault), a
+  keyed hash in `mcp_server.slug_key`, unique in the vault), its own call
+  limits (`mcp_server.limits`, `mcp_server:<id>:limits`,
+  `lib/core/gate/store.ts`), a
   definition's name, short name and description (`server_definition.meta`,
   `slug_key`), a tool's name, title and description, the title its
   annotations carried (`mcp_tool.about`; the name found by a keyed hash of
@@ -3799,7 +3801,9 @@ caller that names none waits `PACING_MAX_WAIT_MS` at most.
 Past that the call is answered at once with a tool error that says how long
 the wait is and that nothing was sent ("Paced: <destination> takes its next
 action in N s, longer than this call can wait (M s). …"), with
-`structuredContent` `{code: "paced", retry_after_ms}`, and takes no slot.
+the code `paced` and `retryAfterMs` in `_meta["gg.pcp/error"]` (and, for
+one release, `structuredContent` `{code: "paced", retry_after_ms}`), and
+takes no slot.
 run_code hands the program the same: the error `pcp.call` throws has
 `code` "paced" and `retryAfterMs` (a Python `PcpError`'s `code` and
 `retry_after_ms`), carried as fields of the bridge's reply. A caller whose
@@ -3849,6 +3853,114 @@ run's call has the tab (`Tab.running`, set for the lane's turn), from
 another run or from none, is answered with one line first: "A running
 program (run <id>) is acting on this tab right now; what you see may change
 under it." It still runs.
+
+## The call gate: limits, cool-downs and timeouts
+
+Pacing spaces calls out; the gate (`lib/core/gate/`, #143) decides whether
+one may go at all, how long PCP waits for it, and what a place's own
+"slow down" means. One module, applied where pacing is and nowhere else:
+`upstream.ts callServerTool` for every server kind but the browser and a
+wrapper (MCP servers, API endpoints, mail and calendar accounts, SSH
+servers, services, storage folders), so execute_<tier>, run_<tier>'s
+`pcp.call`, wrappers and flows, a call the owner allowed and a
+capability's calls to its provider all meet it; `browser/call.ts
+pacedTurn` per site; and `web-fetch.ts runFetch` per site.
+
+**A server's call** (`gate/index.ts gateServerCall`), in order: refused at
+once while the server cools down; refused once its answers today reach its
+bytes a day; its pace (pacing's `paceServerCall`, with the server's own
+pause and calls a minute as a floor under the class's pace, `withFloor`, so
+there is one spacing); a turn among its calls at once (`state.ts acquire`),
+waited for within what the caller's deadline leaves (`waitBudget`); then
+the call within its time limit. Before the pace, a server whose rate limit
+said it has nothing left until a reset holds the call until then (within
+its time, else `paced`), and after its turn a call is refused if a
+cool-down began while it waited. Past the time limit the caller gets a
+`timeout` tool error naming the server and the limit ("… did not answer
+within 45 s, its time limit for a call …"), rather than the run's minutes.
+A time limit the owner set reaches each kind's own requests too (an MCP
+call's `callTool` timeout a second past it, an API endpoint's
+`executeCall`, a calendar account's `DavClient`, a JMAP request, and an
+IMAP connection's socket timeout and the wait for a pooled one, with the
+pool's fingerprint changed by a longer limit); without one each kind keeps
+its own constant. Every kind keeps its turn until the call really ends, at
+most `LINGER_MS` more, so a place that hangs is not sent more at once. A
+refusal is `paced` with `retryAfterMs`.
+
+**Limits** (`gate/limits.ts`, `gate/config.ts`): calls at once, a pause,
+calls a minute, a time limit, bytes a day, and the first and longest
+cool-down. Defaults are per class of place (MCP 8 at once and 2 minutes, an
+API 8 and a minute, mail 2 at once a quarter-second apart and 45 seconds,
+calendar 4 and a minute, SSH 4 and 11 minutes (run_command's own timeout
+rules), a service 5 minutes, a storage folder 10), never per vendor. A
+server's own limits are the fields set for it, the rest following the
+default, sealed in `mcp_server.limits` under the vault's key as
+`mcp_server:<id>:limits` (`gate/store.ts`): the instance's own, never in a
+linked repository's document, carried as it is by an export. Only the
+machine's safety bounds (`GATE_BOUNDS`) limit what may be set, whoever
+proposes it. The owner sets them in the Limits section of the server's page
+(with its pace beside them); an assistant proposes them, in
+`register_server`'s `limits` (stored on the request as `proposedLimits`,
+shown filled in and editable beside the approval, written with the yes as
+the owner left them) or with `propose_server_limits` (a `limits_change`
+request: the limits now against the proposal, the assistant's note on why,
+editable, written over the limits the owner was shown, `basis`). The
+assistant reads them on demand with `get_server_limits`; nothing about
+limits or cool-downs is in `search`, a tool's description or the
+instructions, and a call hears of one only when it cannot go.
+
+**Slowing down** (`lib/core/throttle-signal.ts`, the one module both sides
+use; `state.ts recordEnd`). A place asks PCP to slow down with a 429 or a
+503 with Retry-After (`httpThrottle`, read by JMAP and CalDAV requests, an
+API endpoint's answer in `openapi/call.ts`, an MCP server's refusal in
+`upstream.ts`, web fetch, and a browser tab's page), or with its protocol's
+own words (IMAP's [THROTTLED], a BYE about limits, JMAP's limit errors:
+`mail/throttle.ts`), each an Error (or an answer) carrying `pcpThrottle:
+{reason, retryAfterMs?}`, which the gate reads off the cause chain and
+takes off an answer before it is passed on. Rate-limit headers with nothing
+left on an answer that went through (`rateLimitHold`) are only a hold
+until the reset: the limit may be one bucket of many, so nothing cools
+down. What counts as slowness depends on the class (`SLOW_DETECTION`): for
+MCP servers, endpoints, mail and calendar accounts a run of `SLOW_RUN`
+answers of one tool each `SLOW_FACTOR` times that tool's usual time (the
+median of its last successes, at least `SLOW_FLOOR_MS`), so fast and slow
+tools of one server never mix; for SSH servers, services and storage
+folders, whose work takes as long as it does, only `SLOW_RUN` calls in a
+row past their time limit; for sites, nothing but their own "slow down".
+The place then cools down: for as long as it asked (no longer than its
+longest cool-down), else the first cool-down, doubling for each one that
+starts within `BACKOFF_MEMORY_MS` of the last, up to the longest; a success
+at its usual pace after it ends starts over. While it
+cools, its calls are refused at once ("<server> is cooling down: <reason>.
+Nothing was sent; try again in N s."), the first throttled answer says the
+cool-down began, `check_server` names it (`cooling` on the server's state),
+and the server's page shows it with a button that ends it. The browser and
+web fetch share a site's cool-down and counters: each browser turn at a
+site is counted when it ends (`browser/call.ts pacedTurn`), with a 429 on
+the page a navigation opened.
+
+**Counters and state** are in this process's memory (`state.ts`), per vault
+and place, like pacing's: calls, errors, slow-downs, bytes where an answer
+has them, and answer times for the 50th and 95th percentile (a reservoir
+sample per minute, each call as likely to be kept; minutes older than an
+hour merged into hours by weight), over this minute and the one before,
+the last hour and the last day. At most `MAX_GATED_PLACES` places are held,
+the least recently used idle one dropped first and none that is busy or
+cooling down; the comment there gives the memory this comes to. A mail
+account's last calls (`mail/diagnostics.ts`: each phase's time, whether it
+reused a connection, how it went and the server's own notices) are shown
+beside the counters on its page and in `get_server_limits`'s answer. They are not stored: a restart starts them again and says since when
+it counts, which keeps them out of the database, the export, the cleanup and
+`wipeVault`, and a cool-down a restart forgets is found again by the place's
+next "slow down". Nothing of a call is kept but its outcome, time and size.
+
+**One error shape.** `paced` is one of the tool error codes
+(`tools/outcome.ts`): `_meta["gg.pcp/error"]` `{code: "paced",
+retryAfterMs}`, as `timeout` and `browser_busy` carry theirs, for pacing's
+refusals and the gate's alike (`pacing/pace.ts pacedResult`). The
+`structuredContent` `{code, retry_after_ms}` from before is still sent for
+one release (`docs/breaking-changes.md`). A program's `pcp.call` throws an
+Error with `code` and `retryAfterMs` for every kind.
 
 ## Data on disk
 

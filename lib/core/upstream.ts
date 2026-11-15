@@ -112,7 +112,9 @@ import {
   isPublicAddress,
 } from "./openapi/address"
 import { makeRedactor } from "./openapi/redact"
-import { paceEmbeddings, paceServerCall, pacedResult } from "./pacing"
+import { gateServerCall } from "./gate"
+import { httpThrottle, withThrottle, type Throttle } from "./throttle-signal"
+import { paceEmbeddings } from "./pacing"
 import { PACING_DEADLINE_MARGIN_MS, type PaceRange } from "./pacing/limits"
 import { pacingNow } from "./pacing/pace"
 import { VOYAGE_EMBEDDINGS_URL } from "./constants"
@@ -1294,7 +1296,12 @@ export type UpstreamConnection = {
  * the status and the body, but not the WWW-Authenticate header, which is
  * where a server says why it refused a token.
  */
-type Refusal = { status: number; challenge: string | null }
+type Refusal = {
+  status: number
+  challenge: string | null
+  /** A request to slow down (429, or 503 with Retry-After), for the gate. */
+  throttle: Throttle | null
+}
 
 /** The refusal behind an error thrown while connecting. */
 const refusals = new WeakMap<object, Refusal>()
@@ -1375,6 +1382,11 @@ export async function openUpstream(
         refusal = {
           status: response.status,
           challenge: response.headers.get("www-authenticate"),
+          throttle: httpThrottle(
+            response.status,
+            response.headers,
+            server.name,
+          ),
         }
       }
 
@@ -2088,6 +2100,7 @@ async function callEndpoint(
     open,
     keepBytes,
     placed = [],
+    timeoutMs,
   }: {
     publicUrl: string
     open?: ResultOpener
@@ -2095,6 +2108,8 @@ async function callEndpoint(
     keepBytes?: BytesKeeper
     /** Secrets a wrapper's call carries in its arguments (placeSecrets). */
     placed?: string[]
+    /** The server's time limit for a call (lib/core/gate/). */
+    timeoutMs?: number
   },
 ): Promise<CallToolResult> {
   try {
@@ -2105,6 +2120,7 @@ async function callEndpoint(
       authHeaders: headers,
       redact: [...redact, ...placed],
       open,
+      ...(timeoutMs !== undefined ? { timeoutMs } : {}),
       ...(keepBytes ? { keepBytes } : {}),
       ...(reach ? { reach } : {}),
       ...(server.authType === "oauth"
@@ -2189,15 +2205,21 @@ export type CallOptions = {
    * a pace of its own (lib/core/pacing/). Nothing else looks at it.
    */
   pace?: PaceRange
+  /**
+   * The call's time limit under the gate (lib/core/gate/), set by
+   * callServerTool: a kind that can stop itself at it does (an MCP call).
+   */
+  timeoutMs?: number
 }
 
 /**
  * Runs one tool of a server. Every real call passes here, whatever made it
  * (execute, run_code, a wrapper, the owner's answer to a request), so
- * this is where a server's calls are paced (lib/core/pacing/): by the
- * server, before anything is read or sent. The browser paces its actions
- * by the tab's site instead (browser/call.ts), and a wrapper's tool is
- * paced by the calls its program makes.
+ * this is where a server's calls go through the gate (lib/core/gate/: its
+ * cool-down, pace, calls at once and time limit, by the server, before
+ * anything is read or sent). The browser paces and gates its actions by
+ * the tab's site instead (browser/call.ts), and a wrapper's tool by the
+ * calls its program makes.
  */
 export async function callServerTool(
   ctx: VaultContext,
@@ -2206,21 +2228,31 @@ export async function callServerTool(
   args: Record<string, unknown>,
   options: CallOptions,
 ): Promise<CallToolResult> {
-  if (server.kind !== "browser" && server.kind !== "wrapper") {
-    const paced = await paceServerCall(ctx, server, toolName, {
-      signal: options.signal,
-      deadline: options.deadline,
-    })
-
-    if (paced) {
-      return pacedResult(paced)
-    }
-  }
-
   if (server.kind === "browser") {
     return callBrowser(ctx, server, toolName, args, options)
   }
 
+  return gateServerCall(
+    ctx,
+    server,
+    toolName,
+    { signal: options.signal, deadline: options.deadline },
+    (timeoutMs) =>
+      callPlaced(ctx, server, toolName, args, {
+        ...options,
+        ...(timeoutMs !== undefined ? { timeoutMs } : {}),
+      }),
+  )
+}
+
+/** A server's call once the gate let it through, its secrets in place. */
+async function callPlaced(
+  ctx: VaultContext,
+  server: OpenServer,
+  toolName: string,
+  args: Record<string, unknown>,
+  options: CallOptions,
+): Promise<CallToolResult> {
   const { args: sent, redact } = await placeSecrets(
     ctx,
     server,
@@ -2521,6 +2553,7 @@ async function dispatchKind(
     deadline,
     runId,
     pace,
+    timeoutMs,
   }: CallOptions,
   placed: string[],
 ): Promise<CallToolResult> {
@@ -2610,6 +2643,7 @@ async function dispatchKind(
       open,
       ...(keepBytes ? { keepBytes } : {}),
       placed,
+      timeoutMs,
     })
   }
 
@@ -2641,12 +2675,22 @@ async function dispatchKind(
         server,
         toolName,
         open ? await resolveHandles(args, open) : args,
-        { credential: { ...signIn, redact: [...signIn.redact, ...placed] } },
+        {
+          credential: {
+            ...signIn,
+            redact: [...signIn.redact, ...placed],
+            timeoutMs,
+          },
+        },
       )
     }
 
     return callMailTool(ctx, server, toolName, args, {
-      credential: { ...signIn, redact: [...signIn.redact, ...placed] },
+      credential: {
+        ...signIn,
+        redact: [...signIn.redact, ...placed],
+        timeoutMs,
+      },
       keep,
       keepBytes,
       open,
@@ -2661,7 +2705,9 @@ async function dispatchKind(
     connection = await openUpstream(ctx, server, { publicUrl })
     const result = await connection.client.callTool(
       { name: toolName, arguments: resolved },
-      { timeout: CALL_TIMEOUT_MS },
+      // A moment past the gate's limit, so the gate answers first and the
+      // request is still stopped.
+      { timeout: (timeoutMs ?? CALL_TIMEOUT_MS) + 1_000 },
     )
 
     // A server that echoes what it was sent (a debugging tool, an error
@@ -2702,13 +2748,22 @@ async function dispatchKind(
     // that turned a signed-in request down needs the owner, but not a
     // sign-in. A public-only server refusing a private address hands the
     // owner its switch (the status above stays plain text, for its page).
-    throw new PcpError(
-      failure.status === "auth_required" || failure.status === "client_required"
-        ? "unauthorized"
-        : "upstream",
-      addressBlocked(error)
-        ? withPublicOnlyLink(failure.message, server, publicUrl)
-        : failure.message,
+    throw withThrottle(
+      new PcpError(
+        failure.status === "auth_required" ||
+          failure.status === "client_required"
+          ? "unauthorized"
+          : "upstream",
+        addressBlocked(error)
+          ? withPublicOnlyLink(failure.message, server, publicUrl)
+          : failure.message,
+      ),
+      (
+        connection?.refusal() ??
+        (error !== null && typeof error === "object"
+          ? refusals.get(error)
+          : undefined)
+      )?.throttle ?? null,
     )
   } finally {
     await connection?.close()

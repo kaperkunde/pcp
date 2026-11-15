@@ -18,6 +18,7 @@ import {
 } from "./gateway"
 import type { JmapProbe } from "./mail/probe"
 import { decidePermission, getPermissionView } from "./permissions"
+import { readServerLimits } from "./gate/store"
 import { readServerNote } from "./personal-notes"
 import { createSecret, writeManagedSecret } from "./secrets"
 import { createServer, getServer, setToolDescription } from "./servers"
@@ -2067,5 +2068,121 @@ describe("levels and tiers proposed with it (tool_access)", () => {
         { pattern: "get_issue", tier: "read" },
       ],
     })
+  })
+})
+
+describe("limits proposed with it (#143)", () => {
+  const NO_SYNC = {
+    callTool: async () => {
+      throw new Error("no call runs here")
+    },
+    syncTools: async () => ({
+      status: "ok" as const,
+      message: "",
+      toolCount: 0,
+    }),
+  }
+
+  async function decide(limits?: unknown) {
+    const row = await db().permissionRequest.findFirstOrThrow({
+      orderBy: { createdAt: "desc" },
+    })
+
+    return decidePermission(
+      ctx,
+      row.id,
+      "allow_once",
+      { publicUrl: PUBLIC_URL, ...(limits !== undefined ? { limits } : {}) },
+      NO_SYNC,
+    )
+  }
+
+  it("shows them filled in beside the approval, over the kind's defaults", async () => {
+    const asked = await register({
+      kind: "imap",
+      name: "Mail",
+      url: "mail.example.com",
+      smtp_url: "smtp.example.com",
+      auth_type: "basic",
+      username: "ada@example.com",
+      secret: "Mail password",
+      limits: { max_concurrent: 1, timeout_ms: 30_000, bytes_per_day: "none" },
+    })
+    expect(asked.isError).toBe(false)
+
+    const view = await shown()
+    const fields = Object.fromEntries(
+      view.proposedLimits!.fields.map((field) => [field.field, field]),
+    )
+
+    expect(fields.maxConcurrent).toMatchObject({
+      label: "Calls at once",
+      value: 1,
+      defaultValue: 2,
+    })
+    expect(fields.timeoutMs).toMatchObject({ value: 30_000 })
+    expect(fields.bytesPerDay).toMatchObject({ value: null })
+    expect(fields.minIntervalMs).not.toHaveProperty("value")
+  })
+
+  it("writes them as the owner left them, and none when they sent none", async () => {
+    await register({
+      name: "Pets",
+      openapi_schema: PETS,
+      limits: { calls_per_minute: 10 },
+    })
+    await decide({ callsPerMinute: 5, timeoutMs: 20_000 })
+    const pets = await serverNamed(ctx, "Pets")
+    expect(await readServerLimits(ctx, pets.id)).toEqual({
+      callsPerMinute: 5,
+      timeoutMs: 20_000,
+    })
+
+    await register({
+      name: "Linear",
+      url: "https://mcp.linear.example/mcp",
+      limits: { max_concurrent: 1 },
+    })
+    await decide()
+    const linear = await serverNamed(ctx, "Linear")
+    expect(await readServerLimits(ctx, linear.id)).toEqual({})
+  })
+
+  it("refuses limits past the machine's bounds before asking, and on the page", async () => {
+    const asked = await register({
+      name: "Linear",
+      url: "https://mcp.linear.example/mcp",
+      limits: { max_concurrent: 500 },
+    })
+    expect(asked.isError).toBe(true)
+    expect(
+      await db().permissionRequest.count({ where: { kind: "register" } }),
+    ).toBe(0)
+
+    await register({
+      name: "Linear",
+      url: "https://mcp.linear.example/mcp",
+      limits: { max_concurrent: 2 },
+    })
+    const answer = await decide({ maxConcurrent: 0 })
+    expect(answer.isError).toBe(true)
+    expect(answer.content).toMatchObject([
+      { text: expect.stringContaining("Calls at once is a whole number") },
+    ])
+    // Nothing was made: the owner can fix it and answer again.
+    expect((await shown()).status).toBe("pending")
+  })
+
+  it("takes no limits for a service, which registers its server later", async () => {
+    const asked = await register({
+      kind: "service",
+      name: "Converter",
+      ssh_server: "nas",
+      service: {},
+      limits: { max_concurrent: 1 },
+    })
+
+    expect(asked.isError).toBe(true)
+    expect(asked.text).toContain("propose_server_limits")
   })
 })

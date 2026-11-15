@@ -32,6 +32,7 @@ import {
 } from "./imap-pool"
 import {
   DIAGNOSTIC_NOTICES_PER_CALL,
+  IMAP_LEASE_WAIT_MS,
   MAIL_CALL_TIMEOUT_MS,
   MAILBOX_LIST_TTL_MS,
   MAIL_CONNECT_TIMEOUT_MS,
@@ -236,7 +237,16 @@ export interface SmtpTransportLike {
 
 export type ImapDeps = {
   /** A connected, signed-in client. */
-  connect(address: MailServerAddress, login: Login): Promise<ImapClientLike>
+  connect(
+    address: MailServerAddress,
+    login: Login,
+    /**
+     * How long the connection waits for the server before it gives up:
+     * at least MAIL_CALL_TIMEOUT_MS, longer when the account's time limit
+     * for a call is (lib/core/gate/).
+     */
+    options?: { socketTimeoutMs?: number },
+  ): Promise<ImapClientLike>
   smtp(address: MailServerAddress, login: Login): Promise<SmtpTransportLike>
   /** The message as it goes into the Sent mailbox, Bcc kept. */
   compose(mail: OutgoingMail): Promise<Buffer>
@@ -245,7 +255,7 @@ export type ImapDeps = {
 }
 
 export const defaultImapDeps: ImapDeps = {
-  async connect(address, login) {
+  async connect(address, login, options) {
     const { ImapFlow } = await import("imapflow")
     const client = new ImapFlow({
       host: address.host,
@@ -260,7 +270,7 @@ export const defaultImapDeps: ImapDeps = {
       disableAutoIdle: true,
       connectionTimeout: MAIL_CONNECT_TIMEOUT_MS,
       greetingTimeout: MAIL_CONNECT_TIMEOUT_MS,
-      socketTimeout: MAIL_CALL_TIMEOUT_MS,
+      socketTimeout: options?.socketTimeoutMs ?? MAIL_CALL_TIMEOUT_MS,
       clientInfo: { name: "PCP", version: PCP_VERSION },
     })
     // Without a listener, an error after the call returns would be thrown
@@ -681,6 +691,12 @@ export type ImapSendHooks = {
    * own, closed with it.
    */
   session?: SessionKey & { maxConnections?: number; waitMs?: number }
+  /**
+   * The account's time limit for a call (lib/core/gate/): a connection
+   * opened for it waits at least that long for the server, and the call
+   * waits no longer than that for a pooled one.
+   */
+  timeoutMs?: number
   /** Collects the phases and notices of the call this backend serves. */
   trace?: CallTrace
 }
@@ -809,7 +825,15 @@ export function openImapBackend(
     let connected: ImapClientLike
 
     try {
-      connected = await deps.connect(config.imap, login)
+      connected = await deps.connect(
+        config.imap,
+        login,
+        hooks.timeoutMs === undefined
+          ? undefined
+          : {
+              socketTimeoutMs: Math.max(MAIL_CALL_TIMEOUT_MS, hooks.timeoutMs),
+            },
+      )
     } catch (error) {
       throw describeImapError(error, "IMAP")
     }
@@ -837,7 +861,10 @@ export function openImapBackend(
 
       lease = await leaseImap(session, openConnection, {
         maxConnections: session.maxConnections,
-        waitMs: session.waitMs,
+        waitMs:
+          hooks.timeoutMs === undefined
+            ? session.waitMs
+            : Math.min(session.waitMs ?? IMAP_LEASE_WAIT_MS, hooks.timeoutMs),
       })
 
       if (trace) {

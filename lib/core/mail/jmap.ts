@@ -158,7 +158,9 @@ async function exchange(
             init.body === undefined || typeof init.body === "string"
               ? init.body
               : asBytes(init.body),
-          signal: AbortSignal.timeout(MAIL_CALL_TIMEOUT_MS),
+          signal: AbortSignal.timeout(
+            credential.timeoutMs ?? MAIL_CALL_TIMEOUT_MS,
+          ),
         },
         // http:// only to a private address, so an account saved before
         // that was a rule never sends its credential in the clear.
@@ -170,7 +172,7 @@ async function exchange(
       }
 
       throw new MailTransportError(
-        `${where(url)} could not be reached: ${describeFetchError(error, MAIL_CALL_TIMEOUT_MS)}`,
+        `${where(url)} could not be reached: ${describeFetchError(error, credential.timeoutMs ?? MAIL_CALL_TIMEOUT_MS)}`,
       )
     }
 
@@ -217,7 +219,7 @@ async function exchange(
       body = await readCapped(response, maxBytes)
     } catch (error) {
       throw new MailTransportError(
-        `${where(url)} stopped answering: ${describeFetchError(error, MAIL_CALL_TIMEOUT_MS)}`,
+        `${where(url)} stopped answering: ${describeFetchError(error, credential.timeoutMs ?? MAIL_CALL_TIMEOUT_MS)}`,
       )
     }
 

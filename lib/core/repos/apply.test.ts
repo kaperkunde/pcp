@@ -1,6 +1,7 @@
 import { openServiceOwn } from "../services/own-values"
 import { afterEach, describe, expect, it } from "vitest"
 
+import { readServerLimits, writeServerLimits } from "../gate/store"
 import { openServiceSpec } from "../spec-rows"
 import { openDefinition } from "../definition-rows"
 import { createBrowserServer } from "../browser/server"
@@ -262,6 +263,9 @@ describe("applying an item", () => {
     const ctx = await freshVault()
     const { ids } = await populate(ctx)
     await setPersonalNote(ctx, "server", ids.docs, "Ours, on the NAS.")
+    // The instance's own call limits (lib/core/gate/), sealed.
+    await writeServerLimits(ctx, ids.docs, { maxConcurrent: 1 })
+    await writeServerLimits(ctx, ids.pets, { timeoutMs: 20_000 })
     await writeServer(ctx, ids.docs, {
       name: "Our docs",
       url: "https://docs.home.example/mcp",
@@ -330,6 +334,7 @@ describe("applying an item", () => {
       "oauthClientId",
       "oauthClientSecretId",
       "personalNote",
+      "limits",
     ] as const
     const after = {
       docs: openServer(
@@ -349,6 +354,8 @@ describe("applying an item", () => {
 
     expect(after.docs.description).toBe("The team's documents, all of them.")
     expect(readServerNote(ctx, after.docs)).toBe("Ours, on the NAS.")
+    expect(await readServerLimits(ctx, ids.docs)).toEqual({ maxConcurrent: 1 })
+    expect(await readServerLimits(ctx, ids.pets)).toEqual({ timeoutMs: 20_000 })
     expect(
       await db().vaultToolAccess.findMany({ where: { serverId: ids.pets } }),
     ).toMatchObject([{ toolName: "list_pets", access: "allow" }])

@@ -13,6 +13,13 @@ export type MailProtocol = "jmap" | "imap"
 export type MailCredential = {
   /** Sent with each JMAP request (Authorization). */
   headers: Record<string, string>
+  /**
+   * How long one call may take: the account's time limit (lib/core/gate/).
+   * A JMAP request is stopped at it, and an IMAP connection opened for it
+   * waits at least that long for the server; MAIL_CALL_TIMEOUT_MS when
+   * left out.
+   */
+  timeoutMs?: number
   /** An IMAP or SMTP login; null for a bearer or OAuth token. */
   login: { username: string; password: string } | null
   /** Values that would give the credential away if an answer repeated them. */

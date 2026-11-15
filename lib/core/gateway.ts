@@ -313,6 +313,21 @@ import {
   withWrapperNote,
 } from "./wrappers/admin"
 import { TOOL_ACCESS_ARG, type ToolAccessArg } from "./proposed-access"
+import { serverCooling, serverGateView } from "./gate"
+import {
+  applyLimitsChange,
+  effectiveLimits,
+  limitsArgOf,
+  limitsChangeOf,
+  LIMITS_ARG,
+  sameLimits,
+  type LimitsArg,
+} from "./gate/config"
+import { gateClassOf } from "./gate/limits"
+import { limitsLine, MAX_LIMITS_NOTE, proposeLimits } from "./gate/proposals"
+import type { WindowCounts } from "./gate/state"
+import { readServerLimits } from "./gate/store"
+import { mailDiagnostics } from "./mail/diagnostics"
 import { withRegisterAccess } from "./register-access"
 import { markedReadOnly } from "./read-only"
 import {
@@ -4258,6 +4273,9 @@ export function buildGatewayServer(
         )
       }
 
+      // Cooling down (lib/core/gate/): asked to slow down, or far slower
+      // than usual, so its calls are refused until then.
+      const cooling = serverCooling(scope.ctx, row.id)
       const state: ServerState = {
         id: row.id,
         name: row.name,
@@ -4265,6 +4283,7 @@ export function buildGatewayServer(
         connected: !needsConnecting(row),
         status: row.status,
         toolCount: row._count.tools,
+        cooling,
       }
 
       if (!state.connected) {
@@ -4279,9 +4298,203 @@ export function buildGatewayServer(
       const note = readServerNote(scope.ctx, row)
       // A service, or a server one serves: its state on the SSH server now.
       const service = await serviceStateLine(scope.ctx, row, scope.publicUrl)
-      const said = `${row.name} is connected, with ${state.toolCount} tool${state.toolCount === 1 ? "" : "s"}.${row.enabled ? "" : " The owner has switched it off in PCP."}${service ? ` ${service}` : (row.status === "error" || row.status === "refused") && row.statusMessage ? ` Last contact failed: ${row.statusMessage}` : ""}${note ? ` ${ownerNoteLine(note)}` : ""}`
+      const coolingLine = cooling
+        ? ` It is cooling down: ${cooling.reason}; PCP refuses calls to it for ${Math.max(1, Math.ceil(cooling.retryAfterMs / 1000))} s more.`
+        : ""
+      const said = `${row.name} is connected, with ${state.toolCount} tool${state.toolCount === 1 ? "" : "s"}.${row.enabled ? "" : " The owner has switched it off in PCP."}${coolingLine}${service ? ` ${service}` : (row.status === "error" || row.status === "refused") && row.statusMessage ? ` Last contact failed: ${row.statusMessage}` : ""}${note ? ` ${ownerNoteLine(note)}` : ""}`
 
       return ok({ kind: "done", server: state, message: said }, { text: said })
+    },
+  })
+
+  /** A server this token sees that has limits of its own, or why not. */
+  const limitedServer = (given: string) => {
+    const server = bySlug.get(given.trim())
+
+    if (!server) {
+      return {
+        problem: `No server called ${given.trim()}. Servers: ${slugs.join(", ") || "(none)"}.`,
+      }
+    }
+
+    const gateClass = gateClassOf(server.kind)
+
+    return gateClass
+      ? { server, gateClass }
+      : {
+          problem: `${server.name} has no limits of its own: ${server.kind === "browser" ? "the browser is paced per site" : "a wrapper's calls go by the limits of the servers it calls"}.`,
+        }
+  }
+
+  /** A window's counts, as an assistant reads them. */
+  const countsOf = (counts: WindowCounts) => ({
+    calls: counts.calls,
+    errors: counts.errors,
+    throttles: counts.throttles,
+    bytes: counts.bytes,
+    p50_ms: counts.p50Ms,
+    p95_ms: counts.p95Ms,
+  })
+  const COUNTS = z.object({
+    calls: z.number(),
+    errors: z.number(),
+    throttles: z.number(),
+    bytes: z.number(),
+    p50_ms: z.number().nullable(),
+    p95_ms: z.number().nullable(),
+  })
+
+  register({
+    name: "get_server_limits",
+    title: "Read a server's limits",
+    description:
+      "Get a server's limits and load: how PCP calls it (calls at once, pause between calls, calls a minute, time per call, bytes a day, cool-downs), which of them are its own and which PCP's defaults for its kind, whether it is cooling down and why, and its calls, errors, slow-downs, bytes and answer times over the last minute, hour and day. For planning a busy run, or before propose_server_limits; PCP holds every call to these on its own.",
+    input: z.object({
+      server: z
+        .string()
+        .describe("The server's short name, as in server/tool."),
+    }),
+    output: z.object({
+      server: z.string(),
+      limits: z.record(z.string(), z.union([z.number(), z.literal("none")])),
+      own: z.record(z.string(), z.union([z.number(), z.literal("none")])),
+      cooling: z
+        .object({
+          reason: z.string(),
+          until: z.string(),
+          retry_after_ms: z.number(),
+        })
+        .nullable(),
+      running: z.number(),
+      waiting: z.number(),
+      counting_since: z.string(),
+      last_minute: COUNTS,
+      last_hour: COUNTS,
+      last_day: COUNTS,
+      /** A mail account's last calls, newest first (mail/diagnostics.ts). */
+      mail_calls: z
+        .array(
+          z.object({
+            at: z.string(),
+            tool: z.string().nullable(),
+            outcome: z.enum(["ok", "error", "throttled"]),
+            reused_connection: z.boolean(),
+            phases_ms: z.record(z.string(), z.number()),
+            notices: z.array(z.string()),
+          }),
+        )
+        .optional(),
+    }),
+    annotations: READS,
+    log: serverNamed("server"),
+    async run(args: { server: string }) {
+      const found = limitedServer(args.server)
+
+      if ("problem" in found) {
+        return failure(found.problem!, "not_found")
+      }
+
+      const { server, gateClass } = found
+      const own = await readServerLimits(scope.ctx, server.id)
+      const view = serverGateView(scope.ctx, server.id)
+      const cooling = serverCooling(scope.ctx, server.id)
+      const value = {
+        server: server.slug,
+        limits: limitsArgOf(effectiveLimits(gateClass, own)),
+        own: limitsArgOf(own),
+        cooling: cooling
+          ? {
+              reason: cooling.reason,
+              until: cooling.until,
+              retry_after_ms: cooling.retryAfterMs,
+            }
+          : null,
+        running: view.running,
+        waiting: view.waiting,
+        counting_since: new Date(view.since).toISOString(),
+        last_minute: countsOf(view.minute),
+        last_hour: countsOf(view.hour),
+        last_day: countsOf(view.day),
+        // How a mail account's calls went, phase by phase: where its time
+        // goes (signing in, the command, logging out).
+        ...(gateClass === "mail"
+          ? {
+              mail_calls: mailDiagnostics(server.id).map((call) => ({
+                at: call.at,
+                tool: call.tool ?? null,
+                outcome: call.outcome,
+                reused_connection: call.reused,
+                phases_ms: call.phases,
+                notices: call.notices,
+              })),
+            }
+          : {}),
+      }
+
+      return ok(value, {
+        text: `${server.name}: ${limitsLine(gateClass, own)}.${cooling ? ` Cooling down: ${cooling.reason}, until ${cooling.until}.` : ""} Last hour: ${view.hour.calls} call${view.hour.calls === 1 ? "" : "s"}, ${view.hour.errors} failed, ${view.hour.throttles} slow-down${view.hour.throttles === 1 ? "" : "s"}${view.hour.p50Ms !== null ? `, answers in ${view.hour.p50Ms} ms (p50) and ${view.hour.p95Ms} ms (p95)` : ""}.\n${JSON.stringify(value)}`,
+      })
+    },
+  })
+
+  register({
+    name: "propose_server_limits",
+    title: "Propose a server's limits",
+    description: `Propose server limits for the owner to save: how PCP calls one of their servers (calls at once, pause between calls, calls a minute, time per call, bytes a day, cool-downs), from its documentation or from what you saw it do (a rate limit, answers that slowed down). Looser or tighter; "default" puts one back to PCP's default for its kind. note says why, in a line the owner reads. This changes nothing by itself: the owner sees the limits now beside yours, may change them, and saves them. ${OWNER_LINK_RULE} ${nextMessageCheck("check_permission with its id")}`,
+    input: z.object({
+      server: z
+        .string()
+        .describe("The server's short name, as in server/tool."),
+      limits: LIMITS_ARG.describe(
+        "Only the limits to change; the rest stay as they are.",
+      ),
+      note: z
+        .string()
+        .max(4 * MAX_LIMITS_NOTE)
+        .describe(
+          `Why these limits, for the owner, in one line of at most ${MAX_LIMITS_NOTE} characters: what the documentation says, or what happened.`,
+        ),
+    }),
+    output: z.discriminatedUnion("kind", [
+      NEEDS_OWNER,
+      // Nothing would change, so nothing was asked.
+      z.object({ kind: z.literal("unchanged") }),
+    ]),
+    annotations: PROPOSES,
+    log: serverNamed("server"),
+    async run(args: { server: string; limits: LimitsArg; note: string }) {
+      if (
+        !checkRateLimit(`limits-propose:${scope.tokenId}`, ACCESS_PROPOSALS)
+          .allowed
+      ) {
+        return tooManyCalls(
+          "That is a lot of proposals in a short time. Wait a few minutes.",
+        )
+      }
+
+      const found = limitedServer(args.server)
+
+      if ("problem" in found) {
+        return failure(found.problem!, "not_found")
+      }
+
+      const ask = await proposeLimits(
+        scope.ctx,
+        found.server,
+        limitsChangeOf(args.limits),
+        args.note,
+      )
+
+      if (!ask) {
+        return ok(
+          { kind: "unchanged" },
+          {
+            text: `Nothing to propose: ${found.server.name} has those limits.`,
+          },
+        )
+      }
+
+      return asked({ kind: "limits_change", input: ask })
     },
   })
 
@@ -4825,7 +5038,7 @@ export function buildGatewayServer(
       `Authentication is auth_type: none, header (a secret in a header), basic (username and a password) or oauth (the owner signs in once they agree; PCP finds out itself whether the provider lets it register, so client_id is only for one that does not). Secrets are named by their NAME in secret (and extra_headers): one the owner stored is reused, a new name is typed in by the owner on PCP's page when they agree. ${scope.manageEndpoints ? "list_secrets gives the names of the secrets the owner stored and what already uses each: name one of its text secrets to reuse it rather than inventing a name. " : "A token that may read and change API endpoints can list the names of the owner's secrets with list_secrets. "}Never pass a secret's value, and never ask the owner for one in the conversation: PCP does not take one here.`,
       "A service is a container on one of the owner's SSH servers (ssh_server): its definition in service, its variables' secrets by NAME in env_secrets. Nothing runs until the owner agrees.",
       "Another server of one you see (the same API, MCP server or service elsewhere): pass its short name in definition. note proposes the owner's note on what is new.",
-      "tool_access proposes this token's levels and the tiers of its tools, which the owner sees filled in beside the approval and saves with it, as they leave them: by tool for an API or a mail or calendar account, by name or pattern for an MCP server or what a service registers, applied once to the tools PCP first reads from it.",
+      "tool_access proposes this token's levels and the tiers of its tools, which the owner sees filled in beside the approval and saves with it, as they leave them: by tool for an API or a mail or calendar account, by name or pattern for an MCP server or what a service registers, applied once to the tools PCP first reads from it. limits proposes how PCP calls it (calls at once, per minute, time per call), shown and saved the same way.",
     ].join("\n\n"),
     input: z.object({
       name: z
@@ -5022,6 +5235,7 @@ export function buildGatewayServer(
         ),
       note: noteArg,
       tool_access: TOOL_ACCESS_ARG,
+      limits: LIMITS_ARG.optional(),
     }),
     output: NEEDS_OWNER,
     annotations: { ...PROPOSES, openWorldHint: true },
@@ -5056,6 +5270,7 @@ export function buildGatewayServer(
       publish_ports?: Array<{ container: number; host: number }>
       env_secrets?: Array<{ name: string; secret: string }>
       tool_access?: ToolAccessArg
+      limits?: LimitsArg
     }) {
       // Another server of a definition the token sees: what it is comes
       // from there, and only what is this server's own comes from here.
@@ -5088,6 +5303,16 @@ export function buildGatewayServer(
 
       // The owner reads it whole; checked before they are asked.
       const note = checkPersonalNote(args.note)
+
+      // Limits (lib/core/gate/): the owner sees them beside the approval.
+      if (args.limits !== undefined && kind === "service") {
+        return failure(
+          "limits are for an MCP server, an API, or a mail or calendar account. Once a service runs, propose limits for the server it registered with propose_server_limits.",
+        )
+      }
+
+      const own = applyLimitsChange({}, limitsChangeOf(args.limits))
+      const proposedLimits = sameLimits(own, {}) ? null : own
 
       if (kind === "service") {
         if (
@@ -5508,7 +5733,10 @@ export function buildGatewayServer(
 
       const ask = await asked({
         kind: "register",
-        input: await withRegisterAccess(scope.ctx, input, args.tool_access),
+        input: {
+          ...(await withRegisterAccess(scope.ctx, input, args.tool_access)),
+          ...(proposedLimits ? { proposedLimits } : {}),
+        },
       })
 
       // The assistant hears about mistakes PCP found in the schema, with

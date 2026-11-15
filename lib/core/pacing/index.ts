@@ -8,7 +8,9 @@ import {
   pacingOff,
   type BrowserPacingClass,
   type PaceRange,
+  type PacingBurst,
   type PacingClass,
+  type PacingPolicy,
 } from "./limits"
 import {
   pacingNow,
@@ -73,6 +75,41 @@ function siteKey(vaultId: string, host: string): string {
 }
 
 /**
+ * A server's own limits on spacing (lib/core/gate/): the least time between
+ * calls and at most so many a minute, which pacing keeps as a floor under
+ * the class's pace, so a server has one pace however it was set.
+ */
+export type PaceFloor = { minIntervalMs: number; callsPerMinute: number | null }
+
+/** The stricter of a pace and a floor, field by field. */
+export function withFloor(
+  policy: PacingPolicy | null,
+  floor: PaceFloor | undefined,
+): PacingPolicy | null {
+  if (!floor || (floor.minIntervalMs <= 0 && floor.callsPerMinute === null)) {
+    return policy
+  }
+
+  const own: PacingBurst | null =
+    floor.callsPerMinute === null
+      ? null
+      : { max: floor.callsPerMinute, perMs: 60_000 }
+  const burst = policy?.burst ?? null
+  const stricter =
+    own && burst
+      ? own.max / own.perMs <= burst.max / burst.perMs
+        ? own
+        : burst
+      : (own ?? burst)
+
+  return {
+    minIntervalMs: Math.max(policy?.minIntervalMs ?? 0, floor.minIntervalMs),
+    jitterMs: policy?.jitterMs ?? 0,
+    burst: stricter,
+  }
+}
+
+/**
  * A call to a server's tool, paced by the server: one in the Read tier
  * (tool-tiers.ts, through read-only.ts), or one that changes things.
  */
@@ -80,7 +117,7 @@ export async function paceServerCall(
   ctx: VaultContext,
   server: { id: string; name: string },
   toolName: string,
-  { signal, deadline }: PaceOptions = {},
+  { signal, deadline, floor }: PaceOptions & { floor?: PaceFloor } = {},
 ): Promise<PacedRefusal | null> {
   if (pacingOff()) {
     return null
@@ -93,9 +130,12 @@ export async function paceServerCall(
   ))
     ? "server_read"
     : "server_change"
-  const policy = resolvePolicy(await readPacingConfig(ctx), pacingClass, {
-    serverId: server.id,
-  })
+  const policy = withFloor(
+    resolvePolicy(await readPacingConfig(ctx), pacingClass, {
+      serverId: server.id,
+    }),
+    floor,
+  )
 
   if (!policy) {
     return null
