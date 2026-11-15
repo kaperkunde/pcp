@@ -825,7 +825,7 @@ into Drafts with no EmailSubmission after it, and marks nothing.
 `imaps://host:port`, or `imap://` for STARTTLS; `smtp_url` the same for
 SMTP. A connection that is not encrypted after it is made is dropped, and
 STARTTLS is required, never optional. An account keeps one signed-in
-session for its calls (`mail/imap-pool.ts`, after the SSH pool): a call leases
+session for its calls (`mail/imap-pool.ts`, after the SSH pool; deleting or changing the account drops it, and PCP has no shutdown hook that closes the pools, as the SSH pool has none): a call leases
 a connection, works and hands it back without a LOGOUT, so a call costs a
 command, not a TCP and TLS connect, a login and a logout (against a server
 that takes seconds for each, a call took over a minute). Opened only by a
@@ -840,7 +840,7 @@ the mailbox names every call needs to find a mailbox by role come from a LIST
 without STATUS, kept 30 seconds per account (only `list_mailboxes` asks for
 counts, and a delete of a mailbox asks STATUS of that one); a search with no
 filter fetches the newest page by sequence number from the count SELECT gave
-instead of UID SEARCH ALL; a LOGOUT never waits more than 3 seconds before the
+instead of UID SEARCH ALL (an expunge between the SELECT and the FETCH can shift that page by one row); a LOGOUT never waits more than 3 seconds before the
 socket is closed. The time each phase took (connect, login, select, command,
 logout) and what the server said by itself ([ALERT], [THROTTLED], BYE,
 scrubbed of the login, addresses and links, cut short) are kept in memory

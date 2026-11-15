@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto"
+import { createHmac, randomBytes } from "node:crypto"
 
 import type { CallToolResult } from "@modelcontextprotocol/server"
 
@@ -438,7 +438,7 @@ export async function syncMailTools(
     let canVacation = false
 
     if (kind === "jmap") {
-      const session = await fetchJmapSession(server.url, credential)
+      const session = await fetchJmapSession(server.url, credential, server.id)
       await writeServer(ctx, server.id, {
         mailApiUrl: session.apiUrl,
         mailDownloadUrl: session.downloadUrl,
@@ -479,13 +479,16 @@ export async function syncMailTools(
 
 /**
  * What makes a pooled IMAP connection another one: the address and the
- * login it was made with. Hashed, kept in memory only, never shown.
+ * login it was made with. An HMAC under a key made for this run (never a bare
+ * hash of the password), kept in memory only, never shown.
  */
+const FINGERPRINT_KEY = randomBytes(32)
+
 function sessionFingerprint(
   config: ImapConfig,
   login: { username: string; password: string },
 ): string {
-  return createHash("sha256")
+  return createHmac("sha256", FINGERPRINT_KEY)
     .update(
       JSON.stringify([
         config.imap.host,
@@ -535,7 +538,7 @@ async function openBackend(
 
   // Not read since the address or sign-in changed: read it now.
   if (!session) {
-    session = await fetchJmapSession(server.url, credential)
+    session = await fetchJmapSession(server.url, credential, server.id)
     await writeServer(ctx, server.id, {
       mailApiUrl: session.apiUrl,
       mailDownloadUrl: session.downloadUrl,
@@ -545,7 +548,10 @@ async function openBackend(
     })
   }
 
-  return openJmapBackend({ ...session, from: server.mailFrom }, credential)
+  return openJmapBackend(
+    { ...session, from: server.mailFrom, scope: server.id },
+    credential,
+  )
 }
 
 /** Text an answer carries the start of, with the whole kept when longer. */

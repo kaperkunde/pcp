@@ -1749,6 +1749,25 @@ describe("what a call costs the server", () => {
     )
   })
 
+  it("looks again when a mailbox is not among the names it kept", async () => {
+    const { mail, imap, boxes } = setup()
+    await mail.searchEmails({ offset: 0, limit: 1 })
+    // Another client makes a folder after the names were listed.
+    boxes.set("Receipts", { uidValidity: 30n, uidNext: 1, messages: [] })
+
+    const found = await mail.searchEmails({
+      offset: 0,
+      limit: 1,
+      mailbox: "Receipts",
+    })
+
+    expect(found.total).toBe(0)
+    expect(imap.calls.filter((call) => call === "list")).toHaveLength(2)
+    await expect(
+      mail.searchEmails({ offset: 0, limit: 1, mailbox: "Nowhere" }),
+    ).rejects.toThrow(/No mailbox called/)
+  })
+
   it("fetches the newest page by sequence number when nothing filters", async () => {
     const { mail, imap } = setup()
     const first = await mail.searchEmails({ offset: 0, limit: 2 })

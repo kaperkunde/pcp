@@ -100,6 +100,8 @@ export type JmapLimits = {
 export type JmapConfig = Omit<JmapSession, "vacation" | "limits"> & {
   /** The From address to prefer among the identities. */
   from: string | null
+  /** The account (server id), which the session's limits are kept under. */
+  scope?: string
 }
 
 type Json = Record<string, unknown>
@@ -256,6 +258,8 @@ function excerpt(bytes: Buffer): string {
 export async function fetchJmapSession(
   sessionUrl: string,
   credential: MailCredential,
+  /** The account (server id) the limits it names belong to. */
+  scope?: string,
 ): Promise<JmapSession> {
   const { status, bytes } = await exchange(
     sessionUrl,
@@ -303,7 +307,7 @@ export async function fetchJmapSession(
     ? account.accountCapabilities
     : null
 
-  rememberJmapLimits(apiUrl, limits ?? undefined)
+  rememberJmapLimits(apiUrl, limits ?? undefined, scope)
 
   return {
     apiUrl,
@@ -361,25 +365,39 @@ const OPEN_REQUESTS = new Map<
   { open: number; waiting: Array<() => void> }
 >()
 
+/**
+ * Hosted providers share one API address across users, so limits are kept
+ * per account (`scope`: the server's id), not per address.
+ */
+const limitsKey = (apiUrl: string, scope?: string) =>
+  `${scope ?? ""}\n${apiUrl}`
+
 export function rememberJmapLimits(
   apiUrl: string,
   limits: JmapLimits | undefined,
+  scope?: string,
 ): void {
   if (limits) {
-    KNOWN_LIMITS.set(apiUrl, limits)
+    KNOWN_LIMITS.set(limitsKey(apiUrl, scope), limits)
   } else {
-    KNOWN_LIMITS.delete(apiUrl)
+    KNOWN_LIMITS.delete(limitsKey(apiUrl, scope))
   }
 }
 
-export function knownJmapLimits(apiUrl: string): JmapLimits | undefined {
-  return KNOWN_LIMITS.get(apiUrl)
+export function knownJmapLimits(
+  apiUrl: string,
+  scope?: string,
+): JmapLimits | undefined {
+  return KNOWN_LIMITS.get(limitsKey(apiUrl, scope))
 }
 
 /** Waits for a place among the requests the server lets PCP have open. */
-async function takeTurn(apiUrl: string, cap: number): Promise<() => void> {
-  const state = OPEN_REQUESTS.get(apiUrl) ?? { open: 0, waiting: [] }
-  OPEN_REQUESTS.set(apiUrl, state)
+async function takeTurn(key: string, cap: number): Promise<() => void> {
+  // Never removed once made (one small entry per account): a waiter woken
+  // as the last request ends would otherwise count against a state the map
+  // no longer holds, and the cap would not hold.
+  const state = OPEN_REQUESTS.get(key) ?? { open: 0, waiting: [] }
+  OPEN_REQUESTS.set(key, state)
 
   while (state.open >= cap) {
     await new Promise<void>((resolve) => state.waiting.push(resolve))
@@ -390,10 +408,6 @@ async function takeTurn(apiUrl: string, cap: number): Promise<() => void> {
   return () => {
     state.open--
     state.waiting.shift()?.()
-
-    if (state.open === 0 && state.waiting.length === 0) {
-      OPEN_REQUESTS.delete(apiUrl)
-    }
   }
 }
 
@@ -439,8 +453,9 @@ export async function jmapRequest(
   credential: MailCredential,
   calls: MethodCall[],
   using: string[] = [CORE, MAIL],
+  scope?: string,
 ): Promise<Map<string, Json>> {
-  const limits = KNOWN_LIMITS.get(apiUrl)
+  const limits = KNOWN_LIMITS.get(limitsKey(apiUrl, scope))
   const per = limits?.maxCallsInRequest
 
   // More calls than the server takes in one request: in parts, when none
@@ -449,15 +464,24 @@ export async function jmapRequest(
     const answers = new Map<string, Json>()
 
     for (let at = 0; at < calls.length; at += per) {
-      const part = await jmapRequest(
-        apiUrl,
-        credential,
-        calls.slice(at, at + per),
-        using,
-      )
+      try {
+        const part = await jmapRequest(
+          apiUrl,
+          credential,
+          calls.slice(at, at + per),
+          using,
+          scope,
+        )
 
-      for (const [id, answer] of part) {
-        answers.set(id, answer)
+        for (const [id, answer] of part) {
+          answers.set(id, answer)
+        }
+      } catch (error) {
+        if (at > 0 && error instanceof Error) {
+          error.message += ` (The server takes ${per} calls in a request, so PCP sent this in parts; the earlier parts were already applied, and a split batch is not atomic.)`
+        }
+
+        throw error
       }
     }
 
@@ -465,7 +489,7 @@ export async function jmapRequest(
   }
 
   const release = limits?.maxConcurrentRequests
-    ? await takeTurn(apiUrl, limits.maxConcurrentRequests)
+    ? await takeTurn(limitsKey(apiUrl, scope), limits.maxConcurrentRequests)
     : null
 
   try {
@@ -712,7 +736,7 @@ export function openJmapBackend(
   const { apiUrl, accountId } = config
 
   const request = (calls: MethodCall[], using?: string[]) =>
-    jmapRequest(apiUrl, credential, calls, using)
+    jmapRequest(apiUrl, credential, calls, using, config.scope)
 
   async function mailboxes(): Promise<MailboxSummary[]> {
     const answers = await request([

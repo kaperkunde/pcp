@@ -9,9 +9,15 @@ import { scrubNotice } from "./diagnostics"
  * plain words servers use for it.
  */
 
-/** Words servers use for "too fast, too many, wait". */
+/** Words that say "too fast, too many" on their own. */
 const RATE_TEXT =
-  /\b(?:rate[- ]?limit\w*|throttl\w*|too many (?:simultaneous |concurrent |parallel )?(?:connections?|requests?|commands?|logins?|login attempts)|too (?:fast|frequent\w*)|slow down|bandwidth|exceeded[^.]{0,40}limit|try again (?:later|in)|temporar\w* (?:unavailable|failure|error))\b/i
+  /\b(?:rate[- ]?limit\w*|throttl\w*|too many (?:simultaneous |concurrent |parallel )?(?:connections?|requests?|commands?|logins?|login attempts)|too (?:fast|frequent\w*)|slow down|bandwidth)\b/i
+
+/**
+ * Words that mean "wait" but are also what a plain outage says: they count
+ * only beside a THROTTLED, LIMIT or UNAVAILABLE response code.
+ */
+const WAIT_TEXT = /\btry again (?:later|in)\b|\btemporar\w*/i
 
 /** A BYE that names a limit is about rate more often than not. */
 const BYE_TEXT = /\blimits?\b/i
@@ -31,7 +37,11 @@ type ImapFailure = {
 const text = (value: unknown): string =>
   typeof value === "string" ? value : ""
 
-export function imapThrottle(error: unknown): PcpThrottle | null {
+export function imapThrottle(
+  error: unknown,
+  /** The login PCP signed in with, kept out of what is said. */
+  secrets: string[] = [],
+): PcpThrottle | null {
   if (!error || typeof error !== "object") {
     return null
   }
@@ -49,7 +59,7 @@ export function imapThrottle(error: unknown): PcpThrottle | null {
         ? Number(backoff[1])
         : undefined
   const signal = (): PcpThrottle => ({
-    reason: `The IMAP server is throttling PCP${said ? `: ${scrubNotice(said)}` : "."}`,
+    reason: `The IMAP server is throttling PCP${said ? `: ${scrubNotice(said, secrets)}` : "."}`,
     ...(retryAfterMs === undefined ? {} : { retryAfterMs }),
   })
 
@@ -62,9 +72,15 @@ export function imapThrottle(error: unknown): PcpThrottle | null {
     return signal()
   }
 
-  // LIMIT and UNAVAILABLE, and any refusal, only where the words are about
-  // rate: a message that is too large or a server that is down is not.
-  if (said && RATE_TEXT.test(said) && !failure.authenticationFailed) {
+  // LIMIT and UNAVAILABLE (and any refusal) where the words are about rate:
+  // a message that is too large or a server that is down is not.
+  const coded = code === "LIMIT" || code === "UNAVAILABLE"
+
+  if (
+    said &&
+    !failure.authenticationFailed &&
+    (RATE_TEXT.test(said) || (coded && WAIT_TEXT.test(said)))
+  ) {
     return signal()
   }
 

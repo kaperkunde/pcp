@@ -9,7 +9,7 @@ import { buildInstructions, loadGatewayServers } from "../gateway"
 import { startTestApi, type TestApi } from "../openapi/test-api"
 import { runCall } from "../permissions"
 import { createSecret, deleteSecret, listSecrets } from "../secrets"
-import { getServer, listServers, updateServer } from "../servers"
+import { deleteServer, getServer, listServers, updateServer } from "../servers"
 import { writeServer } from "../server-meta"
 import { scratchDatabase } from "../test-db"
 import {
@@ -26,7 +26,7 @@ import { setupVault } from "../vault"
 import { callMailTool, createMailAccount, updateMailAccount } from "./accounts"
 import { clearMailDiagnostics, mailDiagnostics } from "./diagnostics"
 import { createFakeJmap, type FakeJmap } from "./fake-jmap"
-import { closeMailSessions } from "./imap-pool"
+import { closeMailSessions, mailSessionCount } from "./imap-pool"
 import { throttleOf } from "../throttle-signal"
 import type { ImapClientLike, ImapDeps } from "./imap"
 
@@ -1115,7 +1115,7 @@ describe("an IMAP account's session", () => {
     clearMailDiagnostics()
   })
 
-  function setup(connect: () => Promise<ImapClientLike>) {
+  function setup(connect?: () => Promise<ImapClientLike>) {
     const calls: string[] = []
     const make = (): ImapClientLike =>
       ({
@@ -1215,6 +1215,25 @@ describe("an IMAP account's session", () => {
     expect(kept).toHaveLength(6)
     expect(kept[0]).toMatchObject({ tool: "search_emails", outcome: "ok" })
     expect(kept.some((call) => call.reused)).toBe(true)
+  })
+
+  it("closes the session when the account is deleted", async () => {
+    const id = await imapAccount()
+    const row = await getServer(ctx, id)
+    const { imap, calls } = setup()
+
+    await callMailTool(
+      ctx,
+      row,
+      "search_emails",
+      { limit: 1 },
+      { credential: credential(), imap },
+    )
+    expect(mailSessionCount()).toBe(1)
+
+    await deleteServer(ctx, id)
+    expect(mailSessionCount()).toBe(0)
+    expect(calls).toContain("logout")
   })
 
   it("starts over when the account's login changes", async () => {

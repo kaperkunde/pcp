@@ -571,7 +571,11 @@ const SUMMARY_QUERY: FetchQueryObject = {
 }
 
 /** What went wrong, in terms the account's status and the assistant use. */
-export function describeImapError(error: unknown, what: string): Error {
+export function describeImapError(
+  error: unknown,
+  what: string,
+  secrets: string[] = [],
+): Error {
   if (
     error instanceof MailAuthError ||
     error instanceof MailRequestError ||
@@ -580,7 +584,7 @@ export function describeImapError(error: unknown, what: string): Error {
     return error
   }
 
-  const throttle = imapThrottle(error)
+  const throttle = imapThrottle(error, secrets)
 
   if (throttle) {
     const said =
@@ -789,7 +793,10 @@ export function openImapBackend(
 
   /** A failure as the caller is told it; one on the wire ends the connection. */
   function fail(error: unknown): Error {
-    const described = describeImapError(error, "IMAP")
+    const described = describeImapError(error, "IMAP", [
+      login.username,
+      login.password,
+    ])
 
     if (described instanceof MailTransportError) {
       broken = true
@@ -1034,6 +1041,30 @@ export function openImapBackend(
     return { boxes, names }
   }
 
+  /**
+   * A mailbox by name, role or path. One missing from the names kept is
+   * looked for again in a fresh listing, so a folder another client has
+   * just made is found at once.
+   */
+  async function findFresh(
+    ref: string,
+  ): Promise<{ boxes: MailboxSummary[]; box: MailboxSummary }> {
+    let boxes = await boxNames()
+
+    try {
+      return { boxes, box: findMailbox(boxes, ref) }
+    } catch (error) {
+      if (!(error instanceof MailRequestError)) {
+        throw error
+      }
+
+      forgetNames()
+      boxes = await boxNames()
+
+      return { boxes, box: findMailbox(boxes, ref) }
+    }
+  }
+
   /** list_mailboxes: the mailboxes with their counts. */
   async function mailboxes(): Promise<MailboxSummary[]> {
     const { boxes, names } = await listBoxes(true)
@@ -1264,6 +1295,8 @@ export function openImapBackend(
           return { total: count, emails: [] }
         }
 
+        // An expunge between the SELECT and this FETCH can shift the page by
+        // one row: the count is the one SELECT gave. Next call is exact.
         const low = Math.max(1, count - end + 1)
         const messages = await imap.fetchAll(`${low}:${high}`, SUMMARY_QUERY, {
           uid: false,
@@ -1534,7 +1567,7 @@ export function openImapBackend(
 
       if (!query.allMailboxes) {
         const box = query.mailbox
-          ? findMailbox(boxes, query.mailbox)
+          ? (await findFresh(query.mailbox)).box
           : (mailboxByRole(boxes, "inbox") ?? findMailbox(boxes, "INBOX"))
         const found = await searchBox(box, criteria, query.offset, end)
 
@@ -1660,7 +1693,7 @@ export function openImapBackend(
     },
 
     async moveEmails(ids, mailbox): Promise<BulkResult<MoveResult>> {
-      return move(ids, findMailbox(await boxNames(), mailbox))
+      return move(ids, (await findFresh(mailbox)).box)
     },
 
     async markEmails(
@@ -1724,7 +1757,7 @@ export function openImapBackend(
 
     async createMailbox(name, parent): Promise<MailboxSummary> {
       const boxes = await boxNames()
-      const under = parent ? findMailbox(boxes, parent) : null
+      const under = parent ? (await findFresh(parent)).box : null
       const path = childPath(under?.id ?? null, name)
 
       if (boxes.some((box) => box.id === path)) {
@@ -1743,7 +1776,7 @@ export function openImapBackend(
 
     async renameMailbox(mailbox, change): Promise<MailboxSummary> {
       const boxes = await boxNames()
-      const box = findMailbox(boxes, mailbox)
+      const box = (await findFresh(mailbox)).box
 
       if (box.role === "inbox") {
         throw new MailRequestError("The inbox keeps its name and place.")
@@ -1752,7 +1785,9 @@ export function openImapBackend(
       let parent = box.parentId
 
       if (change.parent !== undefined) {
-        const under = change.parent ? findMailbox(boxes, change.parent) : null
+        const under = change.parent
+          ? (await findFresh(change.parent)).box
+          : null
         checkNewParent(boxes, box, under)
         parent = under?.id ?? null
       }
@@ -1776,7 +1811,7 @@ export function openImapBackend(
       // Fresh: what is inside it decides, not what was listed a while ago.
       forgetNames()
       const boxes = await boxNames()
-      const box = findMailbox(boxes, mailbox)
+      const box = (await findFresh(mailbox)).box
       // IMAP's DELETE takes the mail inside with it, so a STATUS of this
       // mailbox, asked now, decides: only an empty mailbox goes.
       checkDeletable(boxes, await counted(box))

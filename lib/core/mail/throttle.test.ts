@@ -119,6 +119,46 @@ describe("IMAP", () => {
     ).toBeNull()
   })
 
+  it("does not take a plain outage or a size limit for throttling", () => {
+    expect(
+      imapThrottle(
+        imapError({
+          responseStatus: "NO",
+          responseText: "Temporary failure, try again later",
+        }),
+      ),
+    ).toBeNull()
+    expect(
+      imapThrottle(
+        imapError({
+          responseStatus: "NO",
+          serverResponseCode: "LIMIT",
+          responseText: "Message exceeded the size limit",
+        }),
+      ),
+    ).toBeNull()
+    expect(
+      imapThrottle(
+        imapError({
+          responseStatus: "NO",
+          responseText: "Mailbox size limit exceeded",
+        }),
+      ),
+    ).toBeNull()
+  })
+
+  it("keeps the login out of the reason", () => {
+    const slow = imapThrottle(
+      imapError({
+        serverResponseCode: "THROTTLED",
+        responseText: "Slow down hunter2-secret",
+      }),
+      ["hunter2-secret"],
+    )
+
+    expect(slow?.reason).not.toMatch(/hunter2-secret/)
+  })
+
   it("leaves a wrong password and an ordinary no alone", () => {
     expect(
       imapThrottle(
@@ -301,6 +341,21 @@ describe("JMAP limits the session names", () => {
       maxConcurrentRequests: 2,
       maxCallsInRequest: 3,
     })
+  })
+
+  it("keeps limits per account, though the address is shared", () => {
+    rememberJmapLimits(
+      "https://shared.example/api",
+      { maxCallsInRequest: 2 },
+      "a",
+    )
+    seen.push("https://shared.example/api")
+
+    expect(knownJmapLimits("https://shared.example/api", "a")).toEqual({
+      maxCallsInRequest: 2,
+    })
+    expect(knownJmapLimits("https://shared.example/api", "b")).toBeUndefined()
+    rememberJmapLimits("https://shared.example/api", undefined, "a")
   })
 
   it("never has more requests open than the server allows", async () => {
