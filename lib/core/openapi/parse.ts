@@ -1,16 +1,21 @@
-import YAML from "yaml"
-
-import { MAX_SPEC_BYTES } from "../constants"
 import { invalid, isPcpError } from "../errors"
+import { resourceLimits } from "../resources/state"
 import { isObject, type JsonObject } from "./json"
-import { MAX_SPEC_NODES, MAX_YAML_ALIASES } from "./limits"
+import { MAX_SPEC_NODES } from "./limits"
+import { countNodes } from "./nodes"
+import {
+  convertInline,
+  convertInWorker,
+  YamlTooLarge,
+  YamlUnreadable,
+} from "./yaml-json"
 
 /**
  * Turns schema text into a plain JSON value and checks it is OpenAPI 3.
- * YAML is read with the core schema and no custom tags, so nothing in the
- * document can construct anything but strings, numbers, booleans, null,
- * arrays and objects; aliases are capped so a "billion laughs" document
- * fails instead of expanding.
+ * YAML is read by yaml-json.ts into JSON text first (off the main thread
+ * when `prepareSpecText` ran before; see there for what a document may
+ * contain), so everything below sees one form. The size limit is the owner's
+ * (Settings → Resources, `resourceLimits().specBytes`).
  */
 
 export type OpenApiDocument = JsonObject & {
@@ -18,53 +23,118 @@ export type OpenApiDocument = JsonObject & {
   paths: JsonObject
 }
 
-/**
- * Counts the nodes of a parsed value with every alias visited as often as it
- * appears, stopping at the limit. A cycle never ends, so it stops there too.
- */
-function withinNodeLimit(value: unknown, limit: number): boolean {
-  return countNodes(value, limit) <= limit
-}
-
-/**
- * How many nodes a value has, counted the same way; past the limit it stops
- * and answers limit + 1.
- */
-export function countNodes(value: unknown, limit: number): number {
-  const stack: unknown[] = [value]
-  let seen = 0
-
-  while (stack.length > 0) {
-    const current = stack.pop()
-    seen += 1
-
-    if (seen > limit) {
-      return seen
-    }
-
-    if (Array.isArray(current)) {
-      for (const item of current) stack.push(item)
-    } else if (typeof current === "object" && current !== null) {
-      for (const item of Object.values(current)) stack.push(item)
-    }
-  }
-
-  return seen
-}
+export { countNodes }
 
 function short(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error)
   return message.replace(/\s+/g, " ").trim().slice(0, 300)
 }
 
-export function parseSpecText(raw: string): OpenApiDocument {
-  if (Buffer.byteLength(raw, "utf8") > MAX_SPEC_BYTES) {
+function megabytes(bytes: number): string {
+  return `${Math.round((bytes / 1024 / 1024) * 10) / 10} MB`
+}
+
+/** The error for a schema past the owner's limit. */
+export function specTooLarge() {
+  return invalid(
+    `That schema is larger than ${megabytes(resourceLimits().specBytes)}, the most PCP reads (Settings → Resources).`,
+  )
+}
+
+function cleaned(raw: string): string {
+  return raw.replace(/^﻿/, "").trim()
+}
+
+/** Nodes a schema, or a schema with its edits, may have. */
+export function specNodeLimit(): number {
+  // GitHub's 14 MB description has 275,000 nodes: about 50 bytes each, so 16 is generous.
+  return Math.max(MAX_SPEC_NODES, Math.floor(resourceLimits().specBytes / 16))
+}
+
+function checkSize(raw: string): void {
+  if (Buffer.byteLength(raw, "utf8") > resourceLimits().specBytes) {
+    throw specTooLarge()
+  }
+}
+
+/** YAML schemas already turned into JSON text: the last two, for ten minutes. */
+const READY_MAX = 2
+const READY_TTL_MS = 10 * 60_000
+const ready = new Map<string, { json: string; at: number }>()
+
+function readyJson(text: string): string | null {
+  const found = ready.get(text)
+
+  if (!found) {
+    return null
+  }
+
+  if (Date.now() - found.at > READY_TTL_MS) {
+    ready.delete(text)
+    return null
+  }
+
+  return found.json
+}
+
+function remember(text: string, json: string): void {
+  ready.delete(text)
+  ready.set(text, { json, at: Date.now() })
+
+  while (ready.size > READY_MAX) {
+    ready.delete(ready.keys().next().value!)
+  }
+}
+
+/** Forgets what `prepareSpecText` kept (tests). */
+export function forgetPreparedSpecs(): void {
+  ready.clear()
+}
+
+function yamlFailure(error: unknown): never {
+  if (error instanceof YamlTooLarge) {
     throw invalid(
-      `That schema is larger than ${MAX_SPEC_BYTES / 1024 / 1024} MB.`,
+      "The schema is too large once its anchors and aliases are expanded, or needs more memory than PCP may spend reading it (Settings → Resources).",
     )
   }
 
-  const text = raw.replace(/^﻿/, "").trim()
+  if (isPcpError(error)) {
+    throw error
+  }
+
+  throw invalid(`The schema could not be read as JSON or YAML: ${short(error)}`)
+}
+
+/**
+ * Reads YAML schema text ahead of `parseSpecText`, in a worker thread, so
+ * PCP stays responsive while a large one is read and the parse that follows
+ * takes the JSON it made. Call it where schema text arrives, in async code;
+ * JSON text needs nothing. It refuses a text past the owner's limit at once.
+ */
+export async function prepareSpecText(raw: string): Promise<void> {
+  checkSize(raw)
+  const text = cleaned(raw)
+
+  if (!text || text.startsWith("{") || readyJson(text) !== null) {
+    return
+  }
+
+  try {
+    remember(
+      text,
+      await convertInWorker(text, {
+        maxNodes: specNodeLimit(),
+        specBytes: resourceLimits().specBytes,
+      }),
+    )
+  } catch (error) {
+    yamlFailure(error)
+  }
+}
+
+export function parseSpecText(raw: string): OpenApiDocument {
+  checkSize(raw)
+  const text = cleaned(raw)
 
   if (!text) {
     throw invalid("The schema is empty.")
@@ -76,32 +146,21 @@ export function parseSpecText(raw: string): OpenApiDocument {
     if (text.startsWith("{")) {
       value = JSON.parse(text)
     } else {
-      value = YAML.parse(text, {
-        version: "1.2",
-        schema: "core",
-        customTags: [],
-        resolveKnownTags: false,
-        merge: false,
-        // Checking keys for duplicates is quadratic in how many there are:
-        // 40,000 paths took 18 seconds. JSON takes the last of a duplicate
-        // too.
-        uniqueKeys: false,
-        stringKeys: true,
-        maxAliasCount: MAX_YAML_ALIASES,
-        // "silent" would swallow parse errors; "error" throws them and
-        // drops warnings (unknown tags come back as plain strings).
-        logLevel: "error",
-      })
-      if (!withinNodeLimit(value, MAX_SPEC_NODES)) {
-        throw invalid(
-          "The schema is too large once its anchors and aliases are expanded.",
-        )
+      let json = readyJson(text)
+
+      if (json === null) {
+        // Not prepared: read here, on this thread.
+        json = convertInline(text, specNodeLimit())
+        remember(text, json)
       }
 
-      // Only plain JSON values from here on.
-      value = JSON.parse(JSON.stringify(value ?? null))
+      value = JSON.parse(json)
     }
   } catch (error) {
+    if (error instanceof YamlTooLarge || error instanceof YamlUnreadable) {
+      yamlFailure(error)
+    }
+
     if (isPcpError(error)) {
       throw error
     }

@@ -644,6 +644,11 @@ embeddingProvider`, which hands `embeddings/provider.ts` the header;
 - `lib/core/openapi` never fetches a remote `$ref`, never follows a redirect
   on a call, and never lets an argument set a header or leave the base URL.
   A schema is untrusted input: new limits go in `openapi/limits.ts`.
+  The size of a schema is the owner's limit (`resourceLimits().specBytes`,
+  Settings → Resources), never a constant; YAML is read by js-yaml in a worker
+  thread (`prepareSpecText`, `openapi/yaml-worker.cjs`) and kept as JSON text
+  for the parse, and a stored schema or a request's arguments are compressed
+  from 64 KB (`spec-rows.ts`, `sealed-args.ts`; old rows still open).
 - Web fetch (`lib/core/fetch/`, `lib/core/web-fetch.ts`) reaches public
   addresses, and private ones only where the owner allowed them for the
   token (a `private` line in `web_fetch_rule`, never an assistant's to set
@@ -684,7 +689,7 @@ embeddingProvider`, which hands `embeddings/provider.ts` the header;
   `code/limits.ts`, and a new bridge operation gets a test.
 - Limits on the machine's memory, processors and disk (a program's memory,
   programs at once, the largest file, kept results per token, PCP's own
-  store) are not
+  store, the largest API schema) are not
   constants: they are `resourceLimits()` (`lib/core/resources/`), picked
   from the machine unless the owner set them on Settings → Resources, and
   never past what `checkResourceConfig` lets the machine spare. A new one

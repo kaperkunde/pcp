@@ -34,7 +34,6 @@ import type { ServerActionResult } from "@/lib/actions/servers"
 import {
   DEFAULT_HEADER_NAME,
   DEFAULT_VALUE_TEMPLATE,
-  MAX_SPEC_BYTES,
   SPEC_FILE_ACCEPT,
 } from "@/lib/core/constants"
 
@@ -121,9 +120,12 @@ export function EndpointForm({
   initial,
   secrets,
   redirectUrl,
+  maxSpecMb,
 }: {
   initial: EndpointFormValues
   secrets: SecretOption[]
+  /** The largest schema PCP reads, from Settings → Resources. */
+  maxSpecMb: number
   /** Where OAuth providers send you back: what your client lists. */
   redirectUrl: string
 }) {
@@ -173,7 +175,7 @@ export function EndpointForm({
       <Field
         label="Schema file"
         htmlFor={`${prefix}-spec-file`}
-        hint={`OpenAPI 3 as JSON or YAML, up to ${MAX_SPEC_BYTES / 1024 / 1024} MB.${editing ? " Choose a file to replace the stored schema; leave it empty to keep it." : ""}`}
+        hint={`OpenAPI 3 as JSON or YAML, up to ${maxSpecMb} MB.${editing ? " Choose a file to replace the stored schema; leave it empty to keep it." : ""}`}
       >
         <Input
           id={`${prefix}-spec-file`}

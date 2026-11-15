@@ -40,6 +40,14 @@ export const patchrightBrowsersJson = packageFile(
  * sharp's WebAssembly, which its loader reads by a path it works out at
  * runtime (lib/core/code/media.ts): the tracing finds the script, not this.
  */
+/**
+ * The worker thread that reads a YAML schema off the main thread
+ * (lib/core/openapi/yaml-json.ts) is a plain file started by its path, which
+ * the tracing cannot follow; js-yaml, which it requires, is external so it
+ * is in the output's node_modules beside it.
+ */
+export const yamlWorker = "./lib/core/openapi/yaml-worker.cjs"
+
 export const sharpWasm = packageFile(
   "@img/sharp-wasm32/package",
   `lib/sharp-wasm32-${(requireHere("@img/sharp-wasm32/package") as { version: string }).version}.node.wasm`,
@@ -66,7 +74,8 @@ const nextConfig: NextConfig = {
   // file a bundle would lose track of; ssh2 (SSH servers, lib/core/ssh/)
   // looks for optional native parts at runtime and runs without them; sharp
   // (run_code's pcp.image, lib/core/code/media.ts) finds its WebAssembly
-  // build (@img/sharp-wasm32) at runtime, which loads its .wasm by path.
+  // build (@img/sharp-wasm32) at runtime, which loads its .wasm by path;
+  // js-yaml is required by the YAML schema worker's own file (yamlWorker).
   serverExternalPackages: [
     "better-sqlite3",
     "@prisma/adapter-better-sqlite3",
@@ -80,6 +89,7 @@ const nextConfig: NextConfig = {
     "ssh2",
     "sharp",
     "@img/sharp-wasm32",
+    "js-yaml",
   ],
   // patchright-core reads its list of browser builds with a path it works
   // out at runtime, which the file tracing cannot follow; without the file,
@@ -87,10 +97,10 @@ const nextConfig: NextConfig = {
   // (scripts/standalone.test.ts). sharp's WebAssembly is read the same way:
   // without it, pcp.image fails in the image and the app.
   outputFileTracingIncludes: {
-    "/**": [patchrightBrowsersJson, sharpWasm],
+    "/**": [patchrightBrowsersJson, sharpWasm, yamlWorker],
   },
   experimental: {
-    // An uploaded OpenAPI schema (up to MAX_SPEC_BYTES, 5 MB) and an export
+    // An uploaded OpenAPI schema (up to the owner's limit, `resourceLimits().specBytes`) and an export
     // file to restore (up to MAX_EXPORT_FILE_BYTES, 64 MB) travel in a
     // Server Action's body; Next's default limit is 1 MB. This applies to
     // every action, and each checks its own file's size again before

@@ -33,7 +33,7 @@ import {
   MAX_BROWSE_FILES,
   MAX_FILE_BYTES,
   MAX_ITEM_FILES,
-  MAX_SPEC_FILE_BYTES,
+  maxSpecFileBytes,
 } from "./limits"
 
 /**
@@ -305,7 +305,7 @@ export async function readItemFiles(
 
   for (const name of names.sort()) {
     const file = item.files[name]!
-    const max = isSpec(item, name) ? MAX_SPEC_FILE_BYTES : MAX_FILE_BYTES
+    const max = isSpec(item, name) ? maxSpecFileBytes() : MAX_FILE_BYTES
 
     if (file.size !== null && file.size > max) {
       throw invalid(

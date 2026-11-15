@@ -1,7 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import { createApiToken, resolveApiToken } from "./api-tokens"
-import { MAX_SPEC_BYTES } from "./constants"
+import {
+  EMPTY_CONFIG,
+  forgetResourceLimits,
+  resourceLimits,
+  useResourceConfig,
+} from "./resources/state"
 import { db } from "./db"
 import {
   applyEndpointChange,
@@ -447,14 +452,23 @@ describe("registering an endpoint from text", () => {
   })
 
   it("refuses text longer than a schema may be, and says to pass its address instead", async () => {
-    await expect(
-      prepareRegistration(ctx, {
-        name: "Big",
-        spec: spec(api.origin, {
-          info: { title: "x", description: "d".repeat(MAX_SPEC_BYTES) },
+    useResourceConfig({ ...EMPTY_CONFIG, specMb: 1 })
+
+    try {
+      await expect(
+        prepareRegistration(ctx, {
+          name: "Big",
+          spec: spec(api.origin, {
+            info: {
+              title: "x",
+              description: "d".repeat(resourceLimits().specBytes),
+            },
+          }),
         }),
-      }),
-    ).rejects.toThrow(/larger than 5 MB\. Pass its address in openapi_url/)
+      ).rejects.toThrow(/larger than the 1 MB.*Pass its address in openapi_url/)
+    } finally {
+      forgetResourceLimits()
+    }
   })
 
   it("refuses a name with a line break, which would start a line in every assistant's instructions", async () => {

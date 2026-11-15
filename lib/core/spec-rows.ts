@@ -1,3 +1,5 @@
+import { brotliCompressSync, brotliDecompressSync, constants } from "node:zlib"
+
 import type { VaultContext } from "./context"
 import { keyedHash, sha256Hex } from "./crypto"
 import { canonicalJson } from "./permission-rules"
@@ -22,15 +24,44 @@ import {
  * they compare is the keyed one, worked out for a row from before.
  */
 
+/**
+ * A schema's text, sealed. A large one is kept compressed (`packed`: Brotli,
+ * in base64, with `text` empty): GitHub's 14 MB REST description comes to
+ * 0.9 MB, and every instance of a definition holds a copy. A row from
+ * before has only `text`, which every reader still takes; the shape changes
+ * only by adding `packed`, so the older reader's blank `text` is the one
+ * thing a downgrade would lose, and migrations only go forward.
+ */
 export const SPEC_TEXT: SealedGroup<
-  { text: string },
+  { text: string; packed: string },
   "sealedText",
   "serverId"
 > = {
   column: "sealedText",
   idKey: "serverId",
   aad: (id) => `openapi_spec:${id}:sealedText`,
-  blank: { text: "" },
+  blank: { text: "", packed: "" },
+  sealedOnly: ["packed"],
+}
+
+/** Below this many characters a schema is kept as it is. */
+export const PACK_FROM_CHARS = 64 * 1024
+
+/** Brotli at quality 4: 14 MB in about 70 ms, 21 times smaller. */
+export function packText(text: string): string {
+  return brotliCompressSync(Buffer.from(text, "utf8"), {
+    params: { [constants.BROTLI_PARAM_QUALITY]: 4 },
+  }).toString("base64")
+}
+
+/**
+ * The text of a packed value. The output is bounded (a sealed value is
+ * authenticated, so this is a guard against a bug, not an attacker).
+ */
+export function unpackText(packed: string): string {
+  return brotliDecompressSync(Buffer.from(packed, "base64"), {
+    maxOutputLength: 1024 * 1024 * 1024,
+  }).toString("utf8")
 }
 
 export const SPEC_PATCHES: SealedGroup<
@@ -123,7 +154,12 @@ export function openSpec(
   ctx: VaultContext,
   row: SpecRow,
 ): { text: string; patches: string; hash: string } {
-  const { text } = readFields(ctx.dek, SPEC_TEXT, row)
+  const { text: plain, packed } = readFields(ctx.dek, SPEC_TEXT, {
+    ...row,
+    // Sealed only: the row has no plain column for it.
+    plainPacked: "",
+  })
+  const text = packed ? unpackText(packed) : plain
   const { patches } = readFields(ctx.dek, SPEC_PATCHES, row)
 
   return {
@@ -139,8 +175,13 @@ export function sealedSpecText(
   serverId: string,
   text: string,
 ): { sealedText: Uint8Array<ArrayBuffer>; plainText: string; hash: string } {
+  const pack = text.length >= PACK_FROM_CHARS
+
   return {
-    ...(sealFields(ctx.dek, SPEC_TEXT, serverId, { text }) as {
+    ...(sealFields(ctx.dek, SPEC_TEXT, serverId, {
+      text: pack ? "" : text,
+      packed: pack ? packText(text) : "",
+    }) as {
       sealedText: Uint8Array<ArrayBuffer>
       plainText: string
     }),

@@ -32,6 +32,7 @@ import {
 import {
   checkDocument,
   parseSpecText,
+  prepareSpecText,
   type OpenApiDocument,
 } from "./openapi/parse"
 import {
@@ -296,7 +297,7 @@ export function readDocument(
 ): OpenApiDocument {
   const parsed = parseSpecText(text)
   return patches.length > 0
-    ? checkDocument(applyPatches(parsed, patches))
+    ? checkDocument(applyPatches(parsed, patches, { consume: true }))
     : parsed
 }
 
@@ -777,8 +778,14 @@ async function storedSpecRow(
     where: { serverId },
     select: SPEC_SELECT,
   })
+  const spec = row ? openSpec(ctx, row) : null
 
-  return row ? openSpec(ctx, row) : null
+  if (spec) {
+    // A stored YAML schema is read in a worker, not on this thread.
+    await prepareSpecText(spec.text).catch(() => undefined)
+  }
+
+  return spec
 }
 
 /** What PCP keeps of an endpoint's schema: the text and its edits. */
@@ -952,8 +959,10 @@ export async function createEndpoint(
     }))
   }
 
-  // Everything that can be wrong with the schema is found before a row
-  // exists, so a bad one leaves nothing behind.
+  // Read off the main thread first (YAML), then everything that can be
+  // wrong with the schema is found before a row exists, so a bad one leaves
+  // nothing behind.
+  await prepareSpecText(text)
   const generated = generateEndpointTools(text, {
     readOnly: data.readOnly,
     authHeaderNames: sentHeaders(data),

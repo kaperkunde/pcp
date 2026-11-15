@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest"
 
-import { MAX_SPEC_BYTES } from "../constants"
+import {
+  EMPTY_CONFIG,
+  forgetResourceLimits,
+  resourceLimits,
+  useResourceConfig,
+} from "../resources/state"
 import { parseSpecText } from "./parse"
 
 const doc = { openapi: "3.0.3", info: { title: "T", version: "1" }, paths: {} }
@@ -42,8 +47,14 @@ paths: {}
   })
 
   it("refuses a schema over the size limit", () => {
-    const big = `openapi: 3.0.0\ninfo: {}\npaths: {}\n# ${"x".repeat(MAX_SPEC_BYTES)}`
-    expect(() => parseSpecText(big)).toThrow(/larger than 5 MB/)
+    useResourceConfig({ ...EMPTY_CONFIG, specMb: 1 })
+
+    try {
+      const big = `openapi: 3.0.0\ninfo: {}\npaths: {}\n# ${"x".repeat(resourceLimits().specBytes)}`
+      expect(() => parseSpecText(big)).toThrow(/larger than 1 MB/)
+    } finally {
+      forgetResourceLimits()
+    }
   })
 
   it("stops a YAML alias bomb instead of expanding it", () => {
@@ -59,18 +70,25 @@ paths: {}
     const started = Date.now()
     expect(() =>
       parseSpecText(`openapi: 3.0.0\npaths: {}\nx:\n  ${lines.join("\n  ")}`),
-    ).toThrow(/could not be read/)
+    ).toThrow(/too large once its anchors/)
     expect(Date.now() - started).toBeLessThan(2000)
   })
 
-  it("does not build dates or binary values from YAML tags", () => {
-    const parsed = parseSpecText(`openapi: 3.0.0
-paths: {}
-x-when: !!timestamp 2001-12-14
-x-blob: !!binary R0lGODlhDAAMAIQAAP
-`)
-    expect(typeof parsed["x-when"]).toBe("string")
-    expect(typeof parsed["x-blob"]).toBe("string")
+  it("builds no dates or binary values from YAML tags: it refuses the tag", () => {
+    for (const tagged of [
+      "!!timestamp 2001-12-14",
+      "!!binary R0lGODlhDAAMAIQAAP",
+    ]) {
+      expect(() =>
+        parseSpecText(`openapi: 3.0.0\npaths: {}\nx-tagged: ${tagged}\n`),
+      ).toThrow(/could not be read/)
+    }
+    // A date written plainly stays the text it is.
+    expect(
+      parseSpecText("openapi: 3.0.0\npaths: {}\nx-when: 2001-12-14\n")[
+        "x-when"
+      ],
+    ).toBe("2001-12-14")
   })
 
   it("takes the last of a duplicate key, as JSON does", () => {
@@ -94,24 +112,20 @@ x-blob: !!binary R0lGODlhDAAMAIQAAP
   })
 
   it("refuses aliases that expand to far more than the file", () => {
-    // 80 aliases of one 50,000-element array: inside the YAML library's own
-    // alias limit, and four million nodes once expanded.
+    // 80 aliases of one 50,000-element array: four million nodes once
+    // expanded, past what a 16 MB schema may come to.
+    useResourceConfig({ ...EMPTY_CONFIG, specMb: 16 })
     const items = Array(50_000).fill("1").join(", ")
     const copies = Array.from({ length: 80 }, () => "  - *a").join("\n")
     const text = `openapi: 3.0.0\npaths: {}\nx-big: &a [${items}]\nx-copies:\n${copies}\n`
     const started = Date.now()
 
-    expect(() => parseSpecText(text)).toThrow(/too large once its anchors/)
-    expect(Date.now() - started).toBeLessThan(3000)
-  })
-
-  it("leaves the alias limit to the YAML library past a hundred", () => {
-    const copies = Array.from({ length: 150 }, () => "  - *a").join("\n")
-    expect(() =>
-      parseSpecText(
-        `openapi: 3.0.0\npaths: {}\nx-one: &a [1]\nx-copies:\n${copies}\n`,
-      ),
-    ).toThrow(/could not be read/)
+    try {
+      expect(() => parseSpecText(text)).toThrow(/too large once its anchors/)
+      expect(Date.now() - started).toBeLessThan(3000)
+    } finally {
+      forgetResourceLimits()
+    }
   })
 
   it("still reads a schema that uses a few aliases sensibly", () => {

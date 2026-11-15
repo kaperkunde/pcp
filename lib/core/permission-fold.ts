@@ -1,6 +1,7 @@
 import type { PermissionKind } from "./constants"
+import { openArgs } from "./sealed-args"
 import type { VaultContext } from "./context"
-import { decryptString, keyedHash } from "./crypto"
+import { keyedHash } from "./crypto"
 import { db } from "./db"
 
 /**
@@ -69,13 +70,11 @@ export async function openRequestFor<T>(
 
   return {
     id: row.id,
-    args: JSON.parse(
-      decryptString(
-        ctx.dek,
-        Buffer.from(row.argsCiphertext),
-        `permission_request:${row.id}`,
-      ),
-    ) as T,
+    args: openArgs<T>(
+      ctx.dek,
+      Buffer.from(row.argsCiphertext),
+      `permission_request:${row.id}`,
+    ),
   }
 }
 
