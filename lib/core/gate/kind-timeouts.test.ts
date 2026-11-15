@@ -16,7 +16,7 @@ import { scratchDatabase } from "../test-db"
 import { errorCodeOf } from "../tools/outcome"
 import { callServerTool, syncServerTools } from "../upstream"
 import { setupVault } from "../vault"
-import { gateServerCall } from "./index"
+import { gateServerCall, serverCooling } from "./index"
 import { resetGate } from "./state"
 import { writeServerLimits } from "./store"
 
@@ -50,12 +50,15 @@ let api: TestApi
 let secretId: string
 /** How long every answer waits, once the account is set up. */
 let delayMs: number
+/** Whether the calendar and mail servers answer 429, asking for a minute. */
+let throttling: boolean
 let jmap: FakeJmap
 let dav: FakeCalDav
 
 beforeEach(async () => {
   resetGate()
   delayMs = 0
+  throttling = false
   ;({ cleanup } = await scratchDatabase())
   ctx = await setupVault({
     name: "Ada",
@@ -72,6 +75,13 @@ beforeEach(async () => {
     const answer = () => {
       if (request.url.startsWith("/api/")) {
         return json(res, 200, { ok: true })
+      }
+
+      if (throttling) {
+        res.statusCode = 429
+        res.setHeader("retry-after", "60")
+        res.end("slow down")
+        return
       }
 
       const found = request.url.startsWith("/dav")
@@ -207,6 +217,26 @@ describe.each([
         `${server.name} did not answer within 1 s`,
       ),
     })
+  })
+})
+
+// A server's own "slow down" (lib/core/throttle-signal.ts) reaches the gate
+// from each kind's own requests, however the kind words its error.
+describe.each([
+  { kind: "a calendar account", make: calendar, tool: "list_calendars" },
+  { kind: "a JMAP mail account", make: jmapAccount, tool: "list_mailboxes" },
+])("$kind's 429", ({ make, tool }) => {
+  it("cools the server down, and the next call is refused as paced", async () => {
+    const id = await make()
+    const call = async () =>
+      callServerTool(ctx, await getServer(ctx, id), tool, {}, PUBLIC)
+
+    throttling = true
+    expect(await attempt(call)).toMatchObject({ error: expect.any(String) })
+    expect(serverCooling(ctx, id)).not.toBeNull()
+
+    throttling = false
+    expect(await attempt(call)).toMatchObject({ code: "paced" })
   })
 })
 
