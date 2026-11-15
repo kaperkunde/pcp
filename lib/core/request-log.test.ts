@@ -1,6 +1,7 @@
 import {
   appendFileSync,
   existsSync,
+  linkSync,
   mkdirSync,
   readFileSync,
   readdirSync,
@@ -521,5 +522,49 @@ describe("writing a day again", () => {
     writeFileSync(path.join(logDir(), "mine.part"), "not the log's")
     await deleteRequestLog()
     expect(readdirSync(logDir())).toEqual(["mine.part"])
+  })
+})
+
+describe("old bytes of a day", () => {
+  const file = () => path.join(logDir(), "mcp-2026-10-01.jsonl")
+
+  it("are overwritten with zeros before a sealed day's file is replaced", async () => {
+    day("2026-10-01", [line({ tool: "describe", server: "OLD-MARKER" })])
+    const before = readFileSync(file())
+    // A second name for the old file: what the rename leaves behind of it.
+    const held = path.join(logDir(), "held.bin")
+    linkSync(file(), held)
+
+    expect(await sealRequestLogDay(reader, "2026-10-01")).toBe(true)
+
+    // The new file is another one, and the old one holds nothing of it.
+    const old = readFileSync(held)
+    expect(old.length).toBe(before.length)
+    expect(old.every((byte) => byte === 0)).toBe(true)
+    expect(readFileSync(file(), "utf8")).not.toContain("OLD-MARKER")
+  })
+
+  it("are overwritten with zeros before a pruned day, a stale part or a deleted vault's days go", async () => {
+    day("2026-09-01", [line({ server: "PRUNED-MARKER" })])
+    day("2026-10-06", [line({ server: "DELETED-MARKER" })])
+    const part = path.join(logDir(), "mcp-2026-10-06.jsonl.a1b2c3.part")
+    writeFileSync(part, line({ server: "PART-MARKER" }))
+    const held = ["mcp-2026-09-01.jsonl", "mcp-2026-10-06.jsonl", part].map(
+      (name, index) => {
+        const link = path.join(logDir(), `held-${index}.bin`)
+        linkSync(path.resolve(logDir(), name), link)
+        return link
+      },
+    )
+    const sizes = held.map((link) => readFileSync(link).length)
+
+    await pruneRequestLog(7, new Date("2026-10-06T10:00:00Z"))
+    expect(readFileSync(held[0]).every((byte) => byte === 0)).toBe(true)
+    expect(readFileSync(held[2]).every((byte) => byte === 0)).toBe(true)
+    expect(existsSync(part)).toBe(false)
+
+    await deleteRequestLog()
+    expect(readFileSync(held[1]).every((byte) => byte === 0)).toBe(true)
+    expect(held.map((link) => readFileSync(link).length)).toEqual(sizes)
   })
 })
