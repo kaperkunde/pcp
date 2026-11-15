@@ -104,83 +104,89 @@ model Session {
 /// and sees the skills listed in ApiTokenSkill, or every one when allSkills
 /// is set.
 model ApiToken {
-  id               String    @id
-  vaultId          String    @map("vault_id")
-  vault            Vault     @relation(fields: [vaultId], references: [id], onDelete: Cascade)
-  grantId          String    @unique @map("grant_id")
-  grant            KeyGrant  @relation(fields: [grantId], references: [id], onDelete: Cascade)
+  id                   String    @id
+  vaultId              String    @map("vault_id")
+  vault                Vault     @relation(fields: [vaultId], references: [id], onDelete: Cascade)
+  grantId              String    @unique @map("grant_id")
+  grant                KeyGrant  @relation(fields: [grantId], references: [id], onDelete: Cascade)
   /// The name from before it was sealed (#96): read only while sealedName
   /// is null, "" once the row is sealed.
-  plainName        String    @map("name")
+  plainName            String    @map("name")
   /// The name the owner gave it: AES-256-GCM under the vault's data key
   /// with "api_token:<id>:name" as associated data (lib/core/token-names.ts).
-  sealedName       Bytes?    @map("sealed_name")
+  sealedName           Bytes?    @map("sealed_name")
   /// The first characters of the token, so the owner can tell them apart.
-  prefix           String
-  allowAllServers  Boolean   @default(true) @map("allow_all_servers")
+  prefix               String
+  allowAllServers      Boolean   @default(true) @map("allow_all_servers")
   /// Whether the assistant sees every skill of the vault (lib/core/skills.ts)
   /// or only those in ApiTokenSkill. On unless the owner chooses some.
-  allSkills        Boolean   @default(true) @map("all_skills")
+  allSkills            Boolean   @default(true) @map("all_skills")
   /// Whether the assistant may read and change the API endpoints it set up
   /// through the gateway (get_endpoint, update_endpoint). Registering one is
   /// register_server, which every token may ask for and the owner decides.
   /// Off unless the owner turns it on.
-  manageEndpoints  Boolean   @default(false) @map("manage_endpoints")
+  manageEndpoints      Boolean   @default(false) @map("manage_endpoints")
   /// Whether the assistant may keep memories (the gateway's memory tool):
   /// its own, and the shared ones the owner agreed to. Sharing one always
   /// asks the owner. Off unless the owner turns it on.
-  keepMemories     Boolean   @default(false) @map("keep_memories")
+  keepMemories         Boolean   @default(false) @map("keep_memories")
   /// While on (and keepMemories is), the instructions ask the assistant to
   /// offer to move the memories and skills its client keeps elsewhere into
   /// PCP, asking the owner before it moves them and again before it deletes
   /// the originals. The assistant turns it off when it is done (the memory
   /// tool's migration_done); only the owner turns it on. On for a new token.
-  memoryMigration  Boolean   @default(true) @map("memory_migration")
+  memoryMigration      Boolean   @default(true) @map("memory_migration")
   /// Whether the assistant may fetch web pages through the gateway
   /// (web_fetch), following the token's site and method levels
   /// (WebFetchRule). Off unless the owner turns it on.
-  webFetch         Boolean   @default(false) @map("web_fetch")
+  webFetch             Boolean   @default(false) @map("web_fetch")
   /// Whether the assistant may run programs that call its tools through
   /// the gateway (run_code), each call at the token's own levels. Off
   /// unless the owner turns it on.
-  runCode          Boolean   @default(false) @map("run_code")
+  runCode              Boolean   @default(false) @map("run_code")
   /// Whether the assistant may propose wrappers (create_wrapper and its
   /// kin, lib/core/wrappers/): servers whose tools are programs over the
   /// owner's other tools. Every change it proposes is the owner's to make.
   /// Off unless the owner turns it on.
-  manageWrappers   Boolean   @default(false) @map("manage_wrappers")
+  manageWrappers       Boolean   @default(false) @map("manage_wrappers")
   /// Whether the assistant may move files between PCP and its own computer
   /// by link (share_result, receive_file; lib/core/file-links.ts), so a
   /// file's bytes never pass through it. Off unless the owner turns it on.
-  shareFiles       Boolean   @default(false) @map("share_files")
-  expiresAt        DateTime? @map("expires_at")
-  revokedAt        DateTime? @map("revoked_at")
-  createdAt        DateTime  @default(now()) @map("created_at")
-  lastUsedAt       DateTime? @map("last_used_at")
+  shareFiles           Boolean   @default(false) @map("share_files")
+  expiresAt            DateTime? @map("expires_at")
+  revokedAt            DateTime? @map("revoked_at")
+  createdAt            DateTime  @default(now()) @map("created_at")
+  lastUsedAt           DateTime? @map("last_used_at")
   /// Set when the token was made by an assistant signing in with OAuth at
   /// PCP's own authorization server: the client_id it was issued to (a
   /// registered client's id, or the URL of its metadata document) and the
   /// name the client gave. Such a token has no pcp_ value: its grant is
   /// empty, and the key travels in its OAuth credentials.
-  oauthClientId    String?   @map("oauth_client_id")
-  oauthClientName  String?   @map("oauth_client_name")
+  oauthClientId        String?   @map("oauth_client_id")
+  /// From before it was sealed (#96): null once in `clientMeta`.
+  plainOauthClientName String?   @map("oauth_client_name")
+  /// The client's name and what PCP last saw of it (`clientSeen` below) as
+  /// JSON, AES-256-GCM under the vault's data key with
+  /// "api_token:<id>:client" as associated data.
+  clientMeta           Bytes?    @map("client_meta")
   /// The owner's instructions for this assistant, given at the start of
   /// every conversation (lib/core/instructions.ts): ciphertext under the
   /// vault's key with "api_token:<id>" as associated data. Null until the
   /// owner saves some; a new token starts from PCP's suggested ones.
-  instructions     Bytes?
+  instructions         Bytes?
   /// The version of PCP's suggested instructions (instructions-defaults.ts)
   /// the text was copied or merged from. Null with no instructions.
-  instructionsBase Int?      @map("instructions_base")
+  instructionsBase     Int?      @map("instructions_base")
   /// The owner's choice of client profile for this token
   /// (lib/core/clients/profiles.ts: what PCP repeats of its instructions in
   /// answers, and how it formats links), by id. Null: detected per request.
-  clientProfile    String?   @map("client_profile")
+  clientProfile        String?   @map("client_profile")
   /// The client PCP last saw use this token, as JSON: its name and version
   /// as the client gave them, the profile it was detected as, and when
   /// (lib/core/clients/detect.ts). Nothing of a request's content, never a
   /// header's value but the client's own label; not the request log.
-  clientSeen       String?   @map("client_seen")
+  /// From before it was sealed (#96): null once in `clientMeta`.
+  plainClientSeen      String?   @map("client_seen")
 
   servers            ApiTokenServer[]
   skills             ApiTokenSkill[]
@@ -355,25 +361,32 @@ model VaultToolAccess {
 /// changes or removes one. Its level per token is a web_fetch_rule of kind
 /// "exit" keyed by its id: blocked without one.
 model Exit {
-  id        String     @id
-  vaultId   String     @map("vault_id")
-  vault     Vault      @relation(fields: [vaultId], references: [id], onDelete: Cascade)
-  /// What an assistant calls it, unique in the vault.
-  name      String
+  id         String     @id
+  vaultId    String     @map("vault_id")
+  vault      Vault      @relation(fields: [vaultId], references: [id], onDelete: Cascade)
+  /// What an assistant calls it, unique in the vault. From before names were
+  /// sealed (#96): "" once sealed into `about`, found by `nameKey`.
+  plainName  String     @map("name")
   /// The owner's words for where it comes out ("US — home VPS"); may be "".
-  label     String     @default("")
+  /// "" once sealed into `about`.
+  plainLabel String     @default("") @map("label")
+  /// A keyed hash of the name under the vault's key: what is unique.
+  nameKey    String?    @map("name_key")
+  /// The name and the label as JSON, AES-256-GCM under the vault's data key
+  /// with "exit:<id>:about" as associated data.
+  about      Bytes?
   /// ssh | service
-  kind      String
+  kind       String
   /// The SSH server it leaves from, or whose loopback its container is on.
-  serverId  String     @map("server_id")
-  server    McpServer  @relation("ExitHost", fields: [serverId], references: [id], onDelete: Cascade)
+  serverId   String     @map("server_id")
+  server     McpServer  @relation("ExitHost", fields: [serverId], references: [id], onDelete: Cascade)
   /// The service (a container PCP runs) for kind "service"; null for "ssh".
-  serviceId String?    @map("service_id")
-  service   McpServer? @relation("ExitService", fields: [serviceId], references: [id], onDelete: Cascade)
-  createdAt DateTime   @default(now()) @map("created_at")
-  updatedAt DateTime   @updatedAt @map("updated_at")
+  serviceId  String?    @map("service_id")
+  service    McpServer? @relation("ExitService", fields: [serviceId], references: [id], onDelete: Cascade)
+  createdAt  DateTime   @default(now()) @map("created_at")
+  updatedAt  DateTime   @updatedAt @map("updated_at")
 
-  @@unique([vaultId, name])
+  @@unique([vaultId, nameKey])
   @@index([serverId])
   @@index([serviceId])
   @@map("exit")
@@ -1167,37 +1180,42 @@ model ServiceSpec {
 /// read-only work as for any server. Only the owner adds or changes one.
 /// Kept apart from the server row like a service's spec.
 model StorageRoot {
-  serverId   String     @id @map("server_id")
-  server     McpServer  @relation("StorageOwn", fields: [serverId], references: [id], onDelete: Cascade)
+  serverId     String     @id @map("server_id")
+  server       McpServer  @relation("StorageOwn", fields: [serverId], references: [id], onDelete: Cascade)
   /// The SSH server the folder is on. Null for the local store, and once
   /// that server is deleted: the folder stays there, and PCP no longer
   /// reaches it.
-  hostId     String?    @map("host_id")
-  host       McpServer? @relation("StorageHost", fields: [hostId], references: [id], onDelete: SetNull)
+  hostId       String?    @map("host_id")
+  host         McpServer? @relation("StorageHost", fields: [hostId], references: [id], onDelete: SetNull)
   /// The folder, an absolute path on the SSH server ("" for the local
   /// store, which is <data>/storage/<server id>). Every path a tool names
   /// is resolved under it, and refused when its real path is not.
-  path       String
+  /// From before it was sealed (#96): "" once in `sealed`.
+  plainPath    String     @map("path")
   /// Whose files the owner wants these to be (a Samba share's user). SFTP
   /// writes as the SSH login: when this differs, the page says so. Empty is
   /// the login.
-  writeAs    String     @default("") @map("write_as")
+  /// "" once sealed.
+  plainWriteAs String     @default("") @map("write_as")
+  /// The folder and the login as JSON, AES-256-GCM under the vault's data key
+  /// with "storage_root:<server id>:about" as associated data.
+  sealed       Bytes?
   /// The umask new files and folders get, as a number (2 is 002): PCP sets
   /// their mode itself, whatever the server's own umask is.
-  umask      Int        @default(2)
+  umask        Int        @default(2)
   /// "sftp" (a folder on the SSH server) or "local" (PCP's data folder).
-  backend    String     @default("sftp")
+  backend      String     @default("sftp")
   /// "plain" (files as they are, for other apps too) or "encrypted".
-  mode       String     @default("plain")
+  mode         String     @default("plain")
   /// The store key, random, encrypted under the vault key with
   /// "storage_store:<server id>" as associated data; it wraps each file's
   /// key. Null for a store that was never encrypted.
-  storeKey   Bytes?     @map("store_key")
+  storeKey     Bytes?     @map("store_key")
   /// While the owner converts it: "encrypted" or "plain", the mode it is
   /// going to. Tools are refused until it is done.
-  converting String     @default("")
-  createdAt  DateTime   @default(now()) @map("created_at")
-  updatedAt  DateTime   @updatedAt @map("updated_at")
+  converting   String     @default("")
+  createdAt    DateTime   @default(now()) @map("created_at")
+  updatedAt    DateTime   @updatedAt @map("updated_at")
 
   @@index([hostId])
   @@map("storage_root")

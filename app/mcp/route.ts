@@ -209,7 +209,7 @@ async function handle(request: Request): Promise<Response> {
   // request and the token's last initialize show. The client last seen is
   // kept on the token for its Advanced page once this answer is sent.
   const client = detectClient(resolved, requestClient(body, request.headers))
-  after(() => noteClientSeen(resolved, client).catch(() => {}))
+  after(() => noteClientSeen(resolved.ctx, resolved, client).catch(() => {}))
 
   const scope: GatewayScope = {
     ...resolved,

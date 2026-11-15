@@ -2,6 +2,15 @@ import { readFileSync } from "node:fs"
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
 
+import { createOAuthApiToken, getApiToken } from "../api-tokens"
+import {
+  createSshExit,
+  findExitByName,
+  listExits,
+  updateExit,
+} from "../exits/exits"
+import { ensureOwnStore, loadStorageRoot } from "../storage/roots"
+import { createSshServer } from "../ssh/hosts"
 import { storeTools } from "../catalogue"
 import { cleanupIdle, stopCleanup } from "../cleanup/runtime"
 import type { VaultContext } from "../context"
@@ -287,5 +296,123 @@ describe("a tool's icons", () => {
     expect(
       await db().$queryRawUnsafe(`SELECT "icons" FROM "mcp_tool"`),
     ).toEqual([{ icons: null }])
+  })
+})
+
+describe("an exit's name and label", () => {
+  async function exit() {
+    const { id: serverId } = await createSshServer(ctx, {
+      name: "VPS",
+      host: "127.0.0.1",
+      port: 2222,
+      username: "deploy",
+    })
+    const { id } = await createSshExit(ctx, {
+      serverId,
+      name: "exit-marker-name",
+      label: "Exit marker label",
+    })
+    return { serverId, id }
+  }
+
+  it("are sealed, found by the name's hash, and unique by it", async () => {
+    const { serverId, id } = await exit()
+
+    expect(await onDisk("exit-marker-name")).toBe(false)
+    expect(await onDisk("Exit marker label")).toBe(false)
+    expect(await findExitByName(ctx, "Exit-Marker-Name")).toMatchObject({
+      id,
+      name: "exit-marker-name",
+      label: "Exit marker label",
+    })
+    await expect(
+      createSshExit(ctx, { serverId, name: "exit-marker-name" }),
+    ).rejects.toThrow(/already/)
+    await updateExit(ctx, id, { name: "exit-renamed", label: "" })
+    expect(await findExitByName(ctx, "exit-marker-name")).toBeNull()
+    expect((await listExits(ctx))[0]).toMatchObject({ name: "exit-renamed" })
+  })
+
+  it("from before are read by name, and sealed by a request", async () => {
+    const { id } = await exit()
+    await db().$executeRawUnsafe(
+      `UPDATE "exit" SET "name" = 'old-exit-marker', "label" = 'Old exit label', "name_key" = NULL, "about" = NULL`,
+    )
+
+    expect(await findExitByName(ctx, "old-exit-marker")).toMatchObject({
+      id,
+      label: "Old exit label",
+    })
+    expect(await ensureSealed(ctx)).toBe(true)
+    expect(await onDisk("old-exit-marker")).toBe(false)
+    expect(await onDisk("Old exit label")).toBe(false)
+    expect(await findExitByName(ctx, "old-exit-marker")).toMatchObject({
+      id,
+      label: "Old exit label",
+    })
+  })
+})
+
+describe("a store's folder and login", () => {
+  it("from before are read, and sealed by a request", async () => {
+    const id = await ensureOwnStore(ctx)
+    await db().$executeRawUnsafe(
+      `UPDATE "storage_root" SET "path" = '/srv/path-marker', "write_as" = 'login-marker', "sealed" = NULL`,
+    )
+
+    expect((await loadStorageRoot(ctx, id)).root).toMatchObject({
+      path: "/srv/path-marker",
+      writeAs: "login-marker",
+    })
+    expect(await ensureSealed(ctx)).toBe(true)
+    expect(await onDisk("path-marker")).toBe(false)
+    expect(await onDisk("login-marker")).toBe(false)
+    expect((await loadStorageRoot(ctx, id)).root).toMatchObject({
+      path: "/srv/path-marker",
+      writeAs: "login-marker",
+    })
+  })
+
+  it("is sealed when made", async () => {
+    await ensureOwnStore(ctx)
+    const rows = await db().$queryRawUnsafe<Array<{ path: string }>>(
+      `SELECT "path" FROM "storage_root"`,
+    )
+    expect(rows).toEqual([{ path: "" }])
+    expect((await db().storageRoot.findFirstOrThrow()).sealed).not.toBeNull()
+  })
+})
+
+describe("the app a token is for", () => {
+  it("from before is read, and sealed by a request", async () => {
+    const { id } = await createOAuthApiToken(ctx, {
+      name: "Assistant",
+      allowAllServers: true,
+      shareFiles: false,
+      instructions: null,
+      clientProfile: null,
+      oauthClientName: null,
+      clientSeen: null,
+      clientId: "client-1",
+      clientName: "Client-marker-name",
+    } as never)
+
+    expect(await onDisk("Client-marker-name")).toBe(false)
+    expect((await getApiToken(ctx, id)).oauthClient).toEqual({
+      id: "client-1",
+      name: "Client-marker-name",
+    })
+
+    await db().$executeRawUnsafe(
+      `UPDATE "api_token" SET "oauth_client_name" = 'Old-client-marker', "client_seen" = NULL, "client_meta" = NULL`,
+    )
+    expect((await getApiToken(ctx, id)).oauthClient?.name).toBe(
+      "Old-client-marker",
+    )
+    expect(await ensureSealed(ctx)).toBe(true)
+    expect(await onDisk("Old-client-marker")).toBe(false)
+    expect((await getApiToken(ctx, id)).oauthClient?.name).toBe(
+      "Old-client-marker",
+    )
   })
 })

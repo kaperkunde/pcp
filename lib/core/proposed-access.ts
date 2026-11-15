@@ -607,25 +607,35 @@ export async function applyPendingAccess(
   ctx: VaultContext,
   serverId: string,
 ): Promise<void> {
-  const row = await db().mcpServer.findFirst({
-    where: { id: serverId, vaultId: ctx.vaultId },
-    select: { pendingAccess: true },
-  })
+  let row: { pendingAccess: string | null } | null = null
+  let cleared = false
 
-  if (!row?.pendingAccess) {
-    return
+  // A converter may seal the stored text between the read and the clear:
+  // when nothing was cleared, read it once more and try again.
+  for (let attempt = 0; attempt < 2 && !cleared; attempt++) {
+    row = await db().mcpServer.findFirst({
+      where: { id: serverId, vaultId: ctx.vaultId },
+      select: { pendingAccess: true },
+    })
+
+    if (!row?.pendingAccess) {
+      return
+    }
+
+    if ((await db().mcpTool.count({ where: { serverId } })) === 0) {
+      return
+    }
+
+    cleared =
+      (
+        await db().mcpServer.updateMany({
+          where: { id: serverId, pendingAccess: row.pendingAccess },
+          data: { pendingAccess: null },
+        })
+      ).count === 1
   }
 
-  if ((await db().mcpTool.count({ where: { serverId } })) === 0) {
-    return
-  }
-
-  const cleared = await db().mcpServer.updateMany({
-    where: { id: serverId, pendingAccess: row.pendingAccess },
-    data: { pendingAccess: null },
-  })
-
-  if (cleared.count !== 1) {
+  if (!cleared || !row?.pendingAccess) {
     return
   }
 

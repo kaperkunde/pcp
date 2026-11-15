@@ -113,7 +113,7 @@ async function populate() {
       name: "Scans",
       slug: "scans",
       url: "pcp:storage",
-      storageRoot: { create: { path: "/srv/scans", mode: "encrypted" } },
+      storageRoot: { create: { plainPath: "/srv/scans", mode: "encrypted" } },
       storageEntries: {
         create: { id: "entry1", nameKey: "k", meta: new Uint8Array([1]) },
       },

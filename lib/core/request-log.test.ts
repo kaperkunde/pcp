@@ -2,6 +2,7 @@ import {
   appendFileSync,
   existsSync,
   linkSync,
+  renameSync,
   mkdirSync,
   readFileSync,
   readdirSync,
@@ -566,5 +567,25 @@ describe("old bytes of a day", () => {
     await deleteRequestLog()
     expect(readFileSync(held[1]).every((byte) => byte === 0)).toBe(true)
     expect(held.map((link) => readFileSync(link).length)).toEqual(sizes)
+  })
+
+  it("still seals a day where the system will not rename over a held file", async () => {
+    day("2026-10-01", [line({ tool: "describe", server: "OLD-MARKER" })])
+    let tries = 0
+
+    expect(
+      await sealRequestLogDay(reader, "2026-10-01", {
+        rename: async (from, to) => {
+          if (tries++ === 0) {
+            throw Object.assign(new Error("busy"), { code: "EPERM" })
+          }
+
+          renameSync(from, to)
+        },
+      }),
+    ).toBe(true)
+    expect(tries).toBe(2)
+    expect(readFileSync(file(), "utf8")).not.toContain("OLD-MARKER")
+    expect(readdirSync(logDir()).filter((n) => n.endsWith(".part"))).toEqual([])
   })
 })

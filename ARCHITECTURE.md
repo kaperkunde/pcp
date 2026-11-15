@@ -125,9 +125,19 @@ associated data (a ciphertext cannot be moved to another row):
   `server_auth_header.sealed` for the further headers), the levels saved for
   a server's tools before they are read (`mcp_server.pending_access` as
   sealed text, compared and cleared as the stored text) and a tool's icons
-  (in `mcp_tool.about`). What is left in plain text on the lists of #96 is
-  `Vault.name`, which the owner chose to keep, and the public address
-  (`publicUrl`), which a request with no key reads. A lookup by a short name or a tool name (a `server/tool`
+  (in `mcp_tool.about`). So are an exit's name and label (`exit.about`,
+  `exit:<id>:about`; the name found by its keyed hash in `exit.name_key`,
+  unique in the vault), a store's folder and the login its files are
+  written as (`storage_root.sealed`, `storage_root:<server id>:about`; a
+  public download of PCP's own store's file and the sweeps need only the
+  data folder, the backend and the mode, never the path) and the name an
+  app gave when it signed in with OAuth and the client last seen using a
+  token (`api_token.client_meta`, `api_token:<id>:client`;
+  `oauth_client_id` stays plain, as the token endpoint compares it before
+  any key is held). Nothing is left in plain text but `Vault.name`, which
+  the owner chose to keep, the public address (`publicUrl`), which a
+  request with no key reads, and the ids, kinds, flags and the client id
+  that routing needs. A lookup by a short name or a tool name (a `server/tool`
   ref, a call handle's tool, `pcp.call`'s names, list_tools' server, a
   wrapper's calls, a linked repository's item names) hashes the name it is
   given; sorting and matching a pattern (a proposed level's `get_*`) work
@@ -3812,7 +3822,9 @@ Linux):
   days older than the owner keeps (see "Cleanup and the log"). A day's
   file that is written again with its lines sealed, one the cleanup prunes
   and the days of a deleted vault are overwritten with zeros and synced
-  before they are replaced or unlinked, so their old plain names do not
+  before they are replaced or unlinked (not on Windows, which will not
+  rename over an open file: there, and wherever the rename is refused for
+  that reason, the old bytes are left), so their old plain names do not
   stay in the file's blocks; this is best effort. What PCP cannot reach
   stays: a journalling or copy-on-write filesystem's earlier copies of a
   block, an SSD's remapped or wear-levelled cells and any backup or

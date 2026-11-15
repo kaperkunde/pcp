@@ -27,7 +27,12 @@ import { invalid, isPcpError, notFound, PcpError } from "../errors"
 import { OwnerNeeded } from "../browser/types"
 import { forgetExitAnswers } from "../exits/dial"
 import { DOH_RESOLVERS } from "../exits/doh"
-import { checkNewExit, createServiceExit } from "../exits/exits"
+import {
+  checkNewExit,
+  createServiceExit,
+  EXIT_ABOUT_SELECT,
+  openExit,
+} from "../exits/exits"
 import { httpConnect, socks5Connect, type ProxyAuth } from "../exits/handshake"
 import { newId } from "../ids"
 import { errorToolResult, jsonToolResult } from "../json-result"
@@ -2567,10 +2572,17 @@ export async function serviceView(
   const registered = loaded.spec.registeredId
     ? await getServer(ctx, loaded.spec.registeredId).catch(() => null)
     : null
-  const exit = await db().exit.findFirst({
+  const exitRow = await db().exit.findFirst({
     where: { serviceId: id, vaultId: ctx.vaultId },
-    select: { id: true, name: true, label: true },
+    select: EXIT_ABOUT_SELECT,
   })
+  const exit = exitRow
+    ? {
+        id: exitRow.id,
+        name: openExit(ctx, exitRow).name,
+        label: openExit(ctx, exitRow).label,
+      }
+    : null
 
   return {
     id,

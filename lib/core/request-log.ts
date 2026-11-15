@@ -760,6 +760,8 @@ export async function sealRequestLogDay(
   /** Tests: what happens between writing the part and renaming it. */
   hooks: {
     written?: () => Promise<void>
+    /** Tests: stands in for the rename of the part over the day. */
+    rename?: (from: string, to: string) => Promise<void>
   } = {},
 ): Promise<boolean> {
   const state = writers()
@@ -857,18 +859,40 @@ export async function sealRequestLogDay(
 
     // The old file's content is plain names: held open across the rename,
     // so it can be overwritten once nothing names it any more.
-    const old = await open(file, "r+").catch(() => null)
+    // Not on Windows, where renaming over an open file fails: there the
+    // old bytes are not zeroed.
+    let old =
+      process.platform === "win32"
+        ? null
+        : await open(file, "r+").catch(() => null)
+    const move = hooks.rename ?? rename
 
     try {
-      await rename(part, file)
+      await move(part, file)
     } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code
       await old?.close().catch(() => {})
 
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      if (code === "ENOENT") {
         return false
       }
 
-      throw error
+      if (old && (code === "EPERM" || code === "EACCES" || code === "EBUSY")) {
+        // The system will not rename over a file held open: let it go and
+        // try once more without zeroing it.
+        old = null
+        try {
+          await move(part, file)
+        } catch (again) {
+          if ((again as NodeJS.ErrnoException).code === "ENOENT") {
+            return false
+          }
+
+          throw again
+        }
+      } else {
+        throw error
+      }
     }
 
     if (old) {

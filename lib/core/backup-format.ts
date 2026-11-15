@@ -166,7 +166,11 @@ const KeyGrantRow = z.strictObject({
 })
 
 const ApiTokenRow = renamedFrom(
-  { name: "plainName" },
+  {
+    name: "plainName",
+    oauthClientName: "plainOauthClientName",
+    clientSeen: "plainClientSeen",
+  },
   z.strictObject({
     id,
     vaultId: id,
@@ -196,7 +200,9 @@ const ApiTokenRow = renamedFrom(
     // (oauth_credential) are not exported, as a session's are not: after a
     // restore the assistant signs in again.
     oauthClientId: str.nullable().default(null),
-    oauthClientName: str.nullable().default(null),
+    // Sealed into clientMeta since (#96): null once sealed.
+    plainOauthClientName: str.nullable().default(null),
+    clientMeta: bytesOrNull.default(null),
     // The owner's instructions for the assistant, as ciphertext under the
     // vault's key, and the suggested instructions' version they came from.
     // An older file has neither: the token shows them as not set yet.
@@ -206,7 +212,7 @@ const ApiTokenRow = renamedFrom(
     // detects it per request) and the client last seen using it. An older
     // file has neither: the token detects its client again.
     clientProfile: str.nullable().default(null),
-    clientSeen: str.nullable().default(null),
+    plainClientSeen: str.nullable().default(null),
   }),
 )
 
@@ -545,12 +551,8 @@ const OpenApiSpecRow = renamedFrom(
 )
 
 // Wrappers, added in 0.4: absent from older files.
-const WrapperSpecRow = renamedFrom(
-  {
-    definition: "plainDefinition",
-    containerName: "plainContainerName",
-    publish: "plainPublish",
-  },
+export const WrapperSpecRow = renamedFrom(
+  { definition: "plainDefinition" },
   z.strictObject({
     serverId: id,
     plainDefinition: str,
@@ -562,8 +564,12 @@ const WrapperSpecRow = renamedFrom(
 )
 
 // Services, added with the service kind: absent from older files.
-const ServiceSpecRow = renamedFrom(
-  { definition: "plainDefinition" },
+export const ServiceSpecRow = renamedFrom(
+  {
+    definition: "plainDefinition",
+    containerName: "plainContainerName",
+    publish: "plainPublish",
+  },
   z.strictObject({
     serverId: id,
     plainDefinition: str,
@@ -598,21 +604,27 @@ const oneOf = (words: string[]) =>
   })
 
 // Storage roots, added with the storage kind: absent from older files.
-const StorageRootRow = z.strictObject({
-  serverId: id,
-  hostId: id.nullable(),
-  path: str,
-  writeAs: str.default(""),
-  umask: z.number().int().min(0).max(0o777).default(2),
-  // Stores (#90): absent from older files, whose roots are plain folders
-  // over SFTP.
-  backend: oneOf(["sftp", "local"]).default("sftp"),
-  mode: oneOf(["plain", "encrypted"]).default("plain"),
-  storeKey: bytesOrNull.default(null),
-  converting: oneOf(["", "plain", "encrypted"]).default(""),
-  createdAt: date,
-  updatedAt: date,
-})
+// The folder and the login were sealed into `sealed` (#96): an older file
+// names their plain columns by their old names.
+export const StorageRootRow = renamedFrom(
+  { path: "plainPath", writeAs: "plainWriteAs" },
+  z.strictObject({
+    serverId: id,
+    hostId: id.nullable(),
+    plainPath: str,
+    plainWriteAs: str.default(""),
+    sealed: bytesOrNull.default(null),
+    umask: z.number().int().min(0).max(0o777).default(2),
+    // Stores (#90): absent from older files, whose roots are plain folders
+    // over SFTP.
+    backend: oneOf(["sftp", "local"]).default("sftp"),
+    mode: oneOf(["plain", "encrypted"]).default("plain"),
+    storeKey: bytesOrNull.default(null),
+    converting: oneOf(["", "plain", "encrypted"]).default(""),
+    createdAt: date,
+    updatedAt: date,
+  }),
+)
 
 // An encrypted store's index, added with stores: absent from older files.
 // The objects themselves stay on the store's backend, never in a file.
@@ -630,17 +642,24 @@ const StorageEntryRow = z.strictObject({
 })
 
 // Exits, added with exits: absent from older files.
-const ExitRow = z.strictObject({
-  id,
-  vaultId: id,
-  name: str,
-  label: str.default(""),
-  kind: str,
-  serverId: id,
-  serviceId: id.nullable().default(null),
-  createdAt: date,
-  updatedAt: date,
-})
+// The name and label were sealed into `about` (#96), the name found by
+// `nameKey`: an older file names their plain columns by their old names.
+export const ExitRow = renamedFrom(
+  { name: "plainName", label: "plainLabel" },
+  z.strictObject({
+    id,
+    vaultId: id,
+    plainName: str,
+    plainLabel: str.default(""),
+    nameKey: str.nullable().default(null),
+    about: bytesOrNull.default(null),
+    kind: str,
+    serverId: id,
+    serviceId: id.nullable().default(null),
+    createdAt: date,
+    updatedAt: date,
+  }),
+)
 
 // Linked repositories, added in 0.5: absent from older files.
 const RepoRow = z.strictObject({

@@ -4,6 +4,9 @@ import type { VaultContext } from "../context"
 import { db } from "../db"
 import { sealedSiteAllowance } from "../allowances"
 import { sealedLevelName } from "../level-names"
+import { sealedExit } from "../exits/exits"
+import { sealedStorageAbout } from "../storage/roots"
+import { readTokenClient, sealedTokenClient } from "../token-client"
 import { pendingAccessAad } from "../proposed-access"
 import { sealFields } from "../sealed-fields"
 import {
@@ -506,6 +509,80 @@ export const SEAL_CONVERTERS: Converter[] = [
     },
   }),
   converter({
+    table: "exit",
+    read: (ctx, limit) =>
+      db().exit.findMany({
+        where: { vaultId: ctx.vaultId, about: null },
+        take: limit,
+      }),
+    write: async (ctx, row) => {
+      // Only a row still as it was read, its time kept.
+      const { count } = await db().exit.updateMany({
+        where: { id: row.id, about: null, plainName: row.plainName },
+        data: {
+          ...sealedExit(ctx, row.id, {
+            name: row.plainName,
+            label: row.plainLabel,
+          }),
+          updatedAt: row.updatedAt,
+        },
+      })
+      return count === 1
+    },
+  }),
+  converter({
+    table: "storage_root",
+    read: (ctx, limit) =>
+      db().storageRoot.findMany({
+        where: { server: { vaultId: ctx.vaultId }, sealed: null },
+        take: limit,
+      }),
+    write: async (ctx, row) => {
+      const { count } = await db().storageRoot.updateMany({
+        where: {
+          serverId: row.serverId,
+          sealed: null,
+          plainPath: row.plainPath,
+          plainWriteAs: row.plainWriteAs,
+        },
+        data: {
+          ...sealedStorageAbout(ctx, row.serverId, {
+            path: row.plainPath,
+            writeAs: row.plainWriteAs,
+          }),
+          updatedAt: row.updatedAt,
+        },
+      })
+      return count === 1
+    },
+  }),
+  converter({
+    table: "api_token_client",
+    read: (ctx, limit) =>
+      db().apiToken.findMany({
+        where: { vaultId: ctx.vaultId, clientMeta: null },
+        select: {
+          id: true,
+          clientMeta: true,
+          plainOauthClientName: true,
+          plainClientSeen: true,
+        },
+        take: limit,
+      }),
+    write: async (ctx, row) => {
+      const { count } = await db().apiToken.updateMany({
+        where: {
+          id: row.id,
+          clientMeta: null,
+          plainOauthClientName: row.plainOauthClientName,
+          plainClientSeen: row.plainClientSeen,
+        },
+        data: sealedTokenClient(ctx, row.id, readTokenClient(ctx, row)),
+      })
+      return count === 1
+    },
+  }),
+  converter({
     table: "server_auth_header",
     read: (ctx, limit) =>
       db().serverAuthHeader.findMany({
@@ -812,7 +889,7 @@ export const SEAL_CONVERTERS: Converter[] = [
     },
   }),
   converter({
-    table: "service_spec",
+    table: "service_spec_own",
     read: (ctx, limit) =>
       db().serviceSpec.findMany({
         where: { server: { vaultId: ctx.vaultId }, sealedDefinition: null },

@@ -243,7 +243,14 @@ import {
   type RepoShown,
 } from "./repos/assist"
 import type { SecretGrant } from "./wrappers/placeholders"
-import { decideExit, getExit, writeExitAccess } from "./exits/exits"
+import {
+  decideExit,
+  EXIT_ABOUT_SELECT,
+  exitNameWhere,
+  getExit,
+  openExit,
+  writeExitAccess,
+} from "./exits/exits"
 import { exitTitle } from "./exits/use"
 import {
   decideFetch,
@@ -3171,12 +3178,12 @@ async function findExitLabel(
   ctx: VaultContext,
   name: string,
 ): Promise<string | undefined> {
-  const exit = await db().exit.findUnique({
-    where: { vaultId_name: { vaultId: ctx.vaultId, name } },
-    select: { label: true },
+  const exit = await db().exit.findFirst({
+    where: exitNameWhere(ctx, name),
+    select: EXIT_ABOUT_SELECT,
   })
 
-  return exit?.label || undefined
+  return (exit ? openExit(ctx, exit).label : "") || undefined
 }
 
 /**
@@ -3188,8 +3195,8 @@ async function findExitForRun(
   tokenId: string,
   name: string,
 ): Promise<Awaited<ReturnType<typeof getExit>> | string> {
-  const row = await db().exit.findUnique({
-    where: { vaultId_name: { vaultId: ctx.vaultId, name } },
+  const row = await db().exit.findFirst({
+    where: exitNameWhere(ctx, name),
     select: { id: true },
   })
 
