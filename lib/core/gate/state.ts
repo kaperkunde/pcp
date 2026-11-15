@@ -384,6 +384,28 @@ export type CallEnd = {
  * pace once a cool-down is over ends the run of them. Answers the
  * cool-down it started, if any.
  */
+/**
+ * A place's "slow down" that came after its call ran past its time limit
+ * (counted then): it still cools the place down, so the next calls do not
+ * wait out the limit too.
+ */
+export function recordLateThrottle(
+  key: string,
+  label: string,
+  limits: GateLimits,
+  throttle: Throttle,
+): Cooling | null {
+  if (throttle.hold) {
+    return null
+  }
+
+  const state = placeFor(key, label)
+  const now = gateNow()
+  bucketFor(state, now).throttles++
+  coolDown(state, limits, throttle, now)
+  return state.cooling
+}
+
 export function recordEnd(
   key: string,
   label: string,

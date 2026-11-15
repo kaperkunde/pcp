@@ -342,7 +342,9 @@ so in the summary; the bump itself waits for the request.
   keeps its call timings and the server's own [ALERT]/BYE lines in memory
   only (`mail/diagnostics.ts`, scrubbed, never on disk or in the request
   log). A server's "slow down" is an Error with `pcpThrottle`
-  (`lib/core/throttle-signal.ts`). Nothing deletes mail for good: delete moves to the Trash. An
+  (`lib/core/throttle-signal.ts`), or an answer whose IMAP lines were
+  marked `[THROTTLED]` (`noticeThrottle`); one that comes back after its
+  time limit still cools the server down. Nothing deletes mail for good: delete moves to the Trash. An
   assistant adds one only through `register_server` (kind `jmap` or `imap`),
   a permission request like any new server: the owner types the password or
   token in on PCP's page or connects it, the assistant never sees a value, and
