@@ -81,3 +81,14 @@ export function levelNameKeys(
 ): string[] {
   return [levelNameKey(ctx, scopeId, name), name]
 }
+
+/** The tool a permission request is for, from the row as stored. */
+export function openRequestTool(
+  ctx: VaultContext,
+  row: { id: string; toolName: string; toolSealed: Uint8Array | null },
+): string {
+  return openLevelName(ctx, "permission_request", `${row.id}:tool`, {
+    key: row.toolName,
+    sealed: row.toolSealed,
+  })
+}

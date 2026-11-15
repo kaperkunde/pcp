@@ -29,7 +29,7 @@ import {
   type AccessAsk,
 } from "./access-requests"
 import { allowSiteFor, allowToolFor, parseAllowForMinutes } from "./allowances"
-import { openLevelName, sealedLevelName } from "./level-names"
+import { openRequestTool, sealedLevelName } from "./level-names"
 import type { SyncResult } from "./catalogue"
 import type {
   PasswordRecipe,
@@ -1003,10 +1003,7 @@ function named(ctx: VaultContext, row: LoadedRow): Row {
   return {
     ...rest,
     // The tool's name opens here, so every reader of a request has it.
-    toolName: openLevelName(ctx, "permission_request", `${row.id}:tool`, {
-      key: row.toolName,
-      sealed: row.toolSealed,
-    }),
+    toolName: openRequestTool(ctx, row),
     server: server ? openServer(ctx, server) : null,
     token: {
       name: tokenName(ctx, token),

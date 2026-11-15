@@ -1,3 +1,4 @@
+import { openLevelName } from "./level-names"
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
 
 import { storeTools } from "./catalogue"
@@ -210,9 +211,18 @@ describe("the owner's tiers", () => {
     ])
     const kept = await db().toolTier.findMany({
       where: { definitionId: await definitionOf(first) },
-      orderBy: { toolName: "asc" },
     })
-    expect(kept.map((row) => [row.toolName, row.tier])).toEqual([
+    expect(
+      kept
+        .map((row) => [
+          openLevelName(ctx, "tool_tier", row.id, {
+            key: row.toolName,
+            sealed: row.sealed,
+          }),
+          row.tier,
+        ])
+        .sort(),
+    ).toEqual([
       ["burn", "write"],
       ["list", "write"],
     ])

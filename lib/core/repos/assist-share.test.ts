@@ -1,3 +1,4 @@
+import { openRequestTool } from "../level-names"
 import { Client, InMemoryTransport } from "@modelcontextprotocol/client"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
@@ -203,7 +204,7 @@ describe("an assistant proposing a push", () => {
 
     const [request] = await db().permissionRequest.findMany()
     expect(request!.kind).toBe("repo_share")
-    expect(request!.toolName).toBe("memory")
+    expect(openRequestTool(ctx, request!)).toBe("memory")
     const view = (await getPermissionView(ctx, request!.id, {
       publicUrl: PUBLIC_URL,
     }))!

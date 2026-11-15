@@ -1,6 +1,7 @@
 import type { VaultContext } from "./context"
 import { db } from "./db"
-import { openServer } from "./server-meta"
+import { AUTH_HEADER, openServer } from "./server-meta"
+import { openRow } from "./sealed-fields"
 import {
   openTools,
   type OpenTool,
@@ -26,6 +27,9 @@ export async function serverNamed(ctx: VaultContext, name: string) {
   const found = rows
     .map((row) => ({
       ...openServer(ctx, row),
+      authHeaders: row.authHeaders.map((header) =>
+        openRow(ctx.dek, AUTH_HEADER, header),
+      ),
       tools: openTools(ctx, row.tools).sort(byToolName),
     }))
     .find((row) => row.name === name)

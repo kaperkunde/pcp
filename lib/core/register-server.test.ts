@@ -1,3 +1,5 @@
+import { openLevelName } from "./level-names"
+import { openFromText } from "./sealed"
 import { Client, InMemoryTransport } from "@modelcontextprotocol/client"
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
 
@@ -1857,12 +1859,21 @@ describe("levels and tiers proposed with it (tool_access)", () => {
   }
 
   async function levels(serverId: string) {
+    const token = await tokenId()
+
     return (
       await db().apiTokenToolAccess.findMany({
-        where: { tokenId: await tokenId(), serverId },
-        orderBy: { toolName: "asc" },
+        where: { tokenId: token, serverId },
       })
-    ).map((row) => [row.toolName, row.access])
+    )
+      .map((row) => [
+        openLevelName(ctx, "api_token_tool_access", `${token}:${serverId}`, {
+          key: row.toolName,
+          sealed: row.sealed,
+        }),
+        row.access,
+      ])
+      .sort()
   }
 
   it("shows an API's proposal per tool, filled in, and says whose levels they are", async () => {
@@ -1915,11 +1926,18 @@ describe("levels and tiers proposed with it (tool_access)", () => {
     })
     expect(await levels(server.id)).toEqual([["listPets", "allowed"]])
     expect(
-      await db().toolTier.findMany({
-        where: { definitionId: server.definitionId },
-        select: { toolName: true, tier: true },
-      }),
-    ).toEqual([{ toolName: "listPets", tier: "read" }])
+      (
+        await db().toolTier.findMany({
+          where: { definitionId: server.definitionId },
+        })
+      ).map((row) => [
+        openLevelName(ctx, "tool_tier", row.id, {
+          key: row.toolName,
+          sealed: row.sealed,
+        }),
+        row.tier,
+      ]),
+    ).toEqual([["listPets", "read"]])
     expect(JSON.stringify(done)).toContain(
       "The owner set this token's level for 2 tools",
     )
@@ -2034,7 +2052,15 @@ describe("levels and tiers proposed with it (tool_access)", () => {
     const server = await db().mcpServer.findFirstOrThrow({
       where: { kind: "mcp" },
     })
-    expect(JSON.parse(server.pendingAccess!)).toEqual({
+    expect(
+      JSON.parse(
+        openFromText(
+          ctx.dek,
+          `mcp_server:${server.id}:pending_access`,
+          server.pendingAccess!,
+        ),
+      ),
+    ).toEqual({
       tokenId: await tokenId(),
       rules: [
         { pattern: "search_*", access: "allowed" },

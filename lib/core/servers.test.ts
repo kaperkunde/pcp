@@ -7,6 +7,7 @@ import { createSecret, listSecrets } from "./secrets"
 import {
   asServerKind,
   createServer,
+  getServer,
   isBrowserKind,
   isMailKind,
   kindNoun,
@@ -305,9 +306,7 @@ describe("with a vault", () => {
     }
 
     expect(await setMcpHeaderCredential(ctx, id, header)).toBe(true)
-    expect(
-      await db().mcpServer.findUniqueOrThrow({ where: { id } }),
-    ).toMatchObject({
+    expect(await getServer(ctx, id)).toMatchObject({
       authType: "header",
       authHeaderName: "Authorization",
       authValueTemplate: "Bearer {{secret}}",
