@@ -7,6 +7,11 @@
 export type DavCredential = {
   /** Sent with each request (Authorization). */
   headers: Record<string, string>
+  /**
+   * How long one request may take: the account's time limit for a call
+   * (lib/core/gate/), DAV_CALL_TIMEOUT_MS when left out.
+   */
+  timeoutMs?: number
   /** Values that would give the credential away if an answer repeated them. */
   redact: string[]
   /**

@@ -419,6 +419,11 @@ const DECISION_LABELS: Record<PermissionKind, Record<string, string>> = {
     allow_once: "Use this pace in the tab",
     decline: "Not now",
   },
+  // A server's limits an assistant proposed, saved as the owner left them.
+  limits_change: {
+    allow_once: "Save the limits",
+    decline: "Not now",
+  },
   // A secret the owner types in for the browser, and how its uses go: the
   // next one only, every one for an hour, or every one.
   secret_request: {

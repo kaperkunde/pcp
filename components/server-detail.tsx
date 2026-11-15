@@ -80,8 +80,13 @@ export type ServerDetailProps = {
   redirectUrl: string
   /** The kind's settings form, folded under Advanced. */
   settings: ReactNode
-  /** Its pace (components/server-pacing-form.tsx), under Advanced too. */
+  /**
+   * Its pace (components/server-pacing-form.tsx), under Advanced; a server
+   * with a Limits section shows it there instead.
+   */
   pacing?: ReactNode
+  /** Its Limits section (components/server-limits.tsx), after its tools. */
+  limits?: ReactNode
   /** What the kind needs from you, shown after About (SSH's keys). */
   children?: ReactNode
   /**
@@ -105,6 +110,7 @@ export function ServerDetail({
   redirectUrl,
   settings,
   pacing,
+  limits,
   children,
   about,
 }: ServerDetailProps) {
@@ -388,6 +394,8 @@ export function ServerDetail({
 
       <ServerTools serverId={server.id} kind={server.kind} tools={tools} />
 
+      {limits}
+
       <Disclosure
         id={advancedId}
         title="Advanced"
@@ -412,24 +420,24 @@ export function ServerDetail({
 function advancedSummary(kind: ServerKind): string {
   switch (kind) {
     case "openapi":
-      return "Schema, base URL, sign-in, edits to the schema, name, pacing"
+      return "Schema, base URL, sign-in, edits to the schema, name"
     case "jmap":
     case "imap":
-      return "Addresses, sign-in, sender, read-only, name, pacing"
+      return "Addresses, sign-in, sender, read-only, name"
     case "caldav":
-      return "Address, sign-in, read-only, name, pacing"
+      return "Address, sign-in, read-only, name"
     case "ssh":
-      return "Host, port, login, name, pacing"
+      return "Host, port, login, name"
     case "service":
-      return "Name, description, secrets for its variables, pacing"
+      return "Name, description, secrets for its variables"
     case "storage":
-      return "Folder, whose files, umask, read-only, name, pacing"
+      return "Folder, whose files, umask, read-only, name"
     case "wrapper":
       return "The whole definition as JSON, short name, name"
     case "browser":
       return "Name and description, pacing"
     default:
-      return "Address, sign-in, headers, sign-in app, short name, pacing"
+      return "Address, sign-in, headers, sign-in app, short name"
   }
 }
 

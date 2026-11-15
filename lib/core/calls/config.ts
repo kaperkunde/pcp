@@ -26,6 +26,16 @@ import { TOOL_ABOUT_SELECT, toolName, byToolName } from "../tool-rows"
 
 export const SETTING_DUPLICATE_CALLS = "duplicateCalls"
 
+/** The server id PCP's own tools go by in the guard and in this setting. */
+export const OWN_SERVER_ID = "pcp"
+
+/** PCP's own tools the guard watches (lazily: own-tool-tiers builds the gateway). */
+async function guardedOwnTools(ctx: VaultContext) {
+  const { listGuardedOwnTools } = await import("../own-tool-tiers")
+
+  return listGuardedOwnTools(ctx)
+}
+
 export type GuardOverride = number | "exempt"
 
 export type DuplicateCallsConfig = {
@@ -138,7 +148,8 @@ export async function setDuplicateCallDefault(
 
 /**
  * One tool's window: minutes of its own, "exempt", or null for the default.
- * Tools of servers no longer in the vault are dropped as it is written.
+ * PCP's own tools are the server "pcp". Tools of servers no longer in the
+ * vault are dropped as it is written.
  */
 export async function setDuplicateCallWindow(
   ctx: VaultContext,
@@ -151,13 +162,24 @@ export async function setDuplicateCallWindow(
     select: { id: true },
   })
   const ids = new Set(servers.map((row) => row.id))
+  const own = serverId === OWN_SERVER_ID
 
-  if (!ids.has(serverId)) {
+  if (!own && !ids.has(serverId)) {
     throw notFound("That server")
   }
 
   if (tool === "" || tool.length > 200) {
     throw invalid("Choose a tool.")
+  }
+
+  // PCP's own tools: only the ones the guard watches. A choice for one that
+  // is gone may still be taken back.
+  if (
+    own &&
+    value !== null &&
+    !(await guardedOwnTools(ctx)).some((found) => found.name === tool)
+  ) {
+    throw invalid(`The guard does not watch a PCP tool called ${tool}.`)
   }
 
   if (value !== null && !OverrideSchema.safeParse(value).success) {
@@ -171,7 +193,7 @@ export async function setDuplicateCallWindow(
   for (const [name, override] of Object.entries(config.tools)) {
     const id = name.slice(0, name.indexOf("/"))
 
-    if (ids.has(id) && name !== key) {
+    if ((id === OWN_SERVER_ID || ids.has(id)) && name !== key) {
       tools[name] = override
     }
   }
@@ -241,6 +263,17 @@ export async function duplicateCallsOverview(
   const tiers = await loadToolTiers(ctx, servers)
   const choices: DuplicateCallsTool[] = []
   const known = new Map<string, DuplicateCallsTool>()
+
+  for (const tool of await guardedOwnTools(ctx)) {
+    const entry = {
+      key: accessKey(OWN_SERVER_ID, tool.name),
+      serverId: OWN_SERVER_ID,
+      server: "PCP",
+      tool: tool.name,
+    }
+    known.set(entry.key, entry)
+    choices.push(entry)
+  }
 
   for (const server of servers) {
     for (const tool of server.tools) {

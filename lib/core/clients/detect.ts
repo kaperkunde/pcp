@@ -1,5 +1,6 @@
+import type { VaultContext } from "../context"
+import { writeTokenClient } from "../token-client"
 import type { ClientInfo, RequestClient } from "../client-hello"
-import { db } from "../db"
 import {
   clientProfile,
   isClientProfileId,
@@ -192,6 +193,7 @@ export function seenChanged(
  * written a while ago. Returns whether it wrote.
  */
 export async function noteClientSeen(
+  ctx: VaultContext,
   token: Pick<TokenClient, "tokenId" | "clientSeen">,
   detected: DetectedClient,
   now = new Date(),
@@ -202,9 +204,8 @@ export async function noteClientSeen(
     return false
   }
 
-  await db().apiToken.update({
-    where: { id: token.tokenId },
-    data: { clientSeen: JSON.stringify(next) },
+  await writeTokenClient(ctx, token.tokenId, {
+    clientSeen: JSON.stringify(next),
   })
   return true
 }

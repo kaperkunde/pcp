@@ -134,6 +134,9 @@ test("issues an API token and describes the servers behind it", async ({
       "read_result",
       "register_server",
       "propose_tool_access",
+      // A server's limits, read and proposed (#143).
+      "get_server_limits",
+      "propose_server_limits",
     ].sort(),
   )
   expect(instructions).toContain(

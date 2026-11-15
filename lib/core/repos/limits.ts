@@ -1,10 +1,10 @@
-import { MAX_SPEC_BYTES } from "../constants"
-
 /**
  * Bounds on what a linked repository's files can make PCP read. Every file
  * in one is untrusted input: these hold before anything parses it, and the
  * validators each kind already has (skills.ts, wrappers/definition.ts,
- * openapi/) hold after.
+ * openapi/) hold after. This module reads nothing (the e2e fixtures load it
+ * outside the app); the limits that follow the owner's Settings → Resources
+ * are in spec-limit.ts.
  */
 
 /**
@@ -15,12 +15,6 @@ export const MAX_ITEM_FILES = 40
 
 /** One file other than an endpoint's OpenAPI document, in UTF-8 bytes. */
 export const MAX_FILE_BYTES = 256 * 1024
-
-/** An endpoint's OpenAPI document: what PCP takes as a schema anyway. */
-export const MAX_SPEC_FILE_BYTES = MAX_SPEC_BYTES
-
-/** Everything one item's files add up to. */
-export const MAX_ITEM_BYTES = MAX_SPEC_BYTES + 1024 * 1024
 
 /** A file's path from the repository's root, in characters. */
 export const MAX_PATH_CHARS = 200

@@ -234,6 +234,30 @@ so in the summary; the bump itself waits for the request.
   (the setting's `assistant`) or as the owner allowed it (a `tab_pace`
   request for that tab alone; the `wrapper_change` page), never below the
   owner's own pace for the site, and never written into the setting.
+- The call gate (`lib/core/gate/`) applies where pacing does and only
+  there (`upstream.ts callServerTool` for every server kind but the
+  browser and a wrapper, the browser per site in `browser/call.ts`, web
+  fetch per site in `web-fetch.ts runFetch`), so every way in meets it: a
+  server cooling down (it asked to slow down: 429, a 503 with Retry-After,
+  or its protocol's own words, each `pcpThrottle: {reason, retryAfterMs?}`
+  on an error or answer, `lib/core/throttle-signal.ts` the one module; or a
+  run of one tool's answers far slower than its usual, or of calls past
+  their time limit, as `SLOW_DETECTION` says per class) is refused at once,
+  a spent rate limit holds the next call until its reset, then bytes a day, pacing (the server's pause and
+  calls a minute as a floor, one spacing), calls at once, and the time
+  limit, past which the answer is a `timeout` tool error naming the server
+  and the limit; a limit the owner set reaches each kind's own requests. Every refusal is `paced` with `retryAfterMs` in
+  `_meta["gg.pcp/error"]`. Defaults are per class of place in
+  `gate/limits.ts`, never a vendor; a server's own limits are sealed in
+  `mcp_server.limits` (`mcp_server:<id>:limits`), the instance's own, set by
+  the owner on its page within the machine's bounds (`GATE_BOUNDS`). An
+  assistant only proposes them (`register_server`'s `limits`, stored on the
+  request and editable beside the approval; `propose_server_limits`, a
+  `limits_change` with its note, written over the limits shown, `basis`)
+  and reads them on demand (`get_server_limits`); limits and cool-downs
+  never go in search, tool descriptions or the instructions. Its state and
+  counters are in memory, never stored. Add a test for each new field or
+  signal (`gate/gate.test.ts`, `gate/entry-points.test.ts`).
 - Linked repositories (`lib/core/repos/`) share items, never secrets, and
   are never a backup. Their documents carry `pcp_format` and change only
   backward compatibly (add fields with defaults, never repurpose one).
@@ -245,8 +269,8 @@ so in the summary; the bump itself waits for the request.
   A token's own skill is never an item: not listed, pushed, imported onto
   or kept out. A server's document is its definition only (`PCP_FORMAT`
   2): sync never writes an instance's own fields (name and short name, address,
-  credential and secrets, read-only, public-only, enabled, pace, levels,
-  note; a service's SSH server, publish address, variables' secrets and
+  credential and secrets, read-only, public-only, enabled, pace, limits,
+  levels, note; a service's SSH server, publish address, variables' secrets and
   typed values, container, what it registered, its exit), and what a format-1 document says of its
   server only fills in a first instance. Format 3 adds `services/<name>.yaml`
   (a service's definition); every other kind is still written in the
@@ -308,7 +332,19 @@ so in the summary; the bump itself waits for the request.
   is required, never optional); a JMAP session's API, download and upload
   addresses are taken only on the session URL's origin, and redirects are not
   followed. An attachment sent is a kept result of the token's own, read
-  before anything connects. Nothing deletes mail for good: delete moves to the Trash. An
+  before anything connects. An IMAP account keeps one signed-in session for
+  its calls (`mail/imap-pool.ts`, as the SSH pool does: opened only by a call
+  that hands in the login, at most `IMAP_MAX_CONNECTIONS` per account, idled
+  out, dropped when broken, when the address or login changes or when a
+  raised time limit needs a longer socket timeout, never
+  reopened by a timer); other than that it lists mailbox names without STATUS
+  (counts only for `list_mailboxes`), logs out for at most 3 seconds, and
+  keeps its call timings and the server's own [ALERT]/BYE lines in memory
+  only (`mail/diagnostics.ts`, scrubbed, never on disk or in the request
+  log). A server's "slow down" is an Error with `pcpThrottle`
+  (`lib/core/throttle-signal.ts`), or an answer whose IMAP lines were
+  marked `[THROTTLED]` (`noticeThrottle`); one that comes back after its
+  time limit still cools the server down. Nothing deletes mail for good: delete moves to the Trash. An
   assistant adds one only through `register_server` (kind `jmap` or `imap`),
   a permission request like any new server: the owner types the password or
   token in on PCP's page or connects it, the assistant never sees a value, and
@@ -640,10 +676,19 @@ embeddingProvider`, which hands `embeddings/provider.ts` the header;
   the server and tool under the vault key (`crypto.ts keyedHash`,
   `recordedTool`) and a short answer encrypted, never a
   kept result; it is never exported and is pruned by the cleanup. A new
-  way to call a tool goes through it, with a test.
+  way to call a tool goes through it, with a test. Whether it watches one
+  of PCP's own tools is a property of the tool, declared at its
+  registration (`tools/guard.ts`: `never`, or `reads` by the arguments),
+  not a list in the gateway; the owner's per-tool window takes them as
+  the server `pcp`.
 - `lib/core/openapi` never fetches a remote `$ref`, never follows a redirect
   on a call, and never lets an argument set a header or leave the base URL.
   A schema is untrusted input: new limits go in `openapi/limits.ts`.
+  The size of a schema is the owner's limit (`resourceLimits().specBytes`,
+  Settings → Resources), never a constant; YAML is read by js-yaml in a worker
+  thread (`prepareSpecText`, `openapi/yaml-worker.cjs`) and kept as JSON text
+  for the parse, and a stored schema or a request's arguments are compressed
+  from 64 KB (`spec-rows.ts`, `sealed-args.ts`; old rows still open).
 - Web fetch (`lib/core/fetch/`, `lib/core/web-fetch.ts`) reaches public
   addresses, and private ones only where the owner allowed them for the
   token (a `private` line in `web_fetch_rule`, never an assistant's to set
@@ -684,7 +729,7 @@ embeddingProvider`, which hands `embeddings/provider.ts` the header;
   `code/limits.ts`, and a new bridge operation gets a test.
 - Limits on the machine's memory, processors and disk (a program's memory,
   programs at once, the largest file, kept results per token, PCP's own
-  store) are not
+  store, the largest API schema) are not
   constants: they are `resourceLimits()` (`lib/core/resources/`), picked
   from the machine unless the owner set them on Settings → Resources, and
   never past what `checkResourceConfig` lets the machine spare. A new one

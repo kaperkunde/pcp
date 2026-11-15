@@ -1,3 +1,4 @@
+import { openLevelName } from "./level-names"
 import { randomUUID } from "node:crypto"
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
@@ -138,11 +139,20 @@ describe("levels for all tokens", () => {
     // Set all at ask keeps that override too, and only where there is one.
     await setServerToolAccess(ctx, phone.id, postcards, "ask")
     expect(
-      await db().apiTokenToolAccess.findMany({
-        where: { tokenId: phone.id },
-        select: { toolName: true, access: true },
-      }),
-    ).toEqual([{ toolName: "add_numbers", access: "ask" }])
+      (
+        await db().apiTokenToolAccess.findMany({
+          where: { tokenId: phone.id },
+        })
+      ).map((row) => [
+        openLevelName(
+          ctx,
+          "api_token_tool_access",
+          `${phone.id}:${row.serverId}`,
+          { key: row.toolName, sealed: row.sealed },
+        ),
+        row.access,
+      ]),
+    ).toEqual([["add_numbers", "ask"]])
 
     // Unticking takes it from all tokens; the laptop keeps it as its own.
     await setToolAccessShared(ctx, laptop.id, postcards, "add_numbers", false)

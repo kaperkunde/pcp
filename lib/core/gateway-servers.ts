@@ -106,8 +106,8 @@ export async function loadGatewayServers(
         },
       },
     }),
-    loadToolAccess(scope.ctx.vaultId, scope.tokenId),
-    loadToolAllowances(scope.tokenId, now),
+    loadToolAccess(scope.ctx, scope.tokenId),
+    loadToolAllowances(scope.ctx, scope.tokenId, now),
   ])
 
   const opened = servers

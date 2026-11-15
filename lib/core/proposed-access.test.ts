@@ -1,3 +1,4 @@
+import { openLevelName } from "./level-names"
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
 
 import { createApiToken, revokeApiToken } from "./api-tokens"
@@ -209,11 +210,16 @@ describe("writing what the owner saved", () => {
 
   async function levels(serverId: string) {
     return (
-      await db().apiTokenToolAccess.findMany({
-        where: { tokenId, serverId },
-        orderBy: { toolName: "asc" },
-      })
-    ).map((row) => [row.toolName, row.access])
+      await db().apiTokenToolAccess.findMany({ where: { tokenId, serverId } })
+    )
+      .map((row) => [
+        openLevelName(ctx, "api_token_tool_access", `${tokenId}:${serverId}`, {
+          key: row.toolName,
+          sealed: row.sealed,
+        }),
+        row.access,
+      ])
+      .sort()
   }
 
   it("writes the token's levels and the tiers at once to a server that has its tools", async () => {
@@ -265,7 +271,7 @@ describe("writing what the owner saved", () => {
     ).toBeNull()
 
     // Applied once: a level the owner changes since is left alone.
-    await writeToolAccess(tokenId, id, "addPet", "ask")
+    await writeToolAccess(ctx, tokenId, id, "addPet", "ask")
     await syncServerTools(ctx, await getServer(ctx, id), {
       publicUrl: "http://localhost:3000",
     })
@@ -283,7 +289,7 @@ describe("writing what the owner saved", () => {
         }),
       },
     })
-    await writeToolAccess(tokenId, id, "addPet", "blocked")
+    await writeToolAccess(ctx, tokenId, id, "addPet", "blocked")
 
     await applyPendingAccess(ctx, id)
 

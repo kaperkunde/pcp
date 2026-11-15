@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
+import { errorCodeOf } from "../tools/outcome"
 import { callDeadline } from "./index"
 import {
   PACING_CALL_WAIT_MS,
@@ -364,10 +365,24 @@ describe("pacedResult", () => {
     const result = pacedResult({ message: "Paced: …", retryAfterMs: 47_000 })
     expect(result).toEqual({
       content: [{ type: "text", text: "Paced: …" }],
+      // Every tool error's code, as tools/outcome.ts carries it (#143)…
+      _meta: { "gg.pcp/error": { code: "paced", retryAfterMs: 47_000 } },
+      // …and the shape from before, for one release.
       structuredContent: { code: "paced", retry_after_ms: 47_000 },
       isError: true,
     })
     expect(pacedRetryAfter(result)).toBe(47_000)
+    expect(errorCodeOf(result)).toBe("paced")
+  })
+
+  it("reads the wait from the error's code alone", () => {
+    expect(
+      pacedRetryAfter({
+        content: [{ type: "text", text: "Cooling down" }],
+        _meta: { "gg.pcp/error": { code: "paced", retryAfterMs: 12_000 } },
+        isError: true,
+      }),
+    ).toBe(12_000)
   })
 
   it("reads no wait from any other result", () => {

@@ -33,6 +33,7 @@ import { getServer, normalizeNameAndDescription } from "../servers"
 import { isLoopback, readPublish } from "../services/definition"
 import { getSkill, updateSkill } from "../skills"
 import { sha256Hex } from "../crypto"
+import { readServiceOwn, SERVICE_OWN_SELECT } from "../services/own-values"
 
 import { refOf, serializeItem, type ItemDocument } from "./documents"
 import { localHash } from "./hash"
@@ -170,7 +171,7 @@ export async function vaultOwnerFacts(
     }),
     db().serviceSpec.findMany({
       where: { server: { vaultId: ctx.vaultId } },
-      select: { publish: true, host: { select: SERVER_META_SELECT } },
+      select: { ...SERVICE_OWN_SELECT, host: { select: SERVER_META_SELECT } },
     }),
   ])
   const emails = servers.flatMap((server) =>
@@ -192,7 +193,9 @@ export async function vaultOwnerFacts(
       // until the service goes), and an address of its own it is published
       // on: never 0.0.0.0 or loopback, which say nothing of the owner.
       ...services.flatMap((service) => {
-        const published = readPublish(service.publish).address
+        const published = readPublish(
+          readServiceOwn(ctx, service).publish,
+        ).address
 
         return [
           ...(service.host ? [openServer(ctx, service.host).url] : []),

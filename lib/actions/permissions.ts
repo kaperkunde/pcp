@@ -94,6 +94,11 @@ export async function decidePermissionAction(
     generate?: Record<string, unknown>
     sites?: { basis?: string; keep?: string[] }
   },
+  /**
+   * A server's limits left beside the approval (PermissionView
+   * `proposedLimits`), checked in core before anything is written.
+   */
+  limits?: Record<string, unknown>,
 ): Promise<DecidePermissionResult> {
   const ctx = await requireContext()
   const publicUrl = await publicUrlFor(ctx)
@@ -126,6 +131,10 @@ export async function decidePermissionAction(
           revision: typeof revision === "string" ? revision : undefined,
           allowPrivate: allowPrivate === true,
           access: Array.isArray(access) ? access : undefined,
+          limits:
+            limits && typeof limits === "object" && !Array.isArray(limits)
+              ? limits
+              : undefined,
           loginName:
             typeof browserSecret?.loginName === "string"
               ? browserSecret.loginName

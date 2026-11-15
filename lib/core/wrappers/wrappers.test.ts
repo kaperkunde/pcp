@@ -1,3 +1,4 @@
+import { openLevelName, openRequestTool } from "../level-names"
 import { Client, InMemoryTransport } from "@modelcontextprotocol/client"
 import { openWrapperSpec } from "../spec-rows"
 import { writeDefinition } from "../definition-rows"
@@ -151,8 +152,14 @@ beforeEach(async () => {
     manageWrappers: true,
   })
   scope = { ...(await resolveApiToken(token))!, publicUrl: PUBLIC_URL }
-  await writeToolAccess(scope.tokenId, endpointId, "echo", "allowed")
-  await writeToolAccess(scope.tokenId, endpointId, "count", "allowed")
+  await writeToolAccess(scope.ctx, scope.tokenId, endpointId, "echo", "allowed")
+  await writeToolAccess(
+    scope.ctx,
+    scope.tokenId,
+    endpointId,
+    "count",
+    "allowed",
+  )
 })
 
 afterEach(async () => {
@@ -343,7 +350,13 @@ describe("proposing a wrapper", () => {
   })
 
   it("refuses a tool the token is blocked from", async () => {
-    await writeToolAccess(scope.tokenId, endpointId, "echo", "blocked")
+    await writeToolAccess(
+      scope.ctx,
+      scope.tokenId,
+      endpointId,
+      "echo",
+      "blocked",
+    )
     const result = await call("create_wrapper", {
       name: "Lookup",
       tools: [ECHO_TOOL],
@@ -385,7 +398,13 @@ describe("calling a wrapper's tool", () => {
     })
     expect(asked.text).toContain("Not done yet")
 
-    await writeToolAccess(scope.tokenId, wrapper.id, "lookup", "allowed")
+    await writeToolAccess(
+      scope.ctx,
+      scope.tokenId,
+      wrapper.id,
+      "lookup",
+      "allowed",
+    )
     const result = await call("execute_destructive", {
       server: "lookup",
       tool: "lookup",
@@ -421,7 +440,13 @@ describe("calling a wrapper's tool", () => {
       readOnly: false,
       authType: "none",
     })
-    await writeToolAccess(scope.tokenId, notesId, "add_note", "allowed")
+    await writeToolAccess(
+      scope.ctx,
+      scope.tokenId,
+      notesId,
+      "add_note",
+      "allowed",
+    )
     const wrapper = await approvedWrapper({
       ...ECHO_TOOL,
       program: `
@@ -432,7 +457,13 @@ describe("calling a wrapper's tool", () => {
       `,
       calls: ["things/echo", "notes/add_note"],
     })
-    await writeToolAccess(scope.tokenId, wrapper.id, "lookup", "allowed")
+    await writeToolAccess(
+      scope.ctx,
+      scope.tokenId,
+      wrapper.id,
+      "lookup",
+      "allowed",
+    )
 
     const result = await call("execute_destructive", {
       server: "lookup",
@@ -457,7 +488,13 @@ describe("calling a wrapper's tool", () => {
 
   it("checks the arguments against the tool's schema", async () => {
     const wrapper = await approvedWrapper()
-    await writeToolAccess(scope.tokenId, wrapper.id, "lookup", "allowed")
+    await writeToolAccess(
+      scope.ctx,
+      scope.tokenId,
+      wrapper.id,
+      "lookup",
+      "allowed",
+    )
 
     const result = await call("execute_destructive", {
       server: "lookup",
@@ -476,7 +513,13 @@ describe("calling a wrapper's tool", () => {
       program:
         'return await pcp.call("things", "echo", { key: "x", q: { $secret: "Things key" } })',
     })
-    await writeToolAccess(scope.tokenId, wrapper.id, "lookup", "allowed")
+    await writeToolAccess(
+      scope.ctx,
+      scope.tokenId,
+      wrapper.id,
+      "lookup",
+      "allowed",
+    )
 
     const result = await call("execute_destructive", {
       server: "lookup",
@@ -495,7 +538,13 @@ describe("calling a wrapper's tool", () => {
       program:
         'return await pcp.call("things", "echo", { key: { $secret: "Things key", part: "username" }, q: args.word })',
     })
-    await writeToolAccess(scope.tokenId, wrapper.id, "lookup", "allowed")
+    await writeToolAccess(
+      scope.ctx,
+      scope.tokenId,
+      wrapper.id,
+      "lookup",
+      "allowed",
+    )
 
     const result = await call("execute_destructive", {
       server: "lookup",
@@ -513,7 +562,13 @@ describe("calling a wrapper's tool", () => {
       ...ECHO_TOOL,
       program: 'return await pcp.call("things", "count", {})',
     })
-    await writeToolAccess(scope.tokenId, wrapper.id, "lookup", "allowed")
+    await writeToolAccess(
+      scope.ctx,
+      scope.tokenId,
+      wrapper.id,
+      "lookup",
+      "allowed",
+    )
 
     const result = await call("execute_destructive", {
       server: "lookup",
@@ -541,8 +596,14 @@ describe("calling a wrapper's tool", () => {
 
   it("asks while a tool it calls asks, and runs it once the owner allows the call", async () => {
     const wrapper = await approvedWrapper(ECHO_TOOL, { call_levels: "token" })
-    await writeToolAccess(scope.tokenId, wrapper.id, "lookup", "allowed")
-    await writeToolAccess(scope.tokenId, endpointId, "echo", "ask")
+    await writeToolAccess(
+      scope.ctx,
+      scope.tokenId,
+      wrapper.id,
+      "lookup",
+      "allowed",
+    )
+    await writeToolAccess(scope.ctx, scope.tokenId, endpointId, "echo", "ask")
 
     const listed = await call("list_tools", { server: "lookup" })
     expect(listed.text).toMatch(/lookup.*ask/)
@@ -574,8 +635,20 @@ describe("calling a wrapper's tool", () => {
 
   it("is blocked for a token wherever a tool it calls is", async () => {
     const wrapper = await approvedWrapper(ECHO_TOOL, { call_levels: "token" })
-    await writeToolAccess(scope.tokenId, wrapper.id, "lookup", "allowed")
-    await writeToolAccess(scope.tokenId, endpointId, "echo", "blocked")
+    await writeToolAccess(
+      scope.ctx,
+      scope.tokenId,
+      wrapper.id,
+      "lookup",
+      "allowed",
+    )
+    await writeToolAccess(
+      scope.ctx,
+      scope.tokenId,
+      endpointId,
+      "echo",
+      "blocked",
+    )
 
     // Described before, so its handle is genuine; blocked now all the same.
     const result = await call("execute_destructive", {
@@ -811,7 +884,7 @@ describe("another wrapper of a definition, a definition of its own, and the owne
     const view = (await getPermissionView(ctx, row.id, {
       publicUrl: PUBLIC_URL,
     }))!
-    expect(row.toolName).toBe("update_wrapper")
+    expect(openRequestTool(ctx, row)).toBe("update_wrapper")
     expect(view.title).toBe("Detach the wrapper Lookup two?")
     expect(view.lines).toContain("Shares its definition with: lookup")
     expect(
@@ -1128,9 +1201,18 @@ describe("levels and tiers proposed with a wrapper (tool_access)", () => {
     return (
       await db().apiTokenToolAccess.findMany({
         where: { tokenId: scope.tokenId, serverId },
-        orderBy: { toolName: "asc" },
       })
-    ).map((row) => [row.toolName, row.access])
+    )
+      .map((row) => [
+        openLevelName(
+          ctx,
+          "api_token_tool_access",
+          `${scope.tokenId}:${serverId}`,
+          { key: row.toolName, sealed: row.sealed },
+        ),
+        row.access,
+      ])
+      .sort()
   }
 
   it("shows the proposal per tool and writes on the yes only what the owner left", async () => {
@@ -1200,7 +1282,13 @@ describe("levels and tiers proposed with a wrapper (tool_access)", () => {
     expect(unknown.text).toMatch(/has no tool matching "lookup"/)
 
     const wrapper = await approvedWrapper()
-    await writeToolAccess(scope.tokenId, wrapper.id, "lookup", "blocked")
+    await writeToolAccess(
+      scope.ctx,
+      scope.tokenId,
+      wrapper.id,
+      "lookup",
+      "blocked",
+    )
     const blocked = await call("update_wrapper", {
       wrapper: "lookup",
       tools: [COUNT_TOOL],
@@ -1266,7 +1354,13 @@ describe("the same call again through a wrapper (#115)", () => {
       COUNT_TOOL as unknown as typeof ECHO_TOOL,
       { secrets: [] },
     )
-    await writeToolAccess(scope.tokenId, wrapper.id, "tally", "allowed")
+    await writeToolAccess(
+      scope.ctx,
+      scope.tokenId,
+      wrapper.id,
+      "tally",
+      "allowed",
+    )
     const counted = () => api.requests.filter((r) => r.url === "/count")
 
     const direct = await call("execute_write", {
@@ -1308,7 +1402,13 @@ describe("a wrapper's tool's tier", () => {
       // Its own hints only propose: its calls decide.
       annotations: { readOnlyHint: false, destructiveHint: true },
     })
-    await writeToolAccess(scope.tokenId, wrapper.id, "lookup", "allowed")
+    await writeToolAccess(
+      scope.ctx,
+      scope.tokenId,
+      wrapper.id,
+      "lookup",
+      "allowed",
+    )
     const args = {
       server: "lookup",
       tool: "lookup",
@@ -1408,7 +1508,13 @@ describe("a tool's output schema", () => {
         where: { kind: "wrapper" },
       }),
     )
-    await writeToolAccess(scope.tokenId, wrapper.id, "lookup", "allowed")
+    await writeToolAccess(
+      scope.ctx,
+      scope.tokenId,
+      wrapper.id,
+      "lookup",
+      "allowed",
+    )
 
     const described = await call("describe", {
       server: "lookup",
@@ -1468,7 +1574,13 @@ describe("a tool's output schema", () => {
         properties: { got: { type: "number" } },
       },
     })
-    await writeToolAccess(scope.tokenId, wrapper.id, "lookup", "allowed")
+    await writeToolAccess(
+      scope.ctx,
+      scope.tokenId,
+      wrapper.id,
+      "lookup",
+      "allowed",
+    )
 
     const result = await call("execute_destructive", {
       server: "lookup",
@@ -1490,7 +1602,13 @@ describe("a tool's output schema", () => {
       program: "await 1",
       output_schema: SHAPE,
     })
-    await writeToolAccess(scope.tokenId, wrapper.id, "lookup", "allowed")
+    await writeToolAccess(
+      scope.ctx,
+      scope.tokenId,
+      wrapper.id,
+      "lookup",
+      "allowed",
+    )
 
     const result = await call("execute_destructive", {
       server: "lookup",
@@ -1554,11 +1672,17 @@ describe("whose levels a wrapper's calls follow", () => {
           .definition,
       ),
     ).toMatchObject({ callLevels: "approved" })
-    await writeToolAccess(scope.tokenId, wrapper.id, "lookup", "allowed")
+    await writeToolAccess(
+      scope.ctx,
+      scope.tokenId,
+      wrapper.id,
+      "lookup",
+      "allowed",
+    )
 
     // Asking and blocked for the token do not reach the wrapper's calls.
     for (const level of ["ask", "blocked"] as const) {
-      await writeToolAccess(scope.tokenId, endpointId, "echo", level)
+      await writeToolAccess(scope.ctx, scope.tokenId, endpointId, "echo", level)
       const result = await call("execute_destructive", {
         server: "lookup",
         tool: "lookup",
@@ -1578,7 +1702,13 @@ describe("whose levels a wrapper's calls follow", () => {
 
   it("needs the token to reach the wrapper only, not the server behind it", async () => {
     const wrapper = await approvedWrapper()
-    await writeToolAccess(scope.tokenId, wrapper.id, "lookup", "allowed")
+    await writeToolAccess(
+      scope.ctx,
+      scope.tokenId,
+      wrapper.id,
+      "lookup",
+      "allowed",
+    )
     scope = { ...scope, serverIds: [wrapper.id] }
 
     const listed = await call("list_tools", { server: "things" })
@@ -1598,7 +1728,13 @@ describe("whose levels a wrapper's calls follow", () => {
       ...ECHO_TOOL,
       program: 'return await pcp.call("things", "count", {})',
     })
-    await writeToolAccess(scope.tokenId, wrapper.id, "lookup", "allowed")
+    await writeToolAccess(
+      scope.ctx,
+      scope.tokenId,
+      wrapper.id,
+      "lookup",
+      "allowed",
+    )
 
     const unlisted = await call("execute_destructive", {
       server: "lookup",
@@ -1881,8 +2017,20 @@ describe("a browser flow", () => {
         where: { kind: "browser" },
       }),
     )
-    await writeToolAccess(scope.tokenId, browser.id, "type", "allowed")
-    await writeToolAccess(scope.tokenId, browser.id, "press_key", "allowed")
+    await writeToolAccess(
+      scope.ctx,
+      scope.tokenId,
+      browser.id,
+      "type",
+      "allowed",
+    )
+    await writeToolAccess(
+      scope.ctx,
+      scope.tokenId,
+      browser.id,
+      "press_key",
+      "allowed",
+    )
 
     const pressed = await call("execute_destructive", {
       server: "browser",
@@ -1933,8 +2081,20 @@ describe("a browser flow", () => {
     expect(asked.text).toContain("Not done yet")
 
     // What the owner set stays as they set it.
-    await writeToolAccess(scope.tokenId, wrapper.id, "post_message", "allowed")
-    await writeToolAccess(scope.tokenId, wrapper.id, "read_thread", "blocked")
+    await writeToolAccess(
+      scope.ctx,
+      scope.tokenId,
+      wrapper.id,
+      "post_message",
+      "allowed",
+    )
+    await writeToolAccess(
+      scope.ctx,
+      scope.tokenId,
+      wrapper.id,
+      "read_thread",
+      "blocked",
+    )
     expect(await levels()).toEqual([
       ["post_message", "allowed"],
       ["read_thread", "blocked"],
@@ -1966,8 +2126,20 @@ describe("a browser flow", () => {
         ),
       )
     const { wrapper } = await approved([FLOW_TOOL, PLAIN_TOOL])
-    await writeToolAccess(scope.tokenId, wrapper.id, "post_message", "allowed")
-    await writeToolAccess(scope.tokenId, wrapper.id, "lookup", "allowed")
+    await writeToolAccess(
+      scope.ctx,
+      scope.tokenId,
+      wrapper.id,
+      "post_message",
+      "allowed",
+    )
+    await writeToolAccess(
+      scope.ctx,
+      scope.tokenId,
+      wrapper.id,
+      "lookup",
+      "allowed",
+    )
 
     const plain = await call("execute_destructive", {
       server: "chat",
@@ -1997,7 +2169,13 @@ describe("a wrapper's steps", () => {
         calls: ["things/echo"],
       },
     ])
-    await writeToolAccess(scope.tokenId, wrapper.id, "lookup", "allowed")
+    await writeToolAccess(
+      scope.ctx,
+      scope.tokenId,
+      wrapper.id,
+      "lookup",
+      "allowed",
+    )
 
     const result = await call("execute_destructive", {
       server: "chat",
@@ -2053,8 +2231,20 @@ describe("a wrapper called from run_code", () => {
         program: 'throw new Error("it broke")',
       },
     ])
-    await writeToolAccess(scope.tokenId, wrapper.id, "lookup", "allowed")
-    await writeToolAccess(scope.tokenId, wrapper.id, "broken", "allowed")
+    await writeToolAccess(
+      scope.ctx,
+      scope.tokenId,
+      wrapper.id,
+      "lookup",
+      "allowed",
+    )
+    await writeToolAccess(
+      scope.ctx,
+      scope.tokenId,
+      wrapper.id,
+      "broken",
+      "allowed",
+    )
     // Its calls only read, so its tier would be Read and a failed run would
     // not list it among the calls that change things: the owner says Write.
     await setToolTier(ctx, wrapper.id, "lookup", "write")
@@ -2186,7 +2376,13 @@ describe("a wrapper whose calls no longer fit", () => {
           'return await pcp.call("things", "echo", { key: "k", query: args.word })',
       },
     ])
-    await writeToolAccess(scope.tokenId, wrapper.id, "lookup", "allowed")
+    await writeToolAccess(
+      scope.ctx,
+      scope.tokenId,
+      wrapper.id,
+      "lookup",
+      "allowed",
+    )
 
     const result = await call("execute_destructive", {
       server: wrapper.slug,
@@ -2216,7 +2412,13 @@ describe("a wrapper whose calls no longer fit", () => {
           'return await pcp.call("things", "echo", { key: "k", q: args.file })',
       },
     ])
-    await writeToolAccess(scope.tokenId, wrapper.id, "lookup", "allowed")
+    await writeToolAccess(
+      scope.ctx,
+      scope.tokenId,
+      wrapper.id,
+      "lookup",
+      "allowed",
+    )
     const kept = await keepBytes(ctx, {
       tokenId: scope.tokenId,
       serverId: null,
@@ -2267,7 +2469,13 @@ describe("a wrapper whose calls no longer fit", () => {
       })
       const mail = await getServer(ctx, mailId)
       await syncServerTools(ctx, mail, { publicUrl: PUBLIC_URL })
-      await writeToolAccess(scope.tokenId, mailId, "search_emails", "allowed")
+      await writeToolAccess(
+        scope.ctx,
+        scope.tokenId,
+        mailId,
+        "search_emails",
+        "allowed",
+      )
 
       const { wrapper } = await approved([
         {
@@ -2278,7 +2486,13 @@ describe("a wrapper whose calls no longer fit", () => {
           calls: [`${mail.slug}/search_emails`],
         },
       ])
-      await writeToolAccess(scope.tokenId, wrapper.id, "with_files", "allowed")
+      await writeToolAccess(
+        scope.ctx,
+        scope.tokenId,
+        wrapper.id,
+        "with_files",
+        "allowed",
+      )
 
       const result = await call("execute_destructive", {
         server: wrapper.slug,

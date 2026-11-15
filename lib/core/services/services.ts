@@ -27,7 +27,12 @@ import { invalid, isPcpError, notFound, PcpError } from "../errors"
 import { OwnerNeeded } from "../browser/types"
 import { forgetExitAnswers } from "../exits/dial"
 import { DOH_RESOLVERS } from "../exits/doh"
-import { checkNewExit, createServiceExit } from "../exits/exits"
+import {
+  checkNewExit,
+  createServiceExit,
+  EXIT_ABOUT_SELECT,
+  openExit,
+} from "../exits/exits"
 import { httpConnect, socks5Connect, type ProxyAuth } from "../exits/handshake"
 import { newId } from "../ids"
 import { errorToolResult, jsonToolResult } from "../json-result"
@@ -124,6 +129,13 @@ import {
   type ServiceCall,
 } from "./tools"
 import { checkUpdateImage, prepareServiceUpdate } from "./updates"
+import {
+  openServiceOwn,
+  readServiceOwn,
+  sealedServiceOwn,
+  SERVICE_OWN_SELECT,
+  type OpenServiceOwn,
+} from "./own-values"
 import { SECRET_META_SELECT, secretName } from "../secret-meta"
 import {
   findServer,
@@ -229,7 +241,7 @@ export type LoadedService = {
   /** The request's: what opens the service's sealed values and writes them. */
   ctx: VaultContext
   server: OpenServer
-  spec: ServiceSpec
+  spec: OpenServiceOwn<ServiceSpec>
   definition: ServiceDefinition
   publish: ServicePublish
   env: ServiceEnvBindings
@@ -266,16 +278,17 @@ export async function loadService(
   const { host: hostRow, ...bare } = spec
   const host = hostRow ? openServer(ctx, hostRow) : null
   const opened = openServiceSpec(ctx, spec)
+  const own = openServiceOwn(ctx, bare)
 
   return {
     ctx,
     server: openServer(ctx, row),
     // Its hash is the keyed one, also for a row from before.
-    spec: { ...bare, hash: opened.hash },
+    spec: { ...own, hash: opened.hash },
     definition: readServiceDefinition(opened.definition),
-    publish: readPublish(spec.publish),
+    publish: readPublish(own.publish),
     env: readEnvBindings(spec.env),
-    values: readPlainValues(spec.plainValues),
+    values: readPlainValues(own.values),
     engine: engineOf(spec.engine),
     reach: readReach(spec.reach),
     intent: spec.intendedState === "stopped" ? "stopped" : "running",
@@ -527,9 +540,9 @@ async function containerNameFor(
     (
       await db().serviceSpec.findMany({
         where: { hostId, server: { vaultId: ctx.vaultId } },
-        select: { containerName: true },
+        select: SERVICE_OWN_SELECT,
       })
-    ).map((spec) => spec.containerName),
+    ).map((spec) => readServiceOwn(ctx, spec).containerName),
   )
 
   for (let n = 1; ; n++) {
@@ -666,10 +679,12 @@ export async function launchServiceOn(
           hostId: prepared.host.id,
           engine: found.engine,
           engineVersion: found.version,
-          containerName: prepared.containerName,
-          publish: JSON.stringify(prepared.publish),
+          ...sealedServiceOwn(ctx, id, {
+            containerName: prepared.containerName,
+            publish: JSON.stringify(prepared.publish),
+            values: JSON.stringify(prepared.values),
+          }),
           env: JSON.stringify(prepared.env),
-          plainValues: JSON.stringify(prepared.values),
           reach: "tunnel",
           intendedState: "running",
         },
@@ -1834,7 +1849,14 @@ export async function saveServiceSettings(
   await db().$transaction([
     db().serviceSpec.update({
       where: { serverId: id },
-      data: { env: JSON.stringify(env), plainValues: JSON.stringify(values) },
+      data: {
+        env: JSON.stringify(env),
+        ...sealedServiceOwn(ctx, id, {
+          containerName: loaded.spec.containerName,
+          publish: JSON.stringify(loaded.publish),
+          values: JSON.stringify(values),
+        }),
+      },
     }),
   ])
   await writeServer(ctx, id, { name, description })
@@ -2494,7 +2516,7 @@ export async function servicesOnHost(
   const specs = await db().serviceSpec.findMany({
     where: { hostId, server: { vaultId: ctx.vaultId } },
     select: {
-      containerName: true,
+      ...SERVICE_OWN_SELECT,
       server: { select: SERVER_META_SELECT },
     },
     orderBy: { createdAt: "asc" },
@@ -2503,7 +2525,7 @@ export async function servicesOnHost(
   return specs.map((spec) => ({
     id: spec.server.id,
     name: serverName(ctx, spec.server),
-    containerName: spec.containerName,
+    containerName: readServiceOwn(ctx, spec).containerName,
   }))
 }
 
@@ -2550,10 +2572,17 @@ export async function serviceView(
   const registered = loaded.spec.registeredId
     ? await getServer(ctx, loaded.spec.registeredId).catch(() => null)
     : null
-  const exit = await db().exit.findFirst({
+  const exitRow = await db().exit.findFirst({
     where: { serviceId: id, vaultId: ctx.vaultId },
-    select: { id: true, name: true, label: true },
+    select: EXIT_ABOUT_SELECT,
   })
+  const exit = exitRow
+    ? {
+        id: exitRow.id,
+        name: openExit(ctx, exitRow).name,
+        label: openExit(ctx, exitRow).label,
+      }
+    : null
 
   return {
     id,

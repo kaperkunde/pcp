@@ -1,4 +1,5 @@
 import type { Metadata } from "next"
+import { loadResourceLimits } from "@/lib/core/resources/state"
 import { notFound } from "next/navigation"
 
 import { BrowserDescribeForm } from "@/components/browser-describe-form"
@@ -8,6 +9,7 @@ import { MailAccountForm } from "@/components/mail-account-form"
 import { PageColumn } from "@kaperkunde/ui/page"
 import { ServerDetail } from "@/components/server-detail"
 import { ServerForm } from "@/components/server-form"
+import { ServerLimits } from "@/components/server-limits"
 import { ServerPacingForm } from "@/components/server-pacing-form"
 import { ExitsCard } from "@/components/exits-card"
 import { ServiceCard } from "@/components/service-card"
@@ -23,6 +25,7 @@ import { isPcpError } from "@/lib/core/errors"
 import { oauthRedirectUrl } from "@/lib/core/oauth-client"
 import { storedSpec } from "@/lib/core/endpoints"
 import { readCallPlan } from "@/lib/core/openapi/plan"
+import { serverLimitsView } from "@/lib/core/gate/proposals"
 import { pacingOverview, serverPacing } from "@/lib/core/pacing/config"
 import { listSecrets } from "@/lib/core/secrets"
 import {
@@ -114,7 +117,7 @@ export default async function ServerPage({
     ? ((await storedSpec(ctx, server.id))?.patches ?? [])
     : []
 
-  const authExtraHeaders = await extraAuthHeaders(server.id)
+  const authExtraHeaders = await extraAuthHeaders(ctx, server.id)
 
   const secrets = (await listSecrets(ctx))
     .filter((secret) => secret.kind === "text")
@@ -333,6 +336,7 @@ export default async function ServerPage({
         }}
         secrets={secrets}
         redirectUrl={redirectUrl}
+        maxSpecMb={Math.round((await loadResourceLimits()).specBytes / 1048576)}
       />
     ) : (
       <ServerForm
@@ -370,6 +374,18 @@ export default async function ServerPage({
         defaults={await pacingDefaults(ctx, browser)}
       />
     )
+
+  // How fast PCP calls it (lib/core/gate/): its limits, load and pace in
+  // one section; the browser keeps its pace per site under Advanced.
+  const limitsView = await serverLimitsView(ctx, server)
+  const limits = limitsView ? (
+    <ServerLimits
+      key={JSON.stringify(limitsView.limits)}
+      serverId={server.id}
+      view={limitsView}
+      pacing={pacing}
+    />
+  ) : null
 
   return (
     <PageColumn width="narrow">
@@ -423,7 +439,8 @@ export default async function ServerPage({
         notice={notice}
         redirectUrl={redirectUrl}
         settings={settings}
-        pacing={pacing}
+        pacing={limits ? null : pacing}
+        limits={limits}
         about={about}
       >
         {ssh ? <SshAccessCard serverId={server.id} view={ssh} /> : null}

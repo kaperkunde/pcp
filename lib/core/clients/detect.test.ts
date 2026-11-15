@@ -178,7 +178,7 @@ describe("noteClientSeen", () => {
     )
     const now = new Date("2026-11-02T12:00:00Z")
 
-    expect(await noteClientSeen(resolved, detected, now)).toBe(true)
+    expect(await noteClientSeen(ctx, resolved, detected, now)).toBe(true)
 
     const seen = (await getApiToken(ctx, id))!.clientSeen
     expect(seen).toEqual({
@@ -191,6 +191,7 @@ describe("noteClientSeen", () => {
     // The same client a minute later: nothing to write.
     expect(
       await noteClientSeen(
+        ctx,
         { tokenId: id, clientSeen: seen },
         detected,
         new Date(now.getTime() + 60_000),
@@ -199,6 +200,7 @@ describe("noteClientSeen", () => {
     // A while later, or another version: written again.
     expect(
       await noteClientSeen(
+        ctx,
         { tokenId: id, clientSeen: seen },
         detected,
         new Date(now.getTime() + CLIENT_SEEN_INTERVAL_MS + 1),
@@ -206,6 +208,7 @@ describe("noteClientSeen", () => {
     ).toBe(true)
     expect(
       await noteClientSeen(
+        ctx,
         { tokenId: id, clientSeen: seen },
         { ...detected, version: "0.2.0" },
         new Date(now.getTime() + 60_000),

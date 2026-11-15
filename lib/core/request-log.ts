@@ -1,6 +1,7 @@
 import { AsyncLocalStorage } from "node:async_hooks"
 import { randomBytes } from "node:crypto"
 import {
+  type FileHandle,
   appendFile,
   mkdir,
   open,
@@ -698,6 +699,50 @@ export async function unsealedLogDays(
   return found
 }
 
+/** Zeros written to a file about to go, per write. */
+const ERASE_CHUNK = 64 * 1024
+
+/**
+ * Best effort at taking a file's old bytes out of the disk: its content is
+ * overwritten with zeros in place and synced to the device. What PCP cannot
+ * reach stays: a journalling or copy-on-write filesystem, an SSD's remapped
+ * blocks and a backup of the disk may all still hold the old bytes
+ * (ARCHITECTURE.md, "Free space"). Never throws: the caller goes on and
+ * removes the file whether or not this worked.
+ */
+async function zeroHandle(handle: FileHandle): Promise<void> {
+  try {
+    const { size } = await handle.stat()
+    const zeros = Buffer.alloc(Math.min(ERASE_CHUNK, Math.max(size, 1)))
+
+    for (let at = 0; at < size; at += zeros.length) {
+      await handle.write(zeros, 0, Math.min(zeros.length, size - at), at)
+    }
+
+    await handle.sync()
+  } catch {
+    // Best effort.
+  }
+}
+
+/** Overwrites the file with zeros, syncs it, then removes it. */
+async function eraseAndUnlink(file: string): Promise<void> {
+  let handle: FileHandle | null = null
+
+  try {
+    handle = await open(file, "r+")
+  } catch {
+    // Gone, or not ours to write: removing it is still what is asked.
+  }
+
+  if (handle) {
+    await zeroHandle(handle)
+    await handle.close().catch(() => {})
+  }
+
+  await unlink(file)
+}
+
 /** Lines a rewrite takes from another process's appends before it gives up. */
 const REWRITE_ROUNDS = 5
 
@@ -713,7 +758,11 @@ export async function sealRequestLogDay(
   reader: LogReader,
   day: string,
   /** Tests: what happens between writing the part and renaming it. */
-  hooks: { written?: () => Promise<void> } = {},
+  hooks: {
+    written?: () => Promise<void>
+    /** Tests: stands in for the rename of the part over the day. */
+    rename?: (from: string, to: string) => Promise<void>
+  } = {},
 ): Promise<boolean> {
   const state = writers()
 
@@ -808,19 +857,53 @@ export async function sealRequestLogDay(
       copied = size
     }
 
+    // The old file's content is plain names: held open across the rename,
+    // so it can be overwritten once nothing names it any more.
+    // Not on Windows, where renaming over an open file fails: there the
+    // old bytes are not zeroed.
+    let old =
+      process.platform === "win32"
+        ? null
+        : await open(file, "r+").catch(() => null)
+    const move = hooks.rename ?? rename
+
     try {
-      await rename(part, file)
+      await move(part, file)
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      const code = (error as NodeJS.ErrnoException).code
+      await old?.close().catch(() => {})
+
+      if (code === "ENOENT") {
         return false
       }
 
-      throw error
+      if (old && (code === "EPERM" || code === "EACCES" || code === "EBUSY")) {
+        // The system will not rename over a file held open: let it go and
+        // try once more without zeroing it.
+        old = null
+        try {
+          await move(part, file)
+        } catch (again) {
+          if ((again as NodeJS.ErrnoException).code === "ENOENT") {
+            return false
+          }
+
+          throw again
+        }
+      } else {
+        throw error
+      }
+    }
+
+    if (old) {
+      await zeroHandle(old)
+      await old.close().catch(() => {})
     }
 
     return true
   } finally {
-    await unlink(part).catch(() => {})
+    // The part holds plain lines too until it is renamed.
+    await eraseAndUnlink(part).catch(() => {})
     state.rewriting = null
     done()
   }
@@ -857,7 +940,7 @@ async function removeStaleParts(now = Date.now(), all = false): Promise<void> {
       }
     }
 
-    await unlink(full).catch((error: NodeJS.ErrnoException) => {
+    await eraseAndUnlink(full).catch((error: NodeJS.ErrnoException) => {
       if (error.code !== "ENOENT") throw error
     })
   }
@@ -909,7 +992,7 @@ export async function pruneRequestLog(
     }
 
     try {
-      await unlink(fileFor(day))
+      await eraseAndUnlink(fileFor(day))
       removed++
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
@@ -928,7 +1011,7 @@ export async function deleteRequestLog(): Promise<void> {
 
   for (const day of await logDays()) {
     try {
-      await unlink(fileFor(day))
+      await eraseAndUnlink(fileFor(day))
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
         throw error

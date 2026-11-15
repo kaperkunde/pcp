@@ -1,3 +1,5 @@
+import { openLevelName } from "./level-names"
+import { openFromText } from "./sealed"
 import { Client, InMemoryTransport } from "@modelcontextprotocol/client"
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
 
@@ -16,6 +18,7 @@ import {
 } from "./gateway"
 import type { JmapProbe } from "./mail/probe"
 import { decidePermission, getPermissionView } from "./permissions"
+import { readServerLimits } from "./gate/store"
 import { readServerNote } from "./personal-notes"
 import { createSecret, writeManagedSecret } from "./secrets"
 import { createServer, getServer, setToolDescription } from "./servers"
@@ -1022,6 +1025,7 @@ describe("another server of a definition", () => {
   it("makes it on approval from the definition's schema, edits and descriptions, public-only, with the note and no levels", async () => {
     const source = await ownerEndpoint()
     await writeToolAccess(
+      ctx,
       (await createApiToken(ctx, { name: "Other", allowAllServers: true })).id,
       source.id,
       "listPets",
@@ -1342,7 +1346,7 @@ describe("proposing a service", () => {
               hash: serviceDefinitionHash(ctx, definition),
               hostId: input.hostId,
               engine: "docker",
-              containerName: `pcp-${id}`,
+              plainContainerName: `pcp-${id}`,
               env: JSON.stringify(input.env),
             },
           },
@@ -1856,12 +1860,21 @@ describe("levels and tiers proposed with it (tool_access)", () => {
   }
 
   async function levels(serverId: string) {
+    const token = await tokenId()
+
     return (
       await db().apiTokenToolAccess.findMany({
-        where: { tokenId: await tokenId(), serverId },
-        orderBy: { toolName: "asc" },
+        where: { tokenId: token, serverId },
       })
-    ).map((row) => [row.toolName, row.access])
+    )
+      .map((row) => [
+        openLevelName(ctx, "api_token_tool_access", `${token}:${serverId}`, {
+          key: row.toolName,
+          sealed: row.sealed,
+        }),
+        row.access,
+      ])
+      .sort()
   }
 
   it("shows an API's proposal per tool, filled in, and says whose levels they are", async () => {
@@ -1914,11 +1927,18 @@ describe("levels and tiers proposed with it (tool_access)", () => {
     })
     expect(await levels(server.id)).toEqual([["listPets", "allowed"]])
     expect(
-      await db().toolTier.findMany({
-        where: { definitionId: server.definitionId },
-        select: { toolName: true, tier: true },
-      }),
-    ).toEqual([{ toolName: "listPets", tier: "read" }])
+      (
+        await db().toolTier.findMany({
+          where: { definitionId: server.definitionId },
+        })
+      ).map((row) => [
+        openLevelName(ctx, "tool_tier", row.id, {
+          key: row.toolName,
+          sealed: row.sealed,
+        }),
+        row.tier,
+      ]),
+    ).toEqual([["listPets", "read"]])
     expect(JSON.stringify(done)).toContain(
       "The owner set this token's level for 2 tools",
     )
@@ -2033,12 +2053,136 @@ describe("levels and tiers proposed with it (tool_access)", () => {
     const server = await db().mcpServer.findFirstOrThrow({
       where: { kind: "mcp" },
     })
-    expect(JSON.parse(server.pendingAccess!)).toEqual({
+    expect(
+      JSON.parse(
+        openFromText(
+          ctx.dek,
+          `mcp_server:${server.id}:pending_access`,
+          server.pendingAccess!,
+        ),
+      ),
+    ).toEqual({
       tokenId: await tokenId(),
       rules: [
         { pattern: "search_*", access: "allowed" },
         { pattern: "get_issue", tier: "read" },
       ],
     })
+  })
+})
+
+describe("limits proposed with it (#143)", () => {
+  const NO_SYNC = {
+    callTool: async () => {
+      throw new Error("no call runs here")
+    },
+    syncTools: async () => ({
+      status: "ok" as const,
+      message: "",
+      toolCount: 0,
+    }),
+  }
+
+  async function decide(limits?: unknown) {
+    const row = await db().permissionRequest.findFirstOrThrow({
+      orderBy: { createdAt: "desc" },
+    })
+
+    return decidePermission(
+      ctx,
+      row.id,
+      "allow_once",
+      { publicUrl: PUBLIC_URL, ...(limits !== undefined ? { limits } : {}) },
+      NO_SYNC,
+    )
+  }
+
+  it("shows them filled in beside the approval, over the kind's defaults", async () => {
+    const asked = await register({
+      kind: "imap",
+      name: "Mail",
+      url: "mail.example.com",
+      smtp_url: "smtp.example.com",
+      auth_type: "basic",
+      username: "ada@example.com",
+      secret: "Mail password",
+      limits: { max_concurrent: 1, timeout_ms: 30_000, bytes_per_day: "none" },
+    })
+    expect(asked.isError).toBe(false)
+
+    const view = await shown()
+    const fields = Object.fromEntries(
+      view.proposedLimits!.fields.map((field) => [field.field, field]),
+    )
+
+    expect(fields.maxConcurrent).toMatchObject({
+      label: "Calls at once",
+      value: 1,
+      defaultValue: 2,
+    })
+    expect(fields.timeoutMs).toMatchObject({ value: 30_000 })
+    expect(fields.bytesPerDay).toMatchObject({ value: null })
+    expect(fields.minIntervalMs).not.toHaveProperty("value")
+  })
+
+  it("writes them as the owner left them, and none when they sent none", async () => {
+    await register({
+      name: "Pets",
+      openapi_schema: PETS,
+      limits: { calls_per_minute: 10 },
+    })
+    await decide({ callsPerMinute: 5, timeoutMs: 20_000 })
+    const pets = await serverNamed(ctx, "Pets")
+    expect(await readServerLimits(ctx, pets.id)).toEqual({
+      callsPerMinute: 5,
+      timeoutMs: 20_000,
+    })
+
+    await register({
+      name: "Linear",
+      url: "https://mcp.linear.example/mcp",
+      limits: { max_concurrent: 1 },
+    })
+    await decide()
+    const linear = await serverNamed(ctx, "Linear")
+    expect(await readServerLimits(ctx, linear.id)).toEqual({})
+  })
+
+  it("refuses limits past the machine's bounds before asking, and on the page", async () => {
+    const asked = await register({
+      name: "Linear",
+      url: "https://mcp.linear.example/mcp",
+      limits: { max_concurrent: 500 },
+    })
+    expect(asked.isError).toBe(true)
+    expect(
+      await db().permissionRequest.count({ where: { kind: "register" } }),
+    ).toBe(0)
+
+    await register({
+      name: "Linear",
+      url: "https://mcp.linear.example/mcp",
+      limits: { max_concurrent: 2 },
+    })
+    const answer = await decide({ maxConcurrent: 0 })
+    expect(answer.isError).toBe(true)
+    expect(answer.content).toMatchObject([
+      { text: expect.stringContaining("Calls at once is a whole number") },
+    ])
+    // Nothing was made: the owner can fix it and answer again.
+    expect((await shown()).status).toBe("pending")
+  })
+
+  it("takes no limits for a service, which registers its server later", async () => {
+    const asked = await register({
+      kind: "service",
+      name: "Converter",
+      ssh_server: "nas",
+      service: {},
+      limits: { max_concurrent: 1 },
+    })
+
+    expect(asked.isError).toBe(true)
+    expect(asked.text).toContain("propose_server_limits")
   })
 })

@@ -1,3 +1,4 @@
+import { writeTokenClient } from "../token-client"
 import {
   createOAuthApiToken,
   deleteApiToken,
@@ -294,13 +295,10 @@ export async function approveAuthorization(
     }
 
     tokenId = token.id
-    await db().$transaction([
-      ...endOAuthSignIns([tokenId]),
-      db().apiToken.update({
-        where: { id: tokenId },
-        data: { oauthClientName: request.client.name },
-      }),
-    ])
+    await db().$transaction([...endOAuthSignIns([tokenId])])
+    await writeTokenClient(ctx, tokenId, {
+      oauthClientName: request.client.name,
+    })
   } else {
     ;({ id: tokenId } = await createOAuthApiToken(ctx, {
       ...choice.token,

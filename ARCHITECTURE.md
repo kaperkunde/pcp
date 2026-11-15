@@ -86,7 +86,9 @@ associated data (a ciphertext cannot be moved to another row):
   calendar addresses, SSH host and public keys) and its status message,
   as one JSON (`mcp_server.meta`, `mcp_server:<id>:meta`,
   `lib/core/server-meta.ts`) with its short name (`slug`, found by its
-  keyed hash in `mcp_server.slug_key`, unique in the vault), a
+  keyed hash in `mcp_server.slug_key`, unique in the vault), its own call
+  limits (`mcp_server.limits`, `mcp_server:<id>:limits`,
+  `lib/core/gate/store.ts`), a
   definition's name, short name and description (`server_definition.meta`,
   `slug_key`), a tool's name, title and description, the title its
   annotations carried (`mcp_tool.about`; the name found by a keyed hash of
@@ -106,11 +108,38 @@ associated data (a ciphertext cannot be moved to another row):
   reads it and writes it back over what it read
   (`lib/core/sealed-fields.ts`, `server-meta.ts writeServer`), so a write
   that came between is read again, never lost. Kinds, flags and the status
-  word stay plain. Tool names are still plain where they key the owner's
-  levels, allowances and tiers (`api_token_tool_access`,
-  `api_token_tool_allowance`, `vault_tool_access`, `tool_tier`) and in a
-  waiting call's permission request (`permission_request.tool_name`): a
-  later part of #96. A lookup by a short name or a tool name (a `server/tool`
+  word stay plain. A tool's name on the owner's levels, allowances and
+  tiers (`api_token_tool_access`, `api_token_tool_allowance`,
+  `vault_tool_access`, `tool_tier`) and in a waiting call's permission
+  request (`permission_request.tool_name`) is a keyed hash in its old
+  column, bound to its server (to its definition for a tier), with the name
+  sealed beside it (`sealed`, `permission_request.tool_sealed`;
+  `<table>:<owner>:<hash>` as associated data, `lib/core/level-names.ts`),
+  so the keys and unique indexes keep working; readers open the names in
+  memory and a lookup hashes the name it is given. Nothing that runs
+  without the key needs one: the cleanup deletes allowances and requests by
+  their dates. Moving a tier to another definition (detach, merge) hashes
+  and seals its name again. The values the owner types or an upstream sends
+  are sealed too: a service's container name, where it is published and the
+  values of its plain variables (`service_spec.sealed_own`,
+  `service_spec:<server id>:own`, `lib/core/services/own-values.ts`), a
+  server's header name and value template (in `mcp_server.meta`, and
+  `server_auth_header.sealed` for the further headers), the levels saved for
+  a server's tools before they are read (`mcp_server.pending_access` as
+  sealed text, compared and cleared as the stored text) and a tool's icons
+  (in `mcp_tool.about`). So are an exit's name and label (`exit.about`,
+  `exit:<id>:about`; the name found by its keyed hash in `exit.name_key`,
+  unique in the vault), a store's folder and the login its files are
+  written as (`storage_root.sealed`, `storage_root:<server id>:about`; a
+  public download of PCP's own store's file and the sweeps need only the
+  data folder, the backend and the mode, never the path) and the name an
+  app gave when it signed in with OAuth and the client last seen using a
+  token (`api_token.client_meta`, `api_token:<id>:client`;
+  `oauth_client_id` stays plain, as the token endpoint compares it before
+  any key is held). Nothing is left in plain text but `Vault.name`, which
+  the owner chose to keep, the public address (`publicUrl`), which a
+  request with no key reads, and the ids, kinds, flags and the client id
+  that routing needs. A lookup by a short name or a tool name (a `server/tool`
   ref, a call handle's tool, `pcp.call`'s names, list_tools' server, a
   wrapper's calls, a linked repository's item names) hashes the name it is
   given; sorting and matching a pattern (a proposed level's `get_*`) work
@@ -552,13 +581,44 @@ withPublicOnlyLink`, added in `upstream.ts` where the server and PCP's
   parse, the assistant is told that much and not the parser's message, which
   quotes the text. An endpoint the owner reads from a URL they typed keeps
   following it, as before.
-- **Bounded.** Fifty endpoints per vault, 5 MB of schema per registration,
-  the same as an upload (it is held, encrypted, on the request until
-  answered), a thousand edits and a million characters of them, 4 MB of
+- **Bounded.** Fifty endpoints per vault, a schema per registration of at most the
+  owner's limit (`resourceLimits().specBytes`, Settings → Resources, see
+  "Large schemas" below), the same as an upload (it is held, encrypted and
+  compressed, on the request until answered), a thousand edits and a million characters of them, 4 MB of
   stored tools per endpoint, twenty registrations and twenty changes per token
   per ten minutes, no JSON-RPC batches at the gateway (one POST would be many
   calls), and the catalogue a request loads leaves out tool schemas, which are
   read when a tool is described or called.
+- **Large schemas (#141).** GitHub's whole REST description (14 MB as JSON,
+  1,278 operations) registers by `openapi_schema`, by `openapi_url`, by an
+  upload and by a repository's document. There is no fixed cap: the limit is
+  `resourceLimits().specBytes` (a sixty-fourth of the machine's memory, 16 to
+  64 MB, the owner's to set within what `checkResourceConfig` lets the machine
+  spare at sixteen times the size). The download is streamed against it, the
+  zod input has only the highest value the owner may set (`SPEC_TEXT_CEILING`;
+  `endpoint-admin.ts` checks the exact one), and a linked repository's spec
+  file and item are bounded by the same value (`repos/limits.ts`; one browse's
+  total, `MAX_BROWSE_BYTES`, still caps what one read fetches). The node limit
+  (`specNodeLimit`) follows it. Measured on GitHub's description: JSON parses
+  in 70 ms; YAML took 3.1 s and 530 MB with the `yaml` package and 0.35 s and
+  230 MB with js-yaml, which now reads schemas (core schema, no tags; aliases
+  share values, so an expanding document is refused by counting its nodes
+  before it is written out). YAML is turned into compact JSON text first,
+  by `prepareSpecText` in a worker thread (`openapi/yaml-worker.cjs`, not a
+  child process, so the desktop app runs it; memory capped by
+  `resourceLimits`, 60 s limit): the loop's longest gap was 29 ms while
+  GitHub's YAML was read, and everything after reads JSON. The worker's file
+  and js-yaml are carried into the standalone output (`next.config.ts`,
+  `scripts/standalone.test.ts`); where the file is missing the same
+  conversion runs in place, slower for others and never wrong. The two latest
+  conversions are kept ten minutes (no timer), so registration's repeated
+  reads (preview, lint, create) do not read it again. A schema at rest is
+  Brotli-compressed from 64 KB inside the sealed value (`spec-rows.ts`
+  `packed`: 14 MB to 0.9 MB, rows from before still open), and so are a
+  permission request's arguments (`sealed-args.ts`), so the waiting request
+  and the endpoint hold about 1 MB each, not 14. The permission page shows
+  the preview, never the schema. An edit (`applyPatches`) on a freshly read
+  document works in place (`consume`) instead of copying it.
 - A token limited to some servers only sees endpoints in its scope, and what
   it registers is added to that scope.
 
@@ -824,8 +884,39 @@ into Drafts with no EmailSubmission after it, and marks nothing.
 **IMAP** (`mail/imap.ts`, on imapflow and nodemailer): `url` is
 `imaps://host:port`, or `imap://` for STARTTLS; `smtp_url` the same for
 SMTP. A connection that is not encrypted after it is made is dropped, and
-STARTTLS is required, never optional. Each call connects, signs in, works
-and logs out. An email's id is `<uid>.<uidvalidity>.<mailbox path>`, so an id
+STARTTLS is required, never optional. An account keeps one signed-in
+session for its calls (`mail/imap-pool.ts`, after the SSH pool; deleting or changing the account drops it, and PCP has no shutdown hook that closes the pools, as the SSH pool has none): a call leases
+a connection, works and hands it back without a LOGOUT, so a call costs a
+command, not a TCP and TLS connect, a login and a logout (against a server
+that takes seconds for each, a call took over a minute). Opened only by a
+call that brings the login in its request, never in the background; at most
+`IMAP_MAX_CONNECTIONS` per account (2), the others queue for one within the
+call's own time and share it; closed when idle two minutes (a timer only
+closes) or ten minutes old, when a command broke it, when the server closed
+it, or when a NOOP asked of one that sat 30 seconds goes unanswered; keyed by
+the account and a hash of its address and login, so a changed password,
+address or secret starts over (as does a time limit the owner raised past
+the usual minute, which the socket must wait for: see "The call gate").
+Anything else that asks the server for less:
+the mailbox names every call needs to find a mailbox by role come from a LIST
+without STATUS, kept 30 seconds per account (only `list_mailboxes` asks for
+counts, and a delete of a mailbox asks STATUS of that one); a search with no
+filter fetches the newest page by sequence number from the count SELECT gave
+instead of UID SEARCH ALL (an expunge between the SELECT and the FETCH can shift that page by one row); a LOGOUT never waits more than 3 seconds before the
+socket is closed. The time each phase took (connect, login, select, command,
+logout) and what the server said by itself ([ALERT], [THROTTLED], BYE,
+scrubbed of the login, addresses and links, cut short) are kept in memory
+only, a small ring per account (`mail/diagnostics.ts`, `mailDiagnostics(serverId)`),
+never on disk. A server's own "slow down" (IMAP `[THROTTLED]`, a BYE or
+`[LIMIT]`/`[UNAVAILABLE]` that is about rate, JMAP HTTP 429 or the
+`maxConcurrentRequests` limit error, CalDAV 429 or 503 with Retry-After)
+comes out as an Error carrying `pcpThrottle` (`lib/core/throttle-signal.ts`)
+for the call gate to read, and so does an answer that went through with its
+lines marked `[THROTTLED]` (Gmail, throttling an account, answers OK but
+seconds late each time; `noticeThrottle`), even one that came back after the
+call's time limit; JMAP also keeps to the session's
+`maxConcurrentRequests` and `maxCallsInRequest` once it has read them. An
+email's id is `<uid>.<uidvalidity>.<mailbox path>`, so an id
 from before a mailbox was rebuilt is refused rather than naming another
 email. Sending goes over SMTP, attachments included, written by nodemailer.
 The copy in Sent (Bcc kept) is the account's setting, `mailSaveSent`:
@@ -842,8 +933,8 @@ nothing deletes either. The look runs once the call has answered (`savedTo`
 is `"pending"`), inside the same request: the call hands it to
 `lib/core/after-answer.ts`, whose scope the gateway's route and the owner's
 answer to a request open and drain through Next's `after()`, on a connection
-of its own with the login the call already holds; nothing is stored or timed
-past the request. Where no scope is open, the look runs in the call, for 10
+with the login the call already holds, leasing a session of the account's
+pool; nothing is stored or timed past the request. Where no scope is open, the look runs in the call, for 10
 seconds at most. A draft is the same message,
 appended to Drafts with `\Draft` and `\Seen` and sent nowhere; its id comes
 from APPENDUID, and is null without UIDPLUS.
@@ -1277,7 +1368,9 @@ specPath, basePath, auth?}` (an API endpoint from the schema it serves,
   instance, as `writeWrapper` does a program.
 - The instance's own part: `host_id` (the SSH server; null once that is
   deleted, and the container stays there), `engine` and `engine_version`
-  (found at launch), `container_name` (`pcp-<name>`, unique among the
+  (found at launch), `sealed_own` (the three values below that the owner
+  typed, one sealed JSON: `container_name`, `publish` and `plain_values`;
+  their plain columns are empty once sealed), `container_name` (`pcp-<name>`, unique among the
   vault's services on that host), `publish` (`{address, ports: [{container,
 host}]}`, the host's IP address the ports are bound to), `env` (`{NAME:
 secret id}`, never a value), `plain_values` (`{NAME: value}`, what the
@@ -3713,7 +3806,9 @@ caller that names none waits `PACING_MAX_WAIT_MS` at most.
 Past that the call is answered at once with a tool error that says how long
 the wait is and that nothing was sent ("Paced: <destination> takes its next
 action in N s, longer than this call can wait (M s). …"), with
-`structuredContent` `{code: "paced", retry_after_ms}`, and takes no slot.
+the code `paced` and `retryAfterMs` in `_meta["gg.pcp/error"]` (and, for
+one release, `structuredContent` `{code: "paced", retry_after_ms}`), and
+takes no slot.
 run_code hands the program the same: the error `pcp.call` throws has
 `code` "paced" and `retryAfterMs` (a Python `PcpError`'s `code` and
 `retry_after_ms`), carried as fields of the bridge's reply. A caller whose
@@ -3764,6 +3859,114 @@ another run or from none, is answered with one line first: "A running
 program (run <id>) is acting on this tab right now; what you see may change
 under it." It still runs.
 
+## The call gate: limits, cool-downs and timeouts
+
+Pacing spaces calls out; the gate (`lib/core/gate/`, #143) decides whether
+one may go at all, how long PCP waits for it, and what a place's own
+"slow down" means. One module, applied where pacing is and nowhere else:
+`upstream.ts callServerTool` for every server kind but the browser and a
+wrapper (MCP servers, API endpoints, mail and calendar accounts, SSH
+servers, services, storage folders), so execute_<tier>, run_<tier>'s
+`pcp.call`, wrappers and flows, a call the owner allowed and a
+capability's calls to its provider all meet it; `browser/call.ts
+pacedTurn` per site; and `web-fetch.ts runFetch` per site.
+
+**A server's call** (`gate/index.ts gateServerCall`), in order: refused at
+once while the server cools down; refused once its answers today reach its
+bytes a day; its pace (pacing's `paceServerCall`, with the server's own
+pause and calls a minute as a floor under the class's pace, `withFloor`, so
+there is one spacing); a turn among its calls at once (`state.ts acquire`),
+waited for within what the caller's deadline leaves (`waitBudget`); then
+the call within its time limit. Before the pace, a server whose rate limit
+said it has nothing left until a reset holds the call until then (within
+its time, else `paced`), and after its turn a call is refused if a
+cool-down began while it waited. Past the time limit the caller gets a
+`timeout` tool error naming the server and the limit ("… did not answer
+within 45 s, its time limit for a call …"), rather than the run's minutes.
+A time limit the owner set reaches each kind's own requests too (an MCP
+call's `callTool` timeout a second past it, an API endpoint's
+`executeCall`, a calendar account's `DavClient`, a JMAP request, and an
+IMAP connection's socket timeout and the wait for a pooled one, with the
+pool's fingerprint changed by a longer limit); without one each kind keeps
+its own constant. Every kind keeps its turn until the call really ends, at
+most `LINGER_MS` more, so a place that hangs is not sent more at once. A
+refusal is `paced` with `retryAfterMs`.
+
+**Limits** (`gate/limits.ts`, `gate/config.ts`): calls at once, a pause,
+calls a minute, a time limit, bytes a day, and the first and longest
+cool-down. Defaults are per class of place (MCP 8 at once and 2 minutes, an
+API 8 and a minute, mail 2 at once a quarter-second apart and 45 seconds,
+calendar 4 and a minute, SSH 4 and 11 minutes (run_command's own timeout
+rules), a service 5 minutes, a storage folder 10), never per vendor. A
+server's own limits are the fields set for it, the rest following the
+default, sealed in `mcp_server.limits` under the vault's key as
+`mcp_server:<id>:limits` (`gate/store.ts`): the instance's own, never in a
+linked repository's document, carried as it is by an export. Only the
+machine's safety bounds (`GATE_BOUNDS`) limit what may be set, whoever
+proposes it. The owner sets them in the Limits section of the server's page
+(with its pace beside them); an assistant proposes them, in
+`register_server`'s `limits` (stored on the request as `proposedLimits`,
+shown filled in and editable beside the approval, written with the yes as
+the owner left them) or with `propose_server_limits` (a `limits_change`
+request: the limits now against the proposal, the assistant's note on why,
+editable, written over the limits the owner was shown, `basis`). The
+assistant reads them on demand with `get_server_limits`; nothing about
+limits or cool-downs is in `search`, a tool's description or the
+instructions, and a call hears of one only when it cannot go.
+
+**Slowing down** (`lib/core/throttle-signal.ts`, the one module both sides
+use; `state.ts recordEnd`). A place asks PCP to slow down with a 429 or a
+503 with Retry-After (`httpThrottle`, read by JMAP and CalDAV requests, an
+API endpoint's answer in `openapi/call.ts`, an MCP server's refusal in
+`upstream.ts`, web fetch, and a browser tab's page), or with its protocol's
+own words (IMAP's [THROTTLED], a BYE about limits, JMAP's limit errors:
+`mail/throttle.ts`), each an Error (or an answer) carrying `pcpThrottle:
+{reason, retryAfterMs?}`, which the gate reads off the cause chain and
+takes off an answer before it is passed on. Rate-limit headers with nothing
+left on an answer that went through (`rateLimitHold`) are only a hold
+until the reset: the limit may be one bucket of many, so nothing cools
+down. What counts as slowness depends on the class (`SLOW_DETECTION`): for
+MCP servers, endpoints, mail and calendar accounts a run of `SLOW_RUN`
+answers of one tool each `SLOW_FACTOR` times that tool's usual time (the
+median of its last successes, at least `SLOW_FLOOR_MS`), so fast and slow
+tools of one server never mix; for SSH servers, services and storage
+folders, whose work takes as long as it does, only `SLOW_RUN` calls in a
+row past their time limit; for sites, nothing but their own "slow down".
+The place then cools down: for as long as it asked (no longer than its
+longest cool-down), else the first cool-down, doubling for each one that
+starts within `BACKOFF_MEMORY_MS` of the last, up to the longest; a success
+at its usual pace after it ends starts over. While it
+cools, its calls are refused at once ("<server> is cooling down: <reason>.
+Nothing was sent; try again in N s."), the first throttled answer says the
+cool-down began, `check_server` names it (`cooling` on the server's state),
+and the server's page shows it with a button that ends it. The browser and
+web fetch share a site's cool-down and counters: each browser turn at a
+site is counted when it ends (`browser/call.ts pacedTurn`), with a 429 on
+the page a navigation opened.
+
+**Counters and state** are in this process's memory (`state.ts`), per vault
+and place, like pacing's: calls, errors, slow-downs, bytes where an answer
+has them, and answer times for the 50th and 95th percentile (a reservoir
+sample per minute, each call as likely to be kept; minutes older than an
+hour merged into hours by weight), over this minute and the one before,
+the last hour and the last day. At most `MAX_GATED_PLACES` places are held,
+the least recently used idle one dropped first and none that is busy or
+cooling down; the comment there gives the memory this comes to. A mail
+account's last calls (`mail/diagnostics.ts`: each phase's time, whether it
+reused a connection, how it went and the server's own notices) are shown
+beside the counters on its page and in `get_server_limits`'s answer. They are not stored: a restart starts them again and says since when
+it counts, which keeps them out of the database, the export, the cleanup and
+`wipeVault`, and a cool-down a restart forgets is found again by the place's
+next "slow down". Nothing of a call is kept but its outcome, time and size.
+
+**One error shape.** `paced` is one of the tool error codes
+(`tools/outcome.ts`): `_meta["gg.pcp/error"]` `{code: "paced",
+retryAfterMs}`, as `timeout` and `browser_busy` carry theirs, for pacing's
+refusals and the gate's alike (`pacing/pace.ts pacedResult`). The
+`structuredContent` `{code, retry_after_ms}` from before is still sent for
+one release (`docs/breaking-changes.md`). A program's `pcp.call` throws an
+Error with `code` and `retryAfterMs` for every kind.
+
 ## Data on disk
 
 `PCP_DATA_DIR` (default `./data`; `/data` in Docker; in the desktop app
@@ -3790,7 +3993,16 @@ Linux):
   which tool, which upstream, how long, whether it worked, and whether it
   stopped to ask the owner (with the permission request's id). Never
   arguments or results. The Log page reads it back; the cleanup deletes the
-  days older than the owner keeps (see "Cleanup and the log").
+  days older than the owner keeps (see "Cleanup and the log"). A day's
+  file that is written again with its lines sealed, one the cleanup prunes
+  and the days of a deleted vault are overwritten with zeros and synced
+  before they are replaced or unlinked (not on Windows, which will not
+  rename over an open file: there, and wherever the rename is refused for
+  that reason, the old bytes are left), so their old plain names do not
+  stay in the file's blocks; this is best effort. What PCP cannot reach
+  stays: a journalling or copy-on-write filesystem's earlier copies of a
+  block, an SSD's remapped or wear-levelled cells and any backup or
+  snapshot of the disk may still hold the old bytes.
 - `tls/` — only once HTTPS is turned on: the ACME account key and, per name,
   `key.pem` and `cert.pem`. Directory mode 0700, files 0600 (see "Reaching
   PCP").
@@ -4298,7 +4510,10 @@ upload link's use, whose request holds no vault key, logs PCP's own name for
 it (`file_link/download` and the like) plain, marked `keyless`. Lines from
 before are sealed by the vault's requests (`ensureSealed`): a day's file is
 written again with that vault's lines sealed where they were, so the Log
-page's places hold, while new lines wait for it.
+page's places hold, while new lines wait for it. The file it replaces, and
+the days the cleanup removes, are overwritten with zeros and synced first
+(`request-log.ts`), best effort: the filesystem's journal or earlier copies
+and an SSD's remapped blocks are outside PCP's control.
 
 The **Log page** (`/log`, `lib/core/activity.ts`) reads the vault's own lines
 back with the vault's key, newest first, filtered by token, outcome or a tool
@@ -4765,8 +4980,17 @@ The owner's own windows are the vault's `duplicateCalls` setting
 (`calls/config.ts`), set on Settings → Repeated calls
 (`components/repeated-calls-card.tsx`, `lib/actions/repeated-calls.ts`): a
 default for every tool, and per tool (chosen from the vault's tools that
-change things, by server id and name) minutes between 1 and 24 hours, or
-`exempt` ("Never hold back").
+change things, and from PCP's own tools the guard watches, as the server
+`pcp`; by server id and name) minutes between 1 and 24 hours, or `exempt`
+("Never hold back").
+
+Whether the guard watches one of PCP's own tools is a property of the tool,
+declared where it is registered (`register`'s `guard`, `tools/guard.ts`):
+`never` (the stores' tools and the capabilities') or `reads`, a predicate
+on the arguments for a tool whose reading and changing calls differ
+(memory's command, web_fetch's method). A tool that says nothing is guarded
+when it is Write or Destructive and not idempotent. The gateway and the
+Settings page both read it from the tool.
 
 ### Call handles
 
@@ -5369,8 +5593,10 @@ through the access request's own checks and writes (`checkAccessLevels`,
 `checkAccessTiers`, `writeAccessLevels`, `writeAccessTiers`, so tiers go
 through `setToolTier` on the definition) to the tools the server has; with
 none yet, they are kept on the server (`mcp_server.pending_access`: the
-token's id and the rules, no secret) and `upstream.ts syncServerTools`
-applies them once, after the first read that finds tools, and clears them.
+token's id and the rules, no secret, sealed as text under
+`mcp_server:<id>:pending_access`) and `upstream.ts syncServerTools`
+applies them once, after the first read that finds tools, and clears them
+(over the stored text it read, so only one that applies them).
 Applied later, they leave alone a tool the token has blocked since, and give
 a revoked or deleted token nothing. With no proposal the approval reads as
 before: a new server's tools ask the owner first, for every token.

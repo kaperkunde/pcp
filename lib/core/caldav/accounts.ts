@@ -30,6 +30,7 @@ import {
   type OAuthClientInput,
 } from "../servers"
 import { deleteManagedSecret } from "../secrets"
+import { throttleOf, withThrottle } from "../throttle-signal"
 import { requireEncryptedOrPrivate, validateCalDavUrl } from "./addresses"
 import { DavClient, lastSegment } from "./client"
 import {
@@ -1671,9 +1672,15 @@ export async function callCalendarTool(
     }
 
     const failure = await fail(ctx, server, error, credential)
-    throw new PcpError(
-      failure.status === "auth_required" ? "unauthorized" : "upstream",
-      failure.message,
+
+    // The server's own "slow down" (a 429, or a 503 with Retry-After) rides
+    // on the error, for the call gate (lib/core/gate/).
+    throw withThrottle(
+      new PcpError(
+        failure.status === "auth_required" ? "unauthorized" : "upstream",
+        failure.message,
+      ),
+      throttleOf(error),
     )
   }
 }

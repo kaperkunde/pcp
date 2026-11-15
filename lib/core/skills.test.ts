@@ -132,7 +132,7 @@ beforeEach(async () => {
     allowAllServers: true,
     keepMemories: true,
   })
-  await writeToolAccess(tokenId, serverId, "list_cards", "allowed")
+  await writeToolAccess(ctx, tokenId, serverId, "list_cards", "allowed")
   scope = { ...(await resolveApiToken(token))!, publicUrl: PUBLIC_URL }
 })
 

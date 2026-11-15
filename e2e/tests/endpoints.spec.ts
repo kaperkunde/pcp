@@ -273,6 +273,9 @@ const GATEWAY_TOOLS = [
   "read_result",
   "register_server",
   "propose_tool_access",
+  // A server's limits, read and proposed (#143).
+  "get_server_limits",
+  "propose_server_limits",
 ]
 
 test("a token reads and changes endpoints only when the owner says so", async ({

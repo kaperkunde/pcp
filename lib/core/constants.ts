@@ -34,8 +34,6 @@ export const NEW_SECRET = "new"
  */
 export const MAX_SIGN_IN_IMPORT_BYTES = 8 * 1024 * 1024
 
-/** The largest OpenAPI schema PCP reads, uploaded or downloaded. */
-export const MAX_SPEC_BYTES = 5 * 1024 * 1024
 export const SPEC_FILE_ACCEPT =
   ".json,.yaml,.yml,application/json,application/yaml,text/yaml"
 
@@ -177,6 +175,7 @@ export type PermissionKind =
   | "exit_use"
   | "script_use"
   | "tab_pace"
+  | "limits_change"
   | "wrapper_change"
   | "skill_change"
   | "repo_change"

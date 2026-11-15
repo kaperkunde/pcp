@@ -76,7 +76,7 @@ async function tokenScope(name: string): Promise<GatewayScope> {
   const resolved = (await resolveApiToken(token))!
 
   for (const tool of ["list_cards", "send_postcard"]) {
-    await writeToolAccess(resolved.tokenId, serverId, tool, "allowed")
+    await writeToolAccess(ctx, resolved.tokenId, serverId, tool, "allowed")
   }
 
   return { ...resolved, publicUrl: "http://localhost:3000" }
@@ -424,7 +424,13 @@ describe("call_tool with a call handle", () => {
       where: { id: serverId },
       data: { enabled: true },
     })
-    await writeToolAccess(scope.tokenId, serverId, "list_cards", "blocked")
+    await writeToolAccess(
+      scope.ctx,
+      scope.tokenId,
+      serverId,
+      "list_cards",
+      "blocked",
+    )
     const blocked = await call(await connect(), "execute_destructive", {
       call_handle: list,
     })
@@ -508,8 +514,14 @@ describe("call_tool with a call handle", () => {
     const browser = await db().mcpServer.findFirstOrThrow({
       where: { kind: "browser" },
     })
-    await writeToolAccess(scope.tokenId, browser.id, "snapshot", "ask")
-    await writeToolAccess(scope.tokenId, browser.id, "click", "ask")
+    await writeToolAccess(
+      scope.ctx,
+      scope.tokenId,
+      browser.id,
+      "snapshot",
+      "ask",
+    )
+    await writeToolAccess(scope.ctx, scope.tokenId, browser.id, "click", "ask")
     const client = await connect()
     const snapshot = await describedHandle(client, "browser", "snapshot")
     const click = await describedHandle(client, "browser", "click")

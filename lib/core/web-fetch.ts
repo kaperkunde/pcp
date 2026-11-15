@@ -38,7 +38,8 @@ import {
 import { MAX_FETCH_RULES } from "./fetch/limits"
 import type { ExitDialer } from "./exits/dial"
 import { listExitLevels, type ExitLevelView } from "./exits/exits"
-import { callDeadline, pacedResult, paceSite } from "./pacing"
+import { recordSite, siteCooling } from "./gate"
+import { callDeadline, pacedResult, pacedRetryAfter, paceSite } from "./pacing"
 import type { FetchArgs } from "./fetch/request"
 import {
   emptyRules,
@@ -400,6 +401,9 @@ export async function runFetch(
 ): Promise<CallToolResult> {
   const host = fetchHostOf(args)
   const pace = async (site: string) => {
+    // A site cooling down (lib/core/gate/) is not asked at all.
+    const cooling = siteCooling(ctx, site)
+    if (cooling) return pacedResult(cooling)
     const paced = await paceSite(ctx, site, "web_fetch", { deadline })
     return paced ? pacedResult(paced) : null
   }
@@ -420,24 +424,50 @@ export async function runFetch(
   // most sites never check, and the answer can mean loading Playwright.
   const reading = args.method === "GET" && !exit
   let answer: FetchAnswer
+  const started = Date.now()
 
-  if (reading && clearance(ctx.vaultId, host) && (await available(ctx))) {
-    answer = await solve()
-
-    if (answer.challenged) {
-      answer = await fetcher(args, options)
-    }
-  } else {
-    answer = await fetcher(args, options)
-
-    if (answer.challenged && reading && (await available(ctx))) {
+  try {
+    if (reading && clearance(ctx.vaultId, host) && (await available(ctx))) {
       answer = await solve()
+
+      if (answer.challenged) {
+        answer = await fetcher(args, options)
+      }
+    } else {
+      answer = await fetcher(args, options)
+
+      if (answer.challenged && reading && (await available(ctx))) {
+        answer = await solve()
+      }
     }
+  } catch (error) {
+    recordSite(ctx, host, "web_fetch_site", {
+      ok: false,
+      ms: Date.now() - started,
+    })
+    throw error
   }
 
-  const result = answer.challenged
-    ? withNote(answer.result, await checkHint(ctx, tokenId))
+  // Counted and read for throttling, unless the gate or pacing refused it.
+  const cooled =
+    pacedRetryAfter(answer.result) === null
+      ? recordSite(ctx, host, "web_fetch_site", {
+          ok: answer.result.isError !== true,
+          ms: Date.now() - started,
+          ...(answer.bytes !== undefined ? { bytes: answer.bytes } : {}),
+          throttle: answer.throttle ?? null,
+        })
+      : null
+  const noted = cooled
+    ? withNote(
+        answer.result,
+        `PCP lets ${host} cool down until ${new Date(cooled.until).toISOString()}: ${cooled.reason}; web_fetch refuses it until then.`,
+      )
     : answer.result
+
+  const result = answer.challenged
+    ? withNote(noted, await checkHint(ctx, tokenId))
+    : noted
 
   await recordFetch(ctx, tokenId, host)
   return result
