@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto"
+
 import type { CallToolResult } from "@modelcontextprotocol/server"
 
 import { afterAnswer } from "../after-answer"
@@ -14,6 +16,7 @@ import {
   withNotes,
 } from "../tools/family"
 import { makeRedactor } from "../openapi/redact"
+import { throttleOf, withThrottle } from "../throttle-signal"
 import {
   getServer,
   isMailKind,
@@ -59,6 +62,8 @@ import {
   type ImapDeps,
   type ImapSendHooks,
 } from "./imap"
+import { CallTrace } from "./diagnostics"
+import { dropMailSession } from "./imap-pool"
 import { fetchJmapSession, openJmapBackend } from "./jmap"
 import {
   DEFAULT_SEARCH_LIMIT,
@@ -336,6 +341,9 @@ export async function updateMailAccount(
     await deleteManagedSecret(ctx, existing.oauthTokensId)
   }
 
+  // A changed address or login is another session, never the old one.
+  await dropMailSession(id)
+
   return { reconnect }
 }
 
@@ -404,7 +412,12 @@ async function fail(
         : `${server.name} could not be reached.`,
     )
     .slice(0, 500)
-  await setServerStatus(ctx, server.id, "error", message)
+
+  // A server asking for time is not a server in error: its status stays.
+  if (!throttleOf(error)) {
+    await setServerStatus(ctx, server.id, "error", message)
+  }
+
   return { status: "error", message }
 }
 
@@ -464,24 +477,49 @@ export async function syncMailTools(
   }
 }
 
+/**
+ * What makes a pooled IMAP connection another one: the address and the
+ * login it was made with. Hashed, kept in memory only, never shown.
+ */
+function sessionFingerprint(
+  config: ImapConfig,
+  login: { username: string; password: string },
+): string {
+  return createHash("sha256")
+    .update(
+      JSON.stringify([
+        config.imap.host,
+        config.imap.port,
+        config.imap.secure,
+        login.username,
+        login.password,
+      ]),
+    )
+    .digest("hex")
+}
+
 async function openBackend(
   ctx: VaultContext,
   server: OpenServer,
   credential: MailCredential,
   imap: ImapDeps,
   defer: ImapSendHooks["defer"],
+  trace: CallTrace,
 ): Promise<MailBackend> {
   if (server.kind === "imap") {
-    return openImapBackend(
-      imapConfig(server),
-      loginOf(server, credential),
-      imap,
-      {
-        defer,
-        learned: (serverFilesSent) =>
-          learnServerFilesSent(server.id, serverFilesSent),
+    const config = imapConfig(server)
+    const login = loginOf(server, credential)
+
+    return openImapBackend(config, login, imap, {
+      defer,
+      learned: (serverFilesSent) =>
+        learnServerFilesSent(server.id, serverFilesSent),
+      session: {
+        account: server.id,
+        fingerprint: sessionFingerprint(config, login),
       },
-    )
+      trace,
+    })
   }
 
   let session =
@@ -977,9 +1015,12 @@ export async function callMailTool(
     ? await openAttachments(toolName, args.attachments, open)
     : undefined
   let backend: MailBackend | null = null
+  const trace = new CallTrace(server.id, toolName)
+  const started = Date.now()
+  let outcome: "ok" | "error" | "throttled" = "ok"
 
   try {
-    backend = await openBackend(ctx, server, credential, imap, defer)
+    backend = await openBackend(ctx, server, credential, imap, defer, trace)
     const scrub = makeRedactor(credential.redact)
     const value = await runTool(backend, server, toolName, args, {
       keep,
@@ -993,6 +1034,8 @@ export async function callMailTool(
       checked.notes,
     )
   } catch (error) {
+    outcome = throttleOf(error) ? "throttled" : "error"
+
     if (error instanceof MailRequestError) {
       return errorToolResult(error.message, { redact: credential.redact })
     }
@@ -1012,11 +1055,22 @@ export async function callMailTool(
     }
 
     const failure = await fail(ctx, server, error, credential)
-    throw new PcpError(
+    const thrown = new PcpError(
       failure.status === "auth_required" ? "unauthorized" : "upstream",
       failure.message,
     )
+    const slow = throttleOf(error)
+
+    // The server's own "slow down" rides on the error, for the call gate.
+    throw slow ? withThrottle(thrown, slow) : thrown
   } finally {
     await backend?.close().catch(() => {})
+
+    // JMAP has no phases of its own: the whole call is one command.
+    if (server.kind !== "imap") {
+      trace.add("command", Date.now() - started)
+    }
+
+    trace.finish(outcome)
   }
 }

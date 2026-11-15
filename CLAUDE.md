@@ -308,7 +308,16 @@ so in the summary; the bump itself waits for the request.
   is required, never optional); a JMAP session's API, download and upload
   addresses are taken only on the session URL's origin, and redirects are not
   followed. An attachment sent is a kept result of the token's own, read
-  before anything connects. Nothing deletes mail for good: delete moves to the Trash. An
+  before anything connects. An IMAP account keeps one signed-in session for
+  its calls (`mail/imap-pool.ts`, as the SSH pool does: opened only by a call
+  that hands in the login, at most `IMAP_MAX_CONNECTIONS` per account, idled
+  out, dropped when broken or when the address or login changes, never
+  reopened by a timer); other than that it lists mailbox names without STATUS
+  (counts only for `list_mailboxes`), logs out for at most 3 seconds, and
+  keeps its call timings and the server's own [ALERT]/BYE lines in memory
+  only (`mail/diagnostics.ts`, scrubbed, never on disk or in the request
+  log). A server's "slow down" is an Error with `pcpThrottle`
+  (`lib/core/throttle-signal.ts`). Nothing deletes mail for good: delete moves to the Trash. An
   assistant adds one only through `register_server` (kind `jmap` or `imap`),
   a permission request like any new server: the owner types the password or
   token in on PCP's page or connects it, the assistant never sees a value, and

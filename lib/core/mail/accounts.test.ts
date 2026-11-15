@@ -24,7 +24,10 @@ import {
 import { callServerTool, syncServerTools } from "../upstream"
 import { setupVault } from "../vault"
 import { callMailTool, createMailAccount, updateMailAccount } from "./accounts"
+import { clearMailDiagnostics, mailDiagnostics } from "./diagnostics"
 import { createFakeJmap, type FakeJmap } from "./fake-jmap"
+import { closeMailSessions } from "./imap-pool"
+import { throttleOf } from "../throttle-signal"
 import type { ImapClientLike, ImapDeps } from "./imap"
 
 /** A refusal PCP wrote, with its code: nothing was done. */
@@ -1103,5 +1106,170 @@ describe("OAuth", () => {
       kind: "needs_owner",
       reason: "connect",
     })
+  })
+})
+
+describe("an IMAP account's session", () => {
+  afterEach(async () => {
+    await closeMailSessions()
+    clearMailDiagnostics()
+  })
+
+  function setup(connect: () => Promise<ImapClientLike>) {
+    const calls: string[] = []
+    const make = (): ImapClientLike =>
+      ({
+        secureConnection: true,
+        usable: true,
+        capabilities: new Map([["IMAP4rev1", true]]),
+        mailbox: { path: "INBOX", uidValidity: 7n, exists: 0 },
+        async logout() {
+          calls.push("logout")
+        },
+        close() {
+          calls.push("close")
+        },
+        async noop() {},
+        async list() {
+          calls.push("list")
+          return [
+            {
+              path: "INBOX",
+              name: "INBOX",
+              delimiter: "/",
+              parentPath: "",
+              flags: new Set<string>(),
+            },
+          ]
+        },
+        async getMailboxLock(path: string) {
+          return { path, release() {} }
+        },
+        async fetchAll() {
+          return []
+        },
+      }) as unknown as ImapClientLike
+    const imap: ImapDeps = {
+      connect: connect ?? (async () => make()),
+      smtp: async () => {
+        throw new Error("not used")
+      },
+      compose: async () => Buffer.from(""),
+      sleep: async () => {},
+    }
+
+    return { imap, calls, make }
+  }
+
+  const credential = () => ({
+    headers: {},
+    login: { username: "ada@example.com", password: PASSWORD },
+    redact: [PASSWORD],
+  })
+
+  async function imapAccount() {
+    return account({
+      protocol: "imap",
+      url: "imaps://mail.example.com",
+      smtpUrl: "smtps://mail.example.com",
+    })
+  }
+
+  it("logs in once for the calls of an account, however they come", async () => {
+    const id = await imapAccount()
+    const row = await getServer(ctx, id)
+    let logins = 0
+    const { imap, calls, make } = setup(async () => {
+      logins++
+      return make()
+    })
+
+    await Promise.all(
+      [1, 2, 3, 4, 5].map(() =>
+        callMailTool(
+          ctx,
+          row,
+          "search_emails",
+          { limit: 1 },
+          { credential: credential(), imap },
+        ),
+      ),
+    )
+    await callMailTool(
+      ctx,
+      row,
+      "search_emails",
+      { limit: 1 },
+      { credential: credential(), imap },
+    )
+
+    expect(logins).toBeLessThanOrEqual(2)
+    expect(calls).not.toContain("logout")
+    // The names were listed by the connections that started together, not
+    // by each of the six calls.
+    expect(calls.filter((call) => call === "list").length).toBeLessThanOrEqual(
+      2,
+    )
+
+    const kept = mailDiagnostics(id)
+    expect(kept).toHaveLength(6)
+    expect(kept[0]).toMatchObject({ tool: "search_emails", outcome: "ok" })
+    expect(kept.some((call) => call.reused)).toBe(true)
+  })
+
+  it("starts over when the account's login changes", async () => {
+    const id = await imapAccount()
+    const row = await getServer(ctx, id)
+    let logins = 0
+    const { imap, make } = setup(async () => {
+      logins++
+      return make()
+    })
+    const call = (password: string) =>
+      callMailTool(
+        ctx,
+        row,
+        "search_emails",
+        { limit: 1 },
+        {
+          credential: {
+            ...credential(),
+            login: { username: "ada@example.com", password },
+          },
+          imap,
+        },
+      )
+
+    await call(PASSWORD)
+    await call(PASSWORD)
+    expect(logins).toBe(1)
+    await call("another-password-1234")
+    expect(logins).toBe(2)
+  })
+
+  it("passes on a server's slow-down, and does not call the account broken", async () => {
+    const id = await imapAccount()
+    const row = await getServer(ctx, id)
+    const { imap } = setup(async () => {
+      throw Object.assign(new Error("Command failed"), {
+        responseStatus: "NO",
+        serverResponseCode: "THROTTLED",
+        responseText: "Too many commands",
+      })
+    })
+    const error = await callMailTool(
+      ctx,
+      row,
+      "search_emails",
+      { limit: 1 },
+      { credential: credential(), imap },
+    ).catch((thrown: unknown) => thrown)
+
+    expect(error).toBeInstanceOf(Error)
+    expect(throttleOf(error)).toMatchObject({
+      reason: expect.stringMatching(/throttl/i),
+    })
+    expect((await getServer(ctx, id)).status).not.toBe("error")
+    expect(mailDiagnostics(id)[0]).toMatchObject({ outcome: "throttled" })
   })
 })
