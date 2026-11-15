@@ -649,7 +649,11 @@ embeddingProvider`, which hands `embeddings/provider.ts` the header;
   the server and tool under the vault key (`crypto.ts keyedHash`,
   `recordedTool`) and a short answer encrypted, never a
   kept result; it is never exported and is pruned by the cleanup. A new
-  way to call a tool goes through it, with a test.
+  way to call a tool goes through it, with a test. Whether it watches one
+  of PCP's own tools is a property of the tool, declared at its
+  registration (`tools/guard.ts`: `never`, or `reads` by the arguments),
+  not a list in the gateway; the owner's per-tool window takes them as
+  the server `pcp`.
 - `lib/core/openapi` never fetches a remote `$ref`, never follows a redirect
   on a call, and never lets an argument set a header or leave the base URL.
   A schema is untrusted input: new limits go in `openapi/limits.ts`.
