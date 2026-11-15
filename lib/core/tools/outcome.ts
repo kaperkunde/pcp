@@ -53,6 +53,13 @@ export type ToolErrorCode =
   /** Too many calls of this kind in a short time; nothing ran. */
   | "rate_limited"
   /**
+   * The place the call goes to takes no more calls just now: its pace, its
+   * limits, or it is cooling down after asking PCP to slow down
+   * (lib/core/pacing/, lib/core/gate/). Nothing was sent; `retryAfterMs`
+   * says when to try again.
+   */
+  | "paced"
+  /**
    * The call took longer than its timeout and was answered without waiting
    * further (the browser's timeout_ms); the message names the step and
    * whether what it was asked may have happened.
@@ -96,6 +103,20 @@ export const SERVER_STATE = z.object({
   connected: z.boolean(),
   status: z.string(),
   toolCount: z.number(),
+  /**
+   * Set while the server is cooling down after asking PCP to slow down
+   * (lib/core/gate/): why, since and until when (ISO times), and how long
+   * from now; calls to it are refused until then.
+   */
+  cooling: z
+    .object({
+      reason: z.string(),
+      since: z.string(),
+      until: z.string(),
+      retryAfterMs: z.number(),
+    })
+    .nullable()
+    .optional(),
 })
 
 export type ServerState = z.infer<typeof SERVER_STATE>

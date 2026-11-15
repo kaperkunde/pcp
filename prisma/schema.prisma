@@ -807,6 +807,12 @@ model McpServer {
   /// to the tools its first read finds, then cleared
   /// (lib/core/proposed-access.ts). Null when there are none.
   pendingAccess String?           @map("pending_access")
+  /// The server's own call limits (lib/core/gate/): JSON of the fields the
+  /// owner set (calls at once, pause, calls a minute, time per call, bytes
+  /// a day, cool-downs), AES-256-GCM under the vault's data key with
+  /// "mcp_server:<id>:limits" as associated data. Null: its kind's
+  /// defaults. The instance's own: never synced or shared.
+  limits        Bytes?
 
   /// What the server is and where it is, sealed (#96): the JSON of
   /// lib/core/server-meta.ts ServerMeta (name, short name, description, address,

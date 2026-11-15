@@ -434,6 +434,9 @@ const McpServerRow = renamedFrom(
     // Levels the owner saved with an approval, waiting for the server's first
     // read of its tools: absent from older exports, which had none.
     pendingAccess: str.nullable().default(null),
+    // The server's own call limits, sealed (lib/core/gate/): absent from
+    // older exports, whose servers follow their kind's defaults.
+    limits: bytesOrNull.default(null),
     // The sealed values: absent from older files, whose servers hold them in
     // the plain columns until the vault's rows are sealed.
     meta: bytesOrNull.default(null),

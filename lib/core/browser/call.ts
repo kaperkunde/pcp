@@ -10,6 +10,7 @@ import type { VaultContext } from "../context"
 import { db } from "../db"
 import { invalid, PcpError } from "../errors"
 import { CHALLENGE_LINE } from "../fetch/challenge"
+import { siteCooling } from "../gate"
 import { isPcpSite } from "../fetch/fetch"
 import { sliceText } from "../fetch/html"
 import { resolvePrivateAccess, siteKey } from "../fetch/rules"
@@ -1284,6 +1285,14 @@ async function pacedTurn(
 ): Promise<Turn | CallToolResult> {
   if (!site || !pacingClass) {
     return NO_TURN
+  }
+
+  // A site cooling down (lib/core/gate/: it asked PCP to slow down) is not
+  // acted on at all until it is over.
+  const cooling = siteCooling(scope.ctx, site)
+
+  if (cooling) {
+    return pacedResult(cooling)
   }
 
   // A page opened waits for the one the tab shows to finish loading first

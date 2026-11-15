@@ -3,6 +3,7 @@ import { STATUS_CODES } from "node:http"
 import type { CallToolResult } from "@modelcontextprotocol/client"
 
 import { isPcpError, PcpError } from "../errors"
+import { httpThrottle, withThrottle, type Throttle } from "../gate/signals"
 import { PublicOnlyRefusal } from "../public-only"
 import { AddressBlockedError } from "./address"
 import { describeFetchError, discard, readCapped } from "./http"
@@ -152,9 +153,32 @@ function holdsSecret(bytes: Buffer, values: string[]): boolean {
   )
 }
 
+/**
+ * A call, and whether its answer asks PCP to slow down (429, a 503 with
+ * Retry-After, rate-limit headers with nothing left): marked on the result
+ * for the call gate (lib/core/gate/signals.ts), which reads it off.
+ */
 export async function executeCall(
   request: BuiltRequest,
+  options: Parameters<typeof sendCall>[1] = {},
+): Promise<CallOutcome> {
+  let throttle: Throttle | null = null
+  const outcome = await sendCall(request, {
+    ...options,
+    seen: (response) => {
+      throttle = httpThrottle(response.status, response.headers)
+    },
+  })
+
+  return throttle
+    ? { ...outcome, result: withThrottle(outcome.result, throttle) }
+    : outcome
+}
+
+async function sendCall(
+  request: BuiltRequest,
   {
+    seen,
     timeoutMs = CALL_TIMEOUT_MS,
     maxResponseBytes = MAX_RESPONSE_BYTES,
     redact = [],
@@ -178,6 +202,8 @@ export async function executeCall(
     maxFileBytes?: number
     /** Media types the schema declares as a file (`format: binary`). */
     fileTypes?: string[]
+    /** Told the API's answer as it arrives, before its body is read. */
+    seen?: (response: Response) => void
   } & SendOptions = {},
 ): Promise<CallOutcome> {
   // Everything below that is built from the answer goes through this: the
@@ -209,6 +235,7 @@ export async function executeCall(
     )
   }
 
+  seen?.(response)
   const status = response.status
 
   if (status >= 300 && status < 400) {
