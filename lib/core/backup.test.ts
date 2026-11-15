@@ -1289,6 +1289,8 @@ describe("restoring", { timeout: 60_000 }, () => {
     })
     // The companion comes after the secret that names it, in the file as in
     // the vault: the restore writes both before pointing one at the other.
+    // A tick between the two, so they are not made in the same millisecond.
+    await new Promise((resolve) => setTimeout(resolve, 5))
     const codes = await createSecret(ctx, {
       name: "Shop code",
       value: "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ",
