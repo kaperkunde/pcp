@@ -95,6 +95,10 @@ export async function storeTools(
             title: tool.title ?? null,
             description: tool.description ?? "",
             annotationsTitle: annotations.annotationsTitle,
+            icons:
+              tool.icons === undefined || tool.icons === null
+                ? null
+                : JSON.stringify(tool.icons),
             inputSchema: JSON.stringify(tool.inputSchema ?? { type: "object" }),
             operation: tool.operation ?? null,
             output: tool.output ?? null,
@@ -104,10 +108,6 @@ export async function storeTools(
                 : JSON.stringify(tool.outputSchema),
           }),
           annotations: annotations.annotations,
-          icons:
-            tool.icons === undefined || tool.icons === null
-              ? null
-              : JSON.stringify(tool.icons),
         }
 
         if (known.has(tool.name)) {

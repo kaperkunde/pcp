@@ -13,6 +13,7 @@ import { invalid, notFound } from "./errors"
 import { newId } from "./ids"
 import { getServer } from "./servers"
 import { openRuleKey, sealedRuleKey } from "./fetch-rule-keys"
+import { levelNameKeys, openLevelName, sealedLevelName } from "./level-names"
 
 /**
  * What each API token may do with each tool: allowed, ask (the default) or
@@ -70,29 +71,69 @@ function isLevel(value: string): value is ToolAccess {
 }
 
 function levelMap(
-  rows: Array<{ serverId: string; toolName: string; access: string }>,
+  rows: Array<{ serverId: string; name: string; access: string }>,
 ): Map<string, ToolAccess> {
   return new Map(
     rows.flatMap((row) =>
       isLevel(row.access)
-        ? [[accessKey(row.serverId, row.toolName), row.access] as const]
+        ? [[accessKey(row.serverId, row.name), row.access] as const]
         : [],
     ),
   )
 }
 
+/**
+ * A level's tool name is kept as a keyed hash with the name sealed beside
+ * it (#96): every stored level is opened here, so a lookup is by the name
+ * itself; one in the database is by the hash (levelNameKeys).
+ */
+const ACCESS_SELECT = {
+  serverId: true,
+  toolName: true,
+  sealed: true,
+  access: true,
+} as const
+
 /** Every stored level for one token: its own, and the ones for all tokens. */
 export async function loadToolAccess(
-  vaultId: string,
+  ctx: VaultContext,
   tokenId: string,
 ): Promise<StoredAccess> {
-  const select = { serverId: true, toolName: true, access: true } as const
   const [own, shared] = await Promise.all([
-    db().apiTokenToolAccess.findMany({ where: { tokenId }, select }),
-    db().vaultToolAccess.findMany({ where: { vaultId }, select }),
+    db().apiTokenToolAccess.findMany({
+      where: { tokenId },
+      select: ACCESS_SELECT,
+    }),
+    db().vaultToolAccess.findMany({
+      where: { vaultId: ctx.vaultId },
+      select: ACCESS_SELECT,
+    }),
   ])
 
-  return { own: levelMap(own), shared: levelMap(shared) }
+  return {
+    own: levelMap(
+      own.map((row) => ({
+        serverId: row.serverId,
+        access: row.access,
+        name: openLevelName(
+          ctx,
+          "api_token_tool_access",
+          `${tokenId}:${row.serverId}`,
+          { key: row.toolName, sealed: row.sealed },
+        ),
+      })),
+    ),
+    shared: levelMap(
+      shared.map((row) => ({
+        serverId: row.serverId,
+        access: row.access,
+        name: openLevelName(ctx, "vault_tool_access", row.serverId, {
+          key: row.toolName,
+          sealed: row.sealed,
+        }),
+      })),
+    ),
+  }
 }
 
 export function effectiveAccess(
@@ -110,31 +151,50 @@ export function effectiveAccess(
  * catalogue: the permission flow calls this with a tool it just ran.
  */
 export async function writeToolAccess(
+  ctx: VaultContext,
   tokenId: string,
   serverId: string,
   toolName: string,
   access: ToolAccess,
 ): Promise<void> {
+  const names = levelNameKeys(ctx, serverId, toolName)
+
   if (access === "ask") {
     // Ask needs a row only to override a level for all tokens.
-    const shared = await db().vaultToolAccess.findUnique({
-      where: { serverId_toolName: { serverId, toolName } },
+    const shared = await db().vaultToolAccess.findFirst({
+      where: { serverId, toolName: { in: names } },
       select: { access: true },
     })
 
     if (!shared) {
       await db().apiTokenToolAccess.deleteMany({
-        where: { tokenId, serverId, toolName },
+        where: { tokenId, serverId, toolName: { in: names } },
       })
       return
     }
   }
 
-  await db().apiTokenToolAccess.upsert({
-    where: { tokenId_serverId_toolName: { tokenId, serverId, toolName } },
-    create: { tokenId, serverId, toolName, access },
-    update: { access },
-  })
+  const { key, sealed } = sealedLevelName(
+    ctx,
+    "api_token_tool_access",
+    `${tokenId}:${serverId}`,
+    serverId,
+    toolName,
+  )
+
+  await db().$transaction([
+    // One from before, in plain text, gives way to the sealed one.
+    db().apiTokenToolAccess.deleteMany({
+      where: { tokenId, serverId, toolName, sealed: null },
+    }),
+    db().apiTokenToolAccess.upsert({
+      where: {
+        tokenId_serverId_toolName: { tokenId, serverId, toolName: key },
+      },
+      create: { tokenId, serverId, toolName: key, sealed, access },
+      update: { access },
+    }),
+  ])
 }
 
 export async function setToolAccess(
@@ -151,7 +211,7 @@ export async function setToolAccess(
     throw notFound("That tool")
   }
 
-  await writeToolAccess(tokenId, serverId, toolName, access)
+  await writeToolAccess(ctx, tokenId, serverId, toolName, access)
 }
 
 /** One level, the token's own, for every tool the server has now. */
@@ -170,9 +230,14 @@ export async function setServerToolAccess(
           (
             await db().vaultToolAccess.findMany({
               where: { serverId },
-              select: { toolName: true },
+              select: { toolName: true, sealed: true },
             })
-          ).map((row) => row.toolName),
+          ).map((row) =>
+            openLevelName(ctx, "vault_tool_access", serverId, {
+              key: row.toolName,
+              sealed: row.sealed,
+            }),
+          ),
         )
       : null
   const names = server.tools
@@ -184,12 +249,16 @@ export async function setServerToolAccess(
     ...(names.length > 0
       ? [
           db().apiTokenToolAccess.createMany({
-            data: names.map((toolName) => ({
-              tokenId,
-              serverId,
-              toolName,
-              access,
-            })),
+            data: names.map((name) => {
+              const { key, sealed } = sealedLevelName(
+                ctx,
+                "api_token_tool_access",
+                `${tokenId}:${serverId}`,
+                serverId,
+                name,
+              )
+              return { tokenId, serverId, toolName: key, sealed, access }
+            }),
           }),
         ]
       : []),
@@ -218,17 +287,36 @@ export async function setToolAccessShared(
   }
 
   const level = effectiveAccess(
-    await loadToolAccess(ctx.vaultId, tokenId),
+    await loadToolAccess(ctx, tokenId),
     serverId,
     toolName,
   )
-  const own = { tokenId, serverId, toolName }
+  const names = levelNameKeys(ctx, serverId, toolName)
+  const own = { tokenId, serverId, toolName: { in: names } }
 
   if (shared) {
+    const { key, sealed } = sealedLevelName(
+      ctx,
+      "vault_tool_access",
+      serverId,
+      serverId,
+      toolName,
+    )
+
     await db().$transaction([
+      // One from before, in plain text, gives way to the sealed one.
+      db().vaultToolAccess.deleteMany({
+        where: { serverId, toolName, sealed: null },
+      }),
       db().vaultToolAccess.upsert({
-        where: { serverId_toolName: { serverId, toolName } },
-        create: { vaultId: ctx.vaultId, serverId, toolName, access: level },
+        where: { serverId_toolName: { serverId, toolName: key } },
+        create: {
+          vaultId: ctx.vaultId,
+          serverId,
+          toolName: key,
+          sealed,
+          access: level,
+        },
         update: { access: level },
       }),
       db().apiTokenToolAccess.deleteMany({ where: own }),
@@ -236,11 +324,31 @@ export async function setToolAccessShared(
     return
   }
 
+  const mine = sealedLevelName(
+    ctx,
+    "api_token_tool_access",
+    `${tokenId}:${serverId}`,
+    serverId,
+    toolName,
+  )
+
   await db().$transaction([
-    db().vaultToolAccess.deleteMany({ where: { serverId, toolName } }),
+    db().vaultToolAccess.deleteMany({
+      where: { serverId, toolName: { in: names } },
+    }),
     db().apiTokenToolAccess.deleteMany({ where: own }),
     ...(level !== "ask"
-      ? [db().apiTokenToolAccess.create({ data: { ...own, access: level } })]
+      ? [
+          db().apiTokenToolAccess.create({
+            data: {
+              tokenId,
+              serverId,
+              toolName: mine.key,
+              sealed: mine.sealed,
+              access: level,
+            },
+          }),
+        ]
       : []),
   ])
 }
@@ -308,12 +416,28 @@ export async function copyTokenAccess(
     ...(source.toolAccess.length > 0
       ? [
           db().apiTokenToolAccess.createMany({
-            data: source.toolAccess.map((row) => ({
-              tokenId: targetId,
-              serverId: row.serverId,
-              toolName: row.toolName,
-              access: row.access,
-            })),
+            data: source.toolAccess.map((row) => {
+              // A name is sealed to its token's row: sealed again for the copy.
+              const { key, sealed } = sealedLevelName(
+                ctx,
+                "api_token_tool_access",
+                `${targetId}:${row.serverId}`,
+                row.serverId,
+                openLevelName(
+                  ctx,
+                  "api_token_tool_access",
+                  `${sourceId}:${row.serverId}`,
+                  { key: row.toolName, sealed: row.sealed },
+                ),
+              )
+              return {
+                tokenId: targetId,
+                serverId: row.serverId,
+                toolName: key,
+                sealed,
+                access: row.access,
+              }
+            }),
           }),
         ]
       : []),
@@ -366,7 +490,7 @@ export async function listTokenToolAccess(
       tools: { select: TOOL_ABOUT_SELECT },
     },
   })
-  const stored = await loadToolAccess(ctx.vaultId, tokenId)
+  const stored = await loadToolAccess(ctx, tokenId)
 
   return servers
     .map((row) => ({

@@ -2,6 +2,7 @@ import { SECRET_PLACEHOLDER } from "../constants"
 import type { VaultContext } from "../context"
 import { db } from "../db"
 import { openServiceSpec, SERVICE_SPEC_SELECT } from "../spec-rows"
+import { openServiceOwn } from "../services/own-values"
 import { toolOverrides } from "../tool-rows"
 import {
   DEFINITION_META_SELECT,
@@ -167,9 +168,10 @@ async function wrapperDocument(
 
 /** A header-authenticated row's headers and their formats, no secret. */
 async function headerAuth(
+  ctx: VaultContext,
   row: OpenServer,
 ): Promise<EndpointAuthDocument & { kind: "header" }> {
-  const extras = await extraAuthHeaders(row.id)
+  const extras = await extraAuthHeaders(ctx, row.id)
   const headers: HeaderDocument[] = extras.map((extra) => ({
     header: extra.headerName,
     template: extra.valueTemplate,
@@ -204,7 +206,8 @@ export async function instanceSignIn(
   ctx: VaultContext,
   row: OpenServer,
 ): Promise<string[]> {
-  const extras = row.authType === "header" ? await extraAuthHeaders(row.id) : []
+  const extras =
+    row.authType === "header" ? await extraAuthHeaders(ctx, row.id) : []
   const names = await secretNames(ctx, [
     row.authSecretId,
     row.oauthClientSecretId,
@@ -273,7 +276,8 @@ export async function serviceOwnLines(
 
   const bindings = readEnvBindings(spec.env)
   const names = await secretNames(ctx, Object.values(bindings))
-  const publish = readPublish(spec.publish)
+  const own = openServiceOwn(ctx, spec)
+  const publish = readPublish(own.publish)
 
   return {
     runsOn:
@@ -288,7 +292,7 @@ export async function serviceOwnLines(
             )
             .join(", ")
         : "No ports",
-    container: spec.containerName,
+    container: own.containerName,
     secrets: Object.entries(bindings).map(
       ([name, id]) => `${name} takes "${names.get(id) ?? "(none)"}"`,
     ),
@@ -314,7 +318,7 @@ async function endpointDocument(
 
   switch (row.authType) {
     case "header":
-      auth = await headerAuth(row)
+      auth = await headerAuth(ctx, row)
       break
     case "basic":
       auth = { kind: "basic", username: null, secret: null }
@@ -343,6 +347,7 @@ async function endpointDocument(
 }
 
 async function serverDocument(
+  ctx: VaultContext,
   row: OpenServer,
   named: Named,
 ): Promise<ServerDocument> {
@@ -350,7 +355,7 @@ async function serverDocument(
 
   switch (row.authType) {
     case "header":
-      auth = await headerAuth(row)
+      auth = await headerAuth(ctx, row)
       break
     case "oauth":
       auth = oauthAuth(row)
@@ -433,7 +438,7 @@ async function documentOfRow(
     case "openapi":
       return endpointDocument(ctx, row, named)
     case "mcp":
-      return serverDocument(row, named)
+      return serverDocument(ctx, row, named)
     case "service":
       return serviceDocument(ctx, row, named)
   }

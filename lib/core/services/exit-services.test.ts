@@ -1,3 +1,4 @@
+import { openServiceOwn } from "./own-values"
 import { readFileSync } from "node:fs"
 import http from "node:http"
 import type net from "node:net"
@@ -463,7 +464,9 @@ describe(
       const before = await db().serviceSpec.findUniqueOrThrow({
         where: { serverId: launched.id },
       })
-      expect(JSON.parse(before.plainValues)).toEqual({
+      // Sealed: the plain column holds nothing of what the owner typed.
+      expect(before.plainValues).toBe("{}")
+      expect(JSON.parse(openServiceOwn(ctx, before).values)).toEqual({
         VPN_SERVICE_PROVIDER: "mullvad",
         SERVER_COUNTRIES: "Sweden",
       })

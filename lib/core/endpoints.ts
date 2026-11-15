@@ -489,7 +489,7 @@ async function applySpec(
 
   const message = statusNotes(
     server,
-    await authHeaderNames(server),
+    await authHeaderNames(ctx, server),
     generated,
     schemaServerUrl(generated, fetchedFrom ?? server.specUrl),
   )
@@ -574,7 +574,7 @@ async function rebuildFromCopy(
 
     const generated = generateEndpointTools(spec.text, {
       readOnly: server.readOnly,
-      authHeaderNames: await authHeaderNames(server),
+      authHeaderNames: await authHeaderNames(ctx, server),
       patches: spec.patches,
     })
 
@@ -589,7 +589,7 @@ async function rebuildFromCopy(
       "ok",
       statusNotes(
         server,
-        await authHeaderNames(server),
+        await authHeaderNames(ctx, server),
         generated,
         schemaServerUrl(generated, server.specUrl),
       ),
@@ -652,7 +652,7 @@ export async function rebuildOutdatedEndpoints(ctx: VaultContext): Promise<{
 
       const generated = generateEndpointTools(spec.text, {
         readOnly: server.readOnly,
-        authHeaderNames: await authHeaderNames(server),
+        authHeaderNames: await authHeaderNames(ctx, server),
         patches: spec.patches,
       })
 
@@ -720,7 +720,7 @@ export async function endpointMigration(
       return null
     }
 
-    const headers = await authHeaderNames(server as OpenServer)
+    const headers = await authHeaderNames(ctx, server as OpenServer)
 
     try {
       const generated = generateEndpointTools(spec.text, {
@@ -1012,7 +1012,7 @@ export async function createEndpoint(
             oauthAuthorizeParams: data.oauthAuthorizeParams,
             ...oauth,
           }),
-          authHeaders: extraAuthHeadersWrite(data.authExtraHeaders, {
+          authHeaders: extraAuthHeadersWrite(ctx, data.authExtraHeaders, {
             replace: false,
           }),
         },
@@ -1167,7 +1167,7 @@ export async function updateEndpoint(
       authHeaderName: data.authHeaderName,
       authValueTemplate: data.authValueTemplate,
       ...secretColumns(data, secretId),
-      authHeaders: extraAuthHeadersWrite(data.authExtraHeaders, {
+      authHeaders: extraAuthHeadersWrite(ctx, data.authExtraHeaders, {
         replace: true,
       }),
       oauthClientId: data.oauthClientId,
@@ -1359,7 +1359,7 @@ export async function changeEndpoint(
   const patches = changes.patches ?? stored?.patches ?? []
   const generated = generateEndpointTools(text, {
     readOnly,
-    authHeaderNames: await authHeaderNames(existing),
+    authHeaderNames: await authHeaderNames(ctx, existing),
     patches,
   })
   const server = await writeChange(
@@ -1491,7 +1491,7 @@ export async function syncEndpointTools(
     const patches = stored?.patches ?? []
     const generated = generateEndpointTools(text, {
       readOnly: server.readOnly,
-      authHeaderNames: await authHeaderNames(server),
+      authHeaderNames: await authHeaderNames(ctx, server),
       patches,
     })
 

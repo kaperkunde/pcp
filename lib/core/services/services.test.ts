@@ -1,3 +1,6 @@
+import { openRequestTool } from "../level-names"
+import { ensureSealed, forgetSealedVaults } from "../sealing/convert"
+import { openServiceOwn } from "./own-values"
 import {
   createServer as createHttpServer,
   type IncomingMessage,
@@ -976,6 +979,120 @@ describe("a running service", { timeout: 30_000 }, () => {
     expect(docker.state().calls.length).toBe(before)
   })
 
+  describe("what the owner typed for it, sealed", () => {
+    /** The row as stored: the plain columns and whether the sealed one is set. */
+    const stored = (id: string) =>
+      db().$queryRawUnsafe<
+        Array<{
+          container_name: string
+          publish: string
+          plain_values: string
+          sealed_own: Uint8Array | null
+        }>
+      >(
+        `SELECT "container_name", "publish", "plain_values", "sealed_own" FROM "service_spec" WHERE "server_id" = ?`,
+        id,
+      )
+
+    /** A row as an older PCP wrote it: the values in their plain columns. */
+    async function plainRow(id: string) {
+      const own = openServiceOwn(
+        ctx,
+        await db().serviceSpec.findUniqueOrThrow({ where: { serverId: id } }),
+      )
+      await db().$executeRawUnsafe(
+        `UPDATE "service_spec" SET "container_name" = ?, "publish" = ?, "plain_values" = ?, "sealed_own" = NULL WHERE "server_id" = ?`,
+        own.containerName,
+        own.publish,
+        own.values,
+        id,
+      )
+    }
+
+    it("keeps the container's name, where it is published and the typed values in one sealed value", async () => {
+      const { service } = await launched()
+      const [row] = await stored(service.id)
+
+      expect(row).toMatchObject({
+        container_name: "",
+        publish: "{}",
+        plain_values: "{}",
+      })
+      expect(row!.sealed_own).not.toBeNull()
+      expect(
+        openServiceOwn(
+          ctx,
+          await db().serviceSpec.findUniqueOrThrow({
+            where: { serverId: service.id },
+          }),
+        ),
+      ).toMatchObject({ containerName: "pcp-docs" })
+      expect((await serviceView(ctx, service.id)).containerName).toBe(
+        "pcp-docs",
+      )
+    })
+
+    it("reads a service from before, brings it up again, and seals it on a request", async () => {
+      const { service } = await launched()
+      await plainRow(service.id)
+      expect((await stored(service.id))[0]).toMatchObject({
+        container_name: "pcp-docs",
+      })
+
+      // Everything that reads the values works on the old form.
+      expect((await serviceView(ctx, service.id)).containerName).toBe(
+        "pcp-docs",
+      )
+      docker.update((state) => {
+        state.containers["pcp-docs"]!.state = "exited"
+      })
+      expect(
+        await reconcileServices(ctx, PUBLIC, { now: Date.now() + 3_600_000 }),
+      ).toEqual({ started: [service.id] })
+      expect(docker.state().containers["pcp-docs"]!.state).toBe("running")
+
+      // Another launched on the same host does not take its name.
+      const hostId = (await db().serviceSpec.findFirstOrThrow()).hostId!
+      const second = await launchService(
+        ctx,
+        await launchInput(hostId, { name: "Docs" }),
+        FAST,
+      )
+      expect((await serviceView(ctx, second.id)).containerName).not.toBe(
+        "pcp-docs",
+      )
+
+      forgetSealedVaults()
+      expect(await ensureSealed(ctx)).toBe(true)
+      const [row] = await stored(service.id)
+      expect(row).toMatchObject({
+        container_name: "",
+        publish: "{}",
+        plain_values: "{}",
+      })
+      expect(row!.sealed_own).not.toBeNull()
+      expect((await serviceView(ctx, service.id)).containerName).toBe(
+        "pcp-docs",
+      )
+    })
+
+    it("travels in an export as it is, and a file from before restores", async () => {
+      const { service } = await launched()
+      const file = await exportVault(ctx, "export password 123")
+      const { payload } = await readExport(file, "export password 123")
+
+      expect(JSON.stringify(payload)).not.toContain("pcp-docs")
+      await restoreExport(
+        payload,
+        { into: "vault", ctx },
+        { restoreHostSettings: false },
+      )
+      expect((await serviceView(ctx, service.id)).containerName).toBe(
+        "pcp-docs",
+      )
+    })
+  })
+
   it("reaches a service launched before tunnels directly, until it is made again", async () => {
     const { service, endpoint } = await launched()
     await db().serviceSpec.update({
@@ -1123,14 +1240,11 @@ describe("a running service", { timeout: 30_000 }, () => {
       where: secretNameWhere(ctx, "docs-key"),
     })
     // The owner's own header, on the server's page.
-    await db().mcpServer.update({
-      where: { id: launched.registeredId! },
-      data: {
-        authType: "header",
-        authHeaderName: "X-Owner",
-        authValueTemplate: "{{secret}}",
-        authSecretId: secret.id,
-      },
+    await writeServer(ctx, launched.registeredId!, {
+      authType: "header",
+      authHeaderName: "X-Owner",
+      authValueTemplate: "{{secret}}",
+      authSecretId: secret.id,
     })
 
     await recreateService(ctx, launched.id, FAST)
@@ -1139,14 +1253,11 @@ describe("a running service", { timeout: 30_000 }, () => {
       authHeaderName: "X-Owner",
     })
 
-    await db().mcpServer.update({
-      where: { id: launched.registeredId! },
-      data: {
-        authType: "oauth",
-        authHeaderName: null,
-        authValueTemplate: null,
-        authSecretId: null,
-      },
+    await writeServer(ctx, launched.registeredId!, {
+      authType: "oauth",
+      authHeaderName: null,
+      authValueTemplate: null,
+      authSecretId: null,
     })
     await writeServiceDefinition(
       ctx,
@@ -1174,22 +1285,19 @@ describe("a running service", { timeout: 30_000 }, () => {
     })
     // The owner's own header, with a further one named as the definition's
     // header will be.
-    await db().mcpServer.update({
-      where: { id: launched.registeredId! },
-      data: {
-        authType: "header",
-        authHeaderName: "X-Owner",
-        authValueTemplate: "{{secret}}",
-        authSecretId: secret.id,
-      },
+    await writeServer(ctx, launched.registeredId!, {
+      authType: "header",
+      authHeaderName: "X-Owner",
+      authValueTemplate: "{{secret}}",
+      authSecretId: secret.id,
     })
     await db().serverAuthHeader.create({
       data: {
         id: "extra-authorization",
         serverId: launched.registeredId!,
         position: 0,
-        headerName: "authorization",
-        valueTemplate: "Bearer {{secret}}",
+        plainHeaderName: "authorization",
+        plainValueTemplate: "Bearer {{secret}}",
         secretId: secret.id,
       },
     })
@@ -1830,7 +1938,7 @@ describe("an image update", { timeout: 30_000 }, () => {
       where: { kind: "service_change" },
     })
     expect(row.serverId).toBe(service.id)
-    expect(row.toolName).toBe("update")
+    expect(openRequestTool(ctx, row)).toBe("update")
     const view = (await getPermissionView(ctx, row.id, PUBLIC))!
     expect(view.title).toBe("Update Docs service to a new image?")
     expect(view.lines).toEqual(

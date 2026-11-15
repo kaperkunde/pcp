@@ -1,3 +1,4 @@
+import { openServiceOwn } from "../services/own-values"
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
 
 import { openServiceSpec } from "../spec-rows"
@@ -159,10 +160,13 @@ describe("PCP's common items", () => {
     ).toBe(newer)
     expect(after).toMatchObject({
       hostId: before.hostId,
-      publish: before.publish,
       env: before.env,
-      containerName: before.containerName,
       registeredId: before.registeredId,
+    })
+    // What the owner typed stays too, sealed or not.
+    expect(openServiceOwn(ctx, after)).toMatchObject({
+      publish: openServiceOwn(ctx, before).publish,
+      containerName: openServiceOwn(ctx, before).containerName,
     })
   })
 })

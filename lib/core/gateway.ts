@@ -478,7 +478,6 @@ const TOOL_ROW = {
   // The annotations' title is sealed with the description.
   ...TOOL_ABOUT_SELECT,
   annotations: true,
-  icons: true,
 } as const satisfies Prisma.McpToolSelect
 
 type ToolRow = {
@@ -488,7 +487,7 @@ type ToolRow = {
   annotations: string | null
   output: string | null
   outputSchema: string | null
-  icons: string | null
+  icons?: string | null
   operation: string | null
 }
 
@@ -2278,7 +2277,7 @@ export function buildGatewayServer(
     }
 
     const outputSchema = parsedOrNothing(row.outputSchema)
-    const icons = parsedOrNothing(row.icons)
+    const icons = parsedOrNothing(row.icons ?? null)
 
     return {
       ...(handle ? { call_handle: handleFor(entry, row) } : {}),

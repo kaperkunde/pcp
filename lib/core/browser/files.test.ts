@@ -927,7 +927,13 @@ describe.skipIf(!executable)(
       await setFetchPrivate(ctx, scope.tokenId, "allowed")
 
       for (const tool of browserTools()) {
-        await writeToolAccess(scope.tokenId, server.id, tool.name, "allowed")
+        await writeToolAccess(
+          scope.ctx,
+          scope.tokenId,
+          server.id,
+          tool.name,
+          "allowed",
+        )
       }
 
       const [clientSide, serverSide] = InMemoryTransport.createLinkedPair()
@@ -995,7 +1001,13 @@ return { file: got.file, sent: sent.includes("Thank you") }
       await setFetchPrivate(ctx, scope.tokenId, "allowed")
 
       for (const tool of browserTools()) {
-        await writeToolAccess(scope.tokenId, server.id, tool.name, "allowed")
+        await writeToolAccess(
+          scope.ctx,
+          scope.tokenId,
+          server.id,
+          tool.name,
+          "allowed",
+        )
       }
 
       const [clientSide, serverSide] = InMemoryTransport.createLinkedPair()

@@ -1,3 +1,4 @@
+import { sealedServiceOwn } from "../services/own-values"
 import YAML from "yaml"
 
 import { createBrowserServer } from "../browser/server"
@@ -397,10 +398,13 @@ export async function addService(
           hostId,
           engine: "docker",
           engineVersion: "27.1.1",
-          containerName: "pcp-docling",
-          publish: JSON.stringify({
-            address: "192.168.7.20",
-            ports: [{ container: 5001, host: 5001 }],
+          ...sealedServiceOwn(ctx, id, {
+            containerName: "pcp-docling",
+            publish: JSON.stringify({
+              address: "192.168.7.20",
+              ports: [{ container: 5001, host: 5001 }],
+            }),
+            values: "{}",
           }),
           env: JSON.stringify({ DOCLING_SERVE_API_KEY: key.id }),
           registeredId,

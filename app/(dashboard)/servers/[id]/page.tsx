@@ -115,7 +115,7 @@ export default async function ServerPage({
     ? ((await storedSpec(ctx, server.id))?.patches ?? [])
     : []
 
-  const authExtraHeaders = await extraAuthHeaders(server.id)
+  const authExtraHeaders = await extraAuthHeaders(ctx, server.id)
 
   const secrets = (await listSecrets(ctx))
     .filter((secret) => secret.kind === "text")

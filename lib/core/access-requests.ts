@@ -10,6 +10,7 @@ import type { VaultContext } from "./context"
 import { db } from "./db"
 import { openServers, SERVER_META_SELECT } from "./server-meta"
 import { invalid } from "./errors"
+import { levelNameKeys, openLevelName, sealedLevelName } from "./level-names"
 import {
   isToolTier,
   loadToolTiers,
@@ -662,9 +663,17 @@ export async function writeAccessLevels(
           vaultId: ctx.vaultId,
           serverId: { in: [...byServer.keys()] },
         },
-        select: { serverId: true, toolName: true },
+        select: { serverId: true, toolName: true, sealed: true },
       })
-    ).map((row) => accessKey(row.serverId, row.toolName)),
+    ).map((row) =>
+      accessKey(
+        row.serverId,
+        openLevelName(ctx, "vault_tool_access", row.serverId, {
+          key: row.toolName,
+          sealed: row.sealed,
+        }),
+      ),
+    ),
   )
   const stored = levels.filter(
     (level) =>
@@ -675,18 +684,34 @@ export async function writeAccessLevels(
   await db().$transaction([
     ...[...byServer.entries()].map(([serverId, names]) =>
       db().apiTokenToolAccess.deleteMany({
-        where: { tokenId, serverId, toolName: { in: names } },
+        where: {
+          tokenId,
+          serverId,
+          toolName: {
+            in: names.flatMap((name) => levelNameKeys(ctx, serverId, name)),
+          },
+        },
       }),
     ),
     ...(stored.length > 0
       ? [
           db().apiTokenToolAccess.createMany({
-            data: stored.map((level) => ({
-              tokenId,
-              serverId: level.serverId,
-              toolName: level.tool,
-              access: level.access,
-            })),
+            data: stored.map((level) => {
+              const { key, sealed } = sealedLevelName(
+                ctx,
+                "api_token_tool_access",
+                `${tokenId}:${level.serverId}`,
+                level.serverId,
+                level.tool,
+              )
+              return {
+                tokenId,
+                serverId: level.serverId,
+                toolName: key,
+                sealed,
+                access: level.access,
+              }
+            }),
           }),
         ]
       : []),

@@ -1,3 +1,4 @@
+import { openRequestTool } from "./level-names"
 import { randomUUID } from "node:crypto"
 
 import type { CallToolResult } from "@modelcontextprotocol/server"
@@ -392,7 +393,7 @@ describe("proposing tool levels", () => {
     const asked = await propose(scope)
     const row = await db().permissionRequest.findFirstOrThrow()
     expect(row.kind).toBe("access")
-    expect(row.toolName).toBe("propose_tool_access")
+    expect(openRequestTool(ctx, row)).toBe("propose_tool_access")
     expect(textOf(asked)).toContain(`${PUBLIC_URL}/permissions/${row.id}`)
     expect(textOf(asked)).toContain("4 tools would change")
     // The assistant can check what its patterns caught, and the link is

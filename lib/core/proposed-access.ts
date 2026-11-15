@@ -20,6 +20,7 @@ import {
   type ToolAccess,
   type ToolTier,
 } from "./constants"
+import { openFromText, sealToText } from "./sealed"
 import type { VaultContext } from "./context"
 import { db } from "./db"
 import { invalid, isPcpError } from "./errors"
@@ -534,10 +535,43 @@ export async function settleChosenAccess(
 
   await db().mcpServer.update({
     where: { id: serverId },
-    data: { pendingAccess: JSON.stringify({ tokenId, rules }) },
+    data: {
+      pendingAccess: sealedPendingAccess(ctx, serverId, { tokenId, rules }),
+    },
   })
 
   return "The owner saved levels and tiers for its tools by name; they apply once, to the tools PCP first reads from it."
+}
+
+/**
+ * What a server keeps of the owner's saved levels, sealed (#96): the
+ * names they are for say what it serves. In its own column as sealed text
+ * ("pcp-sealed:v1:…", "mcp_server:<id>:pending_access" as associated
+ * data); one from before holds the JSON as it is, until converted, and the
+ * clearing below compares the stored text either way.
+ */
+export function sealedPendingAccess(
+  ctx: VaultContext,
+  serverId: string,
+  pending: { tokenId: string; rules: AccessRule[] },
+): string {
+  return sealToText(
+    ctx.dek,
+    pendingAccessAad(serverId),
+    JSON.stringify(pending),
+  )
+}
+
+export function pendingAccessAad(serverId: string): string {
+  return `mcp_server:${serverId}:pending_access`
+}
+
+function openPendingAccess(
+  ctx: VaultContext,
+  serverId: string,
+  stored: string,
+): string {
+  return openFromText(ctx.dek, pendingAccessAad(serverId), stored)
 }
 
 function readPending(
@@ -573,29 +607,41 @@ export async function applyPendingAccess(
   ctx: VaultContext,
   serverId: string,
 ): Promise<void> {
-  const row = await db().mcpServer.findFirst({
-    where: { id: serverId, vaultId: ctx.vaultId },
-    select: { pendingAccess: true },
-  })
+  let row: { pendingAccess: string | null } | null = null
+  let cleared = false
 
-  if (!row?.pendingAccess) {
+  // A converter may seal the stored text between the read and the clear:
+  // when nothing was cleared, read it once more and try again.
+  for (let attempt = 0; attempt < 2 && !cleared; attempt++) {
+    row = await db().mcpServer.findFirst({
+      where: { id: serverId, vaultId: ctx.vaultId },
+      select: { pendingAccess: true },
+    })
+
+    if (!row?.pendingAccess) {
+      return
+    }
+
+    if ((await db().mcpTool.count({ where: { serverId } })) === 0) {
+      return
+    }
+
+    cleared =
+      (
+        await db().mcpServer.updateMany({
+          where: { id: serverId, pendingAccess: row.pendingAccess },
+          data: { pendingAccess: null },
+        })
+      ).count === 1
+  }
+
+  if (!cleared || !row?.pendingAccess) {
     return
   }
 
-  if ((await db().mcpTool.count({ where: { serverId } })) === 0) {
-    return
-  }
-
-  const cleared = await db().mcpServer.updateMany({
-    where: { id: serverId, pendingAccess: row.pendingAccess },
-    data: { pendingAccess: null },
-  })
-
-  if (cleared.count !== 1) {
-    return
-  }
-
-  const pending = readPending(row.pendingAccess)
+  const pending = readPending(
+    openPendingAccess(ctx, serverId, row.pendingAccess),
+  )
 
   if (!pending) {
     return

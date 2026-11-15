@@ -30,6 +30,7 @@ import {
   type AccessAsk,
 } from "./access-requests"
 import { allowSiteFor, allowToolFor, parseAllowForMinutes } from "./allowances"
+import { openRequestTool, sealedLevelName } from "./level-names"
 import type { SyncResult } from "./catalogue"
 import type {
   PasswordRecipe,
@@ -243,7 +244,14 @@ import {
   type RepoShown,
 } from "./repos/assist"
 import type { SecretGrant } from "./wrappers/placeholders"
-import { decideExit, getExit, writeExitAccess } from "./exits/exits"
+import {
+  decideExit,
+  EXIT_ABOUT_SELECT,
+  exitNameWhere,
+  getExit,
+  openExit,
+  writeExitAccess,
+} from "./exits/exits"
 import { exitTitle } from "./exits/use"
 import {
   decideFetch,
@@ -1000,6 +1008,8 @@ function named(ctx: VaultContext, row: LoadedRow): Row {
   const { token, server, ...rest } = row
   return {
     ...rest,
+    // The tool's name opens here, so every reader of a request has it.
+    toolName: openRequestTool(ctx, row),
     server: server ? openServer(ctx, server) : null,
     token: {
       name: tokenName(ctx, token),
@@ -1995,32 +2005,41 @@ export async function withPermission(
 
   if (!id) {
     id = newId()
+    const requestServerId =
+      ask.kind === "call"
+        ? ask.server.id
+        : ask.kind === "endpoint_change" ||
+            ask.kind === "browse" ||
+            ask.kind === "browser_handover" ||
+            ask.kind === "secret_use" ||
+            ask.kind === "secret_request" ||
+            ask.kind === "secret_sites_change" ||
+            ask.kind === "script_use" ||
+            ask.kind === "tab_pace"
+          ? ask.input.serverId
+          : ask.kind === "exit_use"
+            ? (ask.input.browse?.serverId ?? null)
+            : ask.kind === "note_change" && ask.input.target === "server"
+              ? ask.input.id
+              : ask.kind === "service_change" && isServiceUpdate(ask.input)
+                ? ask.input.serviceId
+                : null
+    const requestTool = sealedLevelName(
+      scope.ctx,
+      "permission_request",
+      `${id}:tool`,
+      requestServerId ?? "",
+      toolNameOf(ask),
+    )
     await db().permissionRequest.create({
       data: {
         id,
         vaultId: scope.ctx.vaultId,
         tokenId: scope.tokenId,
         kind: ask.kind,
-        serverId:
-          ask.kind === "call"
-            ? ask.server.id
-            : ask.kind === "endpoint_change" ||
-                ask.kind === "browse" ||
-                ask.kind === "browser_handover" ||
-                ask.kind === "secret_use" ||
-                ask.kind === "secret_request" ||
-                ask.kind === "secret_sites_change" ||
-                ask.kind === "script_use" ||
-                ask.kind === "tab_pace"
-              ? ask.input.serverId
-              : ask.kind === "exit_use"
-                ? (ask.input.browse?.serverId ?? null)
-                : ask.kind === "note_change" && ask.input.target === "server"
-                  ? ask.input.id
-                  : ask.kind === "service_change" && isServiceUpdate(ask.input)
-                    ? ask.input.serviceId
-                    : null,
-        toolName: toolNameOf(ask),
+        serverId: requestServerId,
+        toolName: requestTool.key,
+        toolSealed: requestTool.sealed,
         fields:
           ask.kind === "call" && ask.fields ? JSON.stringify(ask.fields) : null,
         decode:
@@ -2479,7 +2498,13 @@ export async function decidePermission(
     if (choice === "block" && host) {
       await writeSiteAccess(ctx, row.tokenId, host, "blocked")
     } else if (choice === "block" && row.serverId) {
-      await writeToolAccess(row.tokenId, row.serverId, row.toolName, "blocked")
+      await writeToolAccess(
+        ctx,
+        row.tokenId,
+        row.serverId,
+        row.toolName,
+        "blocked",
+      )
     }
 
     if (kind === "browser_handover") {
@@ -2603,11 +2628,17 @@ export async function decidePermission(
   } else if (choice === "always" && host) {
     await writeSiteAccess(ctx, row.tokenId, host, "allowed")
   } else if (choice === "always" && row.serverId) {
-    await writeToolAccess(row.tokenId, row.serverId, row.toolName, "allowed")
+    await writeToolAccess(
+      ctx,
+      row.tokenId,
+      row.serverId,
+      row.toolName,
+      "allowed",
+    )
   } else if (allowFor && host) {
     await allowSiteFor(ctx, row.tokenId, host, allowFor)
   } else if (allowFor && row.serverId) {
-    await allowToolFor(row.tokenId, row.serverId, row.toolName, allowFor)
+    await allowToolFor(ctx, row.tokenId, row.serverId, row.toolName, allowFor)
   }
 
   // One winner, however many answers race for it.
@@ -2946,7 +2977,7 @@ async function executeSecretUse(
   // the token since it asked stays so.
   if (
     effectiveAccess(
-      await loadToolAccess(ctx.vaultId, row.tokenId),
+      await loadToolAccess(ctx, row.tokenId),
       row.server.id,
       "type",
     ) === "blocked"
@@ -3020,7 +3051,7 @@ async function executeScriptUse(
   // An answer about a site's scripts never lifts a block on the tool.
   if (
     effectiveAccess(
-      await loadToolAccess(ctx.vaultId, row.tokenId),
+      await loadToolAccess(ctx, row.tokenId),
       row.server.id,
       "evaluate",
     ) === "blocked"
@@ -3142,12 +3173,12 @@ async function findExitLabel(
   ctx: VaultContext,
   name: string,
 ): Promise<string | undefined> {
-  const exit = await db().exit.findUnique({
-    where: { vaultId_name: { vaultId: ctx.vaultId, name } },
-    select: { label: true },
+  const exit = await db().exit.findFirst({
+    where: exitNameWhere(ctx, name),
+    select: EXIT_ABOUT_SELECT,
   })
 
-  return exit?.label || undefined
+  return (exit ? openExit(ctx, exit).label : "") || undefined
 }
 
 /**
@@ -3159,8 +3190,8 @@ async function findExitForRun(
   tokenId: string,
   name: string,
 ): Promise<Awaited<ReturnType<typeof getExit>> | string> {
-  const row = await db().exit.findUnique({
-    where: { vaultId_name: { vaultId: ctx.vaultId, name } },
+  const row = await db().exit.findFirst({
+    where: exitNameWhere(ctx, name),
     select: { id: true },
   })
 

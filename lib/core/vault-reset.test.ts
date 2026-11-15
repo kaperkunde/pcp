@@ -97,7 +97,7 @@ async function populate() {
           plainDefinition: "{}",
           hash: "0",
           engine: "docker",
-          containerName: "pcp-docs",
+          plainContainerName: "pcp-docs",
           env: JSON.stringify({ API_KEY: secret.id }),
           registeredId: server.id,
         },
@@ -113,7 +113,7 @@ async function populate() {
       name: "Scans",
       slug: "scans",
       url: "pcp:storage",
-      storageRoot: { create: { path: "/srv/scans", mode: "encrypted" } },
+      storageRoot: { create: { plainPath: "/srv/scans", mode: "encrypted" } },
       storageEntries: {
         create: { id: "entry1", nameKey: "k", meta: new Uint8Array([1]) },
       },

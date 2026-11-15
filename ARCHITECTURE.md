@@ -106,11 +106,38 @@ associated data (a ciphertext cannot be moved to another row):
   reads it and writes it back over what it read
   (`lib/core/sealed-fields.ts`, `server-meta.ts writeServer`), so a write
   that came between is read again, never lost. Kinds, flags and the status
-  word stay plain. Tool names are still plain where they key the owner's
-  levels, allowances and tiers (`api_token_tool_access`,
-  `api_token_tool_allowance`, `vault_tool_access`, `tool_tier`) and in a
-  waiting call's permission request (`permission_request.tool_name`): a
-  later part of #96. A lookup by a short name or a tool name (a `server/tool`
+  word stay plain. A tool's name on the owner's levels, allowances and
+  tiers (`api_token_tool_access`, `api_token_tool_allowance`,
+  `vault_tool_access`, `tool_tier`) and in a waiting call's permission
+  request (`permission_request.tool_name`) is a keyed hash in its old
+  column, bound to its server (to its definition for a tier), with the name
+  sealed beside it (`sealed`, `permission_request.tool_sealed`;
+  `<table>:<owner>:<hash>` as associated data, `lib/core/level-names.ts`),
+  so the keys and unique indexes keep working; readers open the names in
+  memory and a lookup hashes the name it is given. Nothing that runs
+  without the key needs one: the cleanup deletes allowances and requests by
+  their dates. Moving a tier to another definition (detach, merge) hashes
+  and seals its name again. The values the owner types or an upstream sends
+  are sealed too: a service's container name, where it is published and the
+  values of its plain variables (`service_spec.sealed_own`,
+  `service_spec:<server id>:own`, `lib/core/services/own-values.ts`), a
+  server's header name and value template (in `mcp_server.meta`, and
+  `server_auth_header.sealed` for the further headers), the levels saved for
+  a server's tools before they are read (`mcp_server.pending_access` as
+  sealed text, compared and cleared as the stored text) and a tool's icons
+  (in `mcp_tool.about`). So are an exit's name and label (`exit.about`,
+  `exit:<id>:about`; the name found by its keyed hash in `exit.name_key`,
+  unique in the vault), a store's folder and the login its files are
+  written as (`storage_root.sealed`, `storage_root:<server id>:about`; a
+  public download of PCP's own store's file and the sweeps need only the
+  data folder, the backend and the mode, never the path) and the name an
+  app gave when it signed in with OAuth and the client last seen using a
+  token (`api_token.client_meta`, `api_token:<id>:client`;
+  `oauth_client_id` stays plain, as the token endpoint compares it before
+  any key is held). Nothing is left in plain text but `Vault.name`, which
+  the owner chose to keep, the public address (`publicUrl`), which a
+  request with no key reads, and the ids, kinds, flags and the client id
+  that routing needs. A lookup by a short name or a tool name (a `server/tool`
   ref, a call handle's tool, `pcp.call`'s names, list_tools' server, a
   wrapper's calls, a linked repository's item names) hashes the name it is
   given; sorting and matching a pattern (a proposed level's `get_*`) work
@@ -1334,7 +1361,9 @@ specPath, basePath, auth?}` (an API endpoint from the schema it serves,
   instance, as `writeWrapper` does a program.
 - The instance's own part: `host_id` (the SSH server; null once that is
   deleted, and the container stays there), `engine` and `engine_version`
-  (found at launch), `container_name` (`pcp-<name>`, unique among the
+  (found at launch), `sealed_own` (the three values below that the owner
+  typed, one sealed JSON: `container_name`, `publish` and `plain_values`;
+  their plain columns are empty once sealed), `container_name` (`pcp-<name>`, unique among the
   vault's services on that host), `publish` (`{address, ports: [{container,
 host}]}`, the host's IP address the ports are bound to), `env` (`{NAME:
 secret id}`, never a value), `plain_values` (`{NAME: value}`, what the
@@ -3847,7 +3876,16 @@ Linux):
   which tool, which upstream, how long, whether it worked, and whether it
   stopped to ask the owner (with the permission request's id). Never
   arguments or results. The Log page reads it back; the cleanup deletes the
-  days older than the owner keeps (see "Cleanup and the log").
+  days older than the owner keeps (see "Cleanup and the log"). A day's
+  file that is written again with its lines sealed, one the cleanup prunes
+  and the days of a deleted vault are overwritten with zeros and synced
+  before they are replaced or unlinked (not on Windows, which will not
+  rename over an open file: there, and wherever the rename is refused for
+  that reason, the old bytes are left), so their old plain names do not
+  stay in the file's blocks; this is best effort. What PCP cannot reach
+  stays: a journalling or copy-on-write filesystem's earlier copies of a
+  block, an SSD's remapped or wear-levelled cells and any backup or
+  snapshot of the disk may still hold the old bytes.
 - `tls/` — only once HTTPS is turned on: the ACME account key and, per name,
   `key.pem` and `cert.pem`. Directory mode 0700, files 0600 (see "Reaching
   PCP").
@@ -4355,7 +4393,10 @@ upload link's use, whose request holds no vault key, logs PCP's own name for
 it (`file_link/download` and the like) plain, marked `keyless`. Lines from
 before are sealed by the vault's requests (`ensureSealed`): a day's file is
 written again with that vault's lines sealed where they were, so the Log
-page's places hold, while new lines wait for it.
+page's places hold, while new lines wait for it. The file it replaces, and
+the days the cleanup removes, are overwritten with zeros and synced first
+(`request-log.ts`), best effort: the filesystem's journal or earlier copies
+and an SSD's remapped blocks are outside PCP's control.
 
 The **Log page** (`/log`, `lib/core/activity.ts`) reads the vault's own lines
 back with the vault's key, newest first, filtered by token, outcome or a tool
@@ -5435,8 +5476,10 @@ through the access request's own checks and writes (`checkAccessLevels`,
 `checkAccessTiers`, `writeAccessLevels`, `writeAccessTiers`, so tiers go
 through `setToolTier` on the definition) to the tools the server has; with
 none yet, they are kept on the server (`mcp_server.pending_access`: the
-token's id and the rules, no secret) and `upstream.ts syncServerTools`
-applies them once, after the first read that finds tools, and clears them.
+token's id and the rules, no secret, sealed as text under
+`mcp_server:<id>:pending_access`) and `upstream.ts syncServerTools`
+applies them once, after the first read that finds tools, and clears them
+(over the stored text it read, so only one that applies them).
 Applied later, they leave alone a tool the token has blocked since, and give
 a revoked or deleted token nothing. With no proposal the approval reads as
 before: a new server's tools ask the owner first, for every token.

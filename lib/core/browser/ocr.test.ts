@@ -104,7 +104,7 @@ describe("the OCR tool a token can call", () => {
 
     expect((await ocrToolFor(ctx, tokenId))?.name).toBe("reader/read_image")
 
-    await writeToolAccess(tokenId, reader, "read_image", "blocked")
+    await writeToolAccess(ctx, tokenId, reader, "read_image", "blocked")
     expect((await ocrToolFor(ctx, tokenId))?.name).toBe("pdf/extract")
   })
 })

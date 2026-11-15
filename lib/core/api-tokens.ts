@@ -1,3 +1,4 @@
+import { readTokenClient, sealedTokenClient } from "./token-client"
 import type { Prisma } from "@/lib/generated/prisma/client"
 
 import {
@@ -172,14 +173,17 @@ type SummaryRow = {
   createdAt: Date
   lastUsedAt: Date | null
   oauthClientId: string | null
-  oauthClientName: string | null
+  plainOauthClientName: string | null
+  clientMeta: Uint8Array | null
   clientProfile: string | null
-  clientSeen: string | null
+  plainClientSeen: string | null
   servers: Array<{ server: Parameters<typeof serverName>[1] }>
   _count: { permissionRequests: number }
 }
 
 function toSummary(ctx: VaultContext, row: SummaryRow): ApiTokenSummary {
+  const client = readTokenClient(ctx, row)
+
   return {
     id: row.id,
     name: tokenName(ctx, row),
@@ -202,10 +206,10 @@ function toSummary(ctx: VaultContext, row: SummaryRow): ApiTokenSummary {
     lastUsedAt: row.lastUsedAt,
     openPermissions: row._count.permissionRequests,
     oauthClient: row.oauthClientId
-      ? { id: row.oauthClientId, name: row.oauthClientName ?? "" }
+      ? { id: row.oauthClientId, name: client.oauthClientName ?? "" }
       : null,
     clientProfile: chosenProfile(row.clientProfile),
-    clientSeen: parseClientSeen(row.clientSeen),
+    clientSeen: parseClientSeen(client.clientSeen),
   }
 }
 
@@ -404,7 +408,10 @@ export async function createOAuthApiToken(
         shareFiles: input.shareFiles ?? false,
         expiresAt: input.expiresAt ?? null,
         oauthClientId: input.clientId,
-        oauthClientName: input.clientName,
+        ...sealedTokenClient(ctx, id, {
+          oauthClientName: input.clientName ?? null,
+          clientSeen: null,
+        }),
         ...newTokenInstructions(ctx, id),
         servers: { create: serverIds.map((serverId) => ({ serverId })) },
       },
@@ -575,6 +582,8 @@ type TokenRecord = Prisma.ApiTokenGetPayload<{
 }>
 
 function resolved(record: TokenRecord, dek: Buffer): ResolvedToken {
+  const client = readTokenClient({ vaultId: record.vaultId, dek }, record)
+
   return {
     ctx: { vaultId: record.vaultId, dek },
     tokenId: record.id,
@@ -594,8 +603,8 @@ function resolved(record: TokenRecord, dek: Buffer): ResolvedToken {
     shareFiles: record.shareFiles,
     instructions: openInstructions(dek, record.id, record.instructions),
     clientProfile: chosenProfile(record.clientProfile),
-    oauthClientName: record.oauthClientName,
-    clientSeen: parseClientSeen(record.clientSeen),
+    oauthClientName: client.oauthClientName,
+    clientSeen: parseClientSeen(client.clientSeen),
   }
 }
 
