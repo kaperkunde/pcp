@@ -976,6 +976,26 @@ describe("execute_<tier> by name, and the names kept for one release (#113)", ()
     )
   })
 
+  it("honours the owner's window for a PCP tool at call time: exempt lets a repeat run, a time of its own still holds it back", async () => {
+    const { setDuplicateCallWindow } = await import("../calls/config")
+    const register = {
+      tool: "register_server",
+      arguments: { name: "Windows", url: "https://windows.example.com/mcp" },
+    }
+
+    await setDuplicateCallWindow(ctx, "pcp", "register_server", 5)
+    await said("execute_write", register)
+    expect((await said("execute_write", register)).code).toBe("duplicate_call")
+
+    await setDuplicateCallWindow(ctx, "pcp", "register_server", "exempt")
+    expect((await said("execute_write", register)).code).not.toBe(
+      "duplicate_call",
+    )
+    expect((await said("execute_write", register)).code).not.toBe(
+      "duplicate_call",
+    )
+  })
+
   it("lists every one of PCP's own tools for kind pcp with no query", async () => {
     const all = await said("search", { kind: "pcp" })
     const lines = all.texts[0]!.split("\n").filter((line) =>
