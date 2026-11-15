@@ -1,3 +1,4 @@
+import { openRequestTool } from "../level-names"
 import { spawn, spawnSync } from "node:child_process"
 import { editTools } from "../test-servers"
 import { randomBytes, randomUUID } from "node:crypto"
@@ -346,11 +347,8 @@ describe("a program's calls", () => {
     expect(ran).toEqual([{ tool: "archive", args: { all: true } }])
 
     const request = await db().permissionRequest.findFirstOrThrow()
-    expect(request).toMatchObject({
-      kind: "call",
-      toolName: "send_postcard",
-      tokenId: scope.tokenId,
-    })
+    expect(request).toMatchObject({ kind: "call", tokenId: scope.tokenId })
+    expect(openRequestTool(ctx, request)).toBe("send_postcard")
 
     // The call and the run that stopped at it are both in the log as asked,
     // with the request, so the Log page can link it.

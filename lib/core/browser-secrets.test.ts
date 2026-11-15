@@ -1,3 +1,4 @@
+import { openRequestTool } from "./level-names"
 import type { CallToolResult } from "@modelcontextprotocol/server"
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
 
@@ -753,11 +754,11 @@ describe("request_secret", () => {
     expect(textOf(asked)).toContain("Not done yet")
     expect(textOf(asked)).toContain("do not ask them for it here")
     expect(textOf(asked)).toContain(`${PUBLIC_URL}/permissions/`)
-    expect(
-      await db().permissionRequest.findFirstOrThrow({
-        where: { kind: "secret_request" },
-      }),
-    ).toMatchObject({ toolName: "request_secret", serverId })
+    const requested = await db().permissionRequest.findFirstOrThrow({
+      where: { kind: "secret_request" },
+    })
+    expect(requested).toMatchObject({ serverId })
+    expect(openRequestTool(ctx, requested)).toBe("request_secret")
 
     const held = await runCall(
       ctx,
@@ -1117,11 +1118,11 @@ describe("update_secret_sites", () => {
     })
 
     expect(textOf(asked)).toContain("Not done yet")
-    expect(
-      await db().permissionRequest.findFirstOrThrow({
-        where: { kind: "secret_sites_change" },
-      }),
-    ).toMatchObject({ toolName: "update_secret_sites", serverId })
+    const changed = await db().permissionRequest.findFirstOrThrow({
+      where: { kind: "secret_sites_change" },
+    })
+    expect(changed).toMatchObject({ serverId })
+    expect(openRequestTool(ctx, changed)).toBe("update_secret_sites")
     expect(await sitesOf(ctx, secretId)).toHaveLength(2)
 
     const refused = await proposed({ name: "Shop password", reason: "x" })

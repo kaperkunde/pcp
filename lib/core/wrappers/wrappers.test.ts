@@ -1,3 +1,4 @@
+import { openLevelName, openRequestTool } from "../level-names"
 import { Client, InMemoryTransport } from "@modelcontextprotocol/client"
 import { openWrapperSpec } from "../spec-rows"
 import { writeDefinition } from "../definition-rows"
@@ -883,7 +884,7 @@ describe("another wrapper of a definition, a definition of its own, and the owne
     const view = (await getPermissionView(ctx, row.id, {
       publicUrl: PUBLIC_URL,
     }))!
-    expect(row.toolName).toBe("update_wrapper")
+    expect(openRequestTool(ctx, row)).toBe("update_wrapper")
     expect(view.title).toBe("Detach the wrapper Lookup two?")
     expect(view.lines).toContain("Shares its definition with: lookup")
     expect(
@@ -1200,9 +1201,18 @@ describe("levels and tiers proposed with a wrapper (tool_access)", () => {
     return (
       await db().apiTokenToolAccess.findMany({
         where: { tokenId: scope.tokenId, serverId },
-        orderBy: { toolName: "asc" },
       })
-    ).map((row) => [row.toolName, row.access])
+    )
+      .map((row) => [
+        openLevelName(
+          ctx,
+          "api_token_tool_access",
+          `${scope.tokenId}:${serverId}`,
+          { key: row.toolName, sealed: row.sealed },
+        ),
+        row.access,
+      ])
+      .sort()
   }
 
   it("shows the proposal per tool and writes on the yes only what the owner left", async () => {
