@@ -16,6 +16,7 @@ import {
   type LimitsChange,
   type ServerLimits,
 } from "./config"
+import { mailDiagnostics, type MailDiagnostic } from "../mail/diagnostics"
 import { gateClassOf, GATE_DEFAULTS, type GateClass } from "./limits"
 import { endCooling, placeView, serverPlace } from "./state"
 import { limitsBasis, readServerLimits, writeServerLimits } from "./store"
@@ -229,6 +230,12 @@ export function limitsLine(gateClass: GateClass, own: ServerLimits): string {
 /** A server's Limits section, as its page shows it. */
 export type ServerLimitsView = {
   limits: LimitsShown
+  /**
+   * A mail account's last calls (mail/diagnostics.ts), newest first: each
+   * phase's time, whether it reused a connection, how it went and what the
+   * server said on its own. Empty for any other kind.
+   */
+  mailCalls: MailDiagnostic[]
   cooling: { reason: string; since: Date; until: Date } | null
   running: number
   waiting: number
@@ -260,6 +267,7 @@ export async function serverLimitsView(
 
   return {
     limits: limitsShown(gateClass, own),
+    mailCalls: gateClass === "mail" ? mailDiagnostics(server.id) : [],
     cooling: view.cooling
       ? {
           reason: view.cooling.reason,

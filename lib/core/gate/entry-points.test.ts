@@ -17,7 +17,12 @@ import { entryCall, withCallHandle } from "../test-handles"
 import { writeToolAccess } from "../tool-access"
 import { setupVault } from "../vault"
 import { setFetchPrivate, setFetchSite } from "../web-fetch"
+import { serverCooling } from "./index"
 import { resetGate } from "./state"
+import { createMailAccount } from "../mail/accounts"
+import { clearMailDiagnostics, recordMailCall } from "../mail/diagnostics"
+import { createSecret } from "../secrets"
+import { serverLimitsView } from "./proposals"
 import { readServerLimits, writeServerLimits } from "./store"
 
 // The gate holds whatever way a call comes in, as pacing does (it sits in
@@ -38,6 +43,8 @@ let client: Client | null = null
 let throttling: boolean
 /** How long /slow takes. */
 let slowMs: number
+/** /count says its rate limit has nothing left for a second. */
+let spent: boolean
 
 function spec(origin: string) {
   return JSON.stringify({
@@ -71,6 +78,7 @@ function spec(origin: string) {
 beforeEach(async () => {
   resetGate()
   throttling = false
+  spent = false
   slowMs = 0
   ;({ cleanup } = await scratchDatabase())
   ctx = await setupVault({
@@ -80,6 +88,13 @@ beforeEach(async () => {
   api = await startTestApi((req, res) => {
     if (req.url === "/slow") {
       setTimeout(() => json(res, 200, { slow: true }), slowMs)
+      return
+    }
+
+    if (spent && req.url === "/count") {
+      res.setHeader("x-ratelimit-remaining", "0")
+      res.setHeader("x-ratelimit-reset", "1")
+      json(res, 200, { got: req.url })
       return
     }
 
@@ -253,6 +268,20 @@ describe("the call gate, whatever the way in", () => {
     expect(api.requests.map((request) => request.url)).toEqual(["/count"])
   })
 
+  it("holds the next call until a spent rate limit resets, and cools nothing down", async () => {
+    spent = true
+    expect((await call("execute_read", COUNT)).isError).toBe(false)
+    spent = false
+
+    const started = Date.now()
+    const second = await call("execute_read", COUNT)
+
+    expect(second.isError).toBe(false)
+    expect(Date.now() - started).toBeGreaterThanOrEqual(900)
+    expect(serverCooling(ctx, endpointId)).toBeNull()
+    expect(api.requests).toHaveLength(2)
+  })
+
   it("answers timeout naming the server and its limit, not after the run's minutes", async () => {
     await writeServerLimits(ctx, endpointId, { timeoutMs: 1_000 })
     slowMs = 3_000
@@ -388,6 +417,61 @@ describe("the limits tools", () => {
     expect(await readServerLimits(ctx, endpointId)).toEqual({
       maxConcurrent: 4,
     })
+  })
+
+  it("say how a mail account's last calls went, phase by phase, on its page and in the tool", async () => {
+    const { id: secretId } = await createSecret(ctx, {
+      name: "Mail password",
+      value: "hunter22",
+    })
+    const { id: mailId } = await createMailAccount(ctx, {
+      protocol: "imap",
+      name: "Mail",
+      url: "imaps://mail.example.com:993",
+      readOnly: false,
+      authType: "basic",
+      authUsername: "ada@example.com",
+      authSecretId: secretId,
+    })
+    recordMailCall(mailId, {
+      tool: "search_emails",
+      phases: {
+        connect: 120,
+        login: 300,
+        select: 40,
+        command: 900,
+        logout: 20,
+      },
+      notices: ["[ALERT] Your account is over quota"],
+      reused: false,
+      outcome: "ok",
+    })
+
+    const read = await own("get_server_limits", { server: "mail" })
+    expect(read.structured).toMatchObject({
+      limits: { max_concurrent: 2, timeout_ms: 45_000 },
+      mail_calls: [
+        {
+          tool: "search_emails",
+          outcome: "ok",
+          reused_connection: false,
+          phases_ms: { connect: 120, login: 300, command: 900 },
+          notices: ["[ALERT] Your account is over quota"],
+        },
+      ],
+    })
+    // Not for any other kind.
+    expect(
+      (await own("get_server_limits", { server: "things" })).structured,
+    ).not.toHaveProperty("mail_calls")
+
+    const view = await serverLimitsView(ctx, { id: mailId, kind: "imap" })
+    expect(view!.mailCalls).toHaveLength(1)
+    expect(
+      (await serverLimitsView(ctx, { id: endpointId, kind: "openapi" }))!
+        .mailCalls,
+    ).toEqual([])
+    clearMailDiagnostics(mailId)
   })
 
   it("ask nothing when nothing changes, and want a note", async () => {

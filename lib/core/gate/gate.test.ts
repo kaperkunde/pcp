@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest"
 
 import type { VaultContext } from "../context"
 import { PcpError } from "../errors"
+import { PublicOnlyRefusal } from "../public-only"
 import { pacedRetryAfter } from "../pacing"
 import { createServer } from "../servers"
 import { scratchDatabase } from "../test-db"
@@ -470,7 +471,7 @@ describe("a call through the gate", () => {
     await writeServerLimits(ctx, server.id, { timeoutMs: 5_000 })
     expect(await readServerLimits(ctx, server.id)).toEqual({ timeoutMs: 5_000 })
 
-    let given = 0
+    let given: number | undefined = 0
     const result = await gateServerCall(
       ctx,
       server,
@@ -555,6 +556,56 @@ describe("a call through the gate", () => {
       errors: 1,
       throttles: 1,
     })
+  })
+
+  it("refuses a call that waited its turn once a cool-down began meanwhile", async () => {
+    await writeServerLimits(ctx, server.id, { maxConcurrent: 1 })
+    let fail!: (error: Error) => void
+    const first = gateServerCall(
+      ctx,
+      server,
+      "search",
+      {},
+      () =>
+        new Promise<CallToolResult>((_, reject) => {
+          fail = reject
+        }),
+    )
+    let ran = false
+    const second = gateServerCall(ctx, server, "search", {}, async () => {
+      ran = true
+      return answer("no")
+    })
+    await new Promise((resolve) => setImmediate(resolve))
+    expect(serverGateView(ctx, server.id).waiting).toBe(1)
+
+    fail(
+      withThrottle(new PcpError("upstream", "Busy."), {
+        reason: "it is busy",
+        retryAfterMs: 30_000,
+      }),
+    )
+    await expect(first).rejects.toThrow("Busy.")
+
+    const refused = await second
+    expect(ran).toBe(false)
+    expect(errorCodeOf(refused)).toBe("paced")
+    expect(serverGateView(ctx, server.id).running).toBe(0)
+  })
+
+  it("says the cool-down on the error itself, which keeps its class", async () => {
+    const refusal = withThrottle(new PublicOnlyRefusal("Private address."), {
+      reason: "it is busy",
+    })
+
+    const thrown = await gateServerCall(ctx, server, "search", {}, async () => {
+      throw refusal
+    }).catch((error: unknown) => error)
+
+    expect(thrown).toBeInstanceOf(PublicOnlyRefusal)
+    expect((thrown as Error).message).toMatch(
+      /^Private address\. PCP lets Docs cool down for 30 s: it is busy\.$/,
+    )
   })
 
   it("refuses past a day's bytes", async () => {

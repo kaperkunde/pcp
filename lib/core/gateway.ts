@@ -327,6 +327,7 @@ import { gateClassOf } from "./gate/limits"
 import { limitsLine, MAX_LIMITS_NOTE, proposeLimits } from "./gate/proposals"
 import type { WindowCounts } from "./gate/state"
 import { readServerLimits } from "./gate/store"
+import { mailDiagnostics } from "./mail/diagnostics"
 import { withRegisterAccess } from "./register-access"
 import { markedReadOnly } from "./read-only"
 import {
@@ -4389,6 +4390,19 @@ export function buildGatewayServer(
       last_minute: COUNTS,
       last_hour: COUNTS,
       last_day: COUNTS,
+      /** A mail account's last calls, newest first (mail/diagnostics.ts). */
+      mail_calls: z
+        .array(
+          z.object({
+            at: z.string(),
+            tool: z.string().nullable(),
+            outcome: z.enum(["ok", "error", "throttled"]),
+            reused_connection: z.boolean(),
+            phases_ms: z.record(z.string(), z.number()),
+            notices: z.array(z.string()),
+          }),
+        )
+        .optional(),
     }),
     annotations: READS,
     log: serverNamed("server"),
@@ -4420,6 +4434,20 @@ export function buildGatewayServer(
         last_minute: countsOf(view.minute),
         last_hour: countsOf(view.hour),
         last_day: countsOf(view.day),
+        // How a mail account's calls went, phase by phase: where its time
+        // goes (signing in, the command, logging out).
+        ...(gateClass === "mail"
+          ? {
+              mail_calls: mailDiagnostics(server.id).map((call) => ({
+                at: call.at,
+                tool: call.tool ?? null,
+                outcome: call.outcome,
+                reused_connection: call.reused,
+                phases_ms: call.phases,
+                notices: call.notices,
+              })),
+            }
+          : {}),
       }
 
       return ok(value, {

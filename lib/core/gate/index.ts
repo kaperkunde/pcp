@@ -125,21 +125,26 @@ export async function serverLimits(
 
 /**
  * A call to one of a server's tools, through the gate. `run` makes the
- * call, given the time limit (a kind that can stop itself at it, does);
- * the answer is its own, or a `paced` or `timeout` tool error.
+ * call, given the server's own time limit when the owner set one (a kind
+ * that can stop itself at it does; without one each kind keeps its own
+ * default); the answer is its own, or a `paced` or `timeout` tool error,
+ * at the limit in force either way.
  */
 export async function gateServerCall(
   ctx: VaultContext,
   server: GatedServer,
   toolName: string,
   { signal, deadline }: { signal?: AbortSignal; deadline?: number } = {},
-  run: (timeoutMs: number) => Promise<CallToolResult>,
+  run: (timeoutMs: number | undefined) => Promise<CallToolResult>,
 ): Promise<CallToolResult> {
-  const limits = await serverLimits(ctx, server)
+  const gateClass = gateClassOf(server.kind)
 
-  if (!limits) {
-    return run(GATE_DEFAULTS.mcp.timeoutMs)
+  if (!gateClass) {
+    return run(undefined)
   }
+
+  const own = await readServerLimits(ctx, server.id)
+  const limits = effectiveLimits(gateClass, own)
 
   const key = serverPlace(ctx.vaultId, server.id)
   const label = server.name
@@ -229,7 +234,7 @@ export async function gateServerCall(
     label,
     limits,
     { tool: toolName, detect: SLOW_DETECTION[gateClassOf(server.kind)!] },
-    () => run(limits.timeoutMs),
+    () => run(own.timeoutMs),
   )
 }
 

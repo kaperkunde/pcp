@@ -2238,7 +2238,10 @@ export async function callServerTool(
     toolName,
     { signal: options.signal, deadline: options.deadline },
     (timeoutMs) =>
-      callPlaced(ctx, server, toolName, args, { ...options, timeoutMs }),
+      callPlaced(ctx, server, toolName, args, {
+        ...options,
+        ...(timeoutMs !== undefined ? { timeoutMs } : {}),
+      }),
   )
 }
 
@@ -2550,7 +2553,7 @@ async function dispatchKind(
     deadline,
     runId,
     pace,
-    timeoutMs = CALL_TIMEOUT_MS,
+    timeoutMs,
   }: CallOptions,
   placed: string[],
 ): Promise<CallToolResult> {
@@ -2704,7 +2707,7 @@ async function dispatchKind(
       { name: toolName, arguments: resolved },
       // A moment past the gate's limit, so the gate answers first and the
       // request is still stopped.
-      { timeout: timeoutMs + 1_000 },
+      { timeout: (timeoutMs ?? CALL_TIMEOUT_MS) + 1_000 },
     )
 
     // A server that echoes what it was sent (a debugging tool, an error

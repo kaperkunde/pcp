@@ -20,6 +20,8 @@ import {
   type LimitsResult,
 } from "@/lib/actions/limits"
 import type { ServerLimitsView } from "@/lib/core/gate/proposals"
+import type { MailDiagnostic, MailPhase } from "@/lib/core/mail/diagnostics"
+import { shownLimit } from "@/lib/limit-inputs"
 
 function bytes(value: number): string {
   if (value < 1024) return `${value} B`
@@ -31,6 +33,29 @@ function bytes(value: number): string {
 function ms(value: number | null): string {
   if (value === null) return "–"
   return value < 1000 ? `${value} ms` : `${(value / 1000).toFixed(1)} s`
+}
+
+const OUTCOME_WORDS: Record<MailDiagnostic["outcome"], string> = {
+  ok: "went through",
+  error: "failed",
+  throttled: "the server asked PCP to slow down",
+}
+
+const PHASE_WORDS: Record<MailPhase, string> = {
+  connect: "connecting",
+  login: "signing in",
+  select: "opening the mailbox",
+  command: "the command",
+  logout: "logging out",
+}
+
+/** A call's phases in order, each with its time. */
+function phasesLine(phases: MailDiagnostic["phases"]): string {
+  const said = (Object.keys(PHASE_WORDS) as MailPhase[])
+    .filter((phase) => phases[phase] !== undefined)
+    .map((phase) => `${PHASE_WORDS[phase]} ${ms(phases[phase]!)}`)
+
+  return said.length > 0 ? said.join(", ") : "No timings"
 }
 
 /**
@@ -121,7 +146,7 @@ export function ServerLimits({
               : own
                   .map(
                     (field) =>
-                      `${field.label}: ${field.value === null ? "no cap" : (inputs[field.field] ?? "")}${field.unit === "ms" ? " s" : field.unit === "bytes" ? " KiB" : ""}`,
+                      `${field.label}: ${field.value === null || field.value === undefined ? "no cap" : `${shownLimit(field, field.value)}${field.unit === "ms" ? " s" : field.unit === "bytes" ? " KiB" : ""}`}`,
                   )
                   .join("; ")
           }
@@ -135,6 +160,36 @@ export function ServerLimits({
           ? ` ${view.running} running now${view.waiting > 0 ? `, ${view.waiting} waiting` : ""}.`
           : ""}
       </p>
+      {view.mailCalls.length > 0 ? (
+        <Disclosure
+          title="Recent mail calls"
+          description="Where each call's time went: connecting, signing in, opening the mailbox, the command and logging out"
+        >
+          <List>
+            {view.mailCalls.map((call, index) => (
+              <ListRow
+                key={`${call.at}-${index}`}
+                title={
+                  <>
+                    {call.tool ?? "A call"}: {OUTCOME_WORDS[call.outcome]}
+                  </>
+                }
+                description={
+                  <>
+                    <LocalDate value={call.at} />. {phasesLine(call.phases)}.{" "}
+                    {call.reused
+                      ? "On a connection an earlier call opened."
+                      : "On a new connection."}
+                    {call.notices.length > 0
+                      ? ` The server said: ${call.notices.join(" / ")}`
+                      : ""}
+                  </>
+                }
+              />
+            ))}
+          </List>
+        </Disclosure>
+      ) : null}
       <Disclosure
         title="Change limits"
         description="Calls at once, pause, time limit, cool-downs, pacing"
