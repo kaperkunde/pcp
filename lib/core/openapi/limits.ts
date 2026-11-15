@@ -55,7 +55,6 @@ export const OUTLINE_MAX_NODES = 2000
  * a schema within every other limit can still come to tens of megabytes.
  */
 export const MAX_TOTAL_TOOL_CHARS = 4_000_000
-export const MAX_YAML_ALIASES = 100
 
 export const SPEC_FETCH_TIMEOUT_MS = 20_000
 export const SPEC_MAX_REDIRECTS = 3

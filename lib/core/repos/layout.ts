@@ -3,11 +3,11 @@ import { hiddenCharacter } from "../memories"
 
 import {
   MAX_FILE_BYTES,
-  MAX_ITEM_BYTES,
+  maxItemBytes,
   MAX_ITEM_FILES,
   MAX_ITEM_NAME_CHARS,
   MAX_PATH_CHARS,
-  MAX_SPEC_FILE_BYTES,
+  maxSpecFileBytes,
 } from "./limits"
 
 /**
@@ -409,9 +409,7 @@ export function checkItemSize(item: ItemFiles): void {
   for (const name of names) {
     const text = item.files[name]!
     const bytes = byteLength(text)
-    const max = isSpecFile(item.ref, name)
-      ? MAX_SPEC_FILE_BYTES
-      : MAX_FILE_BYTES
+    const max = isSpecFile(item.ref, name) ? maxSpecFileBytes() : MAX_FILE_BYTES
 
     if (bytes > max) {
       throw invalid(
@@ -422,9 +420,9 @@ export function checkItemSize(item: ItemFiles): void {
     total += bytes
   }
 
-  if (total > MAX_ITEM_BYTES) {
+  if (total > maxItemBytes()) {
     throw invalid(
-      `${root}'s files come to ${total.toLocaleString("en")} bytes; an item's have at most ${MAX_ITEM_BYTES.toLocaleString("en")}.`,
+      `${root}'s files come to ${total.toLocaleString("en")} bytes; an item's have at most ${maxItemBytes().toLocaleString("en")}.`,
     )
   }
 }

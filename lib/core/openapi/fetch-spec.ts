@@ -1,6 +1,7 @@
-import { MAX_SPEC_BYTES } from "../constants"
 import { invalid } from "../errors"
 import { AddressBlockedError } from "./address"
+import { resourceLimits } from "../resources/state"
+import { specTooLarge } from "./parse"
 import { describeFetchError, discard, readCapped } from "./http"
 import { SPEC_FETCH_TIMEOUT_MS, SPEC_MAX_REDIRECTS, USER_AGENT } from "./limits"
 import { send, type SendOptions } from "./transport"
@@ -18,7 +19,12 @@ export async function fetchSpec(
     publicOnly = false,
     addressCheck,
     dial,
-  }: { timeoutMs?: number } & SendOptions = {},
+    maxBytes = resourceLimits().specBytes,
+  }: {
+    timeoutMs?: number
+    /** The owner's limit; callers read it with loadResourceLimits(). */
+    maxBytes?: number
+  } & SendOptions = {},
 ): Promise<{ text: string; url: string }> {
   let url = validateSpecUrl(rawUrl)
   const signal = AbortSignal.timeout(timeoutMs)
@@ -69,15 +75,15 @@ export async function fetchSpec(
     }
 
     const declared = Number(response.headers.get("content-length") ?? "0")
-    if (declared > MAX_SPEC_BYTES) {
+    if (declared > maxBytes) {
       await discard(response)
-      throw tooLarge()
+      throw specTooLarge(maxBytes)
     }
 
     let read: { bytes: Buffer; truncated: boolean }
 
     try {
-      read = await readCapped(response, MAX_SPEC_BYTES)
+      read = await readCapped(response, maxBytes)
     } catch (error) {
       throw invalid(
         `The schema could not be downloaded: ${describeFetchError(error, timeoutMs)}.`,
@@ -85,15 +91,9 @@ export async function fetchSpec(
     }
 
     if (read.truncated) {
-      throw tooLarge()
+      throw specTooLarge(maxBytes)
     }
 
     return { text: new TextDecoder().decode(read.bytes), url }
   }
-}
-
-function tooLarge() {
-  return invalid(
-    `That schema is larger than ${MAX_SPEC_BYTES / 1024 / 1024} MB.`,
-  )
 }

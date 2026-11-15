@@ -2,7 +2,6 @@ import { isIP } from "node:net"
 
 import type { ResolvedToken } from "./api-tokens"
 import type { SyncResult } from "./catalogue"
-import { MAX_SPEC_BYTES } from "./constants"
 import type { VaultContext } from "./context"
 import { db } from "./db"
 import { contentHashMatches } from "./spec-rows"
@@ -33,11 +32,13 @@ import {
   storedSpec,
   type EndpointPreview,
 } from "./endpoints"
+import { loadResourceLimits, resourceLimits } from "./resources/state"
 import { invalid, PcpError } from "./errors"
 import { bareHostname, isPublicAddress } from "./openapi/address"
 import { fetchSpec } from "./openapi/fetch-spec"
 import { isObject } from "./openapi/json"
 import { lintDocument, type SchemaProblem } from "./openapi/lint"
+import { prepareSpecText } from "./openapi/parse"
 import { readPatches, valueAt, type PatchOperation } from "./openapi/patch"
 import { readCallPlan } from "./openapi/plan"
 import { canonicalJson } from "./permission-rules"
@@ -690,9 +691,14 @@ export async function prepareRegistration(
     throw invalid("openapi_schema is empty. Pass the whole OpenAPI document.")
   }
 
-  if (!fromUrl && Buffer.byteLength(input.spec!, "utf8") > MAX_SPEC_BYTES) {
+  await loadResourceLimits()
+
+  if (
+    !fromUrl &&
+    Buffer.byteLength(input.spec!, "utf8") > resourceLimits().specBytes
+  ) {
     throw invalid(
-      `The schema is larger than ${MAX_SPEC_BYTES / 1024 / 1024} MB. Pass its address in openapi_url and narrow it with patches, or ask the owner to add the API in PCP.`,
+      `The schema is larger than the ${Math.round(resourceLimits().specBytes / 1024 / 1024)} MB PCP reads (the owner sets it in Settings → Resources). Pass its address in openapi_url, narrow it with patches, or ask the owner to add the API in PCP.`,
     )
   }
 
@@ -717,7 +723,10 @@ export async function prepareRegistration(
   // the document itself; it is never sent to the assistant.
   const specUrl = fromUrl ? validateSpecUrl(input.specUrl!) : null
   const fetched = specUrl
-    ? await fetchSpec(specUrl, { publicOnly: true })
+    ? await fetchSpec(specUrl, {
+        publicOnly: true,
+        maxBytes: resourceLimits().specBytes,
+      })
     : null
   const text = fetched?.text ?? input.spec!
 
@@ -725,6 +734,8 @@ export async function prepareRegistration(
   let preview: EndpointPreview
 
   try {
+    // YAML is read in a worker thread first, so PCP stays responsive.
+    await prepareSpecText(text)
     preview = previewEndpoint(text, {
       readOnly,
       ownerBaseUrl: input.baseUrl,

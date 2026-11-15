@@ -1,3 +1,4 @@
+import { loadResourceLimits } from "../resources/state"
 import { invalid, isPcpError, PcpError } from "../errors"
 
 import { parseItem, type ItemDocument } from "./documents"
@@ -33,7 +34,7 @@ import {
   MAX_BROWSE_FILES,
   MAX_FILE_BYTES,
   MAX_ITEM_FILES,
-  MAX_SPEC_FILE_BYTES,
+  maxSpecFileBytes,
 } from "./limits"
 
 /**
@@ -272,6 +273,8 @@ export async function listRemote(
   branch: string,
   at?: Head,
 ): Promise<RemoteListing> {
+  // The owner's schema limit, not the machine's default, bounds a spec file.
+  await loadResourceLimits()
   const head = at ?? (await branchHead(gh, coords, branch))
   const { items, problems } = itemsOfTree(await readTree(gh, coords, head.tree))
 
@@ -293,6 +296,7 @@ export async function readItemFiles(
   coords: RepoCoords,
   item: RemoteItem,
 ): Promise<RepoFiles> {
+  await loadResourceLimits()
   const names = Object.keys(item.files)
 
   if (names.length > MAX_ITEM_FILES) {
@@ -305,7 +309,7 @@ export async function readItemFiles(
 
   for (const name of names.sort()) {
     const file = item.files[name]!
-    const max = isSpec(item, name) ? MAX_SPEC_FILE_BYTES : MAX_FILE_BYTES
+    const max = isSpec(item, name) ? maxSpecFileBytes() : MAX_FILE_BYTES
 
     if (file.size !== null && file.size > max) {
       throw invalid(
@@ -411,6 +415,7 @@ export async function browseItems(
   coords: RepoCoords,
   listing: RemoteListing,
 ): Promise<BrowsedItem[]> {
+  await loadResourceLimits()
   let files = 0
   let bytes = 0
   const out: BrowsedItem[] = []

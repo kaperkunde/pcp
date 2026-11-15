@@ -552,13 +552,44 @@ withPublicOnlyLink`, added in `upstream.ts` where the server and PCP's
   parse, the assistant is told that much and not the parser's message, which
   quotes the text. An endpoint the owner reads from a URL they typed keeps
   following it, as before.
-- **Bounded.** Fifty endpoints per vault, 5 MB of schema per registration,
-  the same as an upload (it is held, encrypted, on the request until
-  answered), a thousand edits and a million characters of them, 4 MB of
+- **Bounded.** Fifty endpoints per vault, a schema per registration of at most the
+  owner's limit (`resourceLimits().specBytes`, Settings → Resources, see
+  "Large schemas" below), the same as an upload (it is held, encrypted and
+  compressed, on the request until answered), a thousand edits and a million characters of them, 4 MB of
   stored tools per endpoint, twenty registrations and twenty changes per token
   per ten minutes, no JSON-RPC batches at the gateway (one POST would be many
   calls), and the catalogue a request loads leaves out tool schemas, which are
   read when a tool is described or called.
+- **Large schemas (#141).** GitHub's whole REST description (14 MB as JSON,
+  1,278 operations) registers by `openapi_schema`, by `openapi_url`, by an
+  upload and by a repository's document. There is no fixed cap: the limit is
+  `resourceLimits().specBytes` (a sixty-fourth of the machine's memory, 16 to
+  64 MB, the owner's to set within what `checkResourceConfig` lets the machine
+  spare at sixteen times the size). The download is streamed against it, the
+  zod input has only the highest value the owner may set (`SPEC_TEXT_CEILING`;
+  `endpoint-admin.ts` checks the exact one), and a linked repository's spec
+  file and item are bounded by the same value (`repos/limits.ts`; one browse's
+  total, `MAX_BROWSE_BYTES`, still caps what one read fetches). The node limit
+  (`specNodeLimit`) follows it. Measured on GitHub's description: JSON parses
+  in 70 ms; YAML took 3.1 s and 530 MB with the `yaml` package and 0.35 s and
+  230 MB with js-yaml, which now reads schemas (core schema, no tags; aliases
+  share values, so an expanding document is refused by counting its nodes
+  before it is written out). YAML is turned into compact JSON text first,
+  by `prepareSpecText` in a worker thread (`openapi/yaml-worker.cjs`, not a
+  child process, so the desktop app runs it; memory capped by
+  `resourceLimits`, 60 s limit): the loop's longest gap was 29 ms while
+  GitHub's YAML was read, and everything after reads JSON. The worker's file
+  and js-yaml are carried into the standalone output (`next.config.ts`,
+  `scripts/standalone.test.ts`); where the file is missing the same
+  conversion runs in place, slower for others and never wrong. The two latest
+  conversions are kept ten minutes (no timer), so registration's repeated
+  reads (preview, lint, create) do not read it again. A schema at rest is
+  Brotli-compressed from 64 KB inside the sealed value (`spec-rows.ts`
+  `packed`: 14 MB to 0.9 MB, rows from before still open), and so are a
+  permission request's arguments (`sealed-args.ts`), so the waiting request
+  and the endpoint hold about 1 MB each, not 14. The permission page shows
+  the preview, never the schema. An edit (`applyPatches`) on a freshly read
+  document works in place (`consume`) instead of copying it.
 - A token limited to some servers only sees endpoints in its scope, and what
   it registers is added to that scope.
 

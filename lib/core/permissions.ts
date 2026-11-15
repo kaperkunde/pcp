@@ -1,5 +1,6 @@
 import type { CallToolResult } from "@modelcontextprotocol/server"
 
+import { openArgs, sealArgs } from "./sealed-args"
 import type { PermissionRequest, Prisma } from "@/lib/generated/prisma/client"
 
 import {
@@ -970,9 +971,7 @@ function toolNameOf(ask: PermissionAsk): string {
 }
 
 function readArgs(ctx: VaultContext, row: PermissionRequest) {
-  return JSON.parse(
-    decryptString(ctx.dek, Buffer.from(row.argsCiphertext), aad(row.id)),
-  ) as Record<string, unknown>
+  return openArgs(ctx.dek, Buffer.from(row.argsCiphertext), aad(row.id))
 }
 
 function readResult(ctx: VaultContext, row: PermissionRequest): string | null {
@@ -1976,9 +1975,7 @@ export async function withPermission(
         expiresAt: { gt: now },
       },
       data: {
-        argsCiphertext: asBytes(
-          encryptString(scope.ctx.dek, JSON.stringify(args), aad(foldInto)),
-        ),
+        argsCiphertext: asBytes(sealArgs(scope.ctx.dek, args, aad(foldInto))),
         argsHash,
         targetKey: key,
         expiresAt: new Date(now.getTime() + PERMISSION_TTL_MS),
@@ -2029,9 +2026,7 @@ export async function withPermission(
         decode:
           ask.kind === "call" && ask.decode ? JSON.stringify(ask.decode) : null,
         keep: ask.kind === "call" && ask.keep ? JSON.stringify(ask.keep) : null,
-        argsCiphertext: asBytes(
-          encryptString(scope.ctx.dek, JSON.stringify(args), aad(id)),
-        ),
+        argsCiphertext: asBytes(sealArgs(scope.ctx.dek, args, aad(id))),
         argsHash,
         targetKey: key,
         expiresAt: new Date(now.getTime() + PERMISSION_TTL_MS),
