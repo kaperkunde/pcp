@@ -1,4 +1,11 @@
-import type { ToolAccess } from "../constants"
+import type { PasswordRecipe, ToolAccess } from "../constants"
+import type { FetchArgs } from "../fetch/request"
+import type { ServiceUpdateAsk } from "../services/updates"
+import type {
+  BrowserPace,
+  BrowserPacingClass,
+  PaceRange,
+} from "../pacing/limits"
 
 /**
  * What the rest of PCP knows about the browser without loading it: a tab
@@ -41,6 +48,28 @@ export type BrowseAsk = {
   url: string
   /** The tool that asked, for the owner's page and the request's name. */
   toolName: "tabs" | "navigate"
+  /**
+   * The exit a new tab goes out through, by name (lib/core/exits/): its
+   * own context, through that exit. Only for a new tab.
+   */
+  exit?: string
+}
+
+/**
+ * An exit the token may use only after asking (lib/core/exits/), asked
+ * about together with what it is for: a web_fetch request, or a new tab
+ * opening a site. Allowing it once sends that one; Always allow sets the
+ * token's own level for the exit.
+ */
+export type ExitUseAsk = {
+  exitId: string
+  exitName: string
+  exitLabel: string
+  via: "web_fetch" | "browser"
+  /** The request, for web_fetch. */
+  fetch?: FetchArgs
+  /** The tab to open, for the browser (its `exit` is this exit's name). */
+  browse?: BrowseAsk
 }
 
 /** An assistant asking the owner to do something in a tab themselves. */
@@ -76,12 +105,22 @@ export type SecretUseAsk = {
   /** The field, as the call named it: its ref, or its role and name. */
   field: string
   call: SecretTypeCall
+  /** "username": the secret's login name is typed, not its value. */
+  part?: SecretPart
 }
+
+/**
+ * Which part of one of the owner's secrets type's {"$secret": name, "part"}
+ * types: its value (a password, or a TOTP secret's code of the moment), or
+ * the login name the owner keeps with it.
+ */
+export type SecretPart = "password" | "username"
 
 /**
  * An assistant asking the owner to store a secret for the browser to type
  * (request_secret): its name, what it is for and where it goes. The owner
- * types the value in on PCP's page; nothing of it comes back but the name.
+ * types the value in on PCP's page (or has PCP make one, `generate`);
+ * nothing of it comes back but the name.
  */
 export type SecretRequestAsk = {
   serverId: string
@@ -89,6 +128,59 @@ export type SecretRequestAsk = {
   purpose: string
   origins: string[]
   kind: "text" | "totp"
+  /** The login name it goes with, filled in on the page for the owner to check. */
+  username?: string | null
+  /** The password PCP is asked to make, which the page starts from. */
+  generate?: PasswordRecipe | null
+}
+
+/** A site an assistant proposes for one of the owner's secrets. */
+export type ProposedSecretSite = { origin: string; subdomains: boolean }
+
+/**
+ * An assistant proposing to change where one of the owner's secrets is
+ * typed (update_secret_sites): sites to add or take away, and why. Always
+ * the owner's to answer, whatever the token's levels; the value is never
+ * part of it.
+ */
+export type SecretSitesChangeAsk = {
+  serverId: string
+  secretName: string
+  reason: string
+  add: ProposedSecretSite[]
+  remove: string[]
+}
+
+/**
+ * An assistant's script to run in a tab (evaluate) at a site where the
+ * owner has not allowed scripts for the token: the site, the page and the
+ * whole script, which the owner reads before it runs.
+ */
+export type ScriptUseAsk = {
+  serverId: string
+  tabId: string
+  /** The site (siteKey), and the page's address and title then. */
+  site: string
+  url: string
+  title: string
+  script: string
+}
+
+/**
+ * An assistant's pace for one tab (tabs, action pace) outside what the
+ * owner lets assistants set without asking (lib/core/pacing/): the tab,
+ * the pace, and the owner's bounds then. Allowed, it applies to that tab
+ * only, while it is open; it never changes the owner's pacing settings.
+ */
+export type TabPaceAsk = {
+  serverId: string
+  tabId: string
+  url: string
+  title: string
+  pace: BrowserPace
+  /** The classes outside the bounds. */
+  outside: BrowserPacingClass[]
+  bounds: Record<BrowserPacingClass, PaceRange>
 }
 
 export type BrowserAsk =
@@ -96,6 +188,10 @@ export type BrowserAsk =
   | { kind: "browser_handover"; input: HandoverAsk }
   | { kind: "secret_use"; input: SecretUseAsk }
   | { kind: "secret_request"; input: SecretRequestAsk }
+  | { kind: "secret_sites_change"; input: SecretSitesChangeAsk }
+  | { kind: "exit_use"; input: ExitUseAsk }
+  | { kind: "script_use"; input: ScriptUseAsk }
+  | { kind: "tab_pace"; input: TabPaceAsk }
 
 /** Where a call types a secret: what upstream.ts is told when it is typed. */
 export type SecretUseContext = {
@@ -116,16 +212,25 @@ export type SecretUseContext = {
  */
 export type SecretTyper = {
   name: string
+  /** What is typed: the value (the default), or the login name. */
+  part: SecretPart
   value(use: SecretUseContext): Promise<string>
 }
 
 /**
- * Thrown by a browser tool when the owner has to answer first. The call
- * that ran the tool (permissions.ts runCall) turns it into a permission
- * request, so the browser never imports the permission flow.
+ * What a tool outside the browser asks the owner the same way: a service's
+ * `update`, an image update to agree to (services/updates.ts).
+ */
+export type OwnerAsk =
+  BrowserAsk | { kind: "service_change"; input: ServiceUpdateAsk }
+
+/**
+ * Thrown by a browser tool (or a service's `update`) when the owner has to
+ * answer first. The call that ran the tool (permissions.ts runCall) turns
+ * it into a permission request, so neither imports the permission flow.
  */
 export class OwnerNeeded extends Error {
-  constructor(readonly ask: BrowserAsk) {
+  constructor(readonly ask: OwnerAsk) {
     super("The owner's answer is needed first.")
     this.name = "OwnerNeeded"
   }

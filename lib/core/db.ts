@@ -13,13 +13,31 @@ import { databaseUrl } from "./data-dir"
  */
 let client: PrismaClient | undefined
 
+/**
+ * Set on every connection the client opens. SQLite keeps a deleted row's
+ * bytes in the page it sat in, or in a free page, until something writes
+ * over them; with secure_delete ON (not FAST, which leaves free-list pages
+ * as they were) it writes zeros over them as it deletes, so what the owner
+ * removes does not linger in the file. The write-ahead log keeps the older
+ * page until a checkpoint: lib/core/cleanup/space.ts truncates it.
+ */
+export const CONNECTION_PRAGMAS = "PRAGMA secure_delete = ON;"
+
 function create(): PrismaClient {
-  const adapter = new PrismaBetterSqlite3(
+  const factory = new PrismaBetterSqlite3(
     { url: databaseUrl(), timeout: 5000 },
     { timestampFormat: "iso8601" },
   )
+  // The adapter has no hook of its own for a new connection: every one it
+  // hands Prisma runs the pragmas first.
+  const connect = factory.connect.bind(factory)
+  factory.connect = async () => {
+    const adapter = await connect()
+    await adapter.executeScript(CONNECTION_PRAGMAS)
+    return adapter
+  }
 
-  return new PrismaClient({ adapter })
+  return new PrismaClient({ adapter: factory })
 }
 
 const globalForPrisma = globalThis as unknown as {

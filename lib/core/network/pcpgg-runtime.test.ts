@@ -4,14 +4,18 @@ import type net from "node:net"
 import tls from "node:tls"
 import { setTimeout as sleep } from "node:timers/promises"
 
+import {
+  createRelay,
+  type Authorization,
+  type Directory,
+  type Relay,
+} from "@kaperkunde/pcpgg-protocol/relay"
 import acme from "acme-client"
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
 
 import { getHostSetting } from "../host-settings"
 import { scratchDatabase } from "../test-db"
 import { clearPcpggConfig, PCPGG_CONFIG_KEY, savePcpggConfig } from "./pcpgg"
-import type { Authorization, Directory } from "./pcpgg/test-relay/directory"
-import { createRelay, type Relay } from "./pcpgg/test-relay/relay"
 import {
   edgePorts,
   networkIdle,

@@ -29,6 +29,7 @@ import { createMemory, instructionMemories, runMemoryCommand } from "./memories"
 import { listOwnerNotices } from "./owner-notices"
 import { scratchDatabase } from "./test-db"
 import { setupVault } from "./vault"
+import { entryCall, listEveryTool } from "./test-handles"
 
 // Each token's own instructions, copied from PCP's suggestion: given at the
 // start of every conversation, edited by the owner, and offered for a merge
@@ -212,7 +213,7 @@ describe("delivery", () => {
     })
     const lines = text.split("\n")
 
-    expect(lines[0]).toContain('CALL THE read_memory TOOL WITH command "every"')
+    expect(lines[0]).toContain("CALL THE search TOOL WITH NO ARGUMENTS")
     expect(lines[1]).toBe(INSTRUCTIONS_LEAD)
     expect(lines[2]).toBe("- Answer in French.")
     expect(lines[3]).toContain("PCP is a gateway")
@@ -236,11 +237,10 @@ describe("delivery", () => {
     const client = new Client({ name: "test", version: "1.0.0" })
     await client.connect(clientSide)
     const told = client.getInstructions() ?? ""
-    const { tools } = await client.listTools()
-    const every = await client.callTool({
-      name: "read_memory",
-      arguments: { command: "every" },
-    })
+    const { tools } = await listEveryTool(client)
+    const every = await client.callTool(
+      entryCall("read_memory", { command: "every" }),
+    )
     await client.close()
 
     expect(told).toContain(`${INSTRUCTIONS_LEAD}\n${V2}`)

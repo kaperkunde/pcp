@@ -2,7 +2,10 @@ import {
   Client,
   StreamableHTTPClientTransport,
 } from "@modelcontextprotocol/client"
+import { openTool } from "./tool-rows"
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
+
+import { openServer } from "./server-meta"
 
 import { NEW_SECRET } from "./constants"
 import type { VaultContext } from "./context"
@@ -12,7 +15,12 @@ import { createFakeJmap, type FakeJmap } from "./mail/fake-jmap"
 import { oauthRedirectUrl } from "./oauth-client"
 import { json, startTestApi, type TestApi } from "./openapi/test-api"
 import { checkedFetch } from "./openapi/transport"
-import { createServer, getServer, updateServer } from "./servers"
+import {
+  createServer,
+  getServer,
+  setServerPublicOnly,
+  updateServer,
+} from "./servers"
 import { scratchDatabase } from "./test-db"
 import {
   callServerTool,
@@ -22,6 +30,7 @@ import {
   syncServerTools,
 } from "./upstream"
 import { setupVault } from "./vault"
+import { toolNamed } from "./test-servers"
 
 // The bearer token PCP sends to a server it calls itself (a JMAP mail
 // account that signs in with OAuth): renewed before it runs out, renewed
@@ -176,9 +185,12 @@ describe("a JMAP account signed in with OAuth", () => {
       callServerTool(ctx, server, "list_mailboxes", {}, PUBLIC),
     ).rejects.toMatchObject({ code: "unauthorized" })
     expect(tokenRequests).toHaveLength(1)
-    const row = await db().mcpServer.findUniqueOrThrow({
-      where: { id: server.id },
-    })
+    const row = openServer(
+      ctx,
+      await db().mcpServer.findUniqueOrThrow({
+        where: { id: server.id },
+      }),
+    )
     expect(row.status).toBe("auth_required")
     expect(row.oauthConnectedAt).toBeNull()
   })
@@ -219,9 +231,12 @@ describe("a JMAP account signed in with OAuth", () => {
     await expect(
       callServerTool(ctx, server, "list_mailboxes", {}, PUBLIC),
     ).rejects.toMatchObject({ code: "unauthorized" })
-    const row = await db().mcpServer.findUniqueOrThrow({
-      where: { id: server.id },
-    })
+    const row = openServer(
+      ctx,
+      await db().mcpServer.findUniqueOrThrow({
+        where: { id: server.id },
+      }),
+    )
     expect(row.status).toBe("auth_required")
     expect(row.statusMessage).toMatch(/needs to be connected/)
   })
@@ -310,12 +325,17 @@ describe("an MCP server that repeats its credential", () => {
     const server = await echoServer()
 
     expect((await syncServerTools(ctx, server, PUBLIC)).status).toBe("ok")
-    const stored = await db().mcpServer.findUniqueOrThrow({
-      where: { id: server.id },
-      include: { tools: true },
-    })
+    const stored = openServer(
+      ctx,
+      await db().mcpServer.findUniqueOrThrow({
+        where: { id: server.id },
+        include: { tools: true },
+      }),
+    )
     expect(JSON.stringify(stored)).not.toContain(KEY)
-    expect(stored.tools[0]!.description).toBe("Says who [redacted] is.")
+    expect(openTool(ctx, stored.tools[0]!).description).toBe(
+      "Says who [redacted] is.",
+    )
 
     const result = await callServerTool(ctx, server, "whoami", {}, PUBLIC)
     expect(result.content).toEqual([
@@ -437,6 +457,43 @@ describe("an MCP server limited to public addresses", () => {
     })
   })
 
+  it("hands the assistant the server's switch when a call is refused", async () => {
+    const server = await localServer(true)
+
+    const refused = await callServerTool(ctx, server, "ping", {}, PUBLIC).then(
+      () => null,
+      (error: unknown) => error,
+    )
+    expect(refused).toBeInstanceOf(Error)
+    const message = (refused as Error).message
+    expect(message).toMatch(/only reaches public ones/)
+    expect(message.trimEnd().split("\n").at(-1)).toBe(
+      `[Allow private addresses for Local](http://localhost:3000/servers/${server.id}#public-only)`,
+    )
+    // The status the owner reads on the server's page stays plain text.
+    expect((await getServer(ctx, server.id)).statusMessage).not.toContain("](")
+    expect(mcp.requests).toHaveLength(0)
+  })
+
+  it("is lifted by the owner's switch on the server's page", async () => {
+    const server = await localServer(true)
+
+    await setServerPublicOnly(ctx, server.id, false)
+    const allowed = await getServer(ctx, server.id)
+    expect(allowed.publicOnly).toBe(false)
+    expect((await syncServerTools(ctx, allowed, PUBLIC)).status).toBe("ok")
+
+    // Saving the form under Advanced, which no longer carries the switch,
+    // keeps what the switch set.
+    await setServerPublicOnly(ctx, server.id, true)
+    await updateServer(ctx, server.id, {
+      name: "Local again",
+      url: server.url,
+      authType: "none",
+    })
+    expect((await getServer(ctx, server.id)).publicOnly).toBe(true)
+  })
+
   it("is not set on a server the owner adds", async () => {
     const server = await localServer()
 
@@ -465,5 +522,144 @@ describe("an MCP server limited to public addresses", () => {
 
     expect(tools.map((tool) => tool.name)).toEqual(["ping"])
     expect(mcp.requests.some((request) => request.url === "/mcp")).toBe(true)
+  })
+})
+
+describe("an MCP server as it describes and answers its tools", () => {
+  let mcp: TestApi
+
+  beforeEach(async () => {
+    mcp = await startTestApi((request, res) => {
+      if (request.method !== "POST") {
+        res.statusCode = 405
+        return res.end()
+      }
+
+      const { id, method, params } = JSON.parse(request.body) as {
+        id?: number
+        method: string
+        params?: { name?: string }
+      }
+      const answer = (result: unknown) =>
+        json(res, 200, { jsonrpc: "2.0", id, result })
+
+      if (id === undefined) {
+        res.statusCode = 202
+        return res.end()
+      }
+
+      if (method === "initialize") {
+        return answer({
+          protocolVersion: "2025-06-18",
+          capabilities: { tools: {} },
+          serverInfo: { name: "shaped", version: "1" },
+        })
+      }
+
+      if (method === "tools/list") {
+        return answer({
+          tools: [
+            {
+              name: "count",
+              title: "Count things",
+              description: "Counts things.",
+              inputSchema: { type: "object" },
+              outputSchema: {
+                type: "object",
+                properties: { total: { type: "integer" } },
+                required: ["total"],
+              },
+              icons: [
+                { src: "https://shaped.example/count.png", sizes: ["48x48"] },
+                { src: "javascript:alert(1)" },
+              ],
+            },
+            {
+              name: "has space",
+              description: "A name MCP does not allow.",
+              inputSchema: { type: "object" },
+            },
+          ],
+        })
+      }
+
+      if (params?.name === "picky") {
+        return json(res, 200, {
+          jsonrpc: "2.0",
+          id,
+          error: { code: -32602, message: "count must be a number" },
+        })
+      }
+
+      if (params?.name === "broken") {
+        res.statusCode = 502
+        return res.end("Bad gateway")
+      }
+
+      return answer({
+        content: [{ type: "text", text: '{"total":3}' }],
+        structuredContent: { total: 3 },
+      })
+    })
+  })
+
+  afterEach(async () => {
+    await mcp.close()
+  })
+
+  it("keeps each tool's outputSchema, title and icons, and says which names MCP does not allow", async () => {
+    const { id } = await createServer(ctx, {
+      name: "Shaped",
+      url: `${mcp.origin}/mcp`,
+      authType: "none",
+    })
+    const server = await getServer(ctx, id)
+
+    const sync = await syncServerTools(ctx, server, PUBLIC)
+
+    expect(sync.status).toBe("ok")
+    expect(sync.toolCount).toBe(2)
+    expect(sync.message).toContain('"has space"')
+    const count = await toolNamed(ctx, "count", id)
+    expect(count.title).toBe("Count things")
+    expect(JSON.parse(count.outputSchema!)).toEqual({
+      type: "object",
+      properties: { total: { type: "integer" } },
+      required: ["total"],
+    })
+    expect(JSON.parse(count.icons!)).toEqual([
+      { src: "https://shaped.example/count.png", sizes: ["48x48"] },
+    ])
+
+    const result = await callServerTool(ctx, server, "count", {}, PUBLIC)
+    expect(result.structuredContent).toEqual({ total: 3 })
+  })
+
+  it("tells a server that answered with an error from one it could not reach", async () => {
+    const { id } = await createServer(ctx, {
+      name: "Shaped",
+      url: `${mcp.origin}/mcp`,
+      authType: "none",
+    })
+    const server = await getServer(ctx, id)
+    await syncServerTools(ctx, server, PUBLIC)
+
+    // It answered: a tool error in its words, and it is not marked down.
+    const picky = await callServerTool(ctx, server, "picky", {}, PUBLIC)
+    expect(picky.isError).toBe(true)
+    expect(picky._meta).toEqual({
+      "gg.pcp/error": { code: "invalid_arguments" },
+    })
+    expect(JSON.stringify(picky.content)).toContain(
+      "Shaped answered picky with an error (JSON-RPC -32602): count must be a number",
+    )
+    expect(JSON.stringify(picky.content)).not.toContain("could not be reached")
+    expect((await getServer(ctx, id)).status).toBe("ok")
+
+    // It did not: thrown as a failure on the way, and marked.
+    await expect(
+      callServerTool(ctx, server, "broken", {}, PUBLIC),
+    ).rejects.toMatchObject({ code: "upstream" })
+    expect((await getServer(ctx, id)).status).toBe("error")
   })
 })

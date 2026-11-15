@@ -3,7 +3,7 @@ import type { Metadata } from "next"
 import { AuthShell } from "@/components/auth-shell"
 import { DdnsCard, HttpsCard, PcpggCard } from "@/components/network-forms"
 import { UpdateCheckCard } from "@/components/updates-card"
-import { ButtonLink } from "@/components/ui/button"
+import { ButtonLink } from "@kaperkunde/ui/button"
 import { networkOverview } from "@/lib/core/network/runtime"
 import { getSetting, SETTING_PUBLIC_URL } from "@/lib/core/settings"
 import { getUpdateConfig } from "@/lib/core/updates/state"
@@ -39,7 +39,7 @@ export default async function SetupNetworkPage() {
         </p>
       }
     >
-      <ButtonLink href="/home" variant="outline" size="lg">
+      <ButtonLink href="/home" variant="secondary" size="lg">
         Skip for now — open PCP
       </ButtonLink>
       <PcpggCard

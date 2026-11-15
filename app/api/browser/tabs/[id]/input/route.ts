@@ -7,8 +7,8 @@ import {
   saveVaultProfile,
   touch,
 } from "@/lib/core/browser/runtime"
-import { checkRateLimit } from "@/lib/core/rate-limit"
-import { isSameOrigin } from "@/lib/server/same-origin"
+import { checkRateLimit } from "@kaperkunde/security"
+import { isSameOrigin } from "@kaperkunde/security"
 import { currentSession } from "@/lib/server/session"
 
 export const dynamic = "force-dynamic"
@@ -45,7 +45,9 @@ export async function POST(
     return problem(401, "Sign in first.")
   }
 
-  if (!checkRateLimit(`browser-input:${session.sessionId}`, INPUT_BATCHES)) {
+  if (
+    !checkRateLimit(`browser-input:${session.sessionId}`, INPUT_BATCHES).allowed
+  ) {
     return problem(429, "Too much input at once; slow down.")
   }
 

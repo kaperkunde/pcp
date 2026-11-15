@@ -294,12 +294,12 @@ describe("reading a schema URL an assistant proposed again", () => {
       },
     })
 
-    const background = await syncEndpointTools(await getServer(ctx, id))
+    const background = await syncEndpointTools(ctx, await getServer(ctx, id))
     expect(background.message).toMatch(/changed since it was approved/)
     expect(await toolNames(slug)).toEqual(["createPet", "listPets"])
     expect((await getServer(ctx, id)).status).toBe("ok")
 
-    const byOwner = await syncEndpointTools(await getServer(ctx, id), {
+    const byOwner = await syncEndpointTools(ctx, await getServer(ctx, id), {
       byOwner: true,
     })
     expect(byOwner.status).toBe("ok")
@@ -313,7 +313,7 @@ describe("reading a schema URL an assistant proposed again", () => {
 
   it("rebuilds as usual when the document has not changed", async () => {
     const { id, slug } = await fromUrl()
-    const sync = await syncEndpointTools(await getServer(ctx, id))
+    const sync = await syncEndpointTools(ctx, await getServer(ctx, id))
 
     expect(sync).toMatchObject({ status: "ok", toolCount: 2 })
     expect(await toolNames(slug)).toEqual(["createPet", "listPets"])
@@ -323,7 +323,7 @@ describe("reading a schema URL an assistant proposed again", () => {
     const { id, slug } = await fromUrl()
     published = spec({ servers: [] })
 
-    const sync = await syncEndpointTools(await getServer(ctx, id), {
+    const sync = await syncEndpointTools(ctx, await getServer(ctx, id), {
       byOwner: true,
     })
     expect(sync.status).toBe("error")
@@ -492,10 +492,10 @@ describe("changing an endpoint with edits", () => {
     ).resolves.toMatchObject({ updated: expect.stringMatching(/not changed/) })
 
     expect((await getEndpoint(scope, slug)).changes).toEqual({
-      "name, description, toolDescriptions, patches, refreshSpec":
+      "name, description, tool_descriptions, patches, refresh_spec":
         expect.stringMatching(/^asks the owner/),
-      "spec, baseUrl": expect.stringMatching(/^no: the owner/),
-      readOnly: expect.stringMatching(/on only/),
+      "spec, base_url": expect.stringMatching(/^no: the owner/),
+      read_only: expect.stringMatching(/on only/),
       authentication: expect.stringMatching(/only the owner/),
     })
   })

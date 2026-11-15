@@ -3,29 +3,40 @@
 import { Timer } from "lucide-react"
 import { useActionState } from "react"
 
-import { FormError, FormNote } from "@/components/form-status"
+import { FormError, FormNote } from "@kaperkunde/ui/form-status"
 import { describePace, PaceFields } from "@/components/pacing-fields"
 import { SettingsItem } from "@/components/settings-item"
-import { SubmitButton } from "@/components/submit-button"
-import { Disclosure } from "@/components/ui/disclosure"
-import { Checkbox, Input } from "@/components/ui/input"
-import { Field } from "@/components/ui/label"
+import { SubmitButton } from "@kaperkunde/ui/submit-button"
+import { Disclosure } from "@kaperkunde/ui/disclosure"
+import { Checkbox, Input } from "@kaperkunde/ui/input"
+import { Field } from "@kaperkunde/ui/label"
 import {
   type PacingResult,
   removePacingSiteAction,
   resetPacingAction,
+  saveAssistantPaceAction,
   savePacingClassesAction,
   savePacingSiteAction,
 } from "@/lib/actions/pacing"
 import type { PacedSite, PacingOverview } from "@/lib/core/pacing/config"
-import type { PacingClass } from "@/lib/core/pacing/limits"
+import type {
+  BrowserPacingClass,
+  PaceRange,
+  PacingClass,
+} from "@/lib/core/pacing/limits"
 
 const CLASSES: Array<{ name: PacingClass; title: string; about: string }> = [
   {
     name: "browser_act",
-    title: "Browser actions",
+    title: "Browser actions in a page",
     about:
-      "Opening pages, clicking, typing, scrolling and downloads, per site. Reading what a tab already shows is never paced.",
+      "Clicking, typing, choosing, scrolling and the like, per site, after the previous action there ended. Typing fills a field at once, not key by key. Reading what a tab already shows is never paced. A pace you set here before now covers only these, not opening pages, which has its own below.",
+  },
+  {
+    name: "browser_navigate",
+    title: "Browser opening a page",
+    about:
+      "Opening a page, going back and downloading by an address, per site: first the page the tab shows settles, then this wait.",
   },
   {
     name: "web_fetch",
@@ -94,6 +105,18 @@ export function PacingCard({ overview }: { overview: PacingOverview }) {
       <ClassesForm key={JSON.stringify(overview.classes)} overview={overview} />
       <ResetForm />
       <Disclosure
+        title="What assistants may set"
+        description={`A tab's or a browser flow's own pace, without asking you: ${ASSISTANT_CLASSES.map(
+          (entry) =>
+            `${entry.short} ${rangeWords(overview.assistant[entry.name].range)}`,
+        ).join(", ")}`}
+      >
+        <AssistantForm
+          key={JSON.stringify(overview.assistant)}
+          overview={overview}
+        />
+      </Disclosure>
+      <Disclosure
         title="Sites"
         description={
           sites === 0
@@ -139,6 +162,106 @@ function ClassesForm({ overview }: { overview: PacingOverview }) {
               pace={current.pace}
               label={`Pace ${entry.title.toLowerCase()}`}
             />
+          </fieldset>
+        )
+      })}
+      <div className="flex flex-wrap items-center gap-2">
+        <SubmitButton variant="secondary" pendingText="Saving…">
+          Save
+        </SubmitButton>
+        <Status state={state} />
+      </div>
+    </form>
+  )
+}
+
+const ASSISTANT_CLASSES: Array<{
+  name: BrowserPacingClass
+  title: string
+  short: string
+}> = [
+  {
+    name: "browser_act",
+    title: "Before an action in a page",
+    short: "actions",
+  },
+  {
+    name: "browser_navigate",
+    title: "Before opening a page",
+    short: "opening a page",
+  },
+]
+
+function rangeWords(range: PaceRange): string {
+  return `${range.minMs / 1000} to ${range.maxMs / 1000} s`
+}
+
+/**
+ * The bounds within which an assistant may give a tab, or a browser flow,
+ * a pace of its own without asking: outside them it asks you (a tab), or
+ * its request says so (a flow). Your own pace for a site stays a floor.
+ */
+function AssistantForm({ overview }: { overview: PacingOverview }) {
+  const [state, action] = useActionState(saveAssistantPaceAction, IDLE)
+
+  return (
+    <form
+      action={action}
+      className="flex flex-col gap-5"
+      aria-label="What assistants may set"
+    >
+      <p className="text-xs text-muted-foreground">
+        An assistant can slow a tab down or speed it up for a site that is slow
+        or quick, and a browser flow can bring its own timings. Within these it
+        needs no answer from you; outside them it asks. Your own pace for a site
+        always stays the least it waits there.
+      </p>
+      {ASSISTANT_CLASSES.map((entry) => {
+        const current = overview.assistant[entry.name]
+        const defaults = overview.assistantDefaults[entry.name]
+
+        return (
+          <fieldset
+            key={entry.name}
+            className="m-0 flex flex-col gap-2 border-0 p-0"
+          >
+            <legend className="text-[15px] text-foreground">
+              {entry.title}
+            </legend>
+            <p className="text-xs text-muted-foreground">
+              PCP&apos;s default: {rangeWords(defaults)}. Leave both empty for
+              it.
+            </p>
+            <div className="grid grid-cols-2 gap-3">
+              <Field
+                label="Shortest, in seconds"
+                htmlFor={`assistant-${entry.name}-min`}
+              >
+                <Input
+                  id={`assistant-${entry.name}-min`}
+                  name={`${entry.name}-min`}
+                  inputMode="decimal"
+                  defaultValue={
+                    current.own ? String(current.range.minMs / 1000) : ""
+                  }
+                  placeholder={String(defaults.minMs / 1000)}
+                />
+              </Field>
+              <Field
+                label="Longest, in seconds"
+                htmlFor={`assistant-${entry.name}-max`}
+              >
+                <Input
+                  id={`assistant-${entry.name}-max`}
+                  name={`${entry.name}-max`}
+                  inputMode="decimal"
+                  defaultValue={
+                    current.own ? String(current.range.maxMs / 1000) : ""
+                  }
+                  placeholder={String(defaults.maxMs / 1000)}
+                />
+              </Field>
+            </div>
           </fieldset>
         )
       })}

@@ -7,7 +7,9 @@ import { describe, expect, it, vi } from "vitest"
 
 import { displaySwitches } from "./display"
 import {
+  browserLanguages,
   contextOptions,
+  exitContextOptions,
   keepOffScreen,
   launchArgs,
   launchOptions,
@@ -159,6 +161,15 @@ describe("what Chromium is started with", () => {
     expect(options.env).not.toHaveProperty("DISPLAY")
   })
 
+  // #100: the contexts are off the record, so their cache is in memory;
+  // Chromium's own profile (Playwright's user data folder) keeps a disk
+  // cache all the same, which a crash would leave in the temporary folder.
+  it("keeps no disk cache to speak of, in any mode", () => {
+    for (const mode of ["window", "virtual", "headless"] as const) {
+      expect(launchArgs(mode), mode).toContain("--disk-cache-size=1")
+    }
+  })
+
   it("never with the automation switch, in any mode", () => {
     for (const mode of ["window", "virtual", "headless"] as const) {
       const options = launchOptions({ ...base, mode })
@@ -191,6 +202,38 @@ describe("what Chromium is started with", () => {
       // Not repeated: patchright-core's are enough.
       expect(launchArgs("window")).not.toContain(flag)
     }
+  })
+})
+
+describe("the browser's languages", () => {
+  it("are the host's locale, then its language alone, as a person's Chrome lists them", () => {
+    expect(browserLanguages("en-US")).toEqual(["en-US", "en"])
+    expect(browserLanguages("nl-NL")).toEqual(["nl-NL", "nl"])
+    expect(browserLanguages("pt-BR-u-ca-gregory")).toEqual(["pt-BR", "pt"])
+    expect(browserLanguages("zh-Hans-CN")).toEqual(["zh-CN", "zh"])
+    expect(browserLanguages("es-419")).toEqual(["es-419", "es"])
+    expect(browserLanguages("fr")).toEqual(["fr"])
+  })
+
+  it("are American English for a tag that does not read as one", () => {
+    for (const locale of ["", "und", "not a locale", "x-private"]) {
+      expect(browserLanguages(locale), locale).toEqual(["en-US", "en"])
+    }
+  })
+
+  it("are Chromium's own switches in every mode, and no context's locale", () => {
+    for (const mode of ["window", "virtual", "headless"] as const) {
+      const args = launchArgs(mode, "software", ["nl-NL", "nl"])
+      expect(args, mode).toContain("--lang=nl-NL")
+      expect(args, mode).toContain("--accept-lang=nl-NL,nl")
+      // Playwright's locale would send the bare locale as Accept-Language.
+      expect(contextOptions("153.0.7000.1", mode), mode).not.toHaveProperty(
+        "locale",
+      )
+    }
+    expect(launchArgs("virtual")).toContain(
+      `--accept-lang=${browserLanguages().join(",")}`,
+    )
   })
 })
 
@@ -460,5 +503,18 @@ describe("a page of PCP's own", () => {
       vi.useRealTimers()
       delete holder[backgroundWarned]
     }
+  })
+})
+
+describe("exitContextOptions", () => {
+  it("is the tabs' own context, with the exit's proxy and none of the sign-ins", () => {
+    const options = exitContextOptions("153.0.7000.1", "virtual", 41234)
+
+    expect(options).toEqual({
+      ...contextOptions("153.0.7000.1", "virtual"),
+      proxy: { server: "http://127.0.0.1:41234", bypass: "<-loopback>" },
+    })
+    expect(options).not.toHaveProperty("storageState")
+    expect(options.acceptDownloads).toBe(false)
   })
 })

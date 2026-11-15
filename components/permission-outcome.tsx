@@ -1,4 +1,4 @@
-import { StatusDot } from "@/components/ui/badge"
+import { StatusDot } from "@kaperkunde/ui/badge"
 import { cn } from "@/lib/utils"
 
 /**

@@ -25,29 +25,9 @@ export async function register() {
     const { startCleanup } = await import("@/lib/core/cleanup/runtime")
     await startCleanup()
 
-    // Not waited for: until it is done, endpoints answer with the tools
-    // they had.
-    const { rebuildOutdatedEndpoints } = await import("@/lib/core/endpoints")
-    void rebuildOutdatedEndpoints()
-      .then(({ rebuilt, failed }) => {
-        if (rebuilt > 0) {
-          console.log(`[endpoints] rebuilt the tools of ${rebuilt} endpoint(s)`)
-        }
-        for (const { serverId, message } of failed) {
-          console.error("[endpoints] could not rebuild tools", {
-            server: serverId,
-            message,
-          })
-        }
-      })
-      .catch((error) => console.error("[endpoints] rebuild failed", error))
-
-    // The browser's tools are fixed in the code, so a new version brings
-    // them up to date; and whether Chromium is here can change with it.
-    const { syncAllBrowserTools } = await import("@/lib/core/browser/server")
-    void syncAllBrowserTools().catch((error) =>
-      console.error("[browser] could not update the browser's tools", error),
-    )
+    // Endpoints another version built, and the browser's tools, are
+    // caught up by each vault's first request: their tools are sealed
+    // under its key, which nothing here holds (lib/core/vault-upkeep.ts).
 
     // Dynamic DNS and HTTPS, if the owner turned them on: off by default,
     // so nothing listens or runs here for anyone with a proxy of their own.

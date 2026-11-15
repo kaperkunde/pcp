@@ -67,6 +67,21 @@ function capabilities(declared: unknown): Record<string, string[]> {
   return result
 }
 
+/** The values of the headers that label the client, by name. */
+function labelValues(headers: Headers): Record<string, string> {
+  const labels: Record<string, string> = {}
+
+  for (const name of LABEL_HEADERS) {
+    const value = text(headers.get(name) ?? undefined)
+
+    if (value !== undefined) {
+      labels[name] = value
+    }
+  }
+
+  return labels
+}
+
 function headerNames(headers: Headers): string[] {
   return [...headers.keys()].sort().slice(0, MAX_NAMES)
 }
@@ -136,15 +151,7 @@ export function clientSeen(
   const message = parse(body)
   const params = isObject(message?.params) ? message.params : {}
   const meta = isObject(params._meta) ? params._meta : {}
-  const labels: Record<string, string> = {}
-
-  for (const name of LABEL_HEADERS) {
-    const value = text(headers.get(name) ?? undefined)
-
-    if (value !== undefined) {
-      labels[name] = value
-    }
-  }
+  const labels = labelValues(headers)
 
   const described: ClientSeen = {
     method: text(message?.method),
@@ -173,4 +180,39 @@ export function clientSeen(
 
   seen.add(key)
   return described
+}
+
+/**
+ * What one request says about its client, for picking its profile
+ * (clients/detect.ts): the client named by initialize or, under 2026-07-28,
+ * in the request's `_meta`, its user agent and the values of the headers
+ * that label it. Whether it is an initialize, which starts a session.
+ */
+export type RequestClient = {
+  initialize: boolean
+  client?: ClientInfo
+  userAgent?: string
+  labels: Record<string, string>
+}
+
+export function requestClient(body: string, headers: Headers): RequestClient {
+  const message = parse(body)
+  const params = isObject(message?.params) ? message.params : {}
+  const meta = isObject(params._meta) ? params._meta : {}
+  const initialize = message?.method === "initialize"
+  const labels = labelValues(headers)
+
+  const client =
+    initialize && isObject(params.clientInfo)
+      ? clientInfo(params.clientInfo)
+      : CLIENT_INFO_META in meta
+        ? clientInfo(meta[CLIENT_INFO_META])
+        : undefined
+
+  return {
+    initialize,
+    ...(client?.name ? { client } : {}),
+    userAgent: text(headers.get("user-agent") ?? undefined),
+    labels,
+  }
 }

@@ -25,6 +25,7 @@ for (const [from, to] of [
   ["public", "public"],
   ["prisma/migrations", "prisma/migrations"],
   ["docker/start.cjs", "start.cjs"],
+  ["docker/peer-stamp.cjs", "peer-stamp.cjs"],
 ]) {
   const target = path.join(standalone, to)
   rmSync(target, { recursive: true, force: true })
@@ -43,4 +44,7 @@ const ipv6 = await new Promise((resolve) => {
 process.env.HOSTNAME = listenHost("::", ipv6)
 process.env.PORT ??= "3000"
 
+// What the image's start.cjs and the desktop app's server-entry.cjs do
+// before Next: stamp each request with the address that connected (#99).
+require(path.join(standalone, "peer-stamp.cjs")).install(require("node:http"))
 require(path.join(standalone, "server.js"))

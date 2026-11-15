@@ -43,7 +43,7 @@ function callsOf(tool: string) {
 }
 
 async function run(baseURL: string, code: string) {
-  return toolText(await callTool(baseURL, token, "run_code", { code }))
+  return toolText(await callTool(baseURL, token, "run_destructive", { code }))
 }
 
 function returned(text: string): unknown {
@@ -77,9 +77,9 @@ test("a token made to run code gets run_code and is told how", async ({
 
   // The gateway's own part about run_code, not the owner's instructions
   // for the token, whose suggested text names run_code for every token.
-  const runCodePart = "This token can also run code with run_code"
+  const runCodePart = "This token can also run code with run_read"
   const told = await initialize(baseURL!, token)
-  expect(told.tools).toContain("run_code")
+  expect(told.tools).toContain("run_destructive")
   expect(told.instructions).toContain(runCodePart)
   // A token without the switch gets neither: lib/core/code/run.test.ts.
 })
@@ -153,7 +153,8 @@ test("a tool that asks the owner stops the program until they allow it", async (
   expect(stopped).toContain("Not done yet")
   const path = stopped.match(/\/permissions\/[\w-]+/)?.[0]
   expect(path, stopped).toBeTruthy()
-  expect(stopped.trimEnd().endsWith(path!)).toBe(true)
+  // The link to the owner's page is the last line, as a markdown link.
+  expect(stopped.trimEnd()).toMatch(new RegExp(`\\]\\([^)]*${path!}\\)$`))
   expect(callsOf("add_numbers")).toHaveLength(before + 1)
   expect(callsOf("send_postcard")).toHaveLength(0)
 
@@ -165,7 +166,21 @@ test("a tool that asks the owner stops the program until they allow it", async (
   )
   expect(callsOf("send_postcard")).toHaveLength(1)
 
-  const ran = await run(baseURL!, program)
+  // The program again: the postcard the owner's answer sent is not sent a
+  // second time (the duplicate guard), and the program hears how it went.
+  const again = await run(baseURL!, program)
+  expect(again).toContain(`Not run again: ${SLUG}/send_postcard`)
+  expect(again).toContain("The owner allowed it and it ran")
+  expect(callsOf("send_postcard")).toHaveLength(1)
+
+  // Sent again on purpose, it goes.
+  const ran = await run(
+    baseURL!,
+    program.replace(
+      'message: "Sum: " + sum })',
+      'message: "Sum: " + sum }, { rerun: true, reason: "A second card." })',
+    ),
+  )
   expect(returned(ran)).toBe("Sent to Grace: Sum: 5")
   expect(callsOf("send_postcard")).toHaveLength(2)
 })

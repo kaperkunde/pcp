@@ -10,6 +10,7 @@ import {
   parseSnapshot,
   PASSWORD_MASK,
   secretMask,
+  snapshotText,
 } from "./snapshot"
 
 // Playwright's AI snapshot read into elements: what find answers with, and
@@ -200,5 +201,56 @@ describe("a snapshot's masked fields", () => {
       maskFields(TREE, new Map([["ada@example.com", secretMask("Mail")]])),
     ).toContain('textbox "Email" [ref=e2]: [secret: Mail]')
     expect(maskFields(TREE, new Map())).toBe(TREE)
+  })
+
+  it("masks the value a field with a placeholder writes as its text child", () => {
+    const tree = `- generic [ref=e1]:
+  - textbox "IBAN" [ref=e2]:
+    - /placeholder: NL00 BANK 0123 4567 89
+    - text: NL91 ABNA 0417 1643 00
+  - textbox "Password" [ref=e3]:
+    - /placeholder: Your password
+    - text: hunter2
+  - paragraph [ref=e4]:
+    - text: hunter2`
+
+    expect(
+      maskFields(
+        tree,
+        new Map([
+          ["NL91 ABNA 0417 1643 00", secretMask("Bank")],
+          ["hunter2", PASSWORD_MASK],
+        ]),
+      ),
+    ).toBe(`- generic [ref=e1]:
+  - textbox "IBAN" [ref=e2]:
+    - /placeholder: NL00 BANK 0123 4567 89
+    - text: [secret: Bank]
+  - textbox "Password" [ref=e3]:
+    - /placeholder: Your password
+    - text: [password]
+  - paragraph [ref=e4]:
+    - text: hunter2`)
+  })
+})
+
+describe("a snapshot's words", () => {
+  it("reads as lines: headings, links with their address, items, no refs and no field's value", () => {
+    const text = snapshotText(parseSnapshot(SAMPLE))
+
+    expect(text.split("\n")).toEqual([
+      "[Home](/a)",
+      '# Who "are" you?',
+      "Name",
+      "Menu",
+      "- Hi there: yes",
+      "[Hi there](/x)",
+      "Tab 1",
+      "## Time: now",
+      "Inner",
+      "Hi there",
+      "f",
+    ])
+    expect(text).not.toContain("ref")
   })
 })

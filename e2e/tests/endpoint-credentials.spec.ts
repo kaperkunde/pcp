@@ -2,12 +2,7 @@ import { expect, test, type Page } from "@playwright/test"
 
 import { keyedSpec, startUpstream, type Upstream } from "../fixtures/upstream"
 import { callTool, toolText } from "../lib/mcp"
-import {
-  addSecret,
-  allowAllTools,
-  createToken,
-  showServerSettings,
-} from "../lib/ui"
+import { addSecret, allowAllTools, createToken } from "../lib/ui"
 
 // APIs whose credential is more than one bearer token, proposed by an
 // assistant that names the secrets and never sees them: HTTP Basic (a user
@@ -39,9 +34,8 @@ async function allowPrivateAddresses(page: Page, name: string) {
   await page.goto("/servers")
   await page.getByRole("link").filter({ hasText: name }).click()
   await expect(page).toHaveURL(/\/servers\/[0-9a-f-]+$/)
-  await showServerSettings(page)
+  // On the page, outside Advanced: the switch saves as it is turned.
   await page.getByLabel("Public addresses only").uncheck()
-  await page.getByRole("button", { name: "Save changes" }).click()
   await expect(
     page.getByRole("status").filter({ hasText: "Saved." }),
   ).toBeVisible()
@@ -126,7 +120,7 @@ test("an assistant proposes an API with a user name and a password, which the ow
   )
   expect(described).not.toMatch(/authorization/i)
 
-  const result = await callTool(baseURL!, token, "call_tool", {
+  const result = await callTool(baseURL!, token, "execute_destructive", {
     server: slug,
     tool: "whoami",
     arguments: {},
@@ -214,7 +208,7 @@ test("an assistant proposes an API with a key and a secret key in two headers, a
   )
   expect(described).not.toMatch(/X-Secret-API-Key/i)
 
-  const result = await callTool(baseURL!, token, "call_tool", {
+  const result = await callTool(baseURL!, token, "execute_destructive", {
     server: slug,
     tool: "ping",
     arguments: {},

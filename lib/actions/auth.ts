@@ -9,6 +9,7 @@ import {
   unlockWithDeviceKey,
 } from "@/lib/core/device-keys"
 import { invalid } from "@/lib/core/errors"
+import { ensureOwnStore } from "@/lib/core/storage/roots"
 import { destroySession } from "@/lib/core/sessions"
 import {
   isSetUp,
@@ -51,6 +52,8 @@ export async function setupAction(
       name: field(formData, "name"),
       password,
     })
+    // PCP's own store, there from the start.
+    await ensureOwnStore({ vaultId, dek })
     await signIn({ vaultId, dek })
 
     return { recoveryKey }

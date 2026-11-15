@@ -1,8 +1,11 @@
 # Design
 
-How PCP's owner pages look and behave, and why. The components in
-`components/ui/` carry the look; this file is what they cannot say on their
-own: when to use which, what goes where, and the rules a new page follows.
+How PCP's owner pages look and behave, and why. The primitives come from
+`@kaperkunde/ui` (kaperkunde/common-public), whose `themes/pcp.css` holds
+PCP's palette, and carry the look with PCP's own widgets in `components/`;
+this file is what they cannot say on their own: when to use which, what
+goes where, and the rules a new page follows. A primitive that needs to
+change is changed in the package, for every site that draws with it.
 Copy (the words) follows CLAUDE.md › Copy.
 
 ## Principles
@@ -28,8 +31,9 @@ Copy (the words) follows CLAUDE.md › Copy.
 
 The sidebar (`components/app-sidebar.tsx`) has two groups:
 
-- **Every day:** Home, Servers, Assistants, Memories, Skills, and Browser
-  below Skills while the browser is added and enabled.
+- **Every day:** Home, Servers, Assistants, Memories, Skills, Files (every
+  store and its file browser), and Browser below Files while the browser is
+  added and enabled.
 - **Now and then:** Secrets, Log, Settings.
 
 At the bottom: the update notice, the owner's name and **Lock**. The bell
@@ -50,7 +54,7 @@ token" where the token itself is meant (creating, revoking, copying it).
 
 ## Pages
 
-`PageColumn` (`components/page-column.tsx`) sets the width: the layout's
+`PageColumn` (`@kaperkunde/ui/page`) sets the width: the layout's
 960px for lists and Home, `narrow` (820px) for one thing's page and for
 Settings. Sections stand 32px apart.
 
@@ -62,7 +66,7 @@ what happens.
 
 ## Lists
 
-Most of PCP is grouped lists (`components/ui/list.tsx`), as in the Mac's
+Most of PCP is grouped lists (`@kaperkunde/ui/list`), as in the Mac's
 settings:
 
 - `ListSection`: the small grey heading above, an optional link at its
@@ -72,7 +76,7 @@ settings:
 - `ListRow`: icon, title, grey line, then what sits at the right. With
   `href` the row is a link and ends in a chevron. Rows are at least 56px
   tall.
-- `SwitchRow` (`components/ui/switch.tsx`): a label and a switch, the
+- `SwitchRow` (`@kaperkunde/ui/switch`): a label and a switch, the
   switch at the right. Use it for anything on/off; the label names the
   switch for assistive technology and tests.
 - `RowValue`: a grey value at a row's right ("Never", "2").
@@ -81,26 +85,26 @@ Use a `Card` for what is not rows: a form, a block of text, a code sample.
 
 ## Controls
 
-- **Buttons** (`components/ui/button.tsx`): `default` (teal) for the one
-  primary action; `secondary` (filled grey, also `outline`) for the rest;
+- **Buttons** (`@kaperkunde/ui/button`): `default` (teal) for the one
+  primary action; `secondary` (filled grey) for the rest;
   `ghost` (teal text) for an action inside a row; `plain` (grey text) for a
   quiet one; `destructive` (red text). Sizes: `default` 36px, `sm` 32px for
   inside rows, `lg` 44px for the decision buttons on a request.
 - **Switch** for on/off. A checkbox only where it reads as a list of
   choices (servers a token reaches) or as "also for all tokens".
-- **SegmentedControl** (`components/ui/segmented-control.tsx`) for two to
+- **SegmentedControl** (`@kaperkunde/ui/segmented-control`) for two to
   four exclusive choices that fit on a line: a tool's level (Allow / Ask /
   Block, tinted with `tone`), a filter, a sign-in kind. Over four, a
   `Select`.
 - **Fields**: `Field` puts the label above and a grey hint under. Inputs
   are 40px, on the darker field colour.
-- **Disclosure** (`components/ui/disclosure.tsx`) for "Advanced": a row
+- **Disclosure** (`@kaperkunde/ui/disclosure`) for "Advanced": a row
   with the title and a grey line naming what is inside, so the owner knows
   whether to open it. Native `<details>`: forms inside still submit.
-- **Dialog** (`components/ui/dialog.tsx`) for a short task that should not
+- **Dialog** (`@kaperkunde/ui/dialog`) for a short task that should not
   lose the page behind it: connecting an assistant. The primary button is
   last, at the right.
-- **Menu** (`components/ui/menu.tsx`) for a button's list of choices: the
+- **Menu** (`@kaperkunde/ui/menu`) for a button's list of choices: the
   bell, Add on Servers.
 - **IconTile** (`components/ui/icon-tile.tsx`): a server's kind picks its
   tint and symbol (MCP blue, API orange, mail purple, calendar red, browser
@@ -113,9 +117,9 @@ Use a `Card` for what is not rows: a form, a block of text, a code sample.
 
 | Shown on the page                                           | Folded (Disclosure) or one page down                                                     |
 | ----------------------------------------------------------- | ---------------------------------------------------------------------------------------- |
-| A server's description, sign-in state, on/off               | Its address, headers, sign-in app (OAuth client), private addresses                      |
+| A server's description, sign-in state, on/off, public-only  | Its address, headers, sign-in app (OAuth client)                                         |
 | Its tools                                                   | Each tool's description in the owner's words                                             |
-| An endpoint's read-only switch                              | Schema source, base URL, sign-in kind, JSON Patch edits, public-only                     |
+| An endpoint's read-only and public-only switches            | Schema source, base URL, sign-in kind, JSON Patch edits                                  |
 | What it reaches and the skills it sees; memories, web, code | Expiry, its instructions, every tool's level, web methods and sites, what it may propose |
 | Connecting an assistant: which app, name, reach             | More options: expiry, memories, web, code, endpoints, wrappers                           |
 | Settings: address, updates, sign-in, backup                 | Network (public address, outside access, pcp.gg, DNS, HTTPS), upkeep                     |
@@ -186,14 +190,18 @@ Opinionated, and each one the safe side:
   off (the add form says so).
 - A new assistant reaches all servers, but every tool asks first; memories,
   web pages, running code and proposing are off until turned on.
-- A server an assistant proposes reaches public addresses only.
+- A server an assistant proposes reaches public addresses only. One at a
+  private address offers "Allow private addresses" on its request, off;
+  the "Public addresses only" switch stays on the server's page, where a
+  refusal's link (`#public-only`) leads.
 - Advanced and More options start folded, except where something in them
   needs the owner now.
 
 ## Look
 
 Dark only: PCP is a control panel kept open beside other windows. The
-values live in `app/globals.css`; use the Tailwind names, not hex values.
+values live in `@kaperkunde/ui/themes/pcp.css`, which `app/globals.css`
+imports; use the Tailwind names, not hex values.
 
 | Token                          | Use                                         |
 | ------------------------------ | ------------------------------------------- |
@@ -229,6 +237,9 @@ values live in `app/globals.css`; use the Tailwind names, not hex values.
 - Targets are 36px or more (44px on a phone's decision buttons); rows 56px.
 - Every page works at 390px wide: rows wrap their right-hand controls under
   the title, grids fall to one column, wide tables scroll inside their box.
+  A box that scrolls and holds `sr-only` text is `relative`: that text is
+  positioned absolutely, and against the page it stretches the page by
+  everything the box hides.
 - Focus shows as a teal ring; nothing removes it without a replacement.
 
 ## Tests and the design

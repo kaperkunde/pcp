@@ -1,7 +1,11 @@
+import { randomBytes } from "node:crypto"
+import { isIP } from "node:net"
+
 import {
   auth,
   Client,
   discoverAuthorizationServerMetadata,
+  ProtocolError,
   SdkHttpError,
   StreamableHTTPClientTransport,
   UnauthorizedError,
@@ -14,33 +18,114 @@ import {
   type StoredOAuthTokens,
 } from "@modelcontextprotocol/client"
 
-import type { McpServer } from "@/lib/generated/prisma/client"
-
 import { storeTools, type SyncResult } from "./catalogue"
 import type { VaultContext } from "./context"
 import { asBytes, decryptString, encryptString } from "./crypto"
 import { db } from "./db"
-import { admitSecretUse } from "./browser-secrets"
+import { admitSecretUse, findTypableSecret } from "./browser-secrets"
 import { callBrowserTool } from "./browser/call"
 import { syncBrowserTools } from "./browser/server"
 import { isOwnerNeeded, type SecretTyper } from "./browser/types"
 import { callEndpointTool, syncEndpointTools } from "./endpoints"
-import { invalid, isPcpError, PcpError } from "./errors"
+import { invalid, isPcpError, notFound, PcpError } from "./errors"
 import { callCalendarTool, syncCalendarTools } from "./caldav/accounts"
 import { callMailTool, syncMailTools } from "./mail/accounts"
 import type { MailCredential } from "./mail/types"
 import type { GitHubCredential } from "./repos/github"
 import { GITHUB_SIGNIN_SECRET } from "./repos/limits"
-import type { SshIdentity } from "./ssh/client"
-import { callSshTool, syncSshTools } from "./ssh/hosts"
+import {
+  ensureSshConnection,
+  openChannel,
+  openSftp,
+  sshConnectionAddress,
+  sshExec,
+  type SshIdentity,
+} from "./ssh/client"
+import { convertStoreStep, type ConversionStep } from "./storage/convert"
+import { deliverStoreUploads, type Delivery } from "./store-uploads"
+import { type OpenedFile, type StorageFolder } from "./storage/files"
+import {
+  callStorageTool,
+  isLocalStore,
+  loadStorageRoot,
+  localConnect,
+  openStoreFolder,
+  syncStorageTools,
+  unreachableReason,
+  withFolder,
+  type LoadedStorage,
+  type StorageConnect,
+  type StoreMode,
+} from "./storage/roots"
+import { remoteFs } from "./storage/sftp"
+import {
+  makeExitDialer,
+  proxiedTransport,
+  type ExitDialer,
+  type ExitTransport,
+} from "./exits/dial"
+import { deleteExit, getExit, type ExitView } from "./exits/exits"
+import type { ProxyAuth } from "./exits/handshake"
+import { browserExits } from "./exits/use"
+import { callSshTool, sshTarget, syncSshTools } from "./ssh/hosts"
+import {
+  EXIT_PUBLISH_ADDRESS,
+  type ServiceDefinition,
+} from "./services/definition"
+import type {
+  ContainerAction,
+  ServiceEnv,
+  ServiceHost,
+} from "./services/engine"
+import { containerLogs } from "./services/engine"
+import {
+  callServiceTool,
+  EXIT_PROXY_USER,
+  launchServiceOn,
+  loadService,
+  prepareLaunch,
+  reconcileServicesWith,
+  recreateServiceOn,
+  removeServiceOn,
+  serviceActionOn,
+  serviceBehind,
+  serviceDial,
+  servicesUsingSecret,
+  serviceStatusOn,
+  startOnDemand,
+  statusWords,
+  stoppedServiceMessage,
+  syncServiceTools,
+  updateServiceOn,
+  type LaunchResult,
+  type LoadedService,
+  type ReconcileRun,
+  type ServiceAccess,
+  type ServiceLaunchInput,
+  type ServiceStatus,
+  type ServiceUpdateChoice,
+} from "./services/services"
+import { newerImageOn, type NewerImage } from "./services/updates"
 import {
   AddressBlockedError,
   isOwnAddress,
   isPublicAddress,
 } from "./openapi/address"
 import { makeRedactor } from "./openapi/redact"
-import { paceServerCall } from "./pacing"
-import { checkedFetch } from "./openapi/transport"
+import { paceEmbeddings, paceServerCall, pacedResult } from "./pacing"
+import { PACING_DEADLINE_MARGIN_MS, type PaceRange } from "./pacing/limits"
+import { pacingNow } from "./pacing/pace"
+import { VOYAGE_EMBEDDINGS_URL } from "./constants"
+import { embeddingsUrl, type EmbeddingsConfig } from "./embeddings/config"
+import { EMBED_PACE_WAIT_MS } from "./embeddings/limits"
+import {
+  requestEmbeddings,
+  type EmbeddingProvider,
+  type EmbeddingsRequest,
+} from "./embeddings/provider"
+import { checkedFetch, type SendOptions } from "./openapi/transport"
+import { markdownLink } from "./owner-link"
+import { PublicOnlyRefusal, withPublicOnlyLink } from "./public-only"
 import {
   applyAuthorizeParams,
   applySignInDefaults,
@@ -52,6 +137,7 @@ import {
 import {
   deleteManagedSecret,
   readSecretValue,
+  readTypedLogin,
   readTypedValue,
   revealSecret,
   writeManagedSecret,
@@ -60,14 +146,24 @@ import {
   extraAuthHeaders,
   isCalendarKind,
   isMailKind,
+  isServiceKind,
   isSshKind,
+  isStorageKind,
   kindNoun,
   renderAuthValue,
   setServerStatus,
 } from "./servers"
-import { noteSecretTyped } from "./request-log"
+import { noteExitUsed, noteSecretTyped } from "./request-log"
 import { resolveHandles } from "./result-handles"
 import type { BytesKeeper, ResultKeeper, ResultOpener } from "./tool-results"
+import { isToolName } from "./tools/define"
+import { familyError } from "./tools/family"
+import {
+  MAX_ICON_SRC_CHARS,
+  MAX_OUTPUT_SCHEMA_CHARS,
+  MAX_TOOL_ICONS,
+} from "./tools/limits"
+import { applyPendingAccess } from "./proposed-access"
 import { PCP_VERSION } from "./version"
 import { syncWrapperTools } from "./wrappers/catalogue"
 import {
@@ -77,6 +173,8 @@ import {
   scrubResult,
   type SecretGrant,
 } from "./wrappers/placeholders"
+import { SECRET_META_SELECT, secretName } from "./secret-meta"
+import { findServer, type OpenServer, writeServer } from "./server-meta"
 
 /**
  * Talking to the servers in the registry: opening a connection with the
@@ -87,9 +185,15 @@ import {
  * or login this module builds, or an OAuth token it renews; calendar
  * accounts (kind "caldav") to lib/core/caldav/accounts.ts, the same way;
  * SSH servers (kind "ssh") to lib/core/ssh/hosts.ts, with PCP's key for the
- * server, decrypted here. Linked repositories' GitHub client
+ * server, decrypted here; services (kind "service") to
+ * lib/core/services/, with a way to run commands on their SSH server and
+ * their variables' values (ServiceAccess), built here; storage roots (kind
+ * "storage") to lib/core/storage/, with a way to open an SFTP session on
+ * their SSH server (StorageConnect), built here with PCP's key. Linked
+ * repositories' GitHub client
  * (lib/core/repos/github.ts) gets its Authorization header from
- * githubCredential, the same way.
+ * githubCredential, the same way, and search's embeddings provider
+ * (lib/core/embeddings/) its header from embeddingProvider.
  *
  * Credentials are decrypted here, used for the one connection and dropped.
  * Nothing in this module returns a secret to a caller.
@@ -101,7 +205,7 @@ const CONNECT_TIMEOUT_MS = 20_000
 const CALL_TIMEOUT_MS = 120_000
 const OAUTH_STATE_TTL_MS = 15 * 60 * 1000
 
-export function managedSecretName(server: Pick<McpServer, "id">): string {
+export function managedSecretName(server: Pick<OpenServer, "id">): string {
   return `oauth/${server.id}`
 }
 
@@ -110,7 +214,7 @@ export function managedSecretName(server: Pick<McpServer, "id">): string {
  * or its refresh failed (the provider clears oauthConnectedAt then).
  */
 export function needsConnecting(
-  server: Pick<McpServer, "authType" | "oauthConnectedAt">,
+  server: Pick<OpenServer, "authType" | "oauthConnectedAt">,
 ): boolean {
   return server.authType === "oauth" && server.oauthConnectedAt === null
 }
@@ -158,7 +262,7 @@ export class PcpOAuthProvider implements OAuthClientProvider {
 
   constructor(
     private readonly ctx: VaultContext,
-    private readonly server: McpServer,
+    private readonly server: OpenServer,
     private readonly options: {
       redirectUrl: string
       publicUrl: string
@@ -510,7 +614,7 @@ export class PcpOAuthProvider implements OAuthClientProvider {
  */
 export function endpointDiscovery(
   server: Pick<
-    McpServer,
+    OpenServer,
     "kind" | "url" | "oauthAuthorizationUrl" | "oauthTokenUrl"
   >,
 ): OAuthDiscoveryState | undefined {
@@ -542,7 +646,7 @@ export function endpointDiscovery(
 export function endpointAddressesMatch(
   metadata:
     { authorization_endpoint?: string; token_endpoint?: string } | undefined,
-  server: Pick<McpServer, "oauthAuthorizationUrl" | "oauthTokenUrl">,
+  server: Pick<OpenServer, "oauthAuthorizationUrl" | "oauthTokenUrl">,
 ): boolean {
   const same = (given: string | undefined, approved: string | null) => {
     try {
@@ -573,7 +677,7 @@ export function endpointAddressesMatch(
  * goes under the endpoint's address rule, like its other OAuth requests.
  */
 export async function verifiedEndpointDiscovery(
-  server: McpServer,
+  server: OpenServer,
   fixed: OAuthDiscoveryState,
 ): Promise<{
   discovery: OAuthDiscoveryState
@@ -628,7 +732,7 @@ function publicServerAddress(address: string, port: number): boolean {
  * Undefined means the SDK's own fetch.
  */
 export function serverFetch(
-  server: Pick<McpServer, "kind" | "publicOnly">,
+  server: Pick<OpenServer, "kind" | "publicOnly">,
 ): FetchLike | undefined {
   if (!server.publicOnly) {
     return undefined
@@ -669,7 +773,7 @@ const RENEW_MARGIN_MS = 60_000
  */
 async function endpointToken(
   ctx: VaultContext,
-  server: McpServer,
+  server: OpenServer,
   { publicUrl, renew = false }: { publicUrl: string; renew?: boolean },
 ): Promise<{ access: string; refresh: string | undefined }> {
   const provider = new PcpOAuthProvider(ctx, server, {
@@ -747,7 +851,7 @@ export type OAuthConnection = {
 
 export async function describeOAuthConnection(
   ctx: VaultContext,
-  server: McpServer,
+  server: OpenServer,
 ): Promise<OAuthConnection | null> {
   if (server.authType !== "oauth" || !server.oauthConnectedAt) {
     return null
@@ -776,20 +880,17 @@ export async function describeOAuthConnection(
 
 export async function forgetOAuthTokens(
   ctx: VaultContext,
-  server: McpServer,
+  server: OpenServer,
 ): Promise<void> {
   if (server.oauthTokensId) {
     await deleteManagedSecret(ctx, server.oauthTokensId)
   }
 
-  await db().mcpServer.update({
-    where: { id: server.id },
-    data: {
-      oauthTokensId: null,
-      oauthConnectedAt: null,
-      status: "unknown",
-      statusMessage: "",
-    },
+  await writeServer(ctx, server.id, {
+    oauthTokensId: null,
+    oauthConnectedAt: null,
+    status: "unknown",
+    statusMessage: "",
   })
 }
 
@@ -809,7 +910,7 @@ export type Credential = {
 
 async function credential(
   ctx: VaultContext,
-  server: McpServer,
+  server: OpenServer,
   {
     publicUrl,
     renew = false,
@@ -910,14 +1011,14 @@ export async function githubCredential(
 
   const row = await db().secret.findFirst({
     where: { id: secretId, vaultId: ctx.vaultId },
-    select: { kind: true, name: true },
+    select: { ...SECRET_META_SELECT, kind: true },
   })
 
   if (
     !row ||
     !(
       row.kind === "text" ||
-      (row.kind === "oauth" && row.name === GITHUB_SIGNIN_SECRET)
+      (row.kind === "oauth" && secretName(ctx, row) === GITHUB_SIGNIN_SECRET)
     )
   ) {
     throw new PcpError(
@@ -951,9 +1052,158 @@ export async function githubCredential(
   return { headers: { Authorization: header }, redact: [token, header, value] }
 }
 
+/**
+ * A text secret as a bearer header, for a provider PCP calls itself (search's
+ * embeddings), with the values to keep out of what is repeated.
+ */
+async function bearerFromTextSecret(
+  ctx: VaultContext,
+  secretId: string,
+): Promise<{ headers: Record<string, string>; redact: string[] }> {
+  const row = await db().secret.findFirst({
+    where: { id: secretId, vaultId: ctx.vaultId },
+    select: { kind: true },
+  })
+
+  if (row?.kind !== "text") {
+    throw new PcpError(
+      "state",
+      "The embeddings provider's API key is gone. Choose it again on Settings.",
+    )
+  }
+
+  const value = await readSecretValue(ctx, secretId)
+  const token = value.trim()
+
+  if (!token || /[\u0000-\u001f\u007f\s]/.test(token)) {
+    throw new PcpError(
+      "state",
+      "The embeddings provider's API key is empty or has a character a header cannot carry.",
+    )
+  }
+
+  const header = `Bearer ${token}`
+  return { headers: { Authorization: header }, redact: [token, header, value] }
+}
+
+/**
+ * Search's embeddings provider, as the owner set it on Settings: the
+ * request it takes (address, model, the header made from its secret here)
+ * and the addresses it may reach. Voyage AI at its own public address
+ * only; an OpenAI-compatible address the owner typed anywhere but PCP's own;
+ * an API endpoint (a service's text-embeddings-inference) with its own
+ * credential and public-only rule, as its calls go. Paced as a read
+ * (paceEmbeddings); a turn too far off fails the request, and search goes
+ * on with keywords. The header goes to requestEmbeddings and nowhere else.
+ */
+export async function embeddingProvider(
+  ctx: VaultContext,
+  config: EmbeddingsConfig,
+  publicUrl = "",
+): Promise<EmbeddingProvider> {
+  let request: EmbeddingsRequest
+  let pace: { serverId?: string; name: string } = {
+    name: "the embeddings provider",
+  }
+  // A service's endpoint (text-embeddings-inference): reached through its
+  // SSH server when PCP reaches the service that way, and started again
+  // once if a request finds it stopped and the owner left it running.
+  let service: OpenServer | null = null
+  const notOwn = (address: string, port: number) => !isOwnAddress(address, port)
+
+  switch (config.provider) {
+    case "voyage":
+      request = {
+        url: VOYAGE_EMBEDDINGS_URL,
+        style: "voyage",
+        model: config.model,
+        ...(await bearerFromTextSecret(ctx, config.secretId)),
+        sendOptions: { publicOnly: true },
+      }
+      break
+    case "openai":
+      request = {
+        url: embeddingsUrl(config.url),
+        style: "openai",
+        model: config.model,
+        ...(config.secretId
+          ? await bearerFromTextSecret(ctx, config.secretId)
+          : { headers: {}, redact: [] }),
+        sendOptions: { publicOnly: true, addressCheck: notOwn },
+      }
+      break
+    case "endpoint": {
+      const server = await findServer(ctx, {
+        id: config.serverId,
+        vaultId: ctx.vaultId,
+        kind: "openapi",
+      })
+
+      if (!server || !server.enabled) {
+        throw new PcpError(
+          "state",
+          "The embeddings provider's API endpoint is gone or turned off.",
+        )
+      }
+
+      const { headers, redact } = await credential(ctx, server)
+      const tunnel = await serviceTunnel(ctx, server, publicUrl)
+      request = {
+        url: embeddingsUrl(server.url),
+        style: "openai",
+        model: config.model,
+        headers,
+        redact,
+        sendOptions:
+          tunnel ??
+          (server.publicOnly
+            ? { publicOnly: true }
+            : { publicOnly: true, addressCheck: notOwn }),
+      }
+      pace = { serverId: server.id, name: server.name }
+      service = server
+      break
+    }
+  }
+
+  return {
+    fingerprint: [
+      config.provider,
+      config.provider === "endpoint" ? config.serverId : "",
+      request.url,
+      config.model,
+    ].join("\n"),
+    async embed(texts, input, signal) {
+      const paced = await paceEmbeddings(ctx, pace, {
+        signal,
+        deadline: pacingNow() + EMBED_PACE_WAIT_MS + PACING_DEADLINE_MARGIN_MS,
+      })
+
+      if (paced) {
+        throw new PcpError("upstream", paced.message)
+      }
+
+      try {
+        return await requestEmbeddings(request, texts, input, signal)
+      } catch (error) {
+        const woke =
+          service && !signal?.aborted
+            ? await wakeService(ctx, service, publicUrl)
+            : null
+
+        if (!woke?.started) {
+          throw error
+        }
+
+        return requestEmbeddings(request, texts, input, signal)
+      }
+    },
+  }
+}
+
 async function basicCredential(
   ctx: VaultContext,
-  server: McpServer,
+  server: OpenServer,
 ): Promise<Credential> {
   if (!server.authSecretId || !server.authUsername) {
     throw new PcpError(
@@ -991,7 +1241,7 @@ async function basicCredential(
  */
 async function mailCredential(
   ctx: VaultContext,
-  server: McpServer,
+  server: OpenServer,
   { publicUrl }: { publicUrl: string },
 ): Promise<MailCredential> {
   const { headers, redact, login } = await credential(ctx, server, {
@@ -1083,7 +1333,7 @@ async function failureSecrets(
  */
 export async function openUpstream(
   ctx: VaultContext,
-  server: McpServer,
+  server: OpenServer,
   { publicUrl }: { publicUrl: string },
 ): Promise<UpstreamConnection> {
   const provider =
@@ -1102,9 +1352,13 @@ export async function openUpstream(
     ...(await oauthTokens(provider)),
   ]
   const endpoint = new URL(server.url)
-  // A public-only server's requests, and its OAuth requests (the SDK makes
-  // those through this too), reach public addresses only.
-  const reach = serverFetch(server) ?? fetch
+  // A service's MCP server is reached through its SSH server; a public-only
+  // server's requests, and its OAuth requests (the SDK makes those through
+  // this too), reach public addresses only.
+  const tunnel = await serviceTunnel(ctx, server, publicUrl)
+  const reach = tunnel
+    ? checkedFetch(tunnel, { followRedirects: true })
+    : (serverFetch(server) ?? fetch)
   let refusal: Refusal | undefined
   const transport = new StreamableHTTPClientTransport(endpoint, {
     // Never cached: these are live calls carrying credentials. It also keeps
@@ -1165,7 +1419,7 @@ export type { SyncResult }
  */
 async function sshIdentity(
   ctx: VaultContext,
-  server: McpServer,
+  server: OpenServer,
 ): Promise<SshIdentity> {
   if (!server.authSecretId) {
     throw new PcpError(
@@ -1178,12 +1432,484 @@ async function sshIdentity(
 }
 
 /**
+ * How a storage root opens an SFTP session: on its SSH server's long-lived
+ * connection, made with PCP's key for that server, decrypted here when the
+ * session is opened and handed to the ssh module, never further. A host
+ * whose key the owner has not pinned is not connected to (openSftp refuses).
+ */
+export function storageConnect(
+  ctx: VaultContext,
+  loaded: LoadedStorage,
+): StorageConnect {
+  // PCP's own store is in its data folder: no SSH server, no key.
+  if (isLocalStore(loaded.root)) {
+    return localConnect
+  }
+
+  return async () => {
+    const host = loaded.host
+
+    if (!host || !isSshKind(host.kind)) {
+      throw new PcpError(
+        "state",
+        `${loaded.server.name}'s SSH server is no longer in PCP, so PCP cannot reach the folder.`,
+      )
+    }
+
+    const session = await openSftp(
+      host.id,
+      sshTarget(host),
+      await sshIdentity(ctx, host),
+    )
+    return remoteFs(session.sftp, session.release)
+  }
+}
+
+/**
+ * A storage root's folder for the owner's file browser, opened for one
+ * request: `run` gets it, and the session is closed after. Refused while
+ * the root's SSH server is gone or its host key not pinned.
+ */
+export async function withStorageFolder<T>(
+  ctx: VaultContext,
+  serverId: string,
+  { publicUrl }: { publicUrl: string },
+  run: (folder: StorageFolder, loaded: LoadedStorage) => Promise<T>,
+): Promise<T> {
+  const loaded = await loadStorageRoot(ctx, serverId)
+  const unreachable = unreachableReason(loaded, publicUrl)
+
+  if (unreachable) {
+    throw new PcpError("state", unreachable.split("\n")[0]!)
+  }
+
+  return withFolder(ctx, loaded, storageConnect(ctx, loaded), (folder) =>
+    run(folder, loaded),
+  )
+}
+
+/**
+ * Saves files that arrived by upload links made with a store as their
+ * destination (store-uploads.ts), each store opened as the owner's file
+ * browser opens it, with the key this request holds. Run by check_upload
+ * and, after the answer, by any request that brings the vault's key.
+ */
+export function deliverUploads(
+  ctx: VaultContext,
+  {
+    publicUrl,
+    ...options
+  }: {
+    publicUrl: string
+    tokenId?: string
+    uploadLinkId?: string
+    retryNow?: boolean
+  },
+): Promise<Delivery[]> {
+  return deliverStoreUploads(ctx, {
+    ...options,
+    open: (storeId, run) =>
+      withStorageFolder(ctx, storeId, { publicUrl }, (folder, loaded) => {
+        if (loaded.server.readOnly) {
+          throw new PcpError(
+            "state",
+            `${loaded.server.name} is read-only in PCP now, so nothing is saved there.`,
+          )
+        }
+        return run(folder)
+      }),
+  })
+}
+
+/**
+ * One batch of the owner's conversion of a store, encrypted or plain
+ * (storage/convert.ts), on its backend opened for this request.
+ */
+export async function convertStore(
+  ctx: VaultContext,
+  serverId: string,
+  to: StoreMode,
+  { publicUrl }: { publicUrl: string },
+  options?: { budgetMs?: number; maxFiles?: number },
+): Promise<ConversionStep> {
+  const loaded = await loadStorageRoot(ctx, serverId)
+  const unreachable = unreachableReason(loaded, publicUrl)
+
+  if (unreachable) {
+    throw new PcpError("state", unreachable.split("\n")[0]!)
+  }
+
+  return convertStoreStep(ctx, loaded, storageConnect(ctx, loaded), to, options)
+}
+
+/**
+ * One file of a store as a stream, whole or a range (`offset`, `length`),
+ * for the owner's download: decrypted as it is read when the store is
+ * encrypted. The session stays open while the stream is read and closes
+ * when it ends.
+ */
+export async function openStorageDownload(
+  ctx: VaultContext,
+  serverId: string,
+  path: string,
+  { publicUrl }: { publicUrl: string },
+  range?: { offset?: number; length?: number },
+): Promise<OpenedFile> {
+  const loaded = await loadStorageRoot(ctx, serverId)
+  const unreachable = unreachableReason(loaded, publicUrl)
+
+  if (unreachable) {
+    throw new PcpError("state", unreachable.split("\n")[0]!)
+  }
+
+  const { folder, end: close } = await openStoreFolder(
+    ctx,
+    loaded,
+    storageConnect(ctx, loaded),
+  )
+
+  try {
+    const file = await folder.open(path, range)
+    let ended = false
+    const end = () => {
+      if (ended) return
+      ended = true
+      close()
+    }
+    file.stream.once("close", end)
+    file.stream.once("error", end)
+    file.stream.once("end", end)
+    return file
+  } catch (error) {
+    close()
+    throw error
+  }
+}
+
+/**
+ * An upstream tool's outputSchema as the catalogue keeps it: an object
+ * schema of a bounded size, else nothing (describe then shows none).
+ */
+function keptOutputSchema(schema: unknown): unknown {
+  return schema !== null &&
+    typeof schema === "object" &&
+    !Array.isArray(schema) &&
+    JSON.stringify(schema).length <= MAX_OUTPUT_SCHEMA_CHARS
+    ? schema
+    : undefined
+}
+
+/**
+ * The icons an upstream gave a tool, as the catalogue keeps them: an https
+ * address or an image as a data: URI, of a bounded length, with its type,
+ * sizes and theme, and nothing else.
+ */
+function keptIcons(icons: unknown): unknown {
+  if (!Array.isArray(icons)) {
+    return undefined
+  }
+
+  const kept = icons
+    .filter(
+      (icon): icon is Record<string, unknown> =>
+        icon !== null &&
+        typeof icon === "object" &&
+        typeof icon.src === "string" &&
+        icon.src.length <= MAX_ICON_SRC_CHARS &&
+        /^(https:|data:image\/)/i.test(icon.src),
+    )
+    .slice(0, MAX_TOOL_ICONS)
+    .map((icon) => ({
+      src: icon.src,
+      ...(typeof icon.mimeType === "string" ? { mimeType: icon.mimeType } : {}),
+      ...(Array.isArray(icon.sizes) &&
+      icon.sizes.every((size) => typeof size === "string")
+        ? { sizes: icon.sizes.slice(0, 8) }
+        : {}),
+      ...(icon.theme === "light" || icon.theme === "dark"
+        ? { theme: icon.theme }
+        : {}),
+    }))
+
+  return kept.length > 0 ? kept : undefined
+}
+
+/**
+ * An exit, ready for one request: the SSH connection it leaves through
+ * opened (or found open) with PCP's key, decrypted here and handed to the
+ * ssh module, never further.
+ *
+ * `dialer` may open the connection again with that key while the request
+ * runs; `background` never does (it is the browser's proxy, which dials
+ * between requests holding no key: when the connection has closed, its
+ * dials fail until the next call that uses the exit opens it again).
+ *
+ * A host whose key the owner has not pinned is not connected to.
+ */
+export type OpenedExit = { dialer: ExitDialer; background: ExitDialer }
+
+export async function openExit(
+  ctx: VaultContext,
+  exit: ExitView,
+  { publicUrl }: { publicUrl: string },
+): Promise<OpenedExit> {
+  if (exit.kind !== "ssh" && exit.kind !== "service") {
+    throw new PcpError(
+      "state",
+      `The exit ${exit.name} is a kind this version of PCP cannot open yet.`,
+    )
+  }
+
+  // A VPN service's exit: its container, its proxy and its login, all read
+  // here, before anything connects.
+  const proxy = exit.kind === "service" ? await exitProxy(ctx, exit) : null
+
+  const server = await findServer(ctx, {
+    id: exit.serverId,
+    vaultId: ctx.vaultId,
+  })
+
+  if (!server || !isSshKind(server.kind)) {
+    throw new PcpError(
+      "state",
+      `The exit ${exit.name}'s SSH server is no longer in PCP.`,
+    )
+  }
+
+  const target = sshTarget(server)
+  const page = `${publicUrl.replace(/\/+$/, "")}/servers/${server.id}`
+
+  if (!target.hostKey) {
+    throw new PcpError(
+      "state",
+      `PCP has not pinned ${server.name}'s host key yet, so the exit ${exit.name} does not connect: the owner checks the server on its page first.\n${page}`,
+    )
+  }
+
+  if (!server.enabled) {
+    throw new PcpError(
+      "state",
+      `${server.name} is turned off in PCP, so the exit ${exit.name} is closed.`,
+    )
+  }
+
+  const identity = await sshIdentity(ctx, server)
+  let remote: string | null
+
+  try {
+    ;({ remoteAddress: remote } = await ensureSshConnection(
+      server.id,
+      target,
+      identity,
+    ))
+  } catch (error) {
+    throw new PcpError(
+      "upstream",
+      `The exit ${exit.name} could not be opened: ${(error instanceof Error ? error.message : String(error)).slice(0, 300)}`,
+    )
+  }
+
+  const own = () => {
+    const now = sshConnectionAddress(server.id, target) ?? remote
+    return [now, isIP(target.host) ? target.host : null].filter(
+      (address): address is string => !!address,
+    )
+  }
+  const info = { id: exit.id, name: exit.name, label: exit.label }
+
+  // Kind "ssh": a channel from the SSH server to the checked address.
+  // Kind "service": a channel to the one loopback port PCP published the
+  // container's proxy on, then the proxy's handshake to the checked
+  // address; nothing else on the SSH server's loopback is ever reached.
+  const transport = (key: SshIdentity | null): ExitTransport =>
+    proxy
+      ? proxiedTransport(
+          (signal) =>
+            openChannel(
+              server.id,
+              target,
+              key,
+              EXIT_PUBLISH_ADDRESS,
+              proxy.port,
+              { signal },
+            ),
+          { protocol: proxy.protocol, auth: proxy.auth },
+          own,
+        )
+      : {
+          own,
+          open: (address, port, signal) =>
+            openChannel(server.id, target, key, address, port, { signal }),
+        }
+
+  return {
+    dialer: makeExitDialer(info, transport(identity)),
+    background: makeExitDialer(info, transport(null)),
+  }
+}
+
+/**
+ * A VPN service's exit as it is dialed: the loopback port its proxy is
+ * published on, its protocol, and the login PCP made for it (the managed
+ * secret, decrypted here). A service that is gone, off, moved or not an
+ * exit's is not dialed.
+ */
+async function exitProxy(
+  ctx: VaultContext,
+  exit: ExitView,
+): Promise<{ port: number; protocol: "http" | "socks5"; auth?: ProxyAuth }> {
+  const loaded = exit.serviceId
+    ? await loadService(ctx, exit.serviceId).catch(() => null)
+    : null
+
+  if (!loaded) {
+    throw new PcpError(
+      "state",
+      `The exit ${exit.name}'s service is no longer in PCP.`,
+    )
+  }
+
+  const registers = loaded.definition.registers
+
+  if (registers.kind !== "exit" || loaded.host?.id !== exit.serverId) {
+    throw new PcpError(
+      "state",
+      `${loaded.server.name} does not serve the exit ${exit.name} any more.`,
+    )
+  }
+
+  if (!loaded.server.enabled) {
+    throw new PcpError(
+      "state",
+      `${loaded.server.name} is turned off in PCP, so the exit ${exit.name} is closed.`,
+    )
+  }
+
+  const port = loaded.publish.ports.find(
+    (entry) => entry.container === registers.port,
+  )?.host
+
+  if (port === undefined || loaded.publish.address !== EXIT_PUBLISH_ADDRESS) {
+    throw new PcpError(
+      "state",
+      `${loaded.server.name}'s proxy is not published on its SSH server's loopback, so the exit ${exit.name} does not open.`,
+    )
+  }
+
+  return {
+    port,
+    protocol: registers.protocol,
+    ...(registers.auth ? { auth: await exitProxyAuth(ctx, loaded) } : {}),
+  }
+}
+
+/** The login of an exit service's proxy, from the password PCP made for it. */
+async function exitProxyAuth(
+  ctx: VaultContext,
+  loaded: LoadedService,
+): Promise<ProxyAuth> {
+  if (!loaded.server.authSecretId) {
+    throw new PcpError(
+      "state",
+      `${loaded.server.name} has lost the password PCP made for its proxy: remove it and launch it again.`,
+    )
+  }
+
+  return {
+    username: EXIT_PROXY_USER,
+    password: await readSecretValue(ctx, loaded.server.authSecretId),
+  }
+}
+
+/**
+ * The owner removes an exit. A VPN service's exit takes its service with
+ * it when asked (its container removed from the SSH server first, then the
+ * service, whose exit and levels go with it); otherwise the service keeps
+ * running, its proxy still on the SSH server's loopback only.
+ */
+export async function removeExit(
+  ctx: VaultContext,
+  exitId: string,
+  { service = false }: { service?: boolean },
+  options: ServiceOptions,
+): Promise<string> {
+  const exit = await getExit(ctx, exitId)
+
+  if (exit.kind === "service" && exit.serviceId && service) {
+    const said = await removeService(
+      ctx,
+      exit.serviceId,
+      { volumes: true, registered: false },
+      options,
+    )
+    return `Removed the exit ${exit.name} and its service. ${said}`
+  }
+
+  await deleteExit(ctx, exitId)
+  return exit.kind === "service" && exit.service
+    ? `Removed the exit ${exit.name}. ${exit.service.name} keeps running: remove it on its page.`
+    : `Removed the exit ${exit.name}.`
+}
+
+/**
+ * Opens an exit for a token's call and notes its name on the call's line
+ * in the request log (never the site).
+ */
+export async function openExitForCall(
+  ctx: VaultContext,
+  tokenId: string,
+  exit: ExitView,
+  { publicUrl, tool }: { publicUrl: string; tool: string },
+): Promise<OpenedExit> {
+  const opened = await openExit(ctx, exit, { publicUrl })
+  noteExitUsed({
+    vaultId: ctx.vaultId,
+    dek: ctx.dek,
+    tokenId,
+    tool,
+    exit: exit.name,
+  })
+  return opened
+}
+
+/** The exits a browser call may use, opened here when a tab needs one. */
+export function browserExitsFor(
+  ctx: VaultContext,
+  tokenId: string,
+  publicUrl: string,
+  options: { ownerAllowed?: string } = {},
+) {
+  return browserExits(ctx, tokenId, publicUrl, {
+    ...options,
+    open: openExitForCall,
+  })
+}
+
+/**
  * Reads the server's tool list into the catalogue. Tools that disappeared
- * are removed; the owner's description overrides survive a resync.
+ * are removed; the owner's description overrides survive a resync. A read
+ * that found tools applies, once, the levels and tiers the owner saved by
+ * name with their approval of the server (proposed-access.ts).
  */
 export async function syncServerTools(
   ctx: VaultContext,
-  server: McpServer,
+  server: OpenServer,
+  options: Parameters<typeof readServerTools>[2],
+): Promise<SyncResult> {
+  const result = await readServerTools(ctx, server, options)
+
+  // Read from the row: the server handed in may be from before they were
+  // saved.
+  if (result.status === "ok") {
+    await applyPendingAccess(ctx, server.id)
+  }
+
+  return result
+}
+
+async function readServerTools(
+  ctx: VaultContext,
+  server: OpenServer,
   {
     publicUrl,
     byOwner = false,
@@ -1197,22 +1923,69 @@ export async function syncServerTools(
   },
 ): Promise<SyncResult> {
   if (server.kind === "openapi") {
-    return syncEndpointTools(server, { byOwner })
+    let reach: Pick<SendOptions, "dial"> | null
+
+    try {
+      reach = await serviceTunnel(ctx, server, publicUrl)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      await setServerStatus(ctx, server.id, "error", message)
+      return {
+        status: "error",
+        message,
+        toolCount: await db().mcpTool.count({ where: { serverId: server.id } }),
+      }
+    }
+
+    return syncEndpointTools(ctx, server, {
+      byOwner,
+      ...(reach ? { reach } : {}),
+    })
   }
 
   if (server.kind === "browser") {
-    return syncBrowserTools(server)
+    return syncBrowserTools(ctx, server)
   }
 
   if (server.kind === "wrapper") {
-    return syncWrapperTools(server)
+    return syncWrapperTools(ctx, server)
   }
 
   if (isSshKind(server.kind)) {
-    return syncSshTools(server, await sshIdentity(ctx, server), {
+    return syncSshTools(ctx, server, await sshIdentity(ctx, server), {
       publicUrl,
       byOwner,
     })
+  }
+
+  if (isStorageKind(server.kind)) {
+    const loaded = await loadStorageRoot(ctx, server.id)
+
+    return syncStorageTools(
+      ctx,
+      loaded,
+      // Only the owner's check connects: a read for an assistant stores
+      // the tools as they are.
+      byOwner && !unreachableReason(loaded, publicUrl)
+        ? storageConnect(ctx, loaded)
+        : null,
+      { publicUrl },
+    )
+  }
+
+  if (isServiceKind(server.kind)) {
+    const loaded = await loadService(ctx, server.id)
+    let access: ServiceAccess | null = null
+
+    try {
+      access = byOwner ? await serviceAccess(ctx, loaded, { publicUrl }) : null
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      await setServerStatus(ctx, server.id, "error", message)
+      return { status: "error", message, toolCount: 0 }
+    }
+
+    return syncServiceTools(loaded, access, { byOwner })
   }
 
   if (isMailKind(server.kind) || isCalendarKind(server.kind)) {
@@ -1222,13 +1995,13 @@ export async function syncServerTools(
       signIn = await mailCredential(ctx, server, { publicUrl })
     } catch (error) {
       const result = describeFailure(server, error, null)
-      await setServerStatus(server.id, result.status, result.message)
+      await setServerStatus(ctx, server.id, result.status, result.message)
       return { ...result, toolCount: 0 }
     }
 
     return isCalendarKind(server.kind)
-      ? syncCalendarTools(server, signIn)
-      : syncMailTools(server, signIn)
+      ? syncCalendarTools(ctx, server, signIn)
+      : syncMailTools(ctx, server, signIn)
   }
 
   let connection: UpstreamConnection | null = null
@@ -1241,6 +2014,7 @@ export async function syncServerTools(
     // Assistants read these words too, so the credential is taken out.
     const scrub = makeRedactor(await connection.secrets())
     const toolCount = await storeTools(
+      ctx,
       server.id,
       tools.map((tool) => ({
         name: tool.name,
@@ -1251,29 +2025,47 @@ export async function syncServerTools(
             : scrub.text(tool.description),
         inputSchema: scrub.value(tool.inputSchema) as typeof tool.inputSchema,
         annotations: tool.annotations,
+        outputSchema: keptOutputSchema(scrub.value(tool.outputSchema)),
+        icons: keptIcons(tool.icons),
       })),
     )
+    // A name MCP does not allow is kept (the server answers to it), and
+    // said in the server's status, for the owner to take up with its makers.
+    const misnamed = tools
+      .map((tool) => tool.name)
+      .filter((name) => !isToolName(name))
 
     // The upstream's own description is a fallback for a server the owner
     // has not described yet.
     const given = connection.client.getInstructions()?.trim()
     const instructions = given === undefined ? undefined : scrub.text(given)
     if (instructions && !server.description) {
-      await db().mcpServer.update({
-        where: { id: server.id },
-        data: { description: instructions.slice(0, 1000) },
+      await writeServer(ctx, server.id, {
+        description: instructions.slice(0, 1000),
       })
     }
 
-    await setServerStatus(server.id, "ok", "", { lastSyncedAt: new Date() })
+    const message =
+      misnamed.length > 0
+        ? `Some of its tools have names MCP does not allow (1 to 128 letters, digits, "_", "." or "-"), which some apps refuse: ${misnamed
+            .slice(0, 5)
+            .map((name) => JSON.stringify(name.slice(0, 80)))
+            .join(
+              ", ",
+            )}${misnamed.length > 5 ? ` and ${misnamed.length - 5} more` : ""}.`
+        : ""
 
-    return { status: "ok", message: "", toolCount }
+    await setServerStatus(ctx, server.id, "ok", message, {
+      lastSyncedAt: new Date(),
+    })
+
+    return { status: "ok", message, toolCount }
   } catch (error) {
     const result = describeFailure(server, error, connection)
     result.message = makeRedactor(await failureSecrets(error, connection)).text(
       result.message,
     )
-    await setServerStatus(server.id, result.status, result.message)
+    await setServerStatus(ctx, server.id, result.status, result.message)
 
     return { ...result, toolCount: 0 }
   } finally {
@@ -1288,27 +2080,33 @@ export async function syncServerTools(
  */
 async function callEndpoint(
   ctx: VaultContext,
-  server: McpServer,
+  server: OpenServer,
   toolName: string,
   args: Record<string, unknown>,
   {
     publicUrl,
     open,
+    keepBytes,
     placed = [],
   }: {
     publicUrl: string
     open?: ResultOpener
+    /** Keeps a file the API answers for the token (a PDF, an image). */
+    keepBytes?: BytesKeeper
     /** Secrets a wrapper's call carries in its arguments (placeSecrets). */
     placed?: string[]
   },
 ): Promise<CallToolResult> {
   try {
     const { headers, redact } = await credential(ctx, server, { publicUrl })
+    const reach = await serviceTunnel(ctx, server, publicUrl)
 
-    return await callEndpointTool(server, toolName, args, {
+    return await callEndpointTool(ctx, server, toolName, args, {
       authHeaders: headers,
       redact: [...redact, ...placed],
       open,
+      ...(keepBytes ? { keepBytes } : {}),
+      ...(reach ? { reach } : {}),
       ...(server.authType === "oauth"
         ? {
             renew: async () => {
@@ -1324,8 +2122,16 @@ async function callEndpoint(
   } catch (error) {
     if (error instanceof UnauthorizedError) {
       const message = `${server.name} needs to be connected: open it in PCP and choose Connect.`
-      await setServerStatus(server.id, "auth_required", message)
+      await setServerStatus(ctx, server.id, "auth_required", message)
       throw new PcpError("unauthorized", message)
+    }
+
+    // Its address rule at work: the assistant hands the owner the switch.
+    if (error instanceof PublicOnlyRefusal) {
+      throw new PcpError(
+        "forbidden",
+        withPublicOnlyLink(error.message, server, publicUrl),
+      )
     }
 
     throw error
@@ -1370,11 +2176,24 @@ export type CallOptions = {
    * look at it yet.
    */
   signal?: AbortSignal
+  /**
+   * The latest the call may still go, in epoch milliseconds: how long it
+   * waits for its turn under pacing (lib/core/pacing/), the run's end for
+   * a program's call, pacing's callDeadline() for one straight from a
+   * request. Without it a call waits PACING_MAX_WAIT_MS at most.
+   */
+  deadline?: number
+  /**
+   * A browser call's pace, chosen by the wrapper whose run made it
+   * (wrappers/run.ts): the browser paces the call by it, unless its tab has
+   * a pace of its own (lib/core/pacing/). Nothing else looks at it.
+   */
+  pace?: PaceRange
 }
 
 /**
  * Runs one tool of a server. Every real call passes here, whatever made it
- * (call_tool, run_code, a wrapper, the owner's answer to a request), so
+ * (execute, run_code, a wrapper, the owner's answer to a request), so
  * this is where a server's calls are paced (lib/core/pacing/): by the
  * server, before anything is read or sent. The browser paces its actions
  * by the tab's site instead (browser/call.ts), and a wrapper's tool is
@@ -1382,18 +2201,19 @@ export type CallOptions = {
  */
 export async function callServerTool(
   ctx: VaultContext,
-  server: McpServer,
+  server: OpenServer,
   toolName: string,
   args: Record<string, unknown>,
   options: CallOptions,
 ): Promise<CallToolResult> {
   if (server.kind !== "browser" && server.kind !== "wrapper") {
-    const paced = await paceServerCall(ctx.vaultId, server, toolName, {
+    const paced = await paceServerCall(ctx, server, toolName, {
       signal: options.signal,
+      deadline: options.deadline,
     })
 
     if (paced) {
-      return { content: [{ type: "text", text: paced }], isError: true }
+      return pacedResult(paced)
     }
   }
 
@@ -1442,14 +2262,14 @@ export async function callServerTool(
  * field is at then, and only here is it let through (browser-secrets.ts
  * admitSecretUse: the secret's origins and the token's allowance, or a
  * request to the owner) and decrypted (secrets.ts; a TOTP secret's code of
- * the moment). That is every way a type call comes: call_tool, run_code, a
+ * the moment). That is every way a type call comes: execute, run_code, a
  * wrapper or a browser flow (which needs the owner's binding for it too),
  * and the owner's own answer. The value is taken out of the answer and any
  * error, and the request log notes the secret's name and the origin.
  */
 async function callBrowser(
   ctx: VaultContext,
-  server: McpServer,
+  server: OpenServer,
   toolName: string,
   args: Record<string, unknown>,
   options: CallOptions,
@@ -1492,21 +2312,47 @@ async function callBrowser(
     throw new PcpError("state", "The browser is used through a token.")
   }
 
-  const name = found[0]!.name
+  const { name, part } = found[0]!
   const typed: string[] = []
   const secret: SecretTyper = {
     name,
+    part,
     async value(use) {
+      if (part === "username") {
+        // Refused before the owner is asked when there is none to type.
+        const named = await findTypableSecret(ctx, name)
+        if (named) await readTypedLogin(ctx, named.id)
+      }
+
       const admitted = await admitSecretUse(ctx, {
         tokenId,
         serverId: server.id,
         name,
         use,
+        part,
       })
+
+      // The login name is no secret from the assistant (the page's sign-in
+      // note names it), so it is typed through the same gate but not
+      // scrubbed from the answer.
+      if (part === "username") {
+        const login = await readTypedLogin(ctx, admitted.id)
+        noteSecretTyped({
+          vaultId: ctx.vaultId,
+          dek: ctx.dek,
+          tokenId,
+          server: server.slug,
+          secret: admitted.name,
+          origin: use.origin,
+        })
+        return login
+      }
+
       const value = await readTypedValue(ctx, admitted.id)
       typed.push(value)
       noteSecretTyped({
         vaultId: ctx.vaultId,
+        dek: ctx.dek,
         tokenId,
         server: server.slug,
         secret: admitted.name,
@@ -1519,11 +2365,15 @@ async function callBrowser(
   try {
     const result = await callBrowserTool(ctx, server, toolName, args, {
       tokenId,
+      exits: browserExitsFor(ctx, tokenId, options.publicUrl),
       publicUrl: options.publicUrl,
       open: options.open,
+      keep: options.keep,
       keepBytes: options.keepBytes,
       signal: options.signal,
+      deadline: options.deadline,
       runId: options.runId,
+      ...(options.pace ? { pace: options.pace } : {}),
       secret,
     })
 
@@ -1555,7 +2405,7 @@ async function callBrowser(
  */
 async function placeSecrets(
   ctx: VaultContext,
-  server: McpServer,
+  server: OpenServer,
   toolName: string,
   args: Record<string, unknown>,
   grant: SecretGrant | undefined,
@@ -1568,6 +2418,12 @@ async function placeSecrets(
 
   if (server.kind === "browser" || server.kind === "wrapper") {
     throw invalid(`A secret cannot go to ${kindNoun(server.kind)}.`)
+  }
+
+  if (found.some((placeholder) => placeholder.part === "username")) {
+    throw invalid(
+      'A secret\'s login name ("part": "username") goes only into a page, as the browser\'s type text.',
+    )
   }
 
   const bindings = matchGrant(found, grant, `${server.slug}/${toolName}`)
@@ -1590,12 +2446,82 @@ async function placeSecrets(
   return { args: placeValues(args, values), redact }
 }
 
+/**
+ * A call, and when it fails for a server a service registered: a service
+ * the owner left running whose container stopped is started, in this
+ * request, and the call tried once more (nothing went through the first
+ * time: what it serves was not there), its answer saying so; otherwise the
+ * service's state in place of a bare "could not be reached", a stopped
+ * service said to be stopped.
+ */
 async function dispatchCall(
   ctx: VaultContext,
-  server: McpServer,
+  server: OpenServer,
   toolName: string,
   args: Record<string, unknown>,
-  { publicUrl, tokenId, keep, keepBytes, open, signal, runId }: CallOptions,
+  options: CallOptions,
+  placed: string[],
+): Promise<CallToolResult> {
+  try {
+    return await dispatchKind(ctx, server, toolName, args, options, placed)
+  } catch (error) {
+    if (!isPcpError(error) || error.code !== "upstream") {
+      throw error
+    }
+
+    const woken = await wakeService(ctx, server, options.publicUrl)
+
+    if (woken?.started) {
+      try {
+        const again = await dispatchKind(
+          ctx,
+          server,
+          toolName,
+          args,
+          options,
+          placed,
+        )
+        // After the answer, so a client that reads its first block still
+        // gets the answer there.
+        return {
+          ...again,
+          content: [...again.content, { type: "text", text: woken.note }],
+        }
+      } catch (retried) {
+        if (!isPcpError(retried) || retried.code !== "upstream") {
+          throw retried
+        }
+
+        throw new PcpError(
+          "upstream",
+          `${woken.note} The call failed again: ${retried.message}`,
+        )
+      }
+    }
+
+    const said = woken?.reason
+      ? `${server.name} could not be reached. ${woken.reason}`
+      : await serviceFailure(ctx, server, options.publicUrl)
+    throw said ? new PcpError("upstream", said) : error
+  }
+}
+
+async function dispatchKind(
+  ctx: VaultContext,
+  server: OpenServer,
+  toolName: string,
+  args: Record<string, unknown>,
+  {
+    publicUrl,
+    tokenId,
+    keep,
+    keepBytes,
+    open,
+    signal,
+    deadline,
+    runId,
+    pace,
+  }: CallOptions,
   placed: string[],
 ): Promise<CallToolResult> {
   if (server.kind === "wrapper") {
@@ -1614,11 +2540,15 @@ async function dispatchCall(
     // as bytes, not as base64.
     return callBrowserTool(ctx, server, toolName, args, {
       tokenId,
+      exits: browserExitsFor(ctx, tokenId, publicUrl),
       publicUrl,
       open,
+      keep,
       keepBytes,
       signal,
+      deadline,
       runId,
+      ...(pace ? { pace } : {}),
     })
   }
 
@@ -1626,11 +2556,50 @@ async function dispatchCall(
     // Before anything connects: an unknown id never reaches the server.
     const resolved = open ? await resolveHandles(args, open) : args
 
-    return callSshTool(server, toolName, resolved, {
+    return callSshTool(ctx, server, toolName, resolved, {
       identity: await sshIdentity(ctx, server),
       publicUrl,
       redact: placed,
     })
+  }
+
+  if (isStorageKind(server.kind)) {
+    const loaded = await loadStorageRoot(ctx, server.id)
+
+    // The root reads a file to save from the token's kept results itself,
+    // as bytes, before anything connects.
+    return callStorageTool(ctx, loaded, toolName, args, {
+      connect: storageConnect(ctx, loaded),
+      publicUrl,
+      tokenId,
+      keepBytes,
+      open,
+    })
+  }
+
+  if (isServiceKind(server.kind)) {
+    const loaded = await loadService(ctx, server.id)
+    const access = await serviceAccess(ctx, loaded, { publicUrl })
+
+    if (!access) {
+      throw new PcpError(
+        "state",
+        `${server.name}'s SSH server is no longer in PCP, so PCP cannot reach it.`,
+      )
+    }
+
+    return callServiceTool(
+      loaded,
+      toolName,
+      args,
+      {
+        ...access,
+        env: { ...access.env, redact: [...access.env.redact, ...placed] },
+      },
+      // put_file reads its file from the token's kept results itself, as
+      // bytes, before anything connects; get_file keeps what it reads.
+      { publicUrl, open, keepBytes },
+    )
   }
 
   // The endpoint resolves its own handles: an upload's file fields take
@@ -1639,6 +2608,7 @@ async function dispatchCall(
     return callEndpoint(ctx, server, toolName, args, {
       publicUrl,
       open,
+      ...(keepBytes ? { keepBytes } : {}),
       placed,
     })
   }
@@ -1654,7 +2624,7 @@ async function dispatchCall(
       }
 
       const failure = describeFailure(server, error, null)
-      await setServerStatus(server.id, failure.status, failure.message)
+      await setServerStatus(ctx, server.id, failure.status, failure.message)
       throw new PcpError(
         failure.status === "auth_required" ||
           failure.status === "client_required"
@@ -1667,6 +2637,7 @@ async function dispatchCall(
     if (isCalendarKind(server.kind)) {
       // Nothing a calendar tool takes is a file: a handle stands for its text.
       return callCalendarTool(
+        ctx,
         server,
         toolName,
         open ? await resolveHandles(args, open) : args,
@@ -1674,7 +2645,7 @@ async function dispatchCall(
       )
     }
 
-    return callMailTool(server, toolName, args, {
+    return callMailTool(ctx, server, toolName, args, {
       credential: { ...signIn, redact: [...signIn.redact, ...placed] },
       keep,
       keepBytes,
@@ -1697,30 +2668,70 @@ async function dispatchCall(
     // quoting the request) must not hand its credential to the assistant.
     return scrubResult(result, await connection.secrets())
   } catch (error) {
+    // The server answered, with a JSON-RPC error: it is up, and the call
+    // got there and was turned down. A tool error in its words, never "could
+    // not be reached", and nothing about the server's state changes.
+    if (ProtocolError.isInstance(error)) {
+      return familyError(
+        makeRedactor([
+          ...placed,
+          ...(await failureSecrets(error, connection)),
+        ]).text(
+          `${server.name} answered ${toolName} with an error (JSON-RPC ${error.code}): ${error.message}`.slice(
+            0,
+            1000,
+          ),
+        ),
+        error.code === -32602
+          ? "invalid_arguments"
+          : error.code === -32601
+            ? "not_found"
+            : "upstream",
+      )
+    }
+
     const failure = describeFailure(server, error, connection)
     failure.message = makeRedactor([
       ...placed,
       ...(await failureSecrets(error, connection)),
     ]).text(failure.message)
-    await setServerStatus(server.id, failure.status, failure.message)
+    await setServerStatus(ctx, server.id, failure.status, failure.message)
 
     // "unauthorized" tells the gateway the server needs connecting (or its
     // credential was refused), not that it could not be reached. A server
     // that turned a signed-in request down needs the owner, but not a
-    // sign-in.
+    // sign-in. A public-only server refusing a private address hands the
+    // owner its switch (the status above stays plain text, for its page).
     throw new PcpError(
       failure.status === "auth_required" || failure.status === "client_required"
         ? "unauthorized"
         : "upstream",
-      failure.message,
+      addressBlocked(error)
+        ? withPublicOnlyLink(failure.message, server, publicUrl)
+        : failure.message,
     )
   } finally {
     await connection?.close()
   }
 }
 
+/**
+ * Whether a failure is a public-only server's address rule at work: the
+ * refusal itself, or one the MCP client wrapped (`cause`).
+ */
+function addressBlocked(error: unknown): boolean {
+  for (let at = error, depth = 0; at && depth < 5; depth++) {
+    if (at instanceof AddressBlockedError) {
+      return true
+    }
+    at = at instanceof Error ? at.cause : undefined
+  }
+
+  return false
+}
+
 function describeFailure(
-  server: McpServer,
+  server: OpenServer,
   error: unknown,
   connection: UpstreamConnection | null,
 ): {
@@ -1770,6 +2781,18 @@ function describeFailure(
 
   const message = error instanceof Error ? error.message : String(error)
 
+  // It was reached, and answered with a JSON-RPC error.
+  if (ProtocolError.isInstance(error)) {
+    return {
+      status: "error",
+      message:
+        `${server.name} answered with an error (JSON-RPC ${error.code}): ${message}`.slice(
+          0,
+          500,
+        ),
+    }
+  }
+
   return {
     status: "error",
     message: `${server.name} could not be reached: ${message}`.slice(0, 500),
@@ -1814,7 +2837,7 @@ export function refusalReason(
 }
 
 /** What to tell the owner about a server that refused a request. */
-function refusedMessage(server: McpServer, said: string): string {
+function refusedMessage(server: OpenServer, said: string): string {
   if (server.authType === "header") {
     return `${server.name} refused the secret PCP sent (${said}). Check the secret under Advanced on its page, then choose Refresh tools.`
   }
@@ -1832,4 +2855,577 @@ function refusedMessage(server: McpServer, said: string): string {
     : ""
 
   return `${server.name} refused PCP's request although PCP is signed in (${said}). The account or OAuth client you signed in with is not allowed to use it yet.${google} Once that is fixed, choose Refresh tools.`
+}
+
+// ---- Services -----------------------------------------------------------------
+
+/** How long a launch or restart waits for health; tests shorten it. */
+export type ServiceOptions = {
+  publicUrl: string
+  timing?: ServiceAccess["timing"]
+  /**
+   * The owner asked for this (their action, their secret saved, an update
+   * they approved): the read of a registered server's tools after a remake
+   * is theirs too. An assistant's start, a call that wakes the service and
+   * the reconcile pass leave it off.
+   */
+  byOwner?: boolean
+}
+
+/**
+ * A way to run commands on an SSH server for a service, and channels
+ * through the SSH connection: to a port on its own loopback (an exit's
+ * proxy, published there only), and to what a service publishes (checked
+ * by services.ts serviceDial). PCP's key for it, decrypted here, and its
+ * pinned host key. A server whose host key the owner has not pinned is not
+ * connected to, whoever asks.
+ */
+async function serviceConnection(
+  ctx: VaultContext,
+  host: OpenServer,
+  { publicUrl }: { publicUrl: string },
+): Promise<{
+  host: ServiceHost
+  loopback: NonNullable<ServiceAccess["loopback"]>
+  forward: NonNullable<ServiceAccess["forward"]>
+}> {
+  if (!isSshKind(host.kind)) {
+    throw invalid("A service runs on one of your SSH servers.")
+  }
+
+  const target = sshTarget(host)
+
+  if (!target.hostKey) {
+    throw new PcpError(
+      "state",
+      `PCP has not pinned ${host.name}'s host key yet, so it does not connect: the owner checks the server on its page first.\n${markdownLink(`Open ${host.name}'s page in PCP`, `${publicUrl.replace(/\/+$/, "")}/servers/${host.id}`)}`,
+    )
+  }
+
+  const identity = await sshIdentity(ctx, host)
+
+  return {
+    host: {
+      name: host.name,
+      address: target.host,
+      exec: (command, { stdin, timeoutMs, maxOutputBytes }) =>
+        // A service's command never pins a host key.
+        sshExec(
+          target,
+          identity,
+          { command, stdin, timeoutMs, maxOutputBytes },
+          async () => {},
+        ),
+    },
+    // The same pooled connection the exit itself uses (ssh/client.ts).
+    loopback: (port, signal) =>
+      openChannel(host.id, target, identity, EXIT_PUBLISH_ADDRESS, port, {
+        signal,
+      }),
+    forward: (address, port, signal) =>
+      openChannel(host.id, target, identity, address, port, { signal }),
+  }
+}
+
+/**
+ * The variables' values: the definition's fixed ones, and the bound
+ * secrets', decrypted here for the one command that sends them over
+ * standard input, and scrubbed from whatever the engine answers.
+ */
+async function serviceEnv(
+  ctx: VaultContext,
+  definition: ServiceDefinition,
+  bindings: Record<string, string>,
+  {
+    typed = {},
+    proxyAuth,
+  }: {
+    /** What the owner typed for the plain variables. */
+    typed?: Record<string, string>
+    /** An exit's proxy login, made by PCP, into registers.auth's variables. */
+    proxyAuth?: ProxyAuth
+  } = {},
+): Promise<ServiceEnv> {
+  const values: Record<string, string> = {}
+  const redact: string[] = []
+
+  for (const entry of definition.env) {
+    if (entry.value !== undefined) {
+      values[entry.name] = entry.value
+    }
+
+    if (entry.plain && typed[entry.name]) {
+      values[entry.name] = typed[entry.name]!
+    }
+  }
+
+  const exitAuth =
+    definition.registers.kind === "exit" ? definition.registers.auth : null
+
+  if (exitAuth && proxyAuth) {
+    values[exitAuth.user_env] = proxyAuth.username
+    values[exitAuth.password_env] = proxyAuth.password
+    redact.push(proxyAuth.password)
+  }
+
+  for (const [name, secretId] of Object.entries(bindings)) {
+    const value = await readSecretValue(ctx, secretId)
+    values[name] = value
+    redact.push(value)
+  }
+
+  return { values, redact }
+}
+
+/** What the services module needs for a service; null once its SSH server is gone. */
+async function serviceAccess(
+  ctx: VaultContext,
+  loaded: LoadedService,
+  { publicUrl, timing, byOwner = false }: ServiceOptions,
+): Promise<ServiceAccess | null> {
+  if (!loaded.host) {
+    return null
+  }
+
+  const registers = loaded.definition.registers
+
+  const connection = await serviceConnection(ctx, loaded.host, { publicUrl })
+  const exitAuth =
+    loaded.definition.registers.kind === "exit" &&
+    loaded.definition.registers.auth
+  const proxyAuth = exitAuth ? await exitProxyAuth(ctx, loaded) : undefined
+
+  return {
+    host: connection.host,
+    forward: connection.forward,
+    env: await serviceEnv(ctx, loaded.definition, loaded.env, {
+      typed: loaded.values,
+      proxyAuth,
+    }),
+    ...(loaded.definition.registers.kind === "exit"
+      ? { loopback: connection.loopback, ...(proxyAuth ? { proxyAuth } : {}) }
+      : {}),
+    ...(timing ? { timing } : {}),
+    ...(registers.kind === "mcp" || registers.kind === "openapi"
+      ? {
+          afterRemake: (remade) =>
+            rereadRegisteredTools(ctx, remade, { publicUrl, byOwner }),
+        }
+      : {}),
+  }
+}
+
+/**
+ * The tools of the server a service registered, read again once the service
+ * was made again (an update, a saved secret, Start on a missing container):
+ * its image may serve others now. A read that fails is the remake's note,
+ * not its failure. The gateway reads rows per request and goes by the
+ * server's own lastSyncedAt, so the new list is the next answer's.
+ */
+async function rereadRegisteredTools(
+  ctx: VaultContext,
+  loaded: LoadedService,
+  { publicUrl, byOwner }: { publicUrl: string; byOwner: boolean },
+): Promise<string | null> {
+  const id = loaded.spec.registeredId
+
+  if (!id) {
+    return null
+  }
+
+  try {
+    const server = await findServer(ctx, { id })
+
+    if (!server) {
+      return null
+    }
+
+    const sync = await syncServerTools(ctx, server, { publicUrl, byOwner })
+
+    return sync.status === "ok"
+      ? null
+      : `${loaded.server.name} was made again, but PCP could not read its tools yet: ${sync.message}`
+  } catch (error) {
+    return `${loaded.server.name} was made again, but PCP could not read its tools yet: ${error instanceof Error ? error.message : String(error)}`
+  }
+}
+
+/**
+ * How a request reaches a server a service registered, when PCP reaches
+ * that service through its SSH server (`reach` "tunnel"): a dial through
+ * the SSH connection to one of the ports it publishes there, with PCP's
+ * key decrypted here. Null for any other server, which is reached as its
+ * address rule says. A tunnelled service's server is never reached from
+ * PCP's machine instead: without its SSH server, or before its host key is
+ * pinned, this throws.
+ */
+async function serviceTunnel(
+  ctx: VaultContext,
+  server: Pick<OpenServer, "id" | "kind" | "name">,
+  publicUrl: string,
+): Promise<Pick<SendOptions, "dial"> | null> {
+  if (server.kind !== "mcp" && server.kind !== "openapi") {
+    return null
+  }
+
+  const spec = await db().serviceSpec.findFirst({
+    where: {
+      registeredId: server.id,
+      reach: "tunnel",
+      server: { vaultId: ctx.vaultId },
+    },
+    select: { serverId: true },
+  })
+
+  if (!spec) {
+    return null
+  }
+
+  const loaded = await loadService(ctx, spec.serverId)
+
+  if (!loaded.host) {
+    throw new PcpError(
+      "upstream",
+      `${server.name} runs as the service ${loaded.server.name}, whose SSH server is no longer in PCP, so PCP cannot reach it.`,
+    )
+  }
+
+  const connection = await serviceConnection(ctx, loaded.host, { publicUrl })
+
+  return {
+    dial: serviceDial(
+      loaded.publish,
+      connection.host.address,
+      connection.forward,
+    ),
+  }
+}
+
+async function requireAccess(
+  ctx: VaultContext,
+  loaded: LoadedService,
+  options: ServiceOptions,
+): Promise<ServiceAccess> {
+  const access = await serviceAccess(ctx, loaded, options)
+
+  if (!access) {
+    throw new PcpError(
+      "state",
+      `${loaded.server.name}'s SSH server is no longer in PCP, so PCP cannot reach its container.`,
+    )
+  }
+
+  return access
+}
+
+/**
+ * The owner's launch (services/services.ts launchServiceOn): checked before
+ * anything connects, then run with the SSH server's key and the variables'
+ * values. An MCP server it registers has its tools read here.
+ */
+export async function launchService(
+  ctx: VaultContext,
+  input: ServiceLaunchInput,
+  options: ServiceOptions,
+): Promise<LaunchResult & { message: string }> {
+  const prepared = await prepareLaunch(ctx, input)
+  const connection = await serviceConnection(ctx, prepared.host, options)
+  const registers = prepared.definition.registers
+  // An exit's proxy gets a login of its own, made here for this instance:
+  // a random password the container reads among its variables and the
+  // exit signs in with; launchServiceOn keeps it as a managed secret.
+  const proxyAuth =
+    registers.kind === "exit" && registers.auth
+      ? {
+          username: EXIT_PROXY_USER,
+          password: randomBytes(24).toString("base64url"),
+        }
+      : undefined
+  const access: ServiceAccess = {
+    host: connection.host,
+    forward: connection.forward,
+    env: await serviceEnv(ctx, prepared.definition, prepared.env, {
+      typed: prepared.values,
+      proxyAuth,
+    }),
+    ...(registers.kind === "exit"
+      ? { loopback: connection.loopback, ...(proxyAuth ? { proxyAuth } : {}) }
+      : {}),
+    ...(options.timing ? { timing: options.timing } : {}),
+  }
+  const result = await launchServiceOn(ctx, prepared, access)
+  let message = `${prepared.name} is running on ${prepared.host.name}.`
+
+  if (result.exitId && prepared.exit) {
+    message += ` Its exit ${prepared.exit.name} is ready: allow it for a token on the token's page.`
+  }
+
+  if (result.registeredId && result.registeredKind === "mcp") {
+    const registered = await findServer(ctx, { id: result.registeredId })
+
+    if (!registered) {
+      throw notFound("The server it registered")
+    }
+
+    const sync = await syncServerTools(ctx, registered, {
+      publicUrl: options.publicUrl,
+      byOwner: true,
+    })
+
+    if (sync.status !== "ok") {
+      message += ` PCP could not read its tools yet: ${sync.message}`
+    }
+  }
+
+  return { ...result, message }
+}
+
+/** The service's state now, read on its SSH server for the owner's page. */
+export async function readServiceStatus(
+  ctx: VaultContext,
+  id: string,
+  options: ServiceOptions,
+): Promise<ServiceStatus> {
+  const loaded = await loadService(ctx, id)
+  return serviceStatusOn(loaded, await requireAccess(ctx, loaded, options))
+}
+
+/** The service's last lines, with its secrets taken out. */
+export async function readServiceLogs(
+  ctx: VaultContext,
+  id: string,
+  lines: number,
+  options: ServiceOptions,
+): Promise<{ text: string; truncated: boolean }> {
+  const loaded = await loadService(ctx, id)
+  const access = await requireAccess(ctx, loaded, options)
+
+  try {
+    return await containerLogs(
+      access.host,
+      loaded.engine,
+      loaded.spec.containerName,
+      { lines },
+      access.env.redact,
+    )
+  } catch (error) {
+    throw new PcpError(
+      "upstream",
+      makeRedactor(access.env.redact).text(
+        error instanceof Error ? error.message : String(error),
+      ),
+    )
+  }
+}
+
+/** Start, stop or restart, for the owner. */
+export async function runServiceAction(
+  ctx: VaultContext,
+  id: string,
+  action: ContainerAction,
+  options: ServiceOptions,
+): Promise<ServiceStatus> {
+  const loaded = await loadService(ctx, id)
+  return serviceActionOn(
+    loaded,
+    action,
+    await requireAccess(ctx, loaded, { ...options, byOwner: true }),
+  )
+}
+
+/** Makes the container again with the variables as they are now. */
+export async function recreateService(
+  ctx: VaultContext,
+  id: string,
+  options: ServiceOptions,
+): Promise<ServiceStatus> {
+  const loaded = await loadService(ctx, id)
+  return recreateServiceOn(
+    loaded,
+    await requireAccess(ctx, loaded, { ...options, byOwner: true }),
+  )
+}
+
+/**
+ * A new image pinned and the container made again (services.ts
+ * updateServiceOn): the newest of the definition's source, the image an
+ * approved proposal names, or for one built from a repository, a commit.
+ */
+export async function updateService(
+  ctx: VaultContext,
+  id: string,
+  options: ServiceOptions,
+  choice: ServiceUpdateChoice = {},
+): Promise<{ status: ServiceStatus; image: string; changed: boolean }> {
+  const loaded = await loadService(ctx, id)
+  return updateServiceOn(
+    loaded,
+    await requireAccess(ctx, loaded, { ...options, byOwner: true }),
+    choice,
+  )
+}
+
+/** The owner's look for a newer image of a service's source, changing nothing. */
+export async function checkServiceImage(
+  ctx: VaultContext,
+  id: string,
+  options: ServiceOptions,
+): Promise<NewerImage> {
+  const loaded = await loadService(ctx, id)
+  return newerImageOn(loaded, await requireAccess(ctx, loaded, options))
+}
+
+/** Removes the service, its container first (see removeServiceOn). */
+export async function removeService(
+  ctx: VaultContext,
+  id: string,
+  choices: { volumes?: boolean; registered?: boolean },
+  options: ServiceOptions,
+): Promise<string> {
+  const loaded = await loadService(ctx, id)
+  return removeServiceOn(
+    ctx,
+    loaded,
+    await serviceAccess(ctx, loaded, options),
+    choices,
+  )
+}
+
+/**
+ * After a secret's value changed: every service whose variables take it is
+ * made again with the new value (a restart alone would keep the old one).
+ * One that fails says so on its row; the others go on.
+ */
+export async function restartServicesUsingSecret(
+  ctx: VaultContext,
+  secretId: string,
+  options: ServiceOptions,
+): Promise<Array<{ id: string; ok: boolean; message: string }>> {
+  const outcomes: Array<{ id: string; ok: boolean; message: string }> = []
+
+  for (const id of await servicesUsingSecret(ctx, secretId)) {
+    try {
+      const loaded = await loadService(ctx, id)
+      const status = await recreateServiceOn(
+        loaded,
+        await requireAccess(ctx, loaded, { ...options, byOwner: true }),
+      )
+      outcomes.push({
+        id,
+        ok: true,
+        message: statusWords(loaded.server.name, status),
+      })
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      await setServerStatus(ctx, id, "error", message).catch(() => {})
+      outcomes.push({ id, ok: false, message })
+    }
+  }
+
+  return outcomes
+}
+
+/**
+ * After a call to a server a service registered failed: the service
+ * started again when the owner left it running and its container stopped
+ * (services.ts startOnDemand). Null for any other server, or one whose
+ * service cannot be reached.
+ */
+async function wakeService(
+  ctx: VaultContext,
+  server: OpenServer,
+  publicUrl: string,
+): Promise<Awaited<ReturnType<typeof startOnDemand>> | null> {
+  try {
+    const loaded = await serviceBehind(ctx, server.id)
+
+    if (!loaded || loaded.intent === "stopped") {
+      return null
+    }
+
+    const access = await serviceAccess(ctx, loaded, { publicUrl })
+    return access ? await startOnDemand(loaded, access) : null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * The vault's services the owner left running, brought back up when their
+ * container stopped (services.ts reconcileServicesWith): only after a
+ * request that brought the vault's key (app/mcp/route.ts, the owner's
+ * pages, through after()), throttled, never on a timer.
+ */
+export async function reconcileServices(
+  ctx: VaultContext,
+  { publicUrl }: { publicUrl: string },
+  options: { now?: number; budgetMs?: number } = {},
+): Promise<ReconcileRun> {
+  return reconcileServicesWith(
+    ctx,
+    (loaded) => serviceAccess(ctx, loaded, { publicUrl }),
+    options,
+  ).catch(() => ({ started: [] }))
+}
+
+/**
+ * Why a call to a server a service registered failed, when the service is
+ * the reason; null otherwise. Read live, inside the failing call's request.
+ */
+async function serviceFailure(
+  ctx: VaultContext,
+  server: OpenServer,
+  publicUrl: string,
+): Promise<string | null> {
+  try {
+    const loaded = await serviceBehind(ctx, server.id)
+
+    if (!loaded) {
+      return null
+    }
+
+    const access = await serviceAccess(ctx, loaded, { publicUrl }).catch(
+      () => null,
+    )
+    const said = await stoppedServiceMessage(loaded, access, { publicUrl })
+    return said ? `${server.name} could not be reached. ${said}` : null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * One line for check_server about a service, or a server a service
+ * registered: its state, read now. Null for any other server.
+ */
+export async function serviceStateLine(
+  ctx: VaultContext,
+  server: Pick<OpenServer, "id" | "kind" | "name">,
+  publicUrl: string,
+): Promise<string | null> {
+  try {
+    const loaded = isServiceKind(server.kind)
+      ? await loadService(ctx, server.id)
+      : await serviceBehind(ctx, server.id)
+
+    if (!loaded) {
+      return null
+    }
+
+    const access = await serviceAccess(ctx, loaded, { publicUrl })
+
+    if (!access) {
+      return `It runs as the service ${loaded.server.name}, whose SSH server is no longer in PCP.`
+    }
+
+    const words = statusWords(
+      loaded.server.name,
+      await serviceStatusOn(loaded, access),
+    )
+    return isServiceKind(server.kind)
+      ? words
+      : `It runs as the service ${loaded.server.slug}: ${words}`
+  } catch (error) {
+    return `Its service could not be read: ${error instanceof Error ? error.message.slice(0, 300) : String(error)}`
+  }
 }

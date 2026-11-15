@@ -25,6 +25,8 @@ export const RESOURCE_BOUNDS = {
    * watching and no hand-over waiting. An open Chromium holds memory.
    */
   browserIdleMinutes: { min: 5, max: 480 },
+  /** What PCP's own store (in its data folder) may hold, in MB. */
+  storeMb: { min: 100, max: 100_000_000 },
 } satisfies Record<string, Bound>
 
 /**
@@ -49,6 +51,14 @@ export const AUTO_KEPT_DISK_SHARE = 1 / 20
 export const AUTO_KEPT_MB: Bound = { min: 50, max: 4096 }
 /** When the disk cannot be read. */
 export const FALLBACK_KEPT_MB = 500
+/**
+ * PCP's own store may hold a quarter of the disk PCP keeps its data on (of
+ * all of it, so the bound does not shrink as the store fills).
+ */
+export const AUTO_STORE_DISK_SHARE = 1 / 4
+export const AUTO_STORE_MB: Bound = { min: 1024, max: 4_000_000 }
+/** When the disk cannot be read. */
+export const FALLBACK_STORE_MB = 10_240
 /**
  * How long the browser waits idle before it closes: fixed, not read off the
  * machine, since one Chromium costs about the same anywhere.

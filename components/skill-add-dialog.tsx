@@ -4,10 +4,10 @@ import { FileUp, Plus } from "lucide-react"
 import { useRouter } from "next/navigation"
 import { useActionState, useState } from "react"
 
-import { FormError } from "@/components/form-status"
+import { FormError } from "@kaperkunde/ui/form-status"
 import { SkillFields } from "@/components/skill-fields"
-import { SubmitButton } from "@/components/submit-button"
-import { Button } from "@/components/ui/button"
+import { SubmitButton } from "@kaperkunde/ui/submit-button"
+import { Button } from "@kaperkunde/ui/button"
 import {
   Dialog,
   DialogClose,
@@ -16,9 +16,9 @@ import {
   DialogFooter,
   DialogTitle,
   DialogTrigger,
-} from "@/components/ui/dialog"
-import { Textarea } from "@/components/ui/input"
-import { Field } from "@/components/ui/label"
+} from "@kaperkunde/ui/dialog"
+import { Textarea } from "@kaperkunde/ui/input"
+import { Field } from "@kaperkunde/ui/label"
 import {
   createSkillAction,
   importSkillAction,

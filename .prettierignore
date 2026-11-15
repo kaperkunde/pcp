@@ -13,3 +13,5 @@ desktop/.cache
 desktop/dist
 desktop/pnpm-lock.yaml
 desktop/native-staged
+# Written by the release workflow (scripts/changelog.mjs), never by hand.
+CHANGELOG.md

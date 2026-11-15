@@ -5,6 +5,7 @@ import type { BrowserContext } from "patchright-core"
 import type { VaultContext } from "../context"
 import { asBytes, decryptString, encryptString } from "../crypto"
 import { db } from "../db"
+import { invalid } from "../errors"
 import { MAX_PROFILE_BYTES } from "./limits"
 
 /**
@@ -13,7 +14,9 @@ import { MAX_PROFILE_BYTES } from "./limits"
  * encrypted under the vault's data key ("browser_profile:<vaultId>"). The
  * browser itself keeps nothing on disk: its context lives in memory and is
  * started from this, and saved back to it while a request (an assistant's
- * call, or the owner's input) holds the key.
+ * call, or the owner's input) holds the key. Sign-ins come from the
+ * browser's use, or from the owner's import of one made elsewhere
+ * (sign-in-import.ts).
  */
 
 export type StorageState = Awaited<ReturnType<BrowserContext["storageState"]>>
@@ -121,6 +124,37 @@ export async function saveProfile(
     return hash
   }
 
+  await storeProfile(ctx, json, state, partial)
+  return hash
+}
+
+/**
+ * Writes `state` as the vault's profile, in place of what was kept: for a
+ * profile PCP made itself (an owner's import, sign-in-import.ts), never
+ * while the browser runs, which would save its own over it.
+ */
+export async function writeProfile(
+  ctx: VaultContext,
+  state: StorageState,
+  { partial = false }: { partial?: boolean } = {},
+): Promise<void> {
+  const json = JSON.stringify(state)
+
+  if (Buffer.byteLength(json) > MAX_PROFILE_BYTES) {
+    throw invalid(
+      `The sign-ins would come to more than the ${MAX_PROFILE_BYTES / 1024 / 1024} MB PCP keeps. Forget some sites first, or import fewer.`,
+    )
+  }
+
+  await storeProfile(ctx, json, state, partial)
+}
+
+async function storeProfile(
+  ctx: VaultContext,
+  json: string,
+  state: StorageState,
+  partial: boolean,
+): Promise<void> {
   const data = {
     ciphertext: asBytes(encryptString(ctx.dek, json, aad(ctx.vaultId))),
     sites: sitesOf(state),
@@ -135,8 +169,6 @@ export async function saveProfile(
     create: { vaultId: ctx.vaultId, ...data },
     update: data,
   })
-
-  return hash
 }
 
 export async function clearProfile(ctx: VaultContext): Promise<void> {

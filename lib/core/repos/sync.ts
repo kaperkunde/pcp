@@ -7,6 +7,7 @@ import {
   resolveItem,
   type InstanceInput,
   type ResolvedItem,
+  type ServiceInstance,
 } from "./apply"
 import type { ItemDocument } from "./documents"
 import { commitAt, type GitHub } from "./github"
@@ -28,7 +29,8 @@ import {
   type FetchedItem,
   type RemoteListing,
 } from "./remote"
-import { reviewItem, type ItemReview } from "./review"
+import { reviewInVault } from "./found-review"
+import type { ItemReview } from "./review"
 import {
   clientFor,
   getRepo,
@@ -182,7 +184,12 @@ export async function syncItem(
     }
 
     const fetched = await fetchItem(gh, repo, remote)
-    const review = reviewItem(local.document, fetched.document)
+    const review = await reviewInVault(
+      ctx,
+      local.document,
+      fetched.document,
+      item.itemId,
+    )
 
     if (review.same) {
       return save(
@@ -461,7 +468,7 @@ export async function pendingChange(
     pending,
     local,
     incoming,
-    review: reviewItem(local, incoming.document),
+    review: await reviewInVault(ctx, local, incoming.document, item.itemId),
     resolved: await resolveItem(ctx, incoming.document, { onto: true }),
   }
 }
@@ -498,9 +505,21 @@ async function stillAsShown(
 export async function approveChange(
   ctx: VaultContext,
   itemId: string,
-  shown: { sha: string; hash: string },
+  /**
+   * flags: how many things that reach further the owner was shown. What the
+   * vault says of the item (found-review.ts) can change while the document
+   * does not, as when a secret a flow types is added since.
+   */
+  shown: { sha: string; hash: string; flags?: number },
 ): Promise<string[]> {
   const change = await stillAsShown(ctx, itemId, shown)
+
+  if (shown.flags !== undefined && change.review.flags.length !== shown.flags) {
+    throw new PcpError(
+      "conflict",
+      "What this change would do in your vault is not what you were shown: nothing was applied. Open it again.",
+    )
+  }
   const applied = await applyItem(ctx, change.incoming.document, {
     id: change.item.itemId,
   })
@@ -658,6 +677,8 @@ export type AddChoice = {
    * page that adds it: its name, address, sign-in and note.
    */
   instance?: InstanceInput
+  /** A new service's own part, and the launch that runs it. */
+  service?: ServiceInstance
 }
 
 export type AddResult = {
@@ -722,6 +743,7 @@ export async function addFromRepo(
       const applied = await applyItem(ctx, fetched.document, {
         id: found?.id ?? null,
         instance: found ? undefined : choice.instance,
+        service: found ? undefined : choice.service,
       })
       const kind = fetched.document.kind
       const after = await localItem(ctx, kind, applied.id)

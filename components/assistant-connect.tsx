@@ -5,13 +5,13 @@ import { useRouter } from "next/navigation"
 import { useActionState, useRef, useState, type FormEvent } from "react"
 
 import { ChoiceCard } from "@/components/assistant-choice"
-import { CopyableValue } from "@/components/copyable-value"
-import { FormError } from "@/components/form-status"
+import { CopyableValue } from "@kaperkunde/ui/copy-button"
+import { FormError } from "@kaperkunde/ui/form-status"
 import { OwnerConfirmFields } from "@/components/owner-confirm-fields"
 import { ServerScopeFields } from "@/components/server-scope-fields"
-import { SubmitButton } from "@/components/submit-button"
+import { SubmitButton } from "@kaperkunde/ui/submit-button"
 import { TokenOptionRow, TOKEN_OPTION_NAMES } from "@/components/token-options"
-import { Button, buttonVariants } from "@/components/ui/button"
+import { Button, buttonVariants } from "@kaperkunde/ui/button"
 import {
   Dialog,
   DialogClose,
@@ -20,10 +20,10 @@ import {
   DialogFooter,
   DialogTitle,
   DialogTrigger,
-} from "@/components/ui/dialog"
-import { Disclosure } from "@/components/ui/disclosure"
-import { Input, Select } from "@/components/ui/input"
-import { Field } from "@/components/ui/label"
+} from "@kaperkunde/ui/dialog"
+import { Disclosure } from "@kaperkunde/ui/disclosure"
+import { Input, Select } from "@kaperkunde/ui/input"
+import { Field } from "@kaperkunde/ui/label"
 import { createTokenAction, type CreateTokenResult } from "@/lib/actions/tokens"
 import type { ServerKind } from "@/lib/core/servers"
 import { cn } from "@/lib/utils"

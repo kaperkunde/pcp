@@ -1,5 +1,5 @@
-import { Input, Textarea } from "@/components/ui/input"
-import { Field } from "@/components/ui/label"
+import { Input, Textarea } from "@kaperkunde/ui/input"
+import { Field } from "@kaperkunde/ui/label"
 import {
   MAX_SKILL_BODY,
   MAX_SKILL_DESCRIPTION,

@@ -28,6 +28,12 @@ export const MAX_AUTH_HEADERS = 5
  */
 export const NEW_SECRET = "new"
 
+/**
+ * The largest sign-in import the Browser page takes (a cookie export or
+ * Playwright's storage state), as the browser's profile is at most.
+ */
+export const MAX_SIGN_IN_IMPORT_BYTES = 8 * 1024 * 1024
+
 /** The largest OpenAPI schema PCP reads, uploaded or downloaded. */
 export const MAX_SPEC_BYTES = 5 * 1024 * 1024
 export const SPEC_FILE_ACCEPT =
@@ -58,6 +64,29 @@ export const TOOL_ACCESS_LABELS: Record<ToolAccess, string> = {
   allowed: "Allowed",
   ask: "Ask you first",
   blocked: "Blocked",
+}
+
+/**
+ * How much a tool can do (lib/core/tool-tiers.ts): read, change (write) or
+ * change or delete for good (destructive). Each tier has its own entry
+ * tools (execute_<tier>, run_<tier>), which run tools at or below
+ * it, so a client can let Read through without asking each time.
+ */
+export const TOOL_TIERS = ["read", "write", "destructive"] as const
+
+export type ToolTier = (typeof TOOL_TIERS)[number]
+
+export const TOOL_TIER_LABELS: Record<ToolTier, string> = {
+  read: "Read",
+  write: "Write",
+  destructive: "Destructive",
+}
+
+/** What each tier means, in a line, for the owner's pages. */
+export const TOOL_TIER_HINTS: Record<ToolTier, string> = {
+  read: "Only reads.",
+  write: "Changes things, but deletes nothing for good.",
+  destructive: "Can change or delete things for good.",
 }
 
 /**
@@ -94,6 +123,36 @@ export const DEFAULT_ALLOW_FOR_MINUTES: AllowForMinutes = 60
  */
 export const SECRET_ALLOW_MINUTES = 60
 
+/**
+ * A password PCP makes for a secret (lib/core/generate-password.ts), from
+ * request_secret's `generate` or the Generate switch on its page: how long,
+ * which kinds of character, and which characters to leave out.
+ */
+export type PasswordRecipe = {
+  length: number
+  lowercase: boolean
+  uppercase: boolean
+  digits: boolean
+  symbols: boolean
+  /** Characters left out, for a site that refuses some. */
+  exclude: string
+}
+
+export const MIN_GENERATED_LENGTH = 8
+export const MAX_GENERATED_LENGTH = 128
+export const MAX_GENERATE_EXCLUDE = 64
+/** The symbols a made password draws from: printable ASCII, no quote, backslash or space. */
+export const PASSWORD_SYMBOLS = "!#$%&()*+,-./:;<=>?@[]^_{|}~"
+
+export const DEFAULT_PASSWORD_RECIPE: PasswordRecipe = {
+  length: 24,
+  lowercase: true,
+  uppercase: true,
+  digits: true,
+  symbols: true,
+  exclude: "",
+}
+
 export function allowForLabel(minutes: number): string {
   return minutes < 60
     ? `${minutes} minutes`
@@ -114,11 +173,16 @@ export type PermissionKind =
   | "browser_handover"
   | "secret_use"
   | "secret_request"
+  | "secret_sites_change"
+  | "exit_use"
+  | "script_use"
+  | "tab_pace"
   | "wrapper_change"
   | "skill_change"
   | "repo_change"
   | "repo_share"
   | "note_change"
+  | "service_change"
 
 /**
  * The HTTP methods web_fetch has a level for. Each is the default for a
@@ -212,6 +276,12 @@ export const MAX_SKILL_FILE_CHARS = 20_000
 export const MAX_SKILL_FILE_PATH = 100
 export const MAX_SKILL_TOOLS = 30
 export const MAX_SKILLS = 200
+/**
+ * How many skills one token keeps for itself (/skills/mine/), of the
+ * vault's MAX_SKILLS: written without asking, so one token cannot fill the
+ * vault.
+ */
+export const MAX_OWN_SKILLS = 50
 
 /**
  * The owner's own note on a server or skill (lib/core/definitions.ts): one
@@ -294,3 +364,89 @@ export const LETS_ENCRYPT_TERMS_URL = "https://letsencrypt.org/repository/"
 
 /** Where the owner signs in to pcp.gg, picks a name and copies a key. */
 export const PCPGG_URL = "https://pcp.gg/"
+
+/**
+ * The anchor of the "Public addresses only" switch on a server's page (an
+ * MCP server's or an API endpoint's): where a refusal of a private address,
+ * and the approval of a server at one, send the owner.
+ */
+export const PUBLIC_ONLY_ANCHOR = "public-only"
+
+/**
+ * Where search's embeddings come from (lib/core/embeddings/), as Settings
+ * offers them: Voyage AI, any OpenAI-compatible /v1/embeddings address, or
+ * an API endpoint a service registered (text-embeddings-inference from
+ * PCP's common items).
+ */
+export const EMBEDDING_PROVIDERS = ["voyage", "openai", "endpoint"] as const
+
+export type EmbeddingProvider = (typeof EMBEDDING_PROVIDERS)[number]
+
+/** What search may send a provider to embed. */
+export type EmbeddedKinds = {
+  /** Tools' names and descriptions, PCP's own included. */
+  tools: boolean
+  skills: boolean
+  memories: boolean
+}
+
+/** Voyage AI's embeddings address, and the model Settings starts with. */
+export const VOYAGE_EMBEDDINGS_URL = "https://api.voyageai.com/v1/embeddings"
+export const VOYAGE_DEFAULT_MODEL = "voyage-3.5-lite"
+export const OPENAI_DEFAULT_MODEL = "text-embedding-3-small"
+
+/**
+ * Whether an address reads as the owner's own machine or network: a name
+ * with no dot, localhost, .local, .lan, .internal, .home.arpa, or a private,
+ * loopback, shared (CGNAT, as Tailscale's) or link-local IP literal.
+ */
+export function looksSelfHosted(url: string): boolean {
+  let host: string
+
+  try {
+    host = new URL(url).hostname.toLowerCase().replace(/^\[|\]$/g, "")
+  } catch {
+    return false
+  }
+
+  if (
+    !host.includes(".") ||
+    /(^|\.)(localhost|local|lan|internal|home\.arpa)$/.test(host)
+  ) {
+    return true
+  }
+
+  const v4 = /^(\d{1,3})\.(\d{1,3})\.\d{1,3}\.\d{1,3}$/.exec(host)
+
+  if (v4) {
+    const [a, b] = [Number(v4[1]), Number(v4[2])]
+
+    return (
+      a === 10 ||
+      a === 127 ||
+      (a === 172 && b >= 16 && b <= 31) ||
+      (a === 192 && b === 168) ||
+      (a === 100 && b >= 64 && b <= 127) ||
+      (a === 169 && b === 254)
+    )
+  }
+
+  return host === "::1" || /^f[cd]/.test(host) || host.startsWith("fe80:")
+}
+
+/**
+ * What a provider embeds until the owner chooses: a service on the owner's
+ * own machine (an endpoint, or an OpenAI-compatible address on their
+ * network) everything; one elsewhere (Voyage AI, any other address) the
+ * tools' names and descriptions only, so no skill or memory leaves PCP
+ * unless the owner ticks it.
+ */
+export function defaultEmbedded(
+  provider: EmbeddingProvider,
+  url = "",
+): EmbeddedKinds {
+  const own =
+    provider === "endpoint" || (provider === "openai" && looksSelfHosted(url))
+
+  return { tools: true, skills: own, memories: own }
+}

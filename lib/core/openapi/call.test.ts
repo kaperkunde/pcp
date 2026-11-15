@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest"
 
-import { executeCall } from "./call"
+import { dispositionName, executeCall, type AnsweredFile } from "./call"
 import type { BuiltRequest } from "./request"
 import { json, startTestApi, type TestApi } from "./test-api"
 
@@ -46,10 +46,10 @@ describe("executeCall", () => {
     expect(outcome.result.isError).toBeUndefined()
   })
 
-  it("wraps an array so structured content stays an object", async () => {
+  it("passes an array on as structured content as it is, not wrapped", async () => {
     api = await startTestApi((_, res) => json(res, 200, [1, 2]))
     const outcome = await executeCall(get("/pets"))
-    expect(outcome.result.structuredContent).toEqual({ value: [1, 2] })
+    expect(outcome.result.structuredContent).toEqual([1, 2])
   })
 
   it("passes text through and describes binary instead of dumping it", async () => {
@@ -66,6 +66,181 @@ describe("executeCall", () => {
     const binary = await executeCall(get("/image"))
     expect(text(binary)).toMatch(/4 bytes of image\/png/)
     expect(binary.result.isError).toBeUndefined()
+  })
+
+  describe("a file answer", () => {
+    const PDF = Buffer.from("%PDF-1.7\n\u0000\u00ff\u00fe binary body")
+
+    function keeper() {
+      const kept: AnsweredFile[] = []
+      return {
+        kept,
+        keepFile: async (file: AnsweredFile) => {
+          kept.push(file)
+          return {
+            $result: "r1",
+            type: file.mediaType,
+            size: file.bytes.length,
+            ...(file.name ? { name: file.name } : {}),
+          }
+        },
+      }
+    }
+
+    function servePdf(headers: Record<string, string> = {}, body = PDF) {
+      return startTestApi((_, res) => {
+        res.setHeader("content-type", "application/pdf")
+        for (const [key, value] of Object.entries(headers)) {
+          res.setHeader(key, value)
+        }
+        res.end(body)
+      })
+    }
+
+    it("keeps a PDF whole and answers its handle with type, size and name", async () => {
+      api = await servePdf({
+        "content-disposition": 'attachment; filename="invoice 7.pdf"',
+      })
+      const { kept, keepFile } = keeper()
+      const outcome = await executeCall(get("/invoice"), { keepFile })
+
+      expect(kept).toHaveLength(1)
+      expect(kept[0]!.bytes.equals(PDF)).toBe(true)
+      expect(kept[0]!.mediaType).toBe("application/pdf")
+      expect(kept[0]!.name).toBe("invoice 7.pdf")
+      expect(outcome.result.isError).toBeUndefined()
+      expect(outcome.result.structuredContent).toMatchObject({
+        file: {
+          $result: "r1",
+          type: "application/pdf",
+          size: PDF.length,
+          name: "invoice 7.pdf",
+        },
+      })
+      expect(JSON.parse(text(outcome))).toEqual(
+        outcome.result.structuredContent,
+      )
+    })
+
+    it("takes a file larger than a text answer, up to its own cap", async () => {
+      const big = Buffer.alloc(3 * 1024 * 1024, 0xff)
+      api = await servePdf({}, big)
+      const { kept, keepFile } = keeper()
+      await executeCall(get("/big"), { keepFile })
+      expect(kept[0]!.bytes.length).toBe(big.length)
+    })
+
+    it("refuses a file past its cap, said up front or found reading, keeping nothing", async () => {
+      api = await servePdf()
+      const { kept, keepFile } = keeper()
+      const said = await executeCall(get("/a"), { keepFile, maxFileBytes: 10 })
+      expect(said.result.isError).toBe(true)
+      expect(text(said)).toMatch(/more than PCP takes from an API \(10 bytes\)/)
+
+      await api.close()
+      api = await startTestApi((_, res) => {
+        res.setHeader("content-type", "application/pdf")
+        res.setHeader("transfer-encoding", "chunked")
+        res.write(PDF)
+        res.end(PDF)
+      })
+      const found = await executeCall(get("/b"), {
+        keepFile,
+        maxFileBytes: PDF.length + 1,
+      })
+      expect(found.result.isError).toBe(true)
+      expect(text(found)).toMatch(/more than/)
+      expect(kept).toHaveLength(0)
+    })
+
+    it("refuses a file that holds the credential PCP sent", async () => {
+      api = await servePdf({}, Buffer.from("%PDF key=sk-secret-123 \u0000"))
+      const { kept, keepFile } = keeper()
+      const outcome = await executeCall(get("/echo"), {
+        keepFile,
+        redact: ["sk-secret-123"],
+      })
+      expect(outcome.result.isError).toBe(true)
+      expect(text(outcome)).not.toContain("sk-secret-123")
+      expect(kept).toHaveLength(0)
+    })
+
+    it("keeps no credential in the name or the type", async () => {
+      api = await servePdf({
+        "content-type": "application/x-sk-secret-123",
+        "content-disposition": "attachment; filename=sk-secret-123.bin",
+      })
+      const { kept, keepFile } = keeper()
+      await executeCall(get("/x"), { keepFile, redact: ["sk-secret-123"] })
+      expect(kept[0]!.mediaType).toBe("application/octet-stream")
+      expect(kept[0]!.name).toBe("[redacted].bin")
+    })
+
+    it("keeps text the schema declares a file, scrubbed, as UTF-8", async () => {
+      api = await startTestApi((_, res) => {
+        res.setHeader("content-type", "text/csv")
+        res.end("a,b\nsk-secret-123,2\n")
+      })
+      const { kept, keepFile } = keeper()
+      await executeCall(get("/export"), {
+        keepFile,
+        fileTypes: ["text/csv"],
+        redact: ["sk-secret-123"],
+      })
+      expect(kept[0]!.mediaType).toBe("text/csv; charset=utf-8")
+      expect(kept[0]!.bytes.toString("utf8")).toBe("a,b\n[redacted],2\n")
+    })
+
+    it("passes text and JSON on as before, and an error's file as a note", async () => {
+      api = await startTestApi((req, res) => {
+        if (req.url === "/json") {
+          json(res, 200, { a: 1 })
+        } else if (req.url === "/text") {
+          res.setHeader("content-type", "text/plain")
+          res.end("words")
+        } else {
+          res.statusCode = 500
+          res.setHeader("content-type", "application/pdf")
+          res.end(PDF)
+        }
+      })
+      const { kept, keepFile } = keeper()
+      expect(text(await executeCall(get("/json"), { keepFile }))).toBe(
+        '{"a":1}',
+      )
+      expect(text(await executeCall(get("/text"), { keepFile }))).toBe("words")
+      const failed = await executeCall(get("/fail"), { keepFile })
+      expect(failed.result.isError).toBe(true)
+      expect(text(failed)).toMatch(/^HTTP 500.*bytes of application\/pdf/s)
+      expect(kept).toHaveLength(0)
+    })
+
+    it("keeps unlabelled bytes that are not text as application/octet-stream", async () => {
+      api = await startTestApi((_, res) => {
+        res.removeHeader("content-type")
+        res.end(Buffer.from([0xff, 0xfe, 0x00, 0x01]))
+      })
+      const { kept, keepFile } = keeper()
+      await executeCall(get("/raw"), { keepFile })
+      expect(kept[0]!.mediaType).toBe("application/octet-stream")
+    })
+  })
+
+  it("reads a file name from Content-Disposition, without a path", () => {
+    expect(dispositionName('attachment; filename="a b.pdf"')).toBe("a b.pdf")
+    expect(dispositionName("inline; filename=report.pdf; size=3")).toBe(
+      "report.pdf",
+    )
+    expect(
+      dispositionName(
+        "attachment; filename=\"x.pdf\"; filename*=UTF-8''r%C3%A9sum%C3%A9.pdf",
+      ),
+    ).toBe("résumé.pdf")
+    expect(dispositionName('attachment; filename="../../etc/passwd"')).toBe(
+      "passwd",
+    )
+    expect(dispositionName("attachment")).toBeNull()
+    expect(dispositionName(null)).toBeNull()
   })
 
   it("reports an empty answer by its status", async () => {

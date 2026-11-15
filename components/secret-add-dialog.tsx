@@ -3,9 +3,9 @@
 import { Plus } from "lucide-react"
 import { useActionState, useEffect, useRef, useState } from "react"
 
-import { FormError } from "@/components/form-status"
-import { SubmitButton } from "@/components/submit-button"
-import { Button } from "@/components/ui/button"
+import { FormError } from "@kaperkunde/ui/form-status"
+import { SubmitButton } from "@kaperkunde/ui/submit-button"
+import { Button } from "@kaperkunde/ui/button"
 import {
   Dialog,
   DialogClose,
@@ -14,9 +14,9 @@ import {
   DialogFooter,
   DialogTitle,
   DialogTrigger,
-} from "@/components/ui/dialog"
-import { Input, Select, Textarea } from "@/components/ui/input"
-import { Field } from "@/components/ui/label"
+} from "@kaperkunde/ui/dialog"
+import { Input, Select, Textarea } from "@kaperkunde/ui/input"
+import { Field } from "@kaperkunde/ui/label"
 import {
   createSecretAction,
   type SecretActionResult,
@@ -54,6 +54,7 @@ function AddSecretForm({ onSaved }: { onSaved: () => void }) {
         description: String(formData.get("description") ?? ""),
         value: String(formData.get("value") ?? ""),
         origins: String(formData.get("origins") ?? ""),
+        loginName: String(formData.get("loginName") ?? ""),
       })
       const result = await createSecretAction(previous, formData)
 
@@ -148,6 +149,22 @@ function AddSecretForm({ onSaved }: { onSaved: () => void }) {
           className="min-h-16 font-mono"
         />
       </Field>
+      {kind === "text" ? (
+        <Field
+          label="Login name (optional)"
+          htmlFor="secret-login"
+          hint="The email or user name this password signs in with. Assistants see it, never the value."
+        >
+          <Input
+            id="secret-login"
+            name="loginName"
+            defaultValue={typed.loginName}
+            maxLength={200}
+            autoComplete="off"
+            spellCheck={false}
+          />
+        </Field>
+      ) : null}
       <Field
         label="Sites for the browser (optional)"
         htmlFor="secret-origins"

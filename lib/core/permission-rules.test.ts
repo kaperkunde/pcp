@@ -1,4 +1,8 @@
+import { createHash } from "node:crypto"
+
 import { describe, expect, it } from "vitest"
+
+import { generateDek } from "./crypto"
 
 import { hiddenCharacter, withoutPresentation } from "./memories"
 import {
@@ -15,24 +19,40 @@ import {
 } from "./permission-rules"
 
 describe("canonicalJson and requestHash", () => {
+  const dek = generateDek()
+
   it("does not depend on key order or undefined values", () => {
     expect(canonicalJson({ b: 1, a: { d: [1, 2], c: undefined } })).toBe(
       canonicalJson({ a: { d: [1, 2] }, b: 1 }),
     )
-    expect(requestHash("call", "s/send", { to: "x", message: "hi" })).toBe(
-      requestHash("call", "s/send", { message: "hi", to: "x" }),
+    expect(requestHash(dek, "call", "s/send", { to: "x", message: "hi" })).toBe(
+      requestHash(dek, "call", "s/send", { message: "hi", to: "x" }),
     )
   })
 
   it("tells kinds, targets and arguments apart", () => {
-    const base = requestHash("call", "s/send", { to: "x" })
+    const base = requestHash(dek, "call", "s/send", { to: "x" })
 
-    expect(requestHash("register", "s/send", { to: "x" })).not.toBe(base)
-    expect(requestHash("call", "s/other", { to: "x" })).not.toBe(base)
-    expect(requestHash("call", "s/send", { to: "y" })).not.toBe(base)
-    expect(requestHash("call", "s/send", { to: "x", extra: null })).not.toBe(
-      base,
-    )
+    expect(requestHash(dek, "register", "s/send", { to: "x" })).not.toBe(base)
+    expect(requestHash(dek, "call", "s/other", { to: "x" })).not.toBe(base)
+    expect(requestHash(dek, "call", "s/send", { to: "y" })).not.toBe(base)
+    expect(
+      requestHash(dek, "call", "s/send", { to: "x", extra: null }),
+    ).not.toBe(base)
+  })
+
+  it("is keyed by the vault key, so a guess cannot be checked without it", () => {
+    const args = { to: "ada@example.com", message: "hi" }
+    const hash = requestHash(dek, "call", "s/send", args)
+    const plain = createHash("sha256")
+      .update(`call\ns/send\n${canonicalJson(args)}`)
+      .digest("hex")
+
+    expect(hash).toMatch(/^h1:[0-9a-f]{64}$/)
+    expect(requestHash(generateDek(), "call", "s/send", args)).not.toBe(hash)
+    // A row stored before (a plain SHA-256) never matches a new hash.
+    expect(hash).not.toBe(plain)
+    expect(hash.slice(3)).not.toBe(plain)
   })
 
   it("keeps array order, which can matter", () => {

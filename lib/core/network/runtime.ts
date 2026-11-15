@@ -1,4 +1,11 @@
 import {
+  type Connector,
+  type ConnectorStatus,
+  type ConnectorTarget,
+  startConnector,
+} from "@kaperkunde/pcpgg-protocol/connector"
+
+import {
   DDNS_CHECK_INTERVAL_MS,
   type DdnsStatus,
   ddnsHostname,
@@ -21,12 +28,6 @@ import {
   pcpggRelayUrl,
   savePcpggSaved,
 } from "./pcpgg"
-import {
-  type Connector,
-  type ConnectorStatus,
-  type ConnectorTarget,
-  startConnector,
-} from "./pcpgg/connector"
 import {
   clearTlsConfig,
   acmeIssuer,

@@ -1,11 +1,11 @@
 import type { Metadata } from "next"
 
-import { PageColumn } from "@/components/page-column"
-import { PageHeader } from "@/components/page-header"
-import { Badge } from "@/components/ui/badge"
-import { Button } from "@/components/ui/button"
-import { Checkbox } from "@/components/ui/input"
-import { List } from "@/components/ui/list"
+import { PageColumn } from "@kaperkunde/ui/page"
+import { PageHeader } from "@kaperkunde/ui/page"
+import { Badge } from "@kaperkunde/ui/badge"
+import { Button } from "@kaperkunde/ui/button"
+import { Checkbox } from "@kaperkunde/ui/input"
+import { List } from "@kaperkunde/ui/list"
 import { isPcpError } from "@/lib/core/errors"
 import { findLocalItem } from "@/lib/core/repos/local"
 import {

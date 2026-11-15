@@ -2,7 +2,7 @@ import type { Metadata } from "next"
 
 import { MemoriesManager } from "@/components/memories-manager"
 import { MemoryAddDialog } from "@/components/memory-add-dialog"
-import { PageHeader } from "@/components/page-header"
+import { PageHeader } from "@kaperkunde/ui/page"
 import { listApiTokens } from "@/lib/core/api-tokens"
 import { listMemories } from "@/lib/core/memories"
 import { requireContext } from "@/lib/server/session"

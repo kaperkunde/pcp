@@ -2,9 +2,11 @@
 
 import { revalidatePath } from "next/cache"
 import { redirect } from "next/navigation"
+import { after } from "next/server"
 
 import { stopBrowser } from "@/lib/core/browser/owner"
 import { canRereadTools } from "@/lib/core/catalogue"
+import { scrubFreedPages } from "@/lib/core/cleanup/runtime"
 import { disconnectOAuth } from "@/lib/core/oauth"
 import {
   createServer,
@@ -14,6 +16,7 @@ import {
   setOAuthClient,
   setOAuthSignInParams,
   setServerEnabled,
+  setServerPublicOnly,
   setToolDescription,
   updateServer,
   type AuthType,
@@ -84,7 +87,11 @@ export async function updateServerAction(
   const id = field(formData, "id")
 
   const result = await guarded(async () => {
-    const { reconnect } = await updateServer(ctx, id, inputFrom(formData))
+    // "Public addresses only" is the page's own switch, not the form's.
+    const { reconnect } = await updateServer(ctx, id, {
+      ...inputFrom(formData),
+      publicOnly: undefined,
+    })
 
     const slug = field(formData, "slug")
     if (slug) {
@@ -188,7 +195,11 @@ export async function refreshToolsAction(
           ? sync.message
           : server.kind === "ssh"
             ? "PCP signed in."
-            : `Found ${toolCount(sync.toolCount)}.`,
+            : server.kind === "service"
+              ? "It is running."
+              : server.kind === "storage"
+                ? "PCP reached the folder."
+                : `Found ${toolCount(sync.toolCount)}.`,
     }
   })
 
@@ -219,6 +230,43 @@ export async function setToolDescriptionAction(
   })
 
   revalidatePath(`/servers/${serverId}`)
+
+  return result
+}
+
+/**
+ * The "Public addresses only" switch on an MCP server's or an endpoint's
+ * page. An MCP server's tools are read again, since what it reaches now
+ * can change them; an endpoint's calls follow it from the next one.
+ */
+export async function setServerPublicOnlyAction(
+  id: string,
+  publicOnly: boolean,
+): Promise<ServerActionResult> {
+  const ctx = await requireContext()
+
+  const result = await guarded(async () => {
+    const server = await setServerPublicOnly(ctx, id, publicOnly === true)
+
+    if (server.kind !== "mcp") {
+      return { message: "Saved." }
+    }
+
+    const sync = await syncServerTools(ctx, server, {
+      publicUrl: await publicUrlFor(ctx),
+    })
+
+    return {
+      message:
+        sync.status === "ok"
+          ? `Saved. Found ${toolCount(sync.toolCount)}.`
+          : `Saved. ${sync.message}`,
+    }
+  })
+
+  revalidatePath("/servers")
+  revalidatePath(`/servers/${id}`)
+  revalidatePath("/tokens/[id]", "page")
 
   return result
 }
@@ -275,6 +323,9 @@ export async function deleteServerAction(id: string): Promise<void> {
   const ctx = await requireContext()
   const removed = await getServer(ctx, id).catch(() => null)
   await deleteServer(ctx, id)
+  // Its rows are zeroed in the file as they go; the log's older copy of
+  // their pages goes once the answer is sent.
+  after(() => scrubFreedPages({ rebuild: false }))
 
   // Removing the browser closes it; its sign-ins stay until forgotten.
   if (removed?.kind === "browser") {

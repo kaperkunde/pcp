@@ -1,50 +1,40 @@
+import { fail, guarded as kitGuarded, ok } from "@kaperkunde/next-kit"
+
 import { isPcpError } from "@/lib/core/errors"
 
 /**
- * What a Server Action hands back to `useActionState`: the initial state,
- * a failure with a message for the person, or success with whatever the
- * form needs next (a token to show once, an id to navigate to).
+ * What a Server Action hands back to `useActionState`
+ * (@kaperkunde/next-kit's ActionState): the initial state, a failure with a
+ * message for the person, or success with whatever the form needs next (a
+ * token to show once, an id to navigate to). PCP's work throws a PcpError
+ * for what it refuses rather than answering a Result, so `guarded` turns
+ * one into the package's failure here, at the edge.
  */
-export type ActionState<T extends object = Record<never, never>> =
-  | { status: "idle" }
-  | { status: "error"; error: string }
-  | ({ status: "ok" } & T)
-
-export const IDLE: ActionState<never> = { status: "idle" }
+export {
+  field,
+  fields,
+  file,
+  IDLE,
+  type ActionState,
+} from "@kaperkunde/next-kit"
 
 export const UNEXPECTED_ERROR =
   "Something went wrong on PCP's side. Check the server log."
 
 /** Runs the action, turning expected failures into a message. */
-export async function guarded<T extends object>(
-  run: () => Promise<T>,
-): Promise<ActionState<T>> {
-  try {
-    return { status: "ok", ...(await run()) }
-  } catch (error) {
-    if (isPcpError(error)) {
-      return { status: "error", error: error.message }
-    }
+export function guarded<T extends object>(run: () => Promise<T>) {
+  return kitGuarded<T>(
+    async () => {
+      try {
+        return ok(await run())
+      } catch (error) {
+        if (isPcpError(error)) {
+          return fail(error.code, error.message)
+        }
 
-    console.error("[action] failed", error)
-
-    return { status: "error", error: UNEXPECTED_ERROR }
-  }
-}
-
-export function field(formData: FormData, name: string): string {
-  const value = formData.get(name)
-  return typeof value === "string" ? value : ""
-}
-
-export function fields(formData: FormData, name: string): string[] {
-  return formData
-    .getAll(name)
-    .filter((value): value is string => typeof value === "string")
-}
-
-/** An uploaded file, or null when the input was left empty. */
-export function file(formData: FormData, name: string): File | null {
-  const value = formData.get(name)
-  return value instanceof File && value.size > 0 ? value : null
+        throw error
+      }
+    },
+    { unexpected: UNEXPECTED_ERROR },
+  )
 }

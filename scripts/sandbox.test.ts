@@ -1,5 +1,7 @@
-import { execFileSync } from "node:child_process"
-import { readFileSync } from "node:fs"
+import { execFile, execFileSync } from "node:child_process"
+import { mkdtempSync, readFileSync, rmSync } from "node:fs"
+import { createServer } from "node:net"
+import { tmpdir } from "node:os"
 import path from "node:path"
 import { describe, expect, it } from "vitest"
 import { parse } from "yaml"
@@ -96,6 +98,93 @@ describe("docker-compose.sandbox.yaml", () => {
     const sandboxFrames = read("sandbox/pcp.py").match(/MAX_FRAMES = (\d+)/)![1]
 
     expect(sandboxFrames).toBe(pcpFrames)
+  })
+
+  it("bounds with_timeout by the run's own limit", () => {
+    const pcpLimit = read("lib/core/code/limits.ts").match(
+      /export const RUN_TIMEOUT_MS = ([\d_ *]+)\n/,
+    )![1]
+    const sandboxLimit = read("sandbox/pcp.py").match(
+      /\nRUN_TIMEOUT_MS = ([\d_ *]+)\n/,
+    )![1]
+
+    expect(sandboxLimit.trim()).toBe(pcpLimit.trim())
+  })
+})
+
+// The program's side of the bridge, against a socket that answers as PCP
+// would: a tool error's code reaches the program, and with_timeout gives up
+// on a function that takes too long.
+const BRIDGE_SCRIPT = String.raw`
+import sys, time
+sys.path.insert(0, sys.argv[1])
+import pcp
+try:
+    pcp.call("browser", "navigate", {"url": "https://example.com"})
+    raise SystemExit("no error")
+except pcp.PcpError as error:
+    assert error.code == "browser_busy", error.code
+    assert error.retry_after_ms == 500, error.retry_after_ms
+pcp.sleep(5)
+assert pcp.with_timeout(1000, lambda: 7) == 7
+try:
+    pcp.with_timeout(50, lambda: time.sleep(2))
+    raise SystemExit("no timeout")
+except pcp.PcpError as error:
+    assert error.code == "timeout", error.code
+    assert "may have gone through" in str(error)
+print("ok")
+`
+
+describe("sandbox/pcp.py", () => {
+  it("passes a tool error's code on, sleeps through PCP and times a function out", async () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "pcp-bridge-"))
+    const socket = path.join(dir, "bridge.sock")
+    const ops: string[] = []
+    const server = createServer((connection) => {
+      let text = ""
+      connection.on("data", (chunk) => {
+        text += chunk.toString("utf8")
+        if (!text.endsWith("\n")) return
+        const { op } = JSON.parse(text) as { op: string }
+        ops.push(op)
+        connection.end(
+          `${JSON.stringify(
+            op === "call"
+              ? {
+                  ok: false,
+                  error: "The tab is busy.",
+                  code: "browser_busy",
+                  retryAfterMs: 500,
+                }
+              : { ok: true, value: null },
+          )}\n`,
+        )
+      })
+    })
+    await new Promise<void>((resolve) => server.listen(socket, resolve))
+
+    try {
+      const out = await new Promise<string>((resolve, reject) =>
+        execFile(
+          "python3",
+          ["-I", "-c", BRIDGE_SCRIPT, path.join(root, "sandbox")],
+          {
+            env: { ...process.env, PCP_BRIDGE: socket },
+            encoding: "utf8",
+          },
+          (error: Error | null, stdout: string, stderr: string) =>
+            error
+              ? reject(new Error(`${error.message}\n${stderr}`))
+              : resolve(stdout),
+        ),
+      )
+      expect(out.trim()).toBe("ok")
+      expect(ops).toEqual(["call", "sleep"])
+    } finally {
+      server.close()
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 })
 

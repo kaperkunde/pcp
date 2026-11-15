@@ -67,6 +67,16 @@ export const MAX_UPLOAD_BODY_BYTES = 25 * 1024 * 1024
 /** Files one multipart upload may carry. */
 export const MAX_UPLOAD_FILES = 20
 export const MAX_RESPONSE_BYTES = 1024 * 1024
+/**
+ * A file an API answers (a PDF, an image), kept whole as the token's result.
+ * Bounded again by the largest file PCP keeps (resourceLimits().fileBytes):
+ * the smaller of the two applies, and a larger file is refused, not cut.
+ */
+export const MAX_FILE_RESPONSE_BYTES = 256 * 1024 * 1024
+/** A kept file's name, from the answer's Content-Disposition. */
+export const MAX_FILE_NAME_CHARS = 255
+/** Media types one operation declares as a file answer (`format: binary`). */
+export const MAX_FILE_ANSWER_TYPES = 20
 /** structuredContent is only added when it is at most this long as JSON. */
 export const MAX_STRUCTURED_CHARS = 60_000
 /** How much of an error answer's body is passed back. */

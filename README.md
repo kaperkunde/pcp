@@ -20,6 +20,7 @@
   <a href="docs/install.md">Install guide</a> ·
   <a href="docs/using-pcp.md">Using PCP</a> ·
   <a href="ARCHITECTURE.md">Architecture</a> ·
+  <a href="CHANGELOG.md">Changelog</a> ·
   <a href="CONTRIBUTING.md">Contributing</a> ·
   <a href="SECURITY.md">Security</a>
 </p>
@@ -56,8 +57,8 @@ approve it.
 
 - **One endpoint for everything.** MCP servers, OpenAPI APIs, mail (JMAP or
   IMAP), calendars (CalDAV, iCloud included) and SSH hosts sit behind one MCP
-  endpoint. Assistants find tools with `search`, `describe` and `call_tool`
-  instead of loading every definition.
+  endpoint, with seven tools: assistants find tools with `search` and run
+  them with an `execute` per tier, instead of loading every definition.
 - **Allow, ask or block, per tool.** Requests that ask come to your phone:
   allow once, always or for an hour, or block.
 - **Secrets never reach the AI.** They're encrypted at rest with a key the
@@ -69,7 +70,7 @@ approve it.
   you already have, or run container images as managed services on your hosts.
 - **Files in and out.** Upload links work from your phone, and tools pass
   files to each other as handles, so the bytes never go through the model.
-- **run_code.** Short programs run inside PCP to call tools and trim large
+- **Programs.** Short programs (`run_read`, `run_write`, `run_destructive`) run inside PCP to call tools and trim large
   results before they reach the assistant.
 - **Skills and memories** are shared across all your assistants.
 - **Take it with you.** Export everything to one encrypted file and restore
@@ -121,6 +122,7 @@ assistant to find one and propose it.
   browser, wrappers, services, tokens and permissions in detail
 - [How it is secured](docs/security-model.md), plus [ARCHITECTURE.md](ARCHITECTURE.md)
   and [SECURITY.md](SECURITY.md)
+- [CHANGELOG.md](CHANGELOG.md): what changed in each release
 - [CONTRIBUTING.md](CONTRIBUTING.md) for development, and [CLAUDE.md](CLAUDE.md) for AI agents working on the code
 
 ## Licence

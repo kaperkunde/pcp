@@ -2,11 +2,12 @@
 
 import { useActionState, useEffect, useId, useState } from "react"
 
-import { FormError } from "@/components/form-status"
-import { SubmitButton } from "@/components/submit-button"
-import { Badge } from "@/components/ui/badge"
-import { Checkbox, Input, Textarea } from "@/components/ui/input"
-import { Field } from "@/components/ui/label"
+import { FormError } from "@kaperkunde/ui/form-status"
+import { Button } from "@kaperkunde/ui/button"
+import { SubmitButton } from "@kaperkunde/ui/submit-button"
+import { Badge } from "@kaperkunde/ui/badge"
+import { Checkbox, Input, Textarea } from "@kaperkunde/ui/input"
+import { Field } from "@kaperkunde/ui/label"
 import {
   confirmShareAction,
   shareFixAction,
@@ -286,7 +287,7 @@ export function ShareConfirm({
   publicRepo: boolean
   label: string
 }) {
-  const [state, action] = useActionState<RepoActionResult, FormData>(
+  const [state, action, pending] = useActionState<RepoActionResult, FormData>(
     confirmShareAction,
     IDLE,
   )
@@ -316,9 +317,11 @@ export function ShareConfirm({
     >
       <Hidden target={target} />
       <input type="hidden" name="basis" value={basis} />
-      <SubmitButton size="lg" pendingText="Pushing…" disabled={waiting > 0}>
-        {label}
-      </SubmitButton>
+      {/* Held until every hit is fixed or ticked, which SubmitButton cannot
+          say: it is disabled only while the push runs. */}
+      <Button type="submit" size="lg" disabled={pending || waiting > 0}>
+        {pending ? "Pushing…" : label}
+      </Button>
       <p className="text-xs text-muted-foreground" role="status">
         {waiting > 0
           ? `${waiting === 1 ? "One thing still looks" : `${waiting} things still look`} personal: fix ${waiting === 1 ? "it" : "each"}, or tick it as fine to publish.`

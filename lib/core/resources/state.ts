@@ -14,8 +14,11 @@ import {
   AUTO_PROGRAM_MEMORY_SHARE,
   AUTO_PROGRAMS_AT_ONCE,
   AUTO_PROGRAMS_MEMORY_SHARE,
+  AUTO_STORE_DISK_SHARE,
+  AUTO_STORE_MB,
   type Bound,
   FALLBACK_KEPT_MB,
+  FALLBACK_STORE_MB,
   MAX_PROGRAMS_MEMORY_SHARE,
   MB,
   MIN_RESOLVED_CHARS,
@@ -51,6 +54,7 @@ const FIELDS = [
   "fileMb",
   "keptMb",
   "browserIdleMinutes",
+  "storeMb",
 ] as const
 
 export type ResourceField = (typeof FIELDS)[number]
@@ -97,6 +101,8 @@ export type ResourceLimits = {
    * watching and no hand-over waiting (browser/idle.ts).
    */
   browserIdleMs: number
+  /** What PCP's own store may hold (storage/quota.ts). */
+  storeBytes: number
 }
 
 export const EMPTY_CONFIG: ResourceConfig = {
@@ -105,6 +111,7 @@ export const EMPTY_CONFIG: ResourceConfig = {
   fileMb: null,
   keptMb: null,
   browserIdleMinutes: null,
+  storeMb: null,
 }
 
 function clamp(value: number, { min, max }: Bound): number {
@@ -178,8 +185,26 @@ export function chooseResources(
 
   const browserIdleMinutes =
     config.browserIdleMinutes ?? AUTO_BROWSER_IDLE_MINUTES
+  const storeMb =
+    config.storeMb ??
+    Math.max(
+      fileMb,
+      machine.disk
+        ? clamp(
+            Math.floor((machine.disk.totalBytes / MB) * AUTO_STORE_DISK_SHARE),
+            AUTO_STORE_MB,
+          )
+        : FALLBACK_STORE_MB,
+    )
 
-  return { programMemoryMb, programsAtOnce, fileMb, keptMb, browserIdleMinutes }
+  return {
+    programMemoryMb,
+    programsAtOnce,
+    fileMb,
+    keptMb,
+    browserIdleMinutes,
+    storeMb,
+  }
 }
 
 /** What PCP would pick for each setting, given the owner's other ones. */
@@ -218,6 +243,7 @@ export function limitsOf(choice: ResourceChoice): ResourceLimits {
     sandboxRequestBytes: Math.max(MIN_SANDBOX_REQUEST_BYTES, answerChars + MB),
     resolvedChars: Math.max(MIN_RESOLVED_CHARS, answerChars * 2),
     browserIdleMs: choice.browserIdleMinutes * 60_000,
+    storeBytes: choice.storeMb * MB,
   }
 }
 
@@ -227,6 +253,7 @@ const LABELS: Record<ResourceField, string> = {
   fileMb: "The largest file",
   keptMb: "Kept results per token",
   browserIdleMinutes: "The browser's idle close (minutes)",
+  storeMb: "PCP's own store",
 }
 
 function megabytes(mb: number): string {
@@ -289,6 +316,16 @@ export function checkResourceConfig(
   ) {
     throw invalid(
       `Kept results per token (${megabytes(checked.keptMb)}) cannot be more than the whole disk (${megabytes(Math.floor(machine.disk.totalBytes / MB))}).`,
+    )
+  }
+
+  if (
+    checked.storeMb !== null &&
+    machine.disk &&
+    checked.storeMb > machine.disk.totalBytes / MB
+  ) {
+    throw invalid(
+      `PCP's own store (${megabytes(checked.storeMb)}) cannot be more than the whole disk (${megabytes(Math.floor(machine.disk.totalBytes / MB))}).`,
     )
   }
 

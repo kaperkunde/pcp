@@ -40,6 +40,8 @@ describe("what PCP picks itself", () => {
       fileMb: 128,
       keptMb: 4096,
       browserIdleMinutes: 60,
+      // A quarter of the whole disk.
+      storeMb: 128_000,
     })
     expect(chooseResources(EMPTY_CONFIG, tiny)).toEqual({
       programMemoryMb: 128,
@@ -47,6 +49,7 @@ describe("what PCP picks itself", () => {
       fileMb: 16,
       keptMb: 102,
       browserIdleMinutes: 60,
+      storeMb: 2048,
     })
   })
 
@@ -60,6 +63,18 @@ describe("what PCP picks itself", () => {
     })
     // What PCP would pick for the memory itself, with the rest as set.
     expect(automaticResources(config, laptop).programMemoryMb).toBe(1024)
+  })
+
+  it("bounds PCP's own store by the disk, and guesses without one", () => {
+    expect(chooseResources(EMPTY_CONFIG, { ...tiny, disk: null }).storeMb).toBe(
+      10_240,
+    )
+    expect(() =>
+      checkResourceConfig({ ...EMPTY_CONFIG, storeMb: 9000 }, tiny),
+    ).toThrow(/whole disk/)
+    expect(
+      checkResourceConfig({ ...EMPTY_CONFIG, storeMb: 4000 }, tiny).storeMb,
+    ).toBe(4000)
   })
 
   it("keeps room for a file in a token's results, and guesses without a disk", () => {
@@ -76,6 +91,7 @@ describe("what PCP picks itself", () => {
       fileMb: 1,
       keptMb: 10,
       browserIdleMinutes: 5,
+      storeMb: 100,
     })
     expect(small).toMatchObject({
       textChars: 4_000_000,
@@ -91,7 +107,9 @@ describe("what PCP picks itself", () => {
       fileMb: 100,
       keptMb: 1000,
       browserIdleMinutes: 60,
+      storeMb: 1000,
     })
+    expect(large.storeBytes).toBe(1000 * MB)
     expect(large.answerChars).toBeGreaterThan(
       Buffer.alloc(100 * MB).toString("base64").length,
     )

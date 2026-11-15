@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest"
 
-import { describeElement, failureReason } from "./failures"
+import {
+  coveringElement,
+  coveringLine,
+  describeElement,
+  failureReason,
+} from "./failures"
+import { parseSnapshot } from "./snapshot"
 
 // Playwright's failures as Chromium gave them (the call log dimmed with
 // ANSI codes, as it comes), and the reason an answer gives for each.
@@ -128,5 +134,55 @@ describe("describing an element", () => {
     expect(
       describeElement(`<div aria-label="${"y".repeat(500)}">`).length,
     ).toBeLessThanOrEqual(201)
+  })
+})
+
+describe("what covers an element", () => {
+  const AFTER = parseSnapshot(`- generic [ref=e1]:
+  - button "Covered"
+  - dialog "Cookie consent" [ref=e41]:
+    - button "Accept" [ref=e42]
+  - complementary "Chat" [ref=e43]`)
+
+  it("is read from the call log: the outer element, its role (its tag's own too) and label", () => {
+    expect(coveringElement(COVERED)).toEqual({
+      role: "dialog",
+      tag: "div",
+      label: "Cookie consent",
+    })
+    expect(
+      coveringElement(
+        failure("locator.click: Timeout 10000ms exceeded.", [
+          '      - <span>Accept</span> from <aside title="Chat">…</aside> subtree intercepts pointer events',
+        ]),
+      ),
+    ).toEqual({ role: "complementary", tag: "aside", label: "Chat" })
+    expect(coveringElement(new Error("locator.click: Timeout"))).toBeNull()
+  })
+
+  it("is named with its ref from the snapshot that comes with the failure", () => {
+    expect(coveringLine(AFTER, coveringElement(COVERED)!)).toBe(
+      'What covers it is the dialog "Cookie consent" (ref e41): close or dismiss it first (often a button in it, or press_key Escape), then click again.',
+    )
+    expect(
+      coveringLine(AFTER, {
+        role: "complementary",
+        tag: "aside",
+        label: "Chat",
+      }),
+    ).toContain('the complementary "Chat" (ref e43)')
+  })
+
+  it("points at the page's dialogs when the element itself cannot be told", () => {
+    expect(coveringLine(AFTER, { role: null, tag: "div", label: null })).toBe(
+      'The page shows the dialog "Cookie consent" (ref e41), which may be what covers it: close or dismiss it first (often a button in it, or press_key Escape), then click again.',
+    )
+    expect(
+      coveringLine(parseSnapshot('- button "Covered" [ref=e1]'), {
+        role: null,
+        tag: "div",
+        label: null,
+      }),
+    ).toBeNull()
   })
 })

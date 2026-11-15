@@ -122,7 +122,11 @@ export async function updateEndpointAction(
   const id = field(formData, "id")
 
   const result = await guarded(async () => {
-    const { sync } = await updateEndpoint(ctx, id, await inputFrom(formData))
+    // "Public addresses only" is the page's own switch, not the form's.
+    const { sync } = await updateEndpoint(ctx, id, {
+      ...(await inputFrom(formData)),
+      publicOnly: undefined,
+    })
 
     const slug = field(formData, "slug")
     if (slug) {

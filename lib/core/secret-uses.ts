@@ -1,15 +1,30 @@
+import { openOrigin, siteLabel } from "./browser-secrets"
 import type { VaultContext } from "./context"
 import { db } from "./db"
-import type { SecretKind } from "./secrets"
+import { openWrapperSpec, WRAPPER_SPEC_SELECT } from "./spec-rows"
+import { SERVER_META_SELECT, serverName, serverSlug } from "./server-meta"
+import { openSecretDetails, type SecretKind } from "./secrets"
+import { readEnvBindings } from "./services/definition"
 import { readDefinition } from "./wrappers/definition"
+import {
+  byName,
+  openSecretMeta,
+  SECRET_META_SELECT,
+  secretName,
+} from "./secret-meta"
 
 /**
  * What uses each secret, by name, and the secrets' names for a token that
- * manages endpoints (list_secrets). Never a value: nothing here selects a
- * ciphertext, and nothing decrypts.
+ * manages endpoints (list_secrets), with the sign-in each belongs to (the
+ * owner's login name and note, opened by secrets.ts, its TOTP companion and
+ * the sites the browser types it at). Never a value: nothing here selects
+ * a value's ciphertext or decrypts one.
  */
 
-/** Something that uses a secret: a server that sends it, or a wrapper with a place for it. */
+/**
+ * Something that uses a secret: a server that sends it, a wrapper with a
+ * place for it, or a service whose variable takes it.
+ */
 export type SecretUse = {
   name: string
   slug: string
@@ -25,13 +40,14 @@ const KIND_WORDS: Record<string, string> = {
   caldav: "calendar account",
   ssh: "SSH server",
   wrapper: "wrapper",
+  service: "service",
 }
 
 function kindWords(kind: string): string {
   return KIND_WORDS[kind] ?? "server"
 }
 
-const SERVER = { id: true, name: true, slug: true, kind: true } as const
+const SERVER = { ...SERVER_META_SELECT, kind: true } as const
 
 /**
  * Every server that sends one of these secrets or keeps its OAuth tokens or
@@ -60,12 +76,12 @@ export async function secretUses(
   )
   const add = (
     secretId: string,
-    server: { id: string; name: string; slug: string; kind: string },
+    row: Parameters<typeof serverName>[1] & { kind: string },
   ) =>
-    uses.get(secretId)?.set(server.id, {
-      name: server.name,
-      slug: server.slug,
-      kind: kindWords(server.kind),
+    uses.get(secretId)?.set(row.id, {
+      name: serverName(ctx, row),
+      slug: serverSlug(ctx, row),
+      kind: kindWords(row.kind),
     })
 
   for (const row of rows) {
@@ -81,7 +97,7 @@ export async function secretUses(
 
   const wrappers = await db().mcpServer.findMany({
     where: { vaultId: ctx.vaultId, kind: "wrapper" },
-    select: { ...SERVER, wrapperSpec: { select: { definition: true } } },
+    select: { ...SERVER, wrapperSpec: { select: WRAPPER_SPEC_SELECT } },
   })
 
   for (const wrapper of wrappers) {
@@ -92,9 +108,9 @@ export async function secretUses(
     let bound: Array<string | null>
 
     try {
-      bound = readDefinition(wrapper.wrapperSpec.definition).secrets.map(
-        (binding) => binding.secretId,
-      )
+      bound = readDefinition(
+        openWrapperSpec(ctx, wrapper.wrapperSpec).definition,
+      ).secrets.map((binding) => binding.secretId)
     } catch {
       // A definition that does not read is no use of anything.
       continue
@@ -104,6 +120,17 @@ export async function secretUses(
       if (secretId) {
         add(secretId, wrapper)
       }
+    }
+  }
+
+  const services = await db().serviceSpec.findMany({
+    where: { server: { vaultId: ctx.vaultId } },
+    select: { env: true, server: { select: SERVER } },
+  })
+
+  for (const service of services) {
+    for (const secretId of Object.values(readEnvBindings(service.env))) {
+      add(secretId, service.server)
     }
   }
 
@@ -138,6 +165,7 @@ const KIND_SHOWN: Record<SecretKind, string> = {
   totp: "one-time codes (TOTP), typed by the browser only",
   oauth: "OAuth sign-in (kept by PCP for a server)",
   ssh_key: "SSH key (PCP's own, for an SSH server)",
+  proxy_password: "proxy password (PCP's own, for a VPN service's exit)",
 }
 
 export type ListedSecret = {
@@ -149,11 +177,23 @@ export type ListedSecret = {
   usedBy: SecretUse[]
   /** Further uses past MAX_LISTED_USES. */
   moreUses?: number
+  /**
+   * The sites the browser may type it at (SecretBrowserOrigin): an origin,
+   * or "<origin> and its subdomains".
+   */
+  sites?: string[]
+  /** The owner's login name for the sign-in it is the password of. */
+  login_name?: string
+  /** The owner's note on it. */
+  note?: string
+  /** The TOTP secret whose code goes with it, by name. */
+  totp?: string
 }
 
 /**
  * The vault's secrets as a token that manages endpoints sees them: names,
- * descriptions, kinds and what uses each. Never a value or a date.
+ * descriptions, kinds and what uses each, and for the owner's own the
+ * sign-in they belong to, where the owner said. Never a value or a date.
  */
 export async function listSecretNames(
   ctx: VaultContext,
@@ -163,15 +203,34 @@ export async function listSecretNames(
   const rows = (
     await db().secret.findMany({
       where: { vaultId: ctx.vaultId },
-      select: { id: true, name: true, description: true, kind: true },
-      orderBy: [{ kind: "desc" }, { name: "asc" }],
+      select: {
+        ...SECRET_META_SELECT,
+        kind: true,
+        loginName: true,
+        note: true,
+        totpCompanion: { select: SECRET_META_SELECT },
+        browserOrigins: {
+          select: {
+            secretId: true,
+            origin: true,
+            sealed: true,
+            includeSubdomains: true,
+          },
+        },
+      },
     })
-  ).filter(
-    (row) =>
-      !needle ||
-      row.name.toLowerCase().includes(needle) ||
-      row.description.toLowerCase().includes(needle),
   )
+    .map((row) => ({ ...row, ...openSecretMeta(ctx, row) }))
+    // Kind descending, then name: sorted here, since the names are sealed.
+    .sort((a, b) =>
+      a.kind === b.kind ? byName(a, b) : a.kind < b.kind ? 1 : -1,
+    )
+    .filter(
+      (row) =>
+        !needle ||
+        row.name.toLowerCase().includes(needle) ||
+        row.description.toLowerCase().includes(needle),
+    )
   const shown = rows.slice(0, MAX_LISTED_SECRETS)
   const uses = await secretUses(
     ctx,
@@ -182,6 +241,16 @@ export async function listSecretNames(
     secrets: shown.map((row) => {
       const usedBy = uses.get(row.id) ?? []
       const kind = (row.kind in KIND_SHOWN ? row.kind : "text") as SecretKind
+      const { loginName, note } = openSecretDetails(ctx, row)
+      const sites = row.browserOrigins
+        .map((site) => ({
+          origin: openOrigin(ctx, site),
+          subdomains: site.includeSubdomains,
+        }))
+        .sort((a, b) =>
+          a.origin < b.origin ? -1 : a.origin > b.origin ? 1 : 0,
+        )
+        .map(siteLabel)
 
       return {
         name: row.name,
@@ -191,6 +260,12 @@ export async function listSecretNames(
         usedBy: usedBy.slice(0, MAX_LISTED_USES),
         ...(usedBy.length > MAX_LISTED_USES
           ? { moreUses: usedBy.length - MAX_LISTED_USES }
+          : {}),
+        ...(sites.length > 0 ? { sites } : {}),
+        ...(loginName ? { login_name: loginName } : {}),
+        ...(note ? { note } : {}),
+        ...(row.totpCompanion
+          ? { totp: secretName(ctx, row.totpCompanion) }
           : {}),
       }
     }),

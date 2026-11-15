@@ -6,8 +6,8 @@ import {
   CardDescription,
   CardHeader,
   CardTitle,
-} from "@/components/ui/card"
-import { Disclosure } from "@/components/ui/disclosure"
+} from "@kaperkunde/ui/card"
+import { Disclosure } from "@kaperkunde/ui/disclosure"
 import { REPOSITORY_URL } from "@/lib/operator-identity"
 
 const SELF_HOSTING_GUIDE = `${REPOSITORY_URL}/blob/main/docs/self-hosting.md#4-reach-pcp-from-outside-your-home-optional`

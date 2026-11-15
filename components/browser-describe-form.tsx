@@ -2,10 +2,10 @@
 
 import { useActionState } from "react"
 
-import { FormError, FormNote } from "@/components/form-status"
-import { SubmitButton } from "@/components/submit-button"
-import { Input, Textarea } from "@/components/ui/input"
-import { Field } from "@/components/ui/label"
+import { FormError, FormNote } from "@kaperkunde/ui/form-status"
+import { SubmitButton } from "@kaperkunde/ui/submit-button"
+import { Input, Textarea } from "@kaperkunde/ui/input"
+import { Field } from "@kaperkunde/ui/label"
 import { updateBrowserAction } from "@/lib/actions/browser"
 import type { ActionState } from "@/lib/server/action-state"
 

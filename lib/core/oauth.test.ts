@@ -12,6 +12,7 @@ import {
   setOAuthSignInParams,
   updateServer,
 } from "./servers"
+import { secretName } from "./secret-meta"
 import { scratchDatabase } from "./test-db"
 import {
   callServerTool,
@@ -339,10 +340,8 @@ describe("connecting an OAuth server", () => {
     const secret = await db().secret.findUniqueOrThrow({
       where: { id: server.oauthClientSecretId! },
     })
-    expect(secret).toMatchObject({
-      name: "Mail OAuth client secret",
-      kind: "text",
-    })
+    expect(secret.kind).toBe("text")
+    expect(secretName(ctx, secret)).toBe("Mail OAuth client secret")
 
     const url = signInAddress(await startOAuth(ctx, id, HTTP))
     expect(url.origin + url.pathname).toBe(`${as.origin}/authorize`)

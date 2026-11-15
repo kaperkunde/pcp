@@ -42,6 +42,11 @@ so in the summary; the bump itself waits for the request.
 
 ## Boundaries
 
+- Shared code lives in `@kaperkunde/*` (kaperkunde/common-public); check
+  there before writing a helper, and change it upstream rather than
+  copying it here. PCP's own rules ride on top as thin layers
+  (`lib/core/tools/` over `@kaperkunde/mcp`, `lib/server/action-state.ts`
+  over `@kaperkunde/next-kit`).
 - `lib/core` is framework-free. No `next/*`, no React, no `lib/actions`,
   no `lib/server` (ESLint enforces it). Everything takes a `VaultContext`
   explicitly. If a core function needs something from the request, the
@@ -57,7 +62,8 @@ so in the summary; the bump itself waits for the request.
   moment is typed, and only by the browser. An API endpoint's calls
   (`lib/core/endpoints.ts`, `lib/core/openapi/`) are handed their finished
   header by `upstream.ts` and never read a secret; `openapi/call.ts` scrubs
-  the secret from what the API answers.
+  the secret from what the API answers, and refuses a file answer (kept as
+  a result, its handle answered) whose bytes hold it.
 - What an assistant may do to an endpoint through the gateway
   (`lib/core/endpoint-admin.ts`) is narrower than what the owner may do, on
   purpose. It registers one through `register_server` with OpenAPI text or a
@@ -72,7 +78,11 @@ so in the summary; the bump itself waits for the request.
   token addresses), so `client_id` is only for one that does not. It changes a schema with edits (a JSON Patch, `openapi/patch.ts`)
   rather than resending it, and a changed document at a URL it proposed is not
   taken without the owner.
-  It never changes a credential and never clears `publicOnly`. On an
+  It never changes a credential and never clears `publicOnly`: only the
+  owner does, with the switch on the server's page (`#public-only`), or by
+  ticking "Allow private addresses" on a request for a server or endpoint
+  flagged as private (`allowPrivate`, offered only then, never an
+  argument). On an
   endpoint that is the owner's (it sends a secret or an OAuth token, or private
   addresses are allowed) it can turn read-only on, and anything else it may change there
   (name, description, edits, tool descriptions, a re-read of the schema URL)
@@ -85,12 +95,16 @@ so in the summary; the bump itself waits for the request.
   all of that when adding to it, and add a test for each new field an
   assistant can set.
 - Definitions (`lib/core/definitions.ts`, `definition-rows.ts`): an MCP
-  server, endpoint or wrapper is an instance of a `server_definition`, and
-  what instances share (description, schema and edits, wrapper program, tool
-  descriptions) is copied on each of them. Anything that writes shared
-  content goes through `endpoints.ts applySpec`, `shareDescription`,
-  `setToolDescription` or `writeWrapper`, so every instance gets it and
-  rebuilds its tools; a server made on a definition takes its content, never
+  server, endpoint, wrapper or service is an instance of a
+  `server_definition`, and what instances share (description, schema and
+  edits, wrapper program, a service's definition, tool descriptions) is
+  copied on each of them. Anything that writes shared content goes through
+  `endpoints.ts applySpec`, `shareDescription`, `setToolDescription`,
+  `writeWrapper` or `services.ts writeServiceDefinition`, so every instance gets it and
+  rebuilds its tools; the owner's tool tiers are the definition's own rows
+  (`tool_tier`), written only through `tool-tiers.ts setToolTier`, which
+  every instance reads (a detach copies them, a merge keeps the kept
+  definition's); a server made on a definition takes its content, never
   its own. An endpoint shares the owner's rules with its siblings: it is the
   assistant's only while every instance is. Merge is the owner's alone. An
   assistant only proposes the rest, each a permission request that writes
@@ -119,23 +133,107 @@ so in the summary; the bump itself waits for the request.
 - Skills (`lib/core/skills.ts`) are procedures the owner approved, kept as
   SKILL.md (frontmatter with a `version`, other tools' keys kept as they
   are), encrypted under `skill:<id>`. An assistant reads the ones its token
-  sees through `search` and `describe`, and proposes a change only through
+  sees through `search` (by query, then its ref), and proposes a change only through
   the `memory` tool's `/skills/…` paths: a `skill_change` request that shows
   the whole skill and its diff and writes only that, while the skill is
-  still at the version the owner was shown. A change to the SKILL.md shape
+  still at the version the owner was shown. The exception is a token's own
+  skills (`/skills/mine/<name>/`, `visibility` `private` with its
+  `tokenId`), as `/memories/notes.md` is: written at once, seen only by that
+  token (`skill:mine/<name>`, never framed as approved) and the owner (the
+  Skills page, marked with the token), never offered to another token and
+  never in a linked repository (`repos/` reads `listSharedSkills` only). One
+  becomes shared only by the owner's hand (`shareSkill`) or a `skill_change`
+  with `share` (renaming it out of `/skills/mine/`), written as shown. A
+  deleted token's stay, the owner's alone. A change to the SKILL.md shape
   stays backward compatible.
-- `call_tool` and `call_read_only_tool` take only a `call_handle` from
-  `describe` (`lib/core/call-handles.ts`: an HMAC under the vault key over
-  the token, the tool and its schema's hash), and check the arguments against
-  the schema before anything runs or asks the owner. run_code's `pcp.call`
-  keeps names.
+- Every tool PCP exposes is defined through `lib/core/tools/` (PCP's
+  layer over `@kaperkunde/mcp`: its meta keys, error codes, placeholders,
+  owner reasons and permission links): PCP's own
+  at `/mcp` with `defineTool`, the families behind execute (browser, mail,
+  calendar, SSH, services, storage folders) with `defineInnerTool`
+  (`tools/family.ts`); a
+  strict zod input published as JSON Schema 2020-12 (objects closed, every
+  property described), rules across arguments as JSON Schema under
+  `allOf`, all four annotations, an `output` when every answer is one
+  shape. One validator (`tools/validate.ts`) checks every call's
+  arguments before anything runs, connects or asks the owner, on every
+  path (`lib/core/call-arguments.ts`: execute_<tier>, run_<tier>'s
+  `pcp.call`, a wrapper's or flow's calls; the family again before it runs); zod adds
+  only what JSON Schema cannot say. An answer is one of the outcome kinds
+  (`tools/outcome.ts`: `ok`, `toolError` with its code in
+  `_meta["gg.pcp/error"]`, `needsOwner`, passed on): a family throws only
+  for a failure on the way (`upstream`) or a sign-in (`unauthorized`), never
+  for arguments, an unknown tool or read-only. Arguments are snake_case; a
+  renamed one is an alias for one release with a note (and a wrapper's
+  answer says how to change its program), then `retired`, refused with the
+  name to use. Each rename goes in `docs/breaking-changes.md`.
+- A PCP tool's description opens with a verb, its object and what sets it
+  apart, in a search's words, within its first 25 characters: Claude's apps
+  show the model little more of a deferred tool (`gateway-tools.test.ts`
+  checks every one; a new tool adds its keyword there). Names and
+  descriptions are the same for every client and session. What differs per
+  app is in answers only, by its client profile (`lib/core/clients/`: a
+  typed list with `observed` dates, detected per request from clientInfo,
+  label headers, user agent and OAuth client name, the owner's choice per
+  token winning): whether the instructions' key rules are repeated, once a
+  session, and link style. The client last seen is `api_token.client_seen`
+  (its own name, version, profile, time), never the request log.
+- A client lists PCP's entries only (#113, `tools/serve.ts listOnly`):
+  `search` (a query; a `ref`, which is what `describe` was; neither, the
+  owner's standing rules), `execute_read`, `execute_write`,
+  `execute_destructive` and, for a token that runs code, `run_read`,
+  `run_write`, `run_destructive`. Every other tool of PCP's is registered
+  unlisted, found by `search` (kind `pcp`) and run by name through the
+  `execute_<tier>` of its own tier (`tool`, with only `arguments` beside
+  it), served as its own call (its validator, its log line, the lead); an
+  entry's tier is its name, never the owner's choice. A new tool of PCP's
+  is one of those behind them, not a new entry. The old names (`describe`,
+  `call_tool_<tier>`, `run_code_<tier>`, and each of PCP's own tools by
+  its name) still answer for one release with a line naming the new entry
+  (`RETIRED_ENTRIES`, `retiredNote`, `ownNameNote`), then are `retired`:
+  refused as unknown, and its own tools answer only through execute.
+- `execute_read`, `execute_write` and `execute_destructive` take one of
+  the owner's tools only as a `call_handle` from `search`'s ref
+  (`lib/core/call-handles.ts`: an HMAC under the vault key over the token,
+  the tool and its schema's hash, the same for every tier), and check the
+  arguments with that validator before anything runs or asks the owner.
+  run_<tier>'s `pcp.call` keeps names.
+- Tool tiers (`lib/core/tool-tiers.ts`): every tool is Read, Write or
+  Destructive, and `effectiveTier` is the one truth: the owner's choice,
+  else for a wrapper's tool the highest tier of its calls (an unknown call
+  is Destructive; the definition's own annotations only propose), else the
+  annotations as MCP reads them (no hints is Destructive). An API
+  endpoint's tools state both hints (GET Read, POST/PUT/PATCH Write, DELETE
+  Destructive). Everything that asks whether a tool reads or destroys asks
+  there, never the raw annotations: the entry gates, `markedReadOnly`
+  (pacing, a run's trace), the duplicate guard, the permission page's warning, the wrapper
+  review's badges, search's ref, list_tools, search, pcp.tools, and what PCP's
+  own tools advertise. Each `execute_<tier>` and `run_<tier>` runs
+  tools at or below its tier only and refuses one above, naming the entry
+  that runs it, before its arguments are checked or the owner asked (in a
+  program, an error it may catch); the run's duplicate key holds the tier.
+  The owner's levels apply in every tier; a tier adds no right. Derived
+  tiers are worked out when asked, never stored. The owner's choices are
+  `tool_tier` rows (per definition, or per server without one) and the
+  vault's `toolTiers` setting for PCP's own tools; a wrapper tool's choice
+  below what its calls came to since goes to the bell (`tierNotices`).
 - Pacing (`lib/core/pacing/`) applies only in `upstream.ts callServerTool`
-  (the browser by the tab's site, in `browser/call.ts`) and web fetch's
+  (the browser by the tab's site, in `browser/call.ts`, as a turn taken on
+  the tab's lane and held until the action ends, so actions at a site never
+  follow closer than the pause, whatever the callers) and web fetch's
   request path (`fetch/fetch.ts`, `web-fetch.ts runFetch`), so every way in
-  is paced: call_tool, run_code, wrappers and flows, owner-approved calls.
+  is paced: execute_<tier>, run_<tier>, wrappers and flows,
+  owner-approved calls, each as a read or a change by its tier; and to
+  search's embeddings requests, as a read (`paceEmbeddings`).
   New defaults and bounds go in `pacing/limits.ts`, by class of action;
   nothing names a site or vendor. The owner's overrides are the vault's
-  `pacing` setting, never a host setting.
+  `pacing` setting, never a host setting. An assistant's own pace for a
+  browser action is a tab's (`tabs` action `pace`, in memory with the tab,
+  never stored) or a wrapper's (its definition's `pace`, narrowed per call
+  by `pcp.call`'s `pace` within it); either within the owner's bounds
+  (the setting's `assistant`) or as the owner allowed it (a `tab_pace`
+  request for that tab alone; the `wrapper_change` page), never below the
+  owner's own pace for the site, and never written into the setting.
 - Linked repositories (`lib/core/repos/`) share items, never secrets, and
   are never a backup. Their documents carry `pcp_format` and change only
   backward compatibly (add fields with defaults, never repurpose one).
@@ -144,11 +242,26 @@ so in the summary; the bump itself waits for the request.
   (`repos/limits.ts`) and read against a schema, every file checked against
   its git id. It never reads a secret: `upstream.ts githubCredential` hands
   it the header, from a text secret or PCP's own sign-in (`oauth/github`).
-  A server's document is its definition only (`PCP_FORMAT` 2): sync never
-  writes an instance's own fields (name and short name, address,
+  A token's own skill is never an item: not listed, pushed, imported onto
+  or kept out. A server's document is its definition only (`PCP_FORMAT`
+  2): sync never writes an instance's own fields (name and short name, address,
   credential and secrets, read-only, public-only, enabled, pace, levels,
-  note), and what a format-1 document says of its server only fills in a
-  first instance. A push is one commit per item, fast-forward only, and
+  note; a service's SSH server, publish address, variables' secrets and
+  typed values, container, what it registered, its exit), and what a format-1 document says of its
+  server only fills in a first instance. Format 3 adds `services/<name>.yaml`
+  (a service's definition); every other kind is still written in the
+  format that first held it (`FORMAT_OF_KIND`), so an older PCP reads them
+  and leaves `services/` alone. Format 4 adds `auth` on a service's MCP
+  server and a service's `files`; only a service document that has either
+  is written as format 4 (`serviceFormat`), and a format-3 one naming
+  either is refused. Format 5 adds a wrapper's or flow's own `pace`
+  (snake_case, as `create_wrapper` takes it); only one that has a pace is
+  written as format 5 (`wrapperFormat`), an older-format one naming it is
+  refused, and a pace change is never `textOnly` (its review flags it, and
+  says where it goes past the owner's bounds). PCP's common items,
+  `kaperkunde/pcp-gg-common` (`repos/common.ts`), are offered in one click,
+  linked read-only and untrusted (pinned imports), read without a sign-in.
+  A push is one commit per item, fast-forward only, and
   only through the push's review (`repos/share-review.ts`): every file in
   full, what stays private, and the personal-data check
   (`repos/personal-data.ts`, pure), which a public repository waits on
@@ -161,18 +274,34 @@ so in the summary; the bump itself waits for the request.
   `basis` holds. Nothing syncs without a
   request's key: `runDueSyncs` runs only through `after()` from `/mcp` and
   the owner's pages; never a timer, a webhook or a stored key. An assistant
-  (manage-endpoints only) helps through `search`, `describe` and
+  (manage-endpoints only) helps through `search` (and its ref) and
   `/repos/<id>/` in the memory tool, as one `repo_change` request, and
   proposes one item it sees for a push through `/repos/share/…`
   (`repos/assist-share.ts`): a `repo_share` request whose only yes is
   Confirm on the push's review (`confirmProposedShare`, which is
   `confirmShare` unchanged). A new way in gets a test against
   `fake-github.ts`.
-- Tool levels an assistant proposes for its token (`propose_tool_access`,
-  `lib/core/access-requests.ts`) are written only by the owner's save on the
-  request's page (`applyAccessRequest`), with what they chose there. No
-  decision and nothing the assistant sends writes them, and blocked tools
-  stay out of what it can name.
+- Tool levels and tiers an assistant proposes (`propose_tool_access`,
+  `lib/core/access-requests.ts`: `access`, `tier` or both per change; PCP's
+  own tools by tier only, on the server "pcp") are written only by the
+  owner's save on the request's page (`applyAccessRequest`), with what they
+  chose there: levels for its token, tiers through `setToolTier` (every
+  server of the definition, which the page says) or the vault's setting.
+  No decision and nothing the assistant sends writes them, and blocked
+  tools stay out of what it can name. The same holds for `tool_access` on
+  `register_server`, `create_wrapper` and `update_wrapper`
+  (`lib/core/proposed-access.ts`): stored on the request, shown filled in
+  and editable beside the approval on the same page, and written only with
+  the owner's yes there (`decidePermission`'s `access`, checked by
+  `checkChosenAccess`), as they left it, through the access request's own
+  checks and writes. By tool where the names are known up front (a
+  wrapper's tools, an endpoint's operations, a mail or calendar account's
+  tools); by name pattern otherwise (an MCP server, an OAuth one, what a
+  service registers), kept on the server (`pending_access`) and applied
+  once to the tools its first read finds (`syncServerTools`), then
+  cleared, never lifting a block set since. Add a test for each new field
+  (`proposed-access.test.ts`, `register-server.test.ts`,
+  `wrappers.test.ts`).
 - Mail accounts (`lib/core/mail/`) never read a secret: `upstream.ts` hands
   in a `MailCredential` (the header, the login, or an OAuth bearer from
   `credential()`, renewed through `endpointToken` like an API endpoint's). Mail travels encrypted only (TLS, or STARTTLS that
@@ -222,17 +351,222 @@ so in the summary; the bump itself waits for the request.
   JavaScript (its native parts stay out of `allowBuilds`), narrowed to the
   algorithms in `client.ts`; no child process, no `ssh` binary. One tool,
   `run_command` (`ssh/tools.ts`), its arguments checked before anything
-  connects: `exec` only, never a terminal, forwarding, an agent or a file
-  transfer. Only the owner adds or changes one; `register_server` has no kind
-  for it. Its limits go in `ssh/limits.ts`, and a change to how a host is
-  trusted or PCP signs in gets a test against the test server
-  (`ssh/client.test.ts`).
+  connects: `exec` only, never a terminal, an agent or a file transfer.
+  SFTP is for storage folders only (`openSftp`, below), confined to the
+  folder. Forwarding is open for exits and services only (`openChannel`, below):
+  outbound direct-tcpip, never remote forwarding (`tcpip-forward`),
+  streamlocal, the agent or X11. Only the owner adds or changes one; `register_server` has
+  no kind for it. Its limits go in `ssh/limits.ts`, and a change to how a host
+  is trusted, PCP signs in or a channel opens gets a test against the test
+  server (`ssh/client.test.ts`).
+- Stores (`lib/core/storage/`, kind `storage`, a `storage_root` row) are
+  where assistants list, find, get, save, move and delete files: a storage
+  folder on an SSH server PCP holds (backend `sftp`), or PCP's own store in
+  its data folder (backend `local`, `<data>/storage/<server id>/`, one per
+  vault, made by `ensureOwnStore` at setup and on a vault's first request,
+  never removed). A storage folder the owner adds is `encrypted` unless
+  they choose plain on its add form (`newStoreMode`); one from before
+  stores stays plain until converted. Each is `plain` (the files as they are, for other apps
+  too) or `encrypted`: opaque objects (`.pcp-store/<xx>/<random id>`) and
+  an index in `storage_entry` (names, folders, sizes, times encrypted under
+  the vault key as `storage_entry:<id>`; a name found by a keyed hash).
+  `storage/crypt.ts` (pure) holds the keys and the format: the store key
+  wrapped under the vault key (`storage_store:<id>`), a new random key per
+  file write wrapped under it (`storage_object:<store>:<object>`), and the
+  content sealed in 64 KiB AES-256-GCM chunks, nonce the index, the object
+  id, index and last-chunk flag as associated data, so a range opens only
+  its chunks and a change, swap, cut or extension is refused. A new format
+  bumps the header's version and keeps reading the old one. Decryption
+  happens only inside a request; an object is written under a part name,
+  renamed, then pointed at in one transaction, and until then sits in
+  `storage_pending`, swept by the next request that opens the store (and
+  by the cleanup for the local store). Only the owner converts a store
+  either way (`storage/convert.ts`, a batch per request, never a timer,
+  each file removed only once its replacement is whole, every tool refused
+  while `converting` is set); an encrypted store with files is not removed.
+  PCP's own tools `list_folder`, `find_files`, `get_file`, `share_file`
+  (only for a token with `shareFiles`), `save_file`,
+  `make_folder`, `move` and `delete` take `store` (a short name; without
+  it, PCP's own) and run that store's own tool through `gateway.ts
+callResolved`, the same path, levels, tier gate and validator as
+  execute_<tier>; the family stays the one implementation. The local store's
+  size is `resourceLimits().storeBytes`. An export carries store rows, keys
+  and the index, never a file. Storage folders' files travel over SFTP on
+  the SSH server's pooled connection (`ssh/client.ts openSftp`): a pinned
+  host only, opened with the key a request handed in (`upstream.ts
+storageConnect`), never in the background, and SFTP for nothing else;
+  the local store is the data folder (`storage/local.ts`, the same
+  `RemoteFs`). Every path is confined by
+  `storage/files.ts`: `..` refused before anything connects, the folder a
+  name is in resolved by its real path on the server and refused unless it
+  is the root's or inside it, the name itself never followed (a link is
+  followed only to read or list through, and only into the root; delete
+  and move act on the link). A write goes to `<name>.<random>.pcp-part`
+  with exclusive create, gets the root's umask, and is renamed into place;
+  a file there is replaced only with `overwrite`. SFTP writes as the login:
+  `write_as` is what the owner wants, said on the page when it differs,
+  never sudo or chown. Files leave as kept results (`get_file`, bounded by
+  `resourceLimits().fileBytes`) and come in as the token's own
+  (`save_file`'s `file`, read before anything connects). A read-only folder
+  offers and runs the reading tools only; `delete` is Destructive. Only
+  the owner adds one (on the SSH server's page) or changes it;
+  `register_server` has no kind for it. The owner's Files pages
+  (`/files`, every store with its mode and reach; `/files/<id>`, a store's
+  file browser) go through the same confinement, and a preview goes out
+  only as `storage/browse.ts` decides: an image (never SVG), a PDF, a sound
+  or a video as itself only when its first bytes agree, text as plain text,
+  anything else as a download. Limits go in
+  `storage/limits.ts`, and a new tool, argument or way a path is resolved
+  gets a test against the test server's SFTP (`storage/storage.test.ts`)
+  or a temporary data folder (`storage/stores.test.ts`); a change to the
+  format, a test in `storage/crypt.test.ts`.
+- Exits (`lib/core/exits/`) let web_fetch (`exit`) and a new browser tab
+  (`tabs` open with `exit`) go out from somewhere else than PCP's machine:
+  an SSH server PCP holds (kind `ssh`), or a VPN container PCP started on one
+  (kind `service`). An assistant names an exit, never a destination: every
+  connection goes through `exits/dial.ts dial`, which looks the name up by
+  DNS-over-HTTPS through the exit (`exits/doh.ts`: resolvers by IP, their
+  certificates checked, answers cached per exit within bounds), checks
+  every address from the exit's side (`exits/check.ts`: never its loopback,
+  its own address, link-local or a cloud metadata address, whatever the
+  levels; its private ranges only with the token's `private` line; never
+  PCP's own) and opens a channel to the address it checked; a container's
+  exit is a channel to the loopback port PCP published for it (on
+  127.0.0.1 only, `parsePublish`), then CONNECT or SOCKS5
+  (`exits/handshake.ts`) to that address, signed in with a random password
+  PCP made for that instance (a managed `proxy_password` secret, decrypted
+  only in `upstream.ts`, handed to the container over standard input). The SSH connection is pooled per server
+  (`ssh/client.ts openChannel`), opened only with the key a request handed
+  in (`upstream.ts openExit`, a pinned host only), idled out, and never
+  reopened in the background: the browser's exit proxy dials keyless. A tab
+  with an exit has its own context through its own proxy (`proxy.ts` with
+  `connect`), signed in to nothing, saved nowhere, no downloads. Exits are
+  vault rows (`exit`), the owner's alone to add, rename or remove (on the SSH
+  server's page; a VPN exit is made by launching its service, never proposed
+  by an assistant); a token's level for one is a `web_fetch_rule` of kind
+  `exit` keyed by its id (own or for all tokens), blocked without one; an
+  ask is an `exit_use` request showing the exit, its label and the request.
+  The request log names the exit, never the site. Limits go in
+  `exits/limits.ts`.
+- Services (`lib/core/services/`) run with the Docker or Podman the owner
+  already has on an SSH server PCP holds, through the engine's command line
+  over SSH `exec` only: PCP installs no engine, never touches a socket and
+  starts no child process. Every command is built from checked fields (the
+  patterns in `services/definition.ts`) and quoted by `services/shell.ts`,
+  the one quoting helper, then run as `sh -c '<script>'`; never a shell
+  string from anyone. Variable values come from the vault, decrypted only in
+  `upstream.ts` (a `ServiceEnv`, beside the `ServiceHost` that runs commands
+  with PCP's key, only on a pinned host), and reach the engine over standard
+  input as an env file the same command deletes, never on a command line;
+  they are scrubbed from logs and errors, and `inspect` reads only state,
+  image (and its id) and labels. Images are pinned by digest; volumes are named volumes,
+  never a host path. The owner (never an assistant, a `register_server`
+  proposal or a linked repository's document) can have one built instead
+  (`build`: a public GitHub repository, a 40-hex commit, a Containerfile
+  path and context matched by patterns, build arguments as checked fields):
+  `engine.ts buildScript` downloads the tarball at that commit over HTTPS
+  with the host's curl or wget into a `mktemp -d` folder it removes, keeps
+  the Containerfile and context inside the repository, builds with the
+  engine and pins the image id (`localhost/pcp-<repo>@sha256:…`), which is
+  never pulled; time and sizes in `services/limits.ts`. A container gets nothing beyond the engine's default
+  but an exit's, which may get NET_ADMIN and /dev/net/tun only (`cap_add`
+  and `devices`, allow-lists in `definition.ts`, checked again in
+  `engine.ts`); a variable marked `plain` takes a value the owner types per
+  instance (`service_spec.plain_values`, no secret). A service is published
+  on the SSH server's 127.0.0.1 unless the owner opts into its network on
+  the launch form, and PCP reaches it, calls and health checks alike,
+  through the SSH connection (`reach` "tunnel": `services.ts serviceDial`,
+  a direct-tcpip channel to a port it publishes, at the address it is bound
+  to there, on a pinned host with the key a request handed in, built in
+  `upstream.ts serviceTunnel`); a server it registered is never reached from
+  PCP's machine instead. One launched before ("direct") moves over when it
+  is updated or made again. What the owner asked last is
+  `service_spec.intended_state`: `stop` (theirs or an assistant's) writes
+  "stopped", start, restart, launch and remake "running"; only while it is
+  "running" does a call to what it serves that finds its container stopped
+  start it in that request (bounded, `START_ON_DEMAND_WAIT_MS`), try once
+  more and say so, and does the reconcile pass (`reconcileServices`, only
+  through `after()` from `/mcp` and the owner's pages, throttled, never a
+  timer or a stored key) bring it back up. Only the owner
+  launches, changes, updates or removes one; an assistant gets `status`, `logs`, `start`, `stop`, `restart` at the
+  owner's levels, and with a files folder in the definition (`files`: a
+  volume of its own and a path in it) `put_file` and `get_file`, which copy
+  a kept file in and out with the engine's own `cp` and a tar stream PCP
+  builds and reads (`services/files.ts`), over standard input and output:
+  no program in the container, the name confined to that folder before
+  anything connects, a file replaced only with `overwrite` and a folder
+  never, bounded by `resourceLimits().fileBytes`, and a file holding a
+  value PCP handed the service never kept, and proposes one only through `register_server` (kind
+  `service`, `services/proposals.ts`): a `service_change` request that shows
+  everything it runs in full (image, ports and address, variables and their
+  secrets by name, volumes, health, what it registers, the SSH server) and
+  launches only that once the owner agrees; a new secret is typed in on
+  PCP's page; never one that adds an exit or builds. It proposes an image
+  update through the service's `update` tool (`services/updates.ts`): a
+  `service_change` request showing the image it runs and the one it would
+  (the newest of its source tag, or a digest it names in the same
+  repository), both by digest, applied only to the definition as it was
+  (`basis`); never for a built one. The owner's "Check for a newer image"
+  resolves the source's digest on their click only, never polled. Status is read only inside a request (page, `check_server`, a failing call), never
+  polled; a saved secret remakes the services that take it through
+  `after()`. A launch that fails takes back everything it did: the
+  container (also one `run` made but could not start) and only the volumes
+  it made, `removeContainer` reporting what the engine would not remove, the
+  container's first and last lines in the error; a secret the owner typed
+  for it is kept and the error names it. A failed remake marks the service
+  failed and says that Start makes it again. Limits go in
+  `services/limits.ts`; a new command, tool or argument gets a test against
+  the fake engine (`services/fake-docker.ts`, `services.test.ts`).
+- Capabilities (`lib/core/capabilities/`): `read_image`, `edit_pdf` and
+  `convert_document` (also a PDF's page to a picture, `to: "png"`) are
+  PCP's own tools for every token; `view_image` (`view-image.ts`) is PCP's
+  own Read tool beside them, not a capability: it shows a kept picture
+  itself and calls no provider. The work is a
+  provider's, a tool among the token's own found by words in its name,
+  description or arguments (`providers.ts`, pure, never a vendor's name;
+  the common item a server was launched from only ranks it), called how its
+  schema says (a handle, base64, or a file step `put_file` → tool →
+  `get_file`, found by its tools' shape, never their names: the service's
+  own when a service with `files` registered the server, else the #92
+  shape on the server itself; a service's own tools are never a provider). Every call goes through `gateway.ts forwardCall` (as
+  run_code's): the token's own levels, the capability tool's own tier with
+  a provider above it refused naming the entry that runs it, the one
+  validator, `askCodeCall` where a level asks, paced, a request-log line
+  each. With no provider the answer is `needs_owner` reason `setup`: a
+  markdown link, last, to `/plugins/<capability>`, `noteOwnerAsked`, and the
+  tool called again once the owner launched one; that page offers the
+  capability's common items (add PCP's common items first if needed, then
+  the import page at the common repository's head). A new capability is a
+  row in `list.ts`, its operations in `providers.ts`, and a test against
+  fake providers (`capabilities.test.ts`).
+- Search (`lib/core/search.ts`, pure) finds a tool by keywords with no
+  provider: stems, a short synonym table, and for PCP's own tools what
+  their description's lead says they are for (task phrases there, in a
+  search's words). Embeddings (`lib/core/embeddings/`) are optional and the
+  owner's: a provider chosen on Settings → Search (Voyage AI, an
+  OpenAI-compatible address, or one of their API endpoints such as a
+  text-embeddings-inference service), kept as the vault's `embeddings`
+  setting, never a host setting. Only what the owner ticked leaves PCP,
+  with the query: tools' names and descriptions, skills, memories
+  (`itemsToEmbed`, nothing else of the vault: no server description, note,
+  argument or secret); a provider elsewhere starts at tools only
+  (`defaultEmbedded`). The secret is read in `upstream.ts
+embeddingProvider`, which hands `embeddings/provider.ts` the header;
+  Voyage AI at public addresses only, an address the owner typed never PCP's
+  own, an endpoint by its own rules. Vectors are cached encrypted
+  (`embedding_vector:<id>`) under a keyed hash of the provider and the text,
+  rebuilt when either changes, embedded only inside a search's request
+  within `embeddings/limits.ts` (never on a timer), removed by the cleanup
+  once unused, in `wipeVault`, never exported. Any provider failure or
+  timeout is keyword search, quietly; a name given exactly stays first.
 - Long tool answers and files are kept only through
   `lib/core/tool-results.ts`: text or bytes, encrypted with
   `tool_result:<id>`, readable by the token whose call produced them, gone
   after a day, never logged and never exported. A handle (`{"$result": id}`)
   in a call's arguments is replaced only in `upstream.ts`, `endpoints.ts`,
-  `mail/accounts.ts` and `browser/call.ts` (`lib/core/result-handles.ts`), with the token's own
+  `mail/accounts.ts`, `storage/roots.ts`, `services/services.ts` and
+  `browser/call.ts`
+  (`lib/core/result-handles.ts`), with the token's own
   results, before anything is sent; a waiting request stores the handle,
   never the content. File links (`lib/core/file-links.ts`, only for a token
   with `shareFiles`) move one kept file to or from the assistant's own
@@ -241,17 +575,72 @@ so in the summary; the bump itself waits for the request.
   upload's key also wrapped under the vault's, so it becomes a kept result
   only when the token uses its handle); an hour, a few downloads or one
   upload, its token live, every use in the request log, never exported, and
-  pruned by the cleanup. Nothing else serves a kept result over HTTP.
+  pruned by the cleanup. A store's file goes out by a public link
+  (`lib/core/store-links.ts`, `share_file`, a store tool at the owner's
+  levels, same option): a `file_link` of kind `store` that holds that one
+  file's key wrapped under the link's key (`file_link_file_key:<id>`),
+  never the store key; a file of PCP's own store, encrypted, is read in
+  place with that key alone (`openSealedObject`) and the link ends when the
+  index no longer names its object; any other store's file is copied when
+  shared, sealed the same way, into `<data>/file-links/` (a public request
+  holds no SSH key). Ranges are served, counted against `max_downloads`
+  times the file; at most a week (`storage/limits.ts`); the cleanup removes
+  copies no link names. Upload links (`lib/core/upload-links.ts`, same
+  option) are the one link for the owner: `create_upload_link` hands the
+  assistant `/upload/<secret>` (a page outside the dashboard, no session,
+  the link alone its credential) to give the owner as a markdown link, and
+  `check_upload` waits for what arrived; it takes a few files for an hour,
+  then a quarter of an hour from the first or until Done, each file a
+  `file_link` slot made with it (result id and wrapped key up front), so it
+  too becomes a kept result only when the token uses its handle. Made with
+  a `store` and `folder` (also `receive_file`; a store whose save_file is
+  not blocked for the token, shown on the page), each file is saved there
+  too by the next request that holds the vault's key
+  (`lib/core/store-uploads.ts`: check_upload, or `after()` from `/mcp` and
+  the owner's pages; never a timer, never over a file there), its folder
+  and path encrypted (`file_link_store_path:<id>`). Kept results stay rows
+  for a day: a file kept for good is `save_file`'s, into a store. The one
+  other way a kept result goes over HTTP is to the owner's own page, while
+  a call that names it waits for them (`lib/core/permission-files.ts`,
+  `permissions.ts openRequestFile`): only a result that waiting request's
+  arguments name, of its own token, PDF and images as themselves when their
+  bytes agree, text (HTML and SVG too) as plain text, the rest as a
+  download, sandboxed and nosniff. Nothing else serves a kept result over
+  HTTP.
 - The request log (`lib/core/request-log.ts`) is a token's calls by name:
   tool, server, upstream tool, time, outcome, the permission request an
-  ask made, and for a secret the browser typed, its name and the origin.
-  Never arguments, results, other sites or a secret's value; the Log page
-  (`lib/core/activity.ts`) reads only the vault's own lines. A new way a call
+  ask made, whether it was a repeat the assistant confirmed (`rerun`, never
+  its reason), and for a secret the browser typed, its name and the origin.
+  Never arguments, results, other sites or a secret's value. A line's names
+  are sealed under the vault's key with the line as associated data (#96),
+  so a new line is written only with the key (a link's use, which holds
+  none, logs PCP's own name for it, `appendKeylessLog`); the Log page
+  (`lib/core/activity.ts`) opens only the vault's own lines. A new way a call
   can ask the owner calls `noteOwnerAsked`. The cleanup
   (`lib/core/cleanup/`) deletes rows and log days by their dates, needs no
   credential and reads nothing it deletes; its schedule is refused if it
   leaves more than a day between runs. Anything new that PCP keeps only for
   a while is removed by a part there, with a test.
+- The duplicate guard (`lib/core/calls/`): a Write or Destructive call (the
+  tier read through `effectiveTier`) a token makes again with the same
+  server, tool and arguments within the window (`calls/limits.ts`; the
+  owner's default and per-tool times or "never" are the vault's
+  `duplicateCalls` setting, Settings → Repeated calls) is not run but
+  answered `duplicate_call` with how the first went, unless the assistant
+  passes `rerun` with a `reason`. It sits after the arguments are checked
+  in `callResolved` (execute_write/destructive), `forwardCall` (a
+  program's `pcp.call`), a wrapper's `innerCall` and execute's dispatch of
+  PCP's own tools by name (`guardedOwnTool`, server id `pcp`: not the
+  stores' or capabilities' tools, an idempotent one, nor memory's or
+  web_fetch's reading calls; no note about a call with other arguments), never in `upstream.ts`.
+  Never guarded: the browser, SSH and storage kinds, a capability's calls
+  to its provider, a wrapper's calls in a run the owner approved, and
+  executions from the owner's page. The lookup and the record are one
+  transaction. `call_record` keeps only an HMAC of the arguments and one of
+  the server and tool under the vault key (`crypto.ts keyedHash`,
+  `recordedTool`) and a short answer encrypted, never a
+  kept result; it is never exported and is pruned by the cleanup. A new
+  way to call a tool goes through it, with a test.
 - `lib/core/openapi` never fetches a remote `$ref`, never follows a redirect
   on a call, and never lets an argument set a header or leave the base URL.
   A schema is untrusted input: new limits go in `openapi/limits.ts`.
@@ -268,7 +657,7 @@ so in the summary; the bump itself waits for the request.
   starts from none of the vault's sign-ins and is saved nowhere, the same site
   only, the token's lines deciding as before. The sign-ins (`browser_profile`)
   are never used for a web_fetch.
-- run_code (`lib/core/code/`) runs an assistant's program in QuickJS
+- run_<tier> (`lib/core/code/`, run_code before #113) runs an assistant's program in QuickJS
   compiled to WebAssembly, a fresh instance per run, never in Node itself
   (not `vm`, not Node's permission model, not Pyodide in Node: none of
   those is a boundary). The program's only way out is the bridge
@@ -276,9 +665,13 @@ so in the summary; the bump itself waits for the request.
   `resolveCall` and `runCodeCall`: the token's own tools at its own levels,
   an "ask" tool stopping the run with the usual permission request, every
   call in the request log, files as handles (read as base64 only when the
-  program asks). Listing (`pcp.tools`) shows what `list_tools` would. No credential, network, file
+  program asks, whole or a part: `pcp.read(handle, { offset, length })`).
+  Listing (`pcp.tools`) shows what `list_tools` would. No credential, network, file
   or timer ever reaches the program, and nothing but strings crosses into
-  it (a wrapper's program gets its arguments the same way, as text). Its
+  it (a wrapper's program gets its arguments the same way, as text). Waits
+  (`pcp.sleep`, `pcp.withTimeout`) happen only in PCP's bridge, as timers
+  of the bridge's that the program holds no handle to, capped in
+  `code/limits.ts` and counted against the run's wall clock. Its
   memory is capped by the `WebAssembly.Memory` maximum (QuickJS's
   own limit counts nothing in these builds). The sandbox container
   (`code/sandbox.ts`, `sandbox/`, `docker-compose.sandbox.yaml`) is a second
@@ -290,7 +683,8 @@ so in the summary; the bump itself waits for the request.
   (`scripts/sandbox.test.ts` pins the compose file). New limits go in
   `code/limits.ts`, and a new bridge operation gets a test.
 - Limits on the machine's memory, processors and disk (a program's memory,
-  programs at once, the largest file, kept results per token) are not
+  programs at once, the largest file, kept results per token, PCP's own
+  store) are not
   constants: they are `resourceLimits()` (`lib/core/resources/`), picked
   from the machine unless the owner set them on Settings → Resources, and
   never past what `checkResourceConfig` lets the machine spare. A new one
@@ -303,20 +697,34 @@ so in the summary; the bump itself waits for the request.
   QuickJS instance, `args` handed in as text). A program calls only the
   tools its definition lists for it, never a wrapper's, at the calling
   token's own levels; a wrapper's tool comes out at the strictest of its
-  own level and those of the tools it calls (`gateway-servers.ts`), and a
+  own level and those of the tools it calls (`gateway-servers.ts`), and at
+  the highest tier of those tools unless the owner chose one, and a
   call that asks runs only in a call the owner allowed (`approved`); that is
   `callLevels` "token". With `callLevels` "approved", the default for a new
   wrapper, the owner's approval of the wrapper is the level for the calls it
   lists (a tool has its own level only, `innerCall` takes the target from
   the vault), and every request says which calls any token can make through
-  it. A tool's `outputSchema` is checked on every return
-  (`wrappers/schema-check.ts`, no compiled schemas, no `$ref`). A
+  it. A tool's `outputSchema` is checked on every return by the one
+  validator (no `$ref`, `wrappers/schema-check.ts` refuses one when it is
+  saved) and the value answered as `structuredContent`. A
   secret goes in only as `{"$secret": name}` where a binding the owner
   approved names that tool (by server id), argument and address: matched
   and written in `upstream.ts`, scrubbed from the answer, errors and status
   there, and refused in an assistant's own call. Into the browser it goes
   only as `type`'s text (in a wrapper, a binding for `browser/type` at
-  `/text`, no template), through the browser's own gate below.
+  `/text`, no template), through the browser's own gate below. A binding
+  is unique by place and secret, so a login name and a password share
+  `/text`. A secret a flow's program types by a fixed name
+  (`secret-literals.ts`) gets that binding when the definition is checked,
+  for a secret PCP holds, marked `found` with the `parts` the program
+  names (only those are typed), shown on the review and approved with the
+  wrapper; never for any other tool, never one an assistant or a
+  repository document gives (`toInput` leaves it out), and it changes
+  nothing of the gate. It depends on the vault's secrets, so a repository's
+  review flags each one the wrapper does not have yet against the vault
+  (`repos/found-review.ts reviewInVault`, never text only), and the
+  owner's save and page name them. A call whose secret has no binding is refused
+  before anything is sent, with the `secrets` entry to propose.
   An assistant's create, change and delete are a permission request
   (`wrapper_change`) that shows every program, schema, call, replaced tool
   and secret place in full and writes only that, to the wrapper as it was
@@ -324,18 +732,47 @@ so in the summary; the bump itself waits for the request.
   (`wrappers.test.ts`).
 - The browser (`lib/core/browser/`) runs Chromium for the vault and keeps
   nothing on disk: its sign-ins are the vault's `browser_profile`,
-  encrypted, saved only while a request holds the key. Every connection goes
+  encrypted, saved only while a request holds the key. They come from the
+  browser's use or from the owner's import on the Browser page
+  (`sign-in-import.ts`: storage state or a cookie export, checked as
+  Chromium takes a cookie, PCP's own site left out, merged per site as
+  previewed, with the browser closed); never a tool. Its languages are
+  Chromium's own switches from the host's locale (`--lang`,
+  `--accept-lang`), never Playwright's `locale`. Every connection goes
   through its proxy (`proxy.ts`), which checks the address it dials as web
   fetch does, and every page a tab's main frame opens passes the gate in
   `runtime.ts`: the driving token's web fetch site lines, a site the owner
   allowed for that tab, or the owner's own control; PCP's own site never. Service
-  workers are refused at that gate, not by a browser option. No
-  tool runs JavaScript or reads or sets cookies or storage. Files cross only
+  workers are refused at that gate, not by a browser option. No tool
+  reads or sets cookies or storage directly. JavaScript runs only through
+  `evaluate` (`browser/evaluate.ts`): Destructive, asked of the owner per
+  site with the whole script shown (`script_use`, with `noteOwnerAsked`;
+  Run it once, or a level for the site kept as a `web_fetch_rule` of kind
+  `script`, `browser-scripts.ts`), refused while a field holds a typed
+  secret, and while it runs the tab reaches its own site only (its
+  DevTools session fails every request elsewhere, the gate keeps its main
+  frame and popups there, and the proxies hold new connections elsewhere
+  until it is done, then refuse the ones it reached for); its result is
+  masked and a long one kept as a result. The logs (`console_log`,
+  `network_log`, `browser/devtools.ts`) are DevTools events only, never
+  page script; the page's own console calls only from the first
+  `console_log` on a tab (Runtime is a domain pages can detect); headers
+  that carry a credential are dropped, token-like values in addresses
+  masked, and bodies kept as results only when asked for, never a request
+  body from a page PCP typed a secret into. A point (`x`, `y` on `click`,
+  `scroll`, `drag`) is viewport CSS pixels, sent as DevTools mouse events
+  through `input.ts` as the owner's input is. Files cross only
   as the token's kept results, never a path on the machine: Chromium refuses
   every download but while `download` waits for one (`downloads.ts`, on a
   DevTools session of PCP's own), which takes the first from its tab or a
-  popup of it at an address the tab may open, cancels every other and one
-  past the largest file, and reads and removes the file before answering;
+  popup of it (known by its opener even once closed, never through another
+  token's tab) at an address the tab may open, or a PDF or picture one of
+  them is shown whose first bytes agree, held at the gate, read in chunks
+  and handed back to the page within `MAX_HELD_DOCUMENT_BYTES` (never an
+  aborted load), cancels every other and one past the largest file, and
+  reads and removes the file before answering; every window a page opens
+  is named in its tab's next answer (the newest `MAX_WINDOW_NOTES`),
+  closed or refused ones too, a refused one by its site only;
   `upload_file` reads kept results as bytes, and no file chooser ever opens
   a window. A
   refusal that names a site is a tool error, never a thrown `PcpError` (the
@@ -348,11 +785,19 @@ so in the summary; the bump itself waits for the request.
   process: there Chromium has a window of its own kept off the screen,
   its pages opened in the background (`launch.ts`). A
   tool that needs the owner throws `OwnerNeeded`, which `runCall` turns into
-  a permission request (`browse`, `browser_handover`); a site is asked
+  a permission request (`browse`, `browser_handover`, `script_use`,
+  `tab_pace`); a site is asked
   about only for the address in the call's arguments, so a call the owner
   allowed opens it without a second ask. `navigate` waits for a check that
   passes on its own; one that does not is the owner's, through `hand_over`,
-  and nothing asks them by itself. Pages read for web_fetch are not tabs. The
+  and nothing asks them by itself. A call waits its turn per tab and
+  within its own time (`timeout_ms`, `clock.ts`): past it, a `timeout` tool
+  error naming the step; a lane too full for it, `browser_busy` with
+  `retryAfterMs`. Tabs that are done with (idle past a TTL, or their run
+  ended) are closed by the next browser call inside its request
+  (`sweep.ts`), never by a timer. What the tree cannot read (empty iframes,
+  closed shadow roots, canvases, `unseen.ts`) is found through Playwright
+  and DevTools in PCP's own world, never page script. Pages read for web_fetch are not tabs. The
   limits go in `browser/limits.ts`; the Dockerfile's Chromium is the version
   `patchright-core` drives (`scripts/docker.test.ts`). Chromium is installed
   only by the owner's click (`browser/install.ts`), only from the addresses
@@ -362,21 +807,53 @@ so in the summary; the bump itself waits for the request.
   browser's `type` text `{"$secret": name}` (from an assistant's call,
   run_code or a wrapper's binding), never in another tool or argument, and
   only through `upstream.ts callBrowser`, which hands the browser a typer,
-  never a value. The browser asks for it only at the moment of typing, for
+  never a value. `"part": "username"` types the login name the owner keeps
+  with it instead (`secrets.ts readTypedLogin`), through the same gate,
+  refused anywhere but the browser and not held, since the assistant may
+  read it; a once allowance is one sign-in, both parts in the same tab
+  within `SECRET_SIGN_IN_WINDOW_MS`, never more. The browser asks for it only at the moment of typing, for
   an input or textarea whose frame is the page's own origin; the typer lets
   it through only where the token has an allowance for that secret at that
-  origin (once, an hour, or always while the origin is the secret's
-  `SecretBrowserOrigin`), or else asks the owner (`secret_use`, with
+  origin (once, an hour, or always while the origin is one of the secret's
+  `SecretBrowserOrigin` sites), or else asks the owner (`secret_use`, with
   `noteOwnerAsked`), whose answer never changes a tool's level; an API
-  endpoint's use of the secret never counts. It is typed with CDP
-  `Input.insertText` once the field has the focus. While a field holds it
-  (`browser/held.ts`, a keyed hash, never the value), every answer shows it
-  as `[secret: name]` and `screenshot` is refused; a password field's value
-  never shows. The value is scrubbed from answers and errors, and the
-  request log has the secret's name and origin, never the value.
-  `request_secret` asks the owner to type a new one on PCP's page and never
-  writes over a name PCP holds. Allowances are not exported; origins are.
-  Add a test for each new way in.
+  endpoint's use of the secret never counts. A site may stand for its
+  subdomains (`include_subdomains`): only within its own registrable
+  domain by the public suffix list (`tldts`, `siteCovers`), never for an IP
+  address, localhost or a public suffix, never across domains. It is typed
+  with CDP `Input.insertText` once the field has the focus (in its frame,
+  each frame around it and each shadow root around it). While a field holds
+  it, as typed or as the page reformatted it (`browser/held.ts`, keyed
+  hashes of the value and of its normalised form, white space and
+  separators out and upper case, never the value), every answer shows it as
+  `[secret: name]` and `screenshot` and `print_pdf` are refused (also while
+  any frame's text shows a secret typed into one of the token's tabs, as
+  `maskTyped` finds it: `held.ts typedShown`); a password field's value
+  never shows, its snapshot `- text:` child included. For the life of the
+  tab, every answer to the token masks each secret typed into any of its
+  tabs wherever the text has it once normalised (`maskTyped`: a keyed
+  rolling fingerprint, then an HMAC), whatever document the tab shows now.
+  The value is scrubbed from answers and errors, and the request log has
+  the secret's name and origin, never the value.
+  `request_secret` asks the owner to type a new one on PCP's page (with its
+  login name, `username`), or to have PCP make a password there
+  (`generate`: `generate-password.ts`, a CSPRNG, in `decidePermission`,
+  stored at once and never handed back; the owner reveals it under
+  Secrets), and never writes over a name PCP holds. Its page keeps the
+  sites out of a password manager's reach (boxes outside the login form,
+  `data-1p-ignore`). An assistant changes a secret's sites only by
+  proposing it (`update_secret_sites`, a `secret_sites_change` request that
+  always asks, whatever the levels): the page shows the sites now, each
+  change and lookalikes flagged unticked (`lookalike-sites.ts`), and makes
+  only what the owner ticked, to the sites as shown (`sitesBasis`).
+  Allowances are not exported; origins are, with their flag.
+  `navigate`, `snapshot` and `tabs` open name the owner's secrets bound to
+  the page's origin (`browser/sign-in-hint.ts`, louder at a password
+  field) with the login name, note and TOTP companion the owner gave each
+  (`secret.login_name` and `note`, encrypted under `secret:<id>:login` and
+  `:note`, opened only in `secrets.ts`); never a value, and naming one
+  grants nothing: typing it is still the gate above. Add a test for each
+  new way in.
 - PCP's own authorization server (`lib/core/oauth-server/`), for apps that
   sign in to `/mcp` with a URL alone (claude.ai's connectors, ChatGPT), is
   PCP's and never a relay's: whoever issues the tokens could mint one for
@@ -408,17 +885,34 @@ so in the summary; the bump itself waits for the request.
   the desktop app only, also carries the version and the owner's install
   request for the wrapper to read), the export download (`app/api/export/route.ts`: a file needs
   `Content-Disposition`, which an action cannot send; it checks the request's
-  origin itself, `lib/server/same-origin.ts`), file links
-  (`app/api/files/[secret]/`: curl from an assistant's own computer, the
-  link's secret its only credential), and the browser's live view
+  origin itself, `isSameOrigin` from `@kaperkunde/security`), file links
+  (`app/api/files/[secret]/`: curl from an assistant's own computer, a
+  `share_file` link's download with its Range, and the upload page's PUTs
+  and Done, the link's secret its only credential),
+  the browser's live view
   (`app/api/browser/tabs/[id]/`: a stream of a tab's pictures and the
   owner's input, which an action cannot carry; the same origin check and
+  session), a store's download and preview
+  (`app/api/storage/[id]/download/`: a file needs `Content-Disposition` and
+  can be larger than an action's answer, a sound or a video a byte range;
+  streamed from the SSH server or the data folder, decrypted as it is read,
+  kept nowhere; `?inline=1` as `storage/browse.ts servedPreview` says,
+  sandboxed and nosniff; the same origin check and session), and the files a waiting call
+  carries (`app/api/permissions/[id]/files/[result]/`: a preview or download
+  needs Content-Type and Content-Disposition; the same origin check and
   session).
 - The owner is asked by link only: a result hands the assistant a link to
   PCP's page, to end its reply with (`linkLastText`: nothing after it, or
-  Claude's apps fold it out of sight), and a check to call once the owner
-  says they answered (`check_permission`, `check_server`,
-  `lib/core/owner-wait.ts`). The header's bell lists what is waiting. No client prompts (elicitation) and no MCP Apps
+  Claude's apps fold it out of sight; several links in one reply all go at
+  its end, each on its own line; a markdown link with a short label
+  naming the action, never the bare address, so voice mode reads the label;
+  `owner-link.ts` holds the label rules and the wording instructions and
+  descriptions use), and a check to call on the owner's next message,
+  whatever it says, before the link is sent again (`nextMessageCheck`;
+  `check_permission`, `check_server`, `check_upload`, `waitForOwner` from
+  `@kaperkunde/mcp/owner`). In a session, the next answer of any of PCP's
+  own tools names the token's requests answered since, once each, and
+  `check_permission` with no id lists the last hour's. The header's bell lists what is waiting. No client prompts (elicitation) and no MCP Apps
   panel: Claude's apps stalled on the one and rebuilt the other stale (see
   ARCHITECTURE.md). Anything new that needs the owner works the same way.
 - The single-user assumption lives in two places: `ownerVault()` and the
@@ -445,10 +939,11 @@ so in the summary; the bump itself waits for the request.
   unencrypted. Never copy anything from the vault into one, and never add the
   pcp.gg key to an export (`EXPORTED_HOST_KEYS`). `lib/core/network/` starts
   nothing (timer, listener, request, connection) while all three are off.
-- `lib/core/network/pcpgg/{frames,mux,control}.ts` are copies of pcp.gg's
-  `tunnel/protocol/` (kaperkunde/pcp-gg) and speak its wire protocol: change
-  them only together with pcp.gg, keeping `PROTOCOL_VERSION`. `test-relay/`
-  is pcp.gg's relay for tests; PCP never runs it.
+- pcp.gg's wire protocol and connector come from
+  `@kaperkunde/pcpgg-protocol` (kaperkunde/common-public), which pcp.gg
+  takes too: a protocol change is a new version of that package, with a new
+  `PROTOCOL_VERSION`, and PCP and pcp.gg bump it together. Its `/relay` is
+  for tests only; PCP never runs a relay.
 - The Touch ID key (`lib/core/device-keys.ts`) is a credential the Mac app
   keeps and hands to PCP's page only after Touch ID. It is made only with
   the typed password (Settings, or the box on the sign-in page), a vault has
@@ -471,8 +966,9 @@ so in the summary; the bump itself waits for the request.
   restarts itself. Install and restart in the Linux installer's container is
   a file in the data folder (`updates/host-signal.ts`: an id and a time,
   nothing of the vault) that the installer's `watch` reads through `exec` and
-  checks as untrusted input before it runs its own `update`; PCP never
-  addresses the host. A build of develop (`X.Y.Z-dev.N`, a pre-release that
+  checks as untrusted input before it runs its own `update`, which runs the
+  installer read out of the image it pulled (`/app/install.sh`), never out
+  of the running container; PCP never addresses the host. A build of develop (`X.Y.Z-dev.N`, a pre-release that
   `.github/workflows/develop.yml` makes on every push to develop) is never
   offered on the stable channel.
 - `desktop/` is a host for the production build, not part of the app. It
@@ -533,7 +1029,11 @@ The owner is "you"; the assistant is "an assistant"; the thing PCP holds is
 a "secret", the server it talks to is a "server", and an API added from an
 OpenAPI schema is an "endpoint" ("API endpoints" in the UI); a mailbox PCP
 signs in to is a "mail account"; a machine PCP runs commands on is an "SSH
-server" ("SSH servers" in the UI); calendars and reminders PCP reaches over
+server" ("SSH servers" in the UI); a folder on one that assistants keep
+files in is a "storage folder" ("Storage folders" in the UI; a storage root
+in code), and any place assistants keep files, PCP's own included, is a
+"store" ("PCP files" is PCP's own); a container PCP runs on one is a
+"service" ("Services" in the UI); calendars and reminders PCP reaches over
 CalDAV are a "calendar account" ("Calendar accounts" in the UI); a server
 whose tools are programs over the
 others is a "wrapper" ("Wrappers" in the UI); a note an

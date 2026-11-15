@@ -1,4 +1,6 @@
-import type { McpServer, Skill } from "@/lib/generated/prisma/client"
+import type { Skill } from "@/lib/generated/prisma/client"
+
+import type { OpenServer } from "./server-meta"
 
 import { MAX_PERSONAL_NOTE } from "./constants"
 import type { VaultContext } from "./context"
@@ -82,7 +84,7 @@ function readNote(
 /** A server's note, opened. */
 export function readServerNote(
   ctx: VaultContext,
-  row: Pick<McpServer, "id" | "personalNote">,
+  row: Pick<OpenServer, "id" | "personalNote">,
 ): string | null {
   return readNote(ctx, "server", row)
 }

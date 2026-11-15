@@ -17,6 +17,7 @@ export async function fetchSpec(
     timeoutMs = SPEC_FETCH_TIMEOUT_MS,
     publicOnly = false,
     addressCheck,
+    dial,
   }: { timeoutMs?: number } & SendOptions = {},
 ): Promise<{ text: string; url: string }> {
   let url = validateSpecUrl(rawUrl)
@@ -36,7 +37,7 @@ export async function fetchSpec(
             "user-agent": USER_AGENT,
           },
         },
-        { publicOnly, addressCheck },
+        { publicOnly, addressCheck, dial },
       )
     } catch (error) {
       if (error instanceof AddressBlockedError) {

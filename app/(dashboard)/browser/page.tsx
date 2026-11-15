@@ -1,8 +1,8 @@
 import type { Metadata } from "next"
 
 import { BrowserManager } from "@/components/browser-manager"
-import { PageColumn } from "@/components/page-column"
-import { PageHeader } from "@/components/page-header"
+import { PageColumn } from "@kaperkunde/ui/page"
+import { PageHeader } from "@kaperkunde/ui/page"
 import { IconTile } from "@/components/ui/icon-tile"
 import { browserOverview, browserTokens } from "@/lib/core/browser/owner"
 import { findBrowserServer } from "@/lib/core/browser/server"

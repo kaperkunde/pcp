@@ -1,10 +1,9 @@
-import { createHash } from "node:crypto"
-
 import {
   PERMISSION_DECISIONS,
   type PermissionDecision,
   type PermissionKind,
 } from "./constants"
+import { keyedHash } from "./crypto"
 import { invalid } from "./errors"
 
 /**
@@ -21,6 +20,64 @@ export const PERMISSION_TTL_MS = 24 * 60 * 60_000
 
 /** Rows this long past their expiry are deleted at boot. */
 export const PERMISSION_KEEP_MS = 7 * 24 * 60 * 60_000
+
+/**
+ * How long after a call the owner allowed once has run the same token's
+ * identical call is answered with that run's answer instead of asking
+ * again: an assistant that runs its program again after the owner allowed
+ * one call gets what that call did, and the call is not made twice. Once.
+ */
+export const REUSE_EXECUTED_MS = 15 * 60_000
+
+/**
+ * The most characters of JSON kept on the row for a program's identical
+ * call (the value answers.ts answerValue hands it, files and long texts as
+ * handles). A longer one is not kept, and the stored text answers instead.
+ */
+export const REUSE_VALUE_MAX_CHARS = 200_000
+
+/**
+ * How far back the owner's answers are told to the token that asked:
+ * check_permission with no id lists those answered this long ago at most,
+ * and a new session's first answer names those it has not heard of
+ * (clients/sessions.ts), so a conversation started after the owner
+ * answered still learns of it.
+ */
+export const ANSWERED_WINDOW_MS = 60 * 60_000
+
+/** The most answered requests check_permission with no id lists. */
+export const MAX_ANSWERED_LISTED = 20
+
+/**
+ * The most answered requests one answer's note names in full; the rest are
+ * counted, for check_permission with no id to list.
+ */
+export const MAX_ANSWERED_NOTED = 5
+
+/**
+ * The most answered requests one look reads the ids of, newest first: a
+ * bound on the look, far above what a token asks in an hour.
+ */
+export const MAX_ANSWERED_SEEN = 200
+
+/** The statuses of a request the owner answered (decidedAt is when). */
+export const ANSWERED_STATUSES = [
+  "running",
+  "executed",
+  "failed",
+  "declined",
+] as const
+
+/** What an identical call answered from an earlier run says first. */
+export function reusedNote(ranAt: Date, now = new Date()): string {
+  const minutes = Math.max(
+    0,
+    Math.round((now.getTime() - ranAt.getTime()) / 60_000),
+  )
+  const ago = minutes === 0 ? "less than a minute ago" : `${minutes} min ago`
+
+  return `The owner allowed this call once and it already ran ${ago}; this is that run's answer (it was not run again).`
+}
 
 /**
  * `withdrawn`: the assistant that asked took it back (withdraw_request).
@@ -52,19 +109,30 @@ export function canonicalJson(value: unknown): string {
   return `{${entries.map(([key, item]) => `${JSON.stringify(key)}:${canonicalJson(item)}`).join(",")}}`
 }
 
+/** Marks a request hash keyed under the vault key (`requestHash`). */
+export const REQUEST_HASH_PREFIX = "h1:"
+
+const REQUEST_HASH_LABEL = "pcp permission request v1"
+
 /**
  * What makes two requests the same one: the kind, what it targets (the
  * server and tool for a call, the address for a new server) and the
- * arguments.
+ * arguments. An HMAC under a key derived from the vault key, so the stored
+ * column (and a backup's copy) cannot confirm a guess at the arguments
+ * without it. Rows from before carry a plain SHA-256 without the `h1:`
+ * prefix and match nothing; they end within PERMISSION_TTL_MS anyway.
  */
 export function requestHash(
+  dek: Buffer,
   kind: PermissionKind,
   target: string,
   args: unknown,
 ): string {
-  return createHash("sha256")
-    .update(`${kind}\n${target}\n${canonicalJson(args)}`)
-    .digest("hex")
+  return `${REQUEST_HASH_PREFIX}${keyedHash(
+    dek,
+    REQUEST_HASH_LABEL,
+    `${kind}\n${target}\n${canonicalJson(args)}`,
+  )}`
 }
 
 /**
@@ -188,12 +256,13 @@ export function previewArgs(
  * The arguments whole, one part each (text as text, with its newlines;
  * anything else as indented JSON), when `previewArgs` cut a value or wrote
  * something in one out, or when `extra` (what a tool adds about its own
- * arguments) has something to show. Null when the lines say it all.
+ * arguments) has something to show, or `always`. Null when the lines say
+ * it all.
  */
 export function argsInFull(
   args: Record<string, unknown>,
   extra: ShownText[] = [],
-  max = 800,
+  { max = 800, always = false }: { max?: number; always?: boolean } = {},
 ): ShownText[] | null {
   const entries = argEntries(args)
   const whole = entries.every(([key, value]) => {
@@ -206,7 +275,7 @@ export function argsInFull(
     )
   })
 
-  if (whole && extra.length === 0) {
+  if (whole && extra.length === 0 && !always) {
     return null
   }
 
@@ -286,6 +355,11 @@ const DECISION_LABELS: Record<PermissionKind, Record<string, string>> = {
   repo_share: {
     decline: "Not now",
   },
+  // A service an assistant proposed, launched as the owner saw it whole.
+  service_change: {
+    allow_once: "Launch it",
+    decline: "Not now",
+  },
   // The owner's note on a server or a skill, as an assistant proposed it.
   note_change: {
     allow_once: "Save the note",
@@ -309,6 +383,15 @@ const DECISION_LABELS: Record<PermissionKind, Record<string, string>> = {
     block: "Block this site",
     decline: "Not now",
   },
+  // An exit (lib/core/exits/) asked about with the request it is for:
+  // Allow once sends that one; Always and Block set the token's own level
+  // for the exit, never for the site.
+  exit_use: {
+    allow_once: "Allow once",
+    always: "Always allow this exit",
+    block: "Block this exit",
+    decline: "Not now",
+  },
   // A tab the assistant handed over: the owner says when they are done.
   browser_handover: {
     allow_once: "Done",
@@ -322,12 +405,31 @@ const DECISION_LABELS: Record<PermissionKind, Record<string, string>> = {
     always: "Always allow",
     decline: "Not now",
   },
+  // An assistant's script in a tab (evaluate), shown whole: Run it once runs
+  // this one; Allow and Block decide scripts at the site for the token.
+  script_use: {
+    allow_once: "Run it once",
+    always: "Allow scripts at this site",
+    block: "Block scripts at this site",
+    decline: "Not now",
+  },
+  // An assistant's pace for one tab outside the bounds you set: it applies
+  // to that tab only, while it is open.
+  tab_pace: {
+    allow_once: "Use this pace in the tab",
+    decline: "Not now",
+  },
   // A secret the owner types in for the browser, and how its uses go: the
   // next one only, every one for an hour, or every one.
   secret_request: {
     allow_once: "Save, allow one use",
     allow_for: "Save, allow for 1 hour",
     always: "Save, always allow",
+    decline: "Not now",
+  },
+  // An assistant's change to a secret's sites: the ticked changes, made.
+  secret_sites_change: {
+    allow_once: "Apply ticked changes",
     decline: "Not now",
   },
 }

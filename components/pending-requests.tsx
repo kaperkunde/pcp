@@ -8,7 +8,7 @@ import {
   MenuLinkItem,
   MenuNote,
   MenuTrigger,
-} from "@/components/ui/menu"
+} from "@kaperkunde/ui/menu"
 import type { PendingRequestsState } from "@/lib/actions/permissions"
 import { cn, timeAgo } from "@/lib/utils"
 

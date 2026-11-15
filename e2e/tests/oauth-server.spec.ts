@@ -173,7 +173,7 @@ test("the owner signs in, allows it, and the assistant gets a token of its own",
     tokens.access_token,
   )
   expect(tools).toEqual(
-    expect.arrayContaining(["search", "describe", "memory"]),
+    expect.arrayContaining(["search", "execute_read", "memory"]),
   )
   expect(instructions).toContain("PCP")
 

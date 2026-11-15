@@ -6,7 +6,6 @@ import { redirect } from "next/navigation"
 import { readExport, restoreExport } from "@/lib/core/backup"
 import type { ExportPreview } from "@/lib/core/backup-format"
 import { MAX_EXPORT_FILE_BYTES } from "@/lib/core/constants"
-import { rebuildOutdatedEndpoints } from "@/lib/core/endpoints"
 import { invalid, PcpError } from "@/lib/core/errors"
 import { reconcileNetwork } from "@/lib/core/network/runtime"
 import { reconcileUpdates } from "@/lib/core/updates/runtime"
@@ -56,12 +55,12 @@ async function uploadFrom(formData: FormData): Promise<Buffer> {
   return Buffer.from(await upload.arrayBuffer())
 }
 
-/** What boot does for rows it did not write: as instrumentation.ts. */
+/**
+ * What boot does for rows it did not write. The vault's endpoints and
+ * browser are caught up by its next request (lib/core/vault-upkeep.ts),
+ * which holds the key their tools are sealed under.
+ */
 async function afterRestore(restoreHostSettings: boolean): Promise<void> {
-  void rebuildOutdatedEndpoints().catch((error) =>
-    console.error("[backup] rebuild after restore failed", error),
-  )
-
   if (restoreHostSettings) {
     await reconcileNetwork({ ddnsNow: true, tlsNow: true })
     await reconcileUpdates()
@@ -90,6 +89,7 @@ export async function restoreAction(
       await uploadFrom(formData),
       field(formData, "exportPassword"),
       { into: "vault", ctx: session.ctx },
+      { vaultPassword: field(formData, "vaultPassword") || undefined },
     )
 
     if (!confirm) {
@@ -152,6 +152,8 @@ export async function restoreAtSetupAction(
     const { payload, preview } = await readExport(
       await uploadFrom(formData),
       field(formData, "exportPassword"),
+      { into: "fresh" },
+      { vaultPassword: field(formData, "vaultPassword") || undefined },
     )
 
     if (!confirm) {

@@ -6,12 +6,16 @@ import { invalid } from "@/lib/core/errors"
 import {
   removePacingSite,
   resetPacingClasses,
+  setAssistantPaceBounds,
   setPacingClasses,
   setPacingServer,
   setPacingSite,
 } from "@/lib/core/pacing/config"
 import {
+  BROWSER_PACING_CLASSES,
   PACING_CLASSES,
+  type BrowserPacingClass,
+  type PaceRange,
   type PacingClass,
   type PacingOverride,
 } from "@/lib/core/pacing/limits"
@@ -96,6 +100,48 @@ export async function savePacingClassesAction(
 
     await setPacingClasses(ctx, values)
     return { message: "Saved. Calls from now on follow this pace." }
+  })
+
+  revalidatePath("/settings")
+  return result
+}
+
+/**
+ * What assistants may give a tab or a browser flow without asking, per
+ * kind of browser action: both ends in seconds, or both empty for PCP's.
+ */
+export async function saveAssistantPaceAction(
+  _previous: PacingResult,
+  formData: FormData,
+): Promise<PacingResult> {
+  const ctx = await requireContext()
+
+  const result = await guarded(async () => {
+    const values: Partial<Record<BrowserPacingClass, PaceRange | null>> = {}
+
+    for (const name of BROWSER_PACING_CLASSES) {
+      const min = field(formData, `${name}-min`).trim()
+      const max = field(formData, `${name}-max`).trim()
+
+      if (min === "" && max === "") {
+        values[name] = null
+        continue
+      }
+
+      if (min === "" || max === "") {
+        throw invalid(
+          "Give both the shortest and the longest wait, or leave both empty for PCP's.",
+        )
+      }
+
+      values[name] = {
+        minMs: milliseconds(min, "the shortest wait"),
+        maxMs: milliseconds(max, "the longest wait"),
+      }
+    }
+
+    await setAssistantPaceBounds(ctx, values)
+    return { message: "Saved. Assistants' paces from now on are held to it." }
   })
 
   revalidatePath("/settings")

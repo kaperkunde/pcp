@@ -1,10 +1,13 @@
 import { afterEach, describe, expect, it } from "vitest"
 
+import { openServiceSpec } from "../spec-rows"
+import { openDefinition } from "../definition-rows"
 import { createBrowserServer } from "../browser/server"
 import type { VaultContext } from "../context"
 import { db } from "../db"
 import { readServerNote, setPersonalNote } from "../definitions"
 import { createEndpoint, storedSpec } from "../endpoints"
+import { writeServer } from "../server-meta"
 import { scratchDatabase } from "../test-db"
 import { setupVault } from "../vault"
 
@@ -15,12 +18,24 @@ import {
   type EndpointDocument,
   type ItemDocument,
   type ServerDocument,
+  type ServiceDocument,
   type SkillDocument,
   type WrapperDocument,
 } from "./documents"
 import type { RepoFiles } from "./layout"
 import { findLocalItem, localItem, localItems } from "./local"
-import { addSecrets, PETS_SPEC, populate, yamlText } from "./test-vault"
+import {
+  addSecrets,
+  addService,
+  DOCLING,
+  PETS_SPEC,
+  populate,
+  yamlText,
+} from "./test-vault"
+import { readServiceDefinition } from "../services/definition"
+import type { ServiceLaunchInput } from "../services/services"
+import { openServer } from "../server-meta"
+import { toolNamed } from "../test-servers"
 
 // Applying what the owner approved: names resolved against this vault and
 // never guessed, a secret the vault lacks left out with a note, the owner's
@@ -59,6 +74,7 @@ type ByKind = {
   flow: WrapperDocument
   endpoint: EndpointDocument
   server: ServerDocument
+  service: ServiceDocument
 }
 
 function find<K extends ItemDocument["kind"]>(
@@ -118,7 +134,10 @@ describe("applying an item", () => {
       },
     })
     expect(notes).toEqual([])
-    const row = await db().mcpServer.findUniqueOrThrow({ where: { id } })
+    const row = openServer(
+      ctx,
+      await db().mcpServer.findUniqueOrThrow({ where: { id } }),
+    )
     expect(row).toMatchObject({
       name: "Pets at home",
       slug: "pets-at-home",
@@ -128,9 +147,12 @@ describe("applying an item", () => {
     })
     expect(readServerNote(ctx, row)).toBe("The shop in the garage.")
     expect(
-      await db().serverDefinition.findUniqueOrThrow({
-        where: { id: row.definitionId! },
-      }),
+      openDefinition(
+        ctx,
+        await db().serverDefinition.findUniqueOrThrow({
+          where: { id: row.definitionId! },
+        }),
+      ),
     ).toMatchObject({ slug: "pets", name: "Pets" })
     expect(
       await findLocalItem(ctx, { kind: "endpoint", name: "pets" }),
@@ -184,7 +206,10 @@ describe("applying an item", () => {
     })
     const { id } = await applyItem(ctx, first, { id: null })
     expect(
-      await db().mcpServer.findUniqueOrThrow({ where: { id } }),
+      openServer(
+        ctx,
+        await db().mcpServer.findUniqueOrThrow({ where: { id } }),
+      ),
     ).toMatchObject({
       url: "https://pets.example.com/v1",
       readOnly: false,
@@ -196,15 +221,12 @@ describe("applying an item", () => {
 
     // The owner moves it, signs it in otherwise and makes it read-only;
     // a later format-1 document saying otherwise changes none of it.
-    await db().mcpServer.update({
-      where: { id },
-      data: {
-        url: "https://pets.home.example/v1",
-        readOnly: true,
-        publicOnly: false,
-        authHeaderName: "X-Key",
-        authSecretId: secrets.client,
-      },
+    await writeServer(ctx, id, {
+      url: "https://pets.home.example/v1",
+      readOnly: true,
+      publicOnly: false,
+      authHeaderName: "X-Key",
+      authSecretId: secrets.client,
     })
     const [later] = (
       await readRepo(
@@ -219,7 +241,10 @@ describe("applying an item", () => {
     ).items as [EndpointDocument]
     await applyItem(ctx, later, { id })
     expect(
-      await db().mcpServer.findUniqueOrThrow({ where: { id } }),
+      openServer(
+        ctx,
+        await db().mcpServer.findUniqueOrThrow({ where: { id } }),
+      ),
     ).toMatchObject({
       url: "https://pets.home.example/v1",
       readOnly: true,
@@ -236,14 +261,11 @@ describe("applying an item", () => {
     const ctx = await freshVault()
     const { ids } = await populate(ctx)
     await setPersonalNote(ctx, "server", ids.docs, "Ours, on the NAS.")
-    await db().mcpServer.update({
-      where: { id: ids.docs },
-      data: {
-        name: "Our docs",
-        url: "https://docs.home.example/mcp",
-        enabled: false,
-        publicOnly: false,
-      },
+    await writeServer(ctx, ids.docs, {
+      name: "Our docs",
+      url: "https://docs.home.example/mcp",
+      enabled: false,
+      publicOnly: false,
     })
     await db().vaultToolAccess.create({
       data: {
@@ -254,8 +276,14 @@ describe("applying an item", () => {
       },
     })
     const before = {
-      docs: await db().mcpServer.findUniqueOrThrow({ where: { id: ids.docs } }),
-      pets: await db().mcpServer.findUniqueOrThrow({ where: { id: ids.pets } }),
+      docs: openServer(
+        ctx,
+        await db().mcpServer.findUniqueOrThrow({ where: { id: ids.docs } }),
+      ),
+      pets: openServer(
+        ctx,
+        await db().mcpServer.findUniqueOrThrow({ where: { id: ids.pets } }),
+      ),
     }
     const docs = find(items, "server", "docs")
     const pets = find(items, "endpoint", "pets")
@@ -303,8 +331,14 @@ describe("applying an item", () => {
       "personalNote",
     ] as const
     const after = {
-      docs: await db().mcpServer.findUniqueOrThrow({ where: { id: ids.docs } }),
-      pets: await db().mcpServer.findUniqueOrThrow({ where: { id: ids.pets } }),
+      docs: openServer(
+        ctx,
+        await db().mcpServer.findUniqueOrThrow({ where: { id: ids.docs } }),
+      ),
+      pets: openServer(
+        ctx,
+        await db().mcpServer.findUniqueOrThrow({ where: { id: ids.pets } }),
+      ),
     }
 
     for (const field of instanceFields) {
@@ -319,15 +353,16 @@ describe("applying an item", () => {
     ).toMatchObject([{ toolName: "list_pets", access: "allow" }])
     // The definition takes the item's name; the instance keeps its own.
     expect(
-      await db().serverDefinition.findUniqueOrThrow({
-        where: { id: after.pets.definitionId! },
-      }),
+      openDefinition(
+        ctx,
+        await db().serverDefinition.findUniqueOrThrow({
+          where: { id: after.pets.definitionId! },
+        }),
+      ),
     ).toMatchObject({ name: "Pet shop" })
-    expect(
-      await db().mcpTool.findFirstOrThrow({
-        where: { serverId: ids.pets, name: "list_pets" },
-      }),
-    ).toMatchObject({ descriptionOverride: "Every pet." })
+    expect(await toolNamed(ctx, "list_pets", ids.pets)).toMatchObject({
+      descriptionOverride: "Every pet.",
+    })
   })
 
   it("reports a server or tool the vault does not have, and writes nothing", async () => {
@@ -415,14 +450,20 @@ describe("applying an item", () => {
         id: ids.docs,
       },
     )
-    const row = await db().mcpServer.findUniqueOrThrow({
-      where: { id: ids.docs },
-    })
+    const row = openServer(
+      ctx,
+      await db().mcpServer.findUniqueOrThrow({
+        where: { id: ids.docs },
+      }),
+    )
     expect(row).toMatchObject({ slug: "docs", syncVersion: 7 })
     expect(
-      await db().serverDefinition.findUniqueOrThrow({
-        where: { id: row.definitionId! },
-      }),
+      openDefinition(
+        ctx,
+        await db().serverDefinition.findUniqueOrThrow({
+          where: { id: row.definitionId! },
+        }),
+      ),
     ).toMatchObject({ slug: "team-docs" })
     expect((await localItem(ctx, "server", ids.docs)).document).toMatchObject({
       name: "team-docs",
@@ -432,9 +473,12 @@ describe("applying an item", () => {
     // A short name another definition has stays the definition's own.
     await applyItem(ctx, { ...docs, name: "pets" }, { id: ids.docs })
     expect(
-      await db().serverDefinition.findUniqueOrThrow({
-        where: { id: row.definitionId! },
-      }),
+      openDefinition(
+        ctx,
+        await db().serverDefinition.findUniqueOrThrow({
+          where: { id: row.definitionId! },
+        }),
+      ),
     ).toMatchObject({ slug: "team-docs" })
   })
 
@@ -467,17 +511,18 @@ describe("applying an item", () => {
     )
 
     expect(
-      await db().mcpServer.findUniqueOrThrow({ where: { id } }),
+      openServer(
+        ctx,
+        await db().mcpServer.findUniqueOrThrow({ where: { id } }),
+      ),
     ).toMatchObject({
       specSource: "url",
       specUrl: "https://pets.example.com/openapi.json",
     })
-    expect((await storedSpec(id))?.text).toBe(text)
-    expect(
-      await db().mcpTool.findFirstOrThrow({
-        where: { serverId: id, name: "add_pet" },
-      }),
-    ).toMatchObject({ descriptionOverride: "Adds a pet." })
+    expect((await storedSpec(ctx, id))?.text).toBe(text)
+    expect(await toolNamed(ctx, "add_pet", id)).toMatchObject({
+      descriptionOverride: "Adds a pet.",
+    })
   })
 
   it("gives resolveDefinition the wrapper as the owner's form would", async () => {
@@ -504,5 +549,137 @@ describe("applying an item", () => {
         },
       ],
     })
+  })
+})
+
+describe("applying a service", () => {
+  it("writes the definition and description onto a service, and never its own part", async () => {
+    const ctx = await freshVault()
+    const { id, hostId, registeredId } = await addService(ctx)
+    const before = await db().serviceSpec.findUniqueOrThrow({
+      where: { serverId: id },
+    })
+    const { document } = await localItem(ctx, "service", id)
+    const image = `ghcr.io/docling-project/docling-serve-cpu@sha256:${"e".repeat(64)}`
+
+    if (document.kind !== "service") {
+      throw new Error("not a service")
+    }
+
+    const { notes } = await applyItem(
+      ctx,
+      {
+        ...document,
+        version: 4,
+        displayName: "Docling",
+        description: "Documents to Markdown, from the repository.",
+        definition: { ...document.definition, image },
+      },
+      { id },
+    )
+
+    expect(notes.join(" ")).toMatch(/update each on its page/)
+    const after = await db().serviceSpec.findUniqueOrThrow({
+      where: { serverId: id },
+    })
+    expect(
+      readServiceDefinition(openServiceSpec(ctx, after).definition).image,
+    ).toBe(image)
+    // Its SSH server, engine, container, publish address, secrets and what
+    // it registered stay as they were.
+    expect(after).toMatchObject({
+      hostId,
+      engine: before.engine,
+      containerName: before.containerName,
+      publish: before.publish,
+      env: before.env,
+      registeredId,
+    })
+    const row = openServer(
+      ctx,
+      await db().mcpServer.findUniqueOrThrow({ where: { id } }),
+    )
+    expect(row).toMatchObject({
+      name: "Docling service",
+      slug: "docling-service",
+      description: "Documents to Markdown, from the repository.",
+      syncVersion: 4,
+    })
+    expect(
+      openDefinition(
+        ctx,
+        await db().serverDefinition.findUniqueOrThrow({
+          where: { id: row.definitionId! },
+        }),
+      ),
+    ).toMatchObject({ name: "Docling" })
+  })
+
+  it("adds a new one only by launching it, with the owner's own part", async () => {
+    // Read in one vault; a fresh one (another scratch database) takes it.
+    const source = await freshVault()
+    const { document } = await localItem(
+      source,
+      "service",
+      (await addService(source)).id,
+    )
+    const target = await freshVault()
+
+    await expect(applyItem(target, document, { id: null })).rejects.toThrow(
+      /added by launching it/,
+    )
+
+    const launched: ServiceLaunchInput[] = []
+    const { id } = await applyItem(target, document, {
+      id: null,
+      service: {
+        input: {
+          name: "",
+          hostId: "host-1",
+          publish: {
+            address: "0.0.0.0",
+            ports: [{ container: 5001, host: 8001 }],
+          },
+          env: { DOCLING_SERVE_API_KEY: "secret-1" },
+          note: "In the garage.",
+        },
+        launch: async (_ctx, input) => {
+          launched.push(input)
+          // What launchService makes, as rows.
+          const made = await addService(
+            _ctx,
+            input.definition as typeof DOCLING,
+          )
+          return { id: made.id, message: "Docling is running on Build box." }
+        },
+      },
+    })
+
+    expect(launched).toEqual([
+      expect.objectContaining({
+        name: "Docling service",
+        hostId: "host-1",
+        description: "Turns PDFs and images into Markdown.",
+        publish: {
+          address: "0.0.0.0",
+          ports: [{ container: 5001, host: 8001 }],
+        },
+        env: { DOCLING_SERVE_API_KEY: "secret-1" },
+        note: "In the garage.",
+        definition: expect.objectContaining({ image: DOCLING.image }),
+      }),
+    ])
+    const row = openServer(
+      target,
+      await db().mcpServer.findUniqueOrThrow({ where: { id } }),
+    )
+    expect(
+      openDefinition(
+        target,
+        await db().serverDefinition.findUniqueOrThrow({
+          where: { id: row.definitionId! },
+        }),
+      ),
+    ).toMatchObject({ slug: "docling-service", name: "Docling service" })
   })
 })

@@ -1,12 +1,20 @@
 import { describe, expect, it } from "vitest"
 
 import {
+  clientPrefixed,
+  descriptionLead,
+  describeOwnTool,
   listTools,
+  normalName,
+  pcpToolNote,
   searchEverything,
   searchTools,
+  stem,
   summarize,
+  synonymsOf,
   tokenize,
   type ListedTool,
+  type PcpToolCandidate,
   type ToolCandidate,
 } from "./search"
 
@@ -81,6 +89,34 @@ describe("searchTools", () => {
     expect(searchTools(tools, "", { limit: 2 })).toHaveLength(2)
   })
 
+  it("finds a tool by a synonym, below one that says the word", () => {
+    const docs: ToolCandidate[] = [
+      {
+        server: "drive",
+        serverName: "Drive",
+        serverDescription: "",
+        name: "upload_document",
+        title: null,
+        description: "Upload a document.",
+      },
+      {
+        server: "drive",
+        serverName: "Drive",
+        serverDescription: "",
+        name: "upload_file",
+        title: null,
+        description: "Upload a file.",
+      },
+    ]
+
+    expect(searchTools(docs, "upload a file").map((m) => m.name)).toEqual([
+      "upload_file",
+      "upload_document",
+    ])
+    expect(searchTools(docs, "documents")[0]?.name).toBe("upload_document")
+    expect(searchTools(docs, "documents")).toHaveLength(2)
+  })
+
   it("drops tools that match nothing", () => {
     expect(searchTools(tools, "kubernetes")).toEqual([])
   })
@@ -90,6 +126,45 @@ describe("helpers", () => {
   it("tokenizes names the way people type them", () => {
     expect(tokenize("listPullRequests")).toEqual(["list", "pull", "requests"])
     expect(tokenize("create_issue v2")).toEqual(["create", "issue", "v2"])
+  })
+
+  it("stems a word's forms to one (#61)", () => {
+    const same = (...words: string[]) =>
+      expect(new Set(words.map(stem)).size, words.join(" ")).toBe(1)
+
+    same("store", "stores", "stored", "storing", "storage")
+    same("launch", "launches", "launched", "launching")
+    same("run", "runs", "running", "ran")
+    same("create", "creates", "created", "creating")
+    same("issue", "issues")
+    same("file", "files")
+    same("deploy", "deployed", "deployment", "deployments")
+    same("keep", "keeps", "kept")
+    same("embed", "embedded", "embedding", "embeddings")
+    // Words that only look like a form keep their meaning.
+    expect(stem("string")).toBe("string")
+    expect(stem("status")).toBe("status")
+    expect(stem("access")).toBe("access")
+    expect(stem("file")).not.toBe(stem("filter"))
+  })
+
+  it("knows a few words people use for the same task", () => {
+    expect(synonymsOf(stem("container"))).toContain(stem("docker"))
+    expect(synonymsOf(stem("launch"))).toEqual(
+      expect.arrayContaining([stem("start"), stem("run"), stem("deploy")]),
+    )
+    expect(synonymsOf(stem("document"))).toContain(stem("file"))
+    expect(synonymsOf(stem("kubernetes"))).toEqual([])
+  })
+
+  it("reads a description's lead up to its first clause", () => {
+    expect(
+      descriptionLead("Share a kept file, to store it: a link. More."),
+    ).toBe("Share a kept file, to store it")
+    expect(descriptionLead("Fetch https://x.example; then more")).toBe(
+      "Fetch https://x.example",
+    )
+    expect(descriptionLead("One line\nanother")).toBe("One line")
   })
 
   it("summarizes to one sentence within the limit", () => {
@@ -117,6 +192,31 @@ describe("listTools", () => {
       "porkbun/tool_3 [ask] — Does thing 3.",
       "porkbun/tool_4 [ask] — Does thing 4.",
       "porkbun/tool_5 [allowed] — Does thing 5.",
+    ])
+  })
+
+  it("names each tool's tier and the entry that runs it, when it has one", () => {
+    expect(
+      listTools("porkbun", [
+        {
+          name: "delete_domain",
+          title: null,
+          description: "Deletes a domain.",
+          access: "ask",
+          tier: "destructive",
+        },
+        {
+          name: "list_domains",
+          title: null,
+          description: "Lists domains.",
+          access: "allowed",
+          tier: "read",
+        },
+      ]).split("\n"),
+    ).toEqual([
+      "porkbun: 2 tools, 1 allowed and 1 ask the owner first.",
+      "porkbun/delete_domain [ask, destructive: execute_destructive] — Deletes a domain.",
+      "porkbun/list_domains [allowed, read: execute_read] — Lists domains.",
     ])
   })
 
@@ -218,5 +318,206 @@ describe("searchEverything", () => {
       "skill:weekly-review",
       "github/create_issue",
     ])
+  })
+})
+
+describe("PCP's own tools in search (#41)", () => {
+  // As the field report had them: a server whose description says it hosts
+  // PCP, tools named like PCP's on other servers, and PCP's own.
+  const upstream: ToolCandidate[] = [
+    {
+      server: "bazzite",
+      serverName: "Bazzite",
+      serverDescription:
+        "My local gaming machine runs my arr stack, as well as hosts this PCP server",
+      name: "run_command",
+      title: "Run a command",
+      description: "Run one command on the machine and answer its output.",
+    },
+    {
+      server: "coolify",
+      serverName: "Coolify",
+      serverDescription: "Deployments.",
+      name: "check-server-registry-login",
+      title: null,
+      description: "Check whether a server is logged in to a registry.",
+    },
+    {
+      server: "porkbun",
+      serverName: "Porkbun",
+      serverDescription: "Domains.",
+      name: "check_domain",
+      title: "Check a domain",
+      description: "Check whether a domain is free, and its price.",
+    },
+  ]
+  const pcp: PcpToolCandidate[] = [
+    {
+      name: "check_permission",
+      title: "Check a permission request",
+      description:
+        "Whether the owner has answered a request, and its answer once they have.",
+    },
+    {
+      name: "withdraw_request",
+      title: "Withdraw a request",
+      description: "Take back a request you no longer need.",
+    },
+    {
+      name: "run_code",
+      title: "Run code",
+      description: "Run a program that calls the owner's tools.",
+    },
+    {
+      name: "delete_wrapper",
+      title: "Delete a wrapper",
+      description:
+        "Propose deleting a wrapper on PCP's page; call check_permission once the owner says they answered.",
+    },
+  ]
+  const refs = (query: string, options = {}) =>
+    searchEverything({ tools: upstream, pcp }, query, options).map(
+      (result) => `${result.kind} ${result.ref}`,
+    )
+
+  it("ranks an exact name first, PCP's own tools included", () => {
+    expect(refs("check_permission PCP")[0]).toBe("pcp check_permission")
+    expect(refs("run_code")[0]).toBe("pcp run_code")
+    expect(refs("withdraw")[0]).toBe("pcp withdraw_request")
+    expect(refs("porkbun/check_domain")[0]).toBe("tool porkbun/check_domain")
+  })
+
+  it("matches a name whatever its case and separators", () => {
+    expect(normalName("Check-Permission")).toBe("check_permission")
+    expect(normalName("checkPermission")).toBe("check_permission")
+    expect(refs("Check permission")[0]).toBe("pcp check_permission")
+    expect(refs("check server registry login")[0]).toBe(
+      "tool coolify/check-server-registry-login",
+    )
+    expect(refs("coolify/check_server_registry_login")[0]).toBe(
+      "tool coolify/check-server-registry-login",
+    )
+  })
+
+  it("takes an app's prefix off a name", () => {
+    expect(refs("mcp__PCP_Bazzite__run_code")[0]).toBe("pcp run_code")
+    expect(refs("mcp__claude_ai_PCP__withdraw_request")[0]).toBe(
+      "pcp withdraw_request",
+    )
+    expect(
+      clientPrefixed("mcp__PCP_Bazzite__run_code", ["run_code", "search"]),
+    ).toEqual({ prefix: "mcp__PCP_Bazzite__", name: "run_code" })
+    expect(clientPrefixed("run_code", ["run_code"])).toBeNull()
+    expect(clientPrefixed("mcp__PCP__nothing", ["run_code"])).toBeNull()
+  })
+
+  it("does not let a server described as PCP outrank the tools a word names", () => {
+    const pcpRun = refs("PCP run")
+    expect(pcpRun[0]).toBe("pcp run_code")
+    expect(pcpRun.indexOf("tool bazzite/run_command")).toBeGreaterThan(0)
+
+    // Words only a server's description has still find its tools.
+    expect(refs("arr stack")).toEqual(["tool bazzite/run_command"])
+    expect(searchTools(upstream, "PCP")[0]?.name).toBe("run_command")
+  })
+
+  it("says how to call one of PCP's own tools, and finds it by name, not its description", () => {
+    const [first] = searchEverything(
+      { tools: upstream, pcp },
+      "check_permission",
+    )
+    expect(first).toMatchObject({
+      kind: "pcp",
+      ref: "check_permission",
+      title: "Check a permission request",
+    })
+    expect(
+      first!.description.endsWith(pcpToolNote("check_permission", first!.tier)),
+    ).toBe(true)
+
+    // delete_wrapper's description names check_permission; its name does not.
+    expect(refs("owner answered")).not.toContain("pcp delete_wrapper")
+    expect(refs("check_permission PCP")).not.toContain("pcp delete_wrapper")
+  })
+
+  it("finds one of PCP's tools by what its description's lead says it is for (#61)", () => {
+    const own: PcpToolCandidate[] = [
+      ...pcp,
+      {
+        name: "share_result",
+        title: "Download a kept file by link",
+        description:
+          "Share a kept file to your computer, to store, move or download a file there: a download link. Anyone holding it can use it; the owner sees it.",
+      },
+    ]
+    const found = (query: string) =>
+      searchEverything({ tools: upstream, pcp: own }, query).map(
+        (result) => result.ref,
+      )
+
+    expect(found("store a file")[0]).toBe("share_result")
+    expect(found("move documents")).toContain("share_result")
+    // Not by a word further on, which says how it works.
+    expect(found("anyone holding")).not.toContain("share_result")
+  })
+
+  it("does not find PCP's tools by the words most of them share", () => {
+    const own: PcpToolCandidate[] = Array.from({ length: 6 }, (_, index) => ({
+      name: `tool_${index}`,
+      title: `Tool ${index}`,
+      description: `Gather thing ${index} for the owner: more.`,
+    }))
+
+    expect(
+      searchEverything({ tools: [], pcp: own }, "owner").map((r) => r.ref),
+    ).toEqual([])
+    expect(
+      searchEverything({ tools: [], pcp: own }, "gather")
+        .map((r) => r.ref)
+        .includes("tool_1"),
+    ).toBe(false)
+  })
+
+  it("keeps to kind pcp, and leaves PCP's tools out of kind tool and of a server", () => {
+    expect(refs("check", { kind: "pcp" })).toEqual(["pcp check_permission"])
+    expect(
+      refs("check", { kind: "tool" }).every((ref) => ref.startsWith("tool ")),
+    ).toBe(true)
+    expect(refs("run_code", { server: "bazzite" })).toEqual([
+      "tool bazzite/run_command",
+    ])
+    // With nothing to rank by, PCP's tools are listed only when asked for.
+    expect(refs("")).not.toContain("pcp run_code")
+    expect(refs("", { kind: "pcp" })).toHaveLength(4)
+  })
+
+  it("describes one of PCP's tools with its schemas and no call_handle", () => {
+    const said = JSON.parse(
+      describeOwnTool(
+        {
+          ...pcp[0]!,
+          inputSchema: { type: "object", additionalProperties: false },
+          annotations: {
+            readOnlyHint: true,
+            destructiveHint: false,
+            idempotentHint: true,
+            openWorldHint: false,
+          },
+        },
+        "a note",
+      ),
+    )
+
+    expect(Object.keys(said)[0]).toBe("note")
+    expect(said).toMatchObject({
+      tool: "check_permission",
+      kind: "pcp",
+      inputSchema: { type: "object" },
+    })
+    expect(said.call).toContain(
+      'run it with execute_destructive as {"tool": "check_permission"',
+    )
+    expect(said.call_handle).toBeUndefined()
+    expect(said.outputSchema).toBeUndefined()
   })
 })

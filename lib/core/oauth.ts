@@ -5,8 +5,6 @@ import {
   type OAuthDiscoveryState,
 } from "@modelcontextprotocol/client"
 
-import type { McpServer } from "@/lib/generated/prisma/client"
-
 import type { VaultContext } from "./context"
 import { randomSecret } from "./crypto"
 import { db } from "./db"
@@ -27,6 +25,7 @@ import {
   syncServerTools,
   verifiedEndpointDiscovery,
 } from "./upstream"
+import type { OpenServer } from "./server-meta"
 
 /**
  * Connecting an OAuth-protected MCP server: PCP discovers the authorization
@@ -92,6 +91,7 @@ export async function startOAuth(
 
   if (method === "needs-client") {
     throw await needsClient(
+      ctx,
       server,
       publicUrl,
       elsewhere
@@ -126,7 +126,7 @@ export async function startOAuth(
     // A registration endpoint that refuses PCP (an allow-list of clients,
     // or a guessed /register that is not there) leaves the same way out.
     if (error instanceof RegistrationRejectedError) {
-      throw await needsClient(server, publicUrl, rejection(error))
+      throw await needsClient(ctx, server, publicUrl, rejection(error))
     }
 
     throw error
@@ -146,7 +146,7 @@ export async function startOAuth(
 }
 
 async function discover(
-  server: Pick<McpServer, "url" | "kind" | "publicOnly">,
+  server: Pick<OpenServer, "url" | "kind" | "publicOnly">,
 ): Promise<OAuthDiscoveryState | undefined> {
   try {
     // Under the server's address rule, like everything else it reaches.
@@ -209,13 +209,14 @@ function rejection(error: RegistrationRejectedError): string {
  * The message is the server page's status line and what an assistant hears.
  */
 async function needsClient(
+  ctx: VaultContext,
   server: { id: string; name: string },
   publicUrl: string,
   why = "it does not let apps register themselves",
 ): Promise<PcpError> {
   const message = `${server.name} needs an OAuth client from you: ${why}. Create one in the provider's developer settings with ${oauthRedirectUrl(publicUrl)} as its redirect URI, then give PCP its client ID and secret on the server's page.`
 
-  await setServerStatus(server.id, "client_required", message)
+  await setServerStatus(ctx, server.id, "client_required", message)
 
   return new PcpError("state", message)
 }
@@ -312,7 +313,7 @@ async function afterConnecting(
   publicUrl: string,
 ): Promise<void> {
   if (server.kind === "openapi") {
-    await syncEndpointTools(server, { fromCopy: true })
+    await syncEndpointTools(ctx, server, { fromCopy: true })
     return
   }
 

@@ -107,7 +107,7 @@ describe("a call that names no tab", () => {
 
       expect(refused.isError, name).toBe(true)
       expect(text, name).toBe(
-        `${name} needs the tab to act on (tab), and the browser never picks one. This token has no tab open. Open one with tabs (action open, with the url): its answer names the new tab's id, which every other browser tool takes as tab.`,
+        `${name} needs the tab to act on (tab), and the browser never picks one. This token has no tab open (0 of 8 tabs open in the browser, 0 of them this token's). Open one with tabs (action open, with the url): its answer names the new tab's id, which every other browser tool takes as tab.`,
       )
     }
 

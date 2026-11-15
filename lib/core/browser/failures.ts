@@ -1,4 +1,6 @@
 import { MAX_ELEMENT_NAME_CHARS } from "./limits"
+import { allNodes, type SnapshotNode } from "./snapshot"
+import { nameMatches } from "./target"
 
 /**
  * Why an action on a page failed, in plain words. Playwright's message is
@@ -43,12 +45,55 @@ export function describeElement(html: string): string {
   )
 }
 
+/** The roles some tags have of their own, as the accessibility tree reads them. */
+const IMPLICIT_ROLES: Record<string, string> = {
+  a: "link",
+  article: "article",
+  aside: "complementary",
+  button: "button",
+  dialog: "dialog",
+  footer: "contentinfo",
+  form: "form",
+  header: "banner",
+  img: "img",
+  main: "main",
+  nav: "navigation",
+  section: "region",
+  select: "combobox",
+  textarea: "textbox",
+}
+
+/** An element that covers the one an action was for, as the call log shows it. */
+export type CoveringElement = {
+  /** Its role: the one it is given, or its tag's own; null for none. */
+  role: string | null
+  tag: string
+  /** Its aria-label, title or alt. */
+  label: string | null
+}
+
+export function readElement(html: string): CoveringElement {
+  const tag = html.match(/^<([a-zA-Z][\w-]*)/)?.[1]?.toLowerCase() ?? "element"
+
+  return {
+    role: attribute(html, "role") ?? IMPLICIT_ROLES[tag] ?? null,
+    tag,
+    label:
+      attribute(html, "aria-label") ??
+      attribute(html, "title") ??
+      attribute(html, "alt"),
+  }
+}
+
+const COVERED =
+  /(<[^>]+>)[^]*?(?:from (<[^>]+>)[^]*? subtree )?intercepts pointer events/
+
 type Rule = { test: RegExp; say: (match: RegExpMatchArray) => string }
 
 /** What the call log says, last line first; the first rule that fits. */
 const RULES: Rule[] = [
   {
-    test: /(<[^>]+>)[^]*?(?:from (<[^>]+>)[^]*? subtree )?intercepts pointer events/,
+    test: COVERED,
     say: (match) =>
       `Another element covers it and would get the click: ${describeElement(match[2] ?? match[1]!)}. Close or move what covers it first (a dialog, a banner, a menu), or pass force: true to click anyway.`,
   },
@@ -88,14 +133,35 @@ const RULES: Rule[] = [
   },
 ]
 
-/** A failure's reason, bounded, for an answer. */
-export function failureReason(error: unknown): string {
+/** A failure's first line, and its call log's lines. */
+function readFailure(error: unknown): { first: string; log: string[] } {
   const message = (
     error instanceof Error ? error.message : String(error)
   ).replace(/\u001b\[[0-9;]*m/g, "")
   const [first = "", ...rest] = message.split("\n")
   const logAt = rest.findIndex((line) => /^\s*Call log:/.test(line))
-  const log = logAt >= 0 ? rest.slice(logAt + 1) : []
+  return { first, log: logAt >= 0 ? rest.slice(logAt + 1) : [] }
+}
+
+/**
+ * The element the call log says covers the one an action was for (the
+ * outer one, when a part of it is what would get the click); null when
+ * nothing covered it.
+ */
+export function coveringElement(error: unknown): CoveringElement | null {
+  const { log } = readFailure(error)
+
+  for (const line of [...log].reverse()) {
+    const match = line.match(COVERED)
+    if (match) return readElement(match[2] ?? match[1]!)
+  }
+
+  return null
+}
+
+/** A failure's reason, bounded, for an answer. */
+export function failureReason(error: unknown): string {
+  const { first, log } = readFailure(error)
 
   for (const line of [...log].reverse()) {
     for (const rule of RULES) {
@@ -128,4 +194,45 @@ export function failureReason(error: unknown): string {
 
   // Playwright's own words, without the method it was in.
   return short(first.replace(/^[\w.]+: /, ""), MAX_REASON_CHARS)
+}
+
+/** Roles whose element sits over a page: what usually covers a click. */
+const OVERLAY_ROLES = new Set(["dialog", "alertdialog"])
+
+function quoted(node: SnapshotNode): string {
+  return `${node.role}${node.name ? ` "${node.name.slice(0, 100)}"` : ""}`
+}
+
+/**
+ * The element of the failed click's snapshot that covers the one clicked,
+ * by the role and label the call log gives it, as a line with its ref; or,
+ * when the log's element cannot be told in the snapshot (a backdrop with
+ * no name), the dialogs the page shows, which are what it usually is.
+ */
+export function coveringLine(
+  nodes: SnapshotNode[],
+  covering: CoveringElement,
+): string | null {
+  const all = allNodes(nodes).filter((node) => node.ref !== null)
+  const exact = covering.role
+    ? all.filter(
+        (node) =>
+          node.role === covering.role &&
+          (covering.label === null ||
+            nameMatches(node.name, covering.label, true)),
+      )
+    : []
+
+  if (exact.length === 1 && (covering.label !== null || exact[0]!.name)) {
+    const node = exact[0]!
+    return `What covers it is the ${quoted(node)} (ref ${node.ref}): close or dismiss it first (often a button in it, or press_key Escape), then click again.`
+  }
+
+  const overlays = all.filter((node) => OVERLAY_ROLES.has(node.role))
+
+  if (overlays.length > 0 && overlays.length <= 3) {
+    return `The page shows ${overlays.map((node) => `the ${quoted(node)} (ref ${node.ref})`).join(", ")}, which may be what covers it: close or dismiss it first (often a button in it, or press_key Escape), then click again.`
+  }
+
+  return null
 }

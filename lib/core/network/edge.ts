@@ -89,7 +89,7 @@ export class Edge {
       /**
        * The address to listen on: every interface when unset, as a
        * router's forward needs; 127.0.0.1 when only the pcp.gg connector
-       * (pcpgg/connector.ts) reaches the listeners.
+       * (@kaperkunde/pcpgg-protocol/connector) reaches the listeners.
        */
       host?: string
     },

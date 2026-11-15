@@ -30,6 +30,7 @@ import {
 } from "./personal-notes"
 import { createSecret } from "./secrets"
 import { createServer, getServer, type ExtraAuthHeaderInput } from "./servers"
+import { writeServer, serverSlugWhere } from "./server-meta"
 import { scratchDatabase } from "./test-db"
 import { callServerTool } from "./upstream"
 import { setupVault } from "./vault"
@@ -96,7 +97,7 @@ const enable = (id: string) =>
   db().mcpServer.update({ where: { id }, data: { enabled: true } })
 
 const rowOf = (slug: string) =>
-  db().mcpServer.findFirstOrThrow({ where: { slug } })
+  db().mcpServer.findFirstOrThrow({ where: serverSlugWhere(ctx, slug) })
 
 /**
  * What an owner's "yes" does to an assistant's register_server with OpenAPI
@@ -380,9 +381,10 @@ describe("registering an endpoint from text", () => {
     })
     expect(JSON.stringify(details)).not.toContain(password.id)
     expect(JSON.stringify(details)).not.toContain("ada@example.com")
-    expect(
-      await db().mcpServer.findUniqueOrThrow({ where: { id } }),
-    ).toMatchObject({ authType: "basic", authUsername: "ada@example.com" })
+    expect(await getServer(ctx, id)).toMatchObject({
+      authType: "basic",
+      authUsername: "ada@example.com",
+    })
   })
 
   it("notes a private address it can see, and does not look up names", async () => {
@@ -491,11 +493,11 @@ describe("getEndpoint", () => {
       belongsTo: "owner",
       authentication: { type: "header", header: "X-API-Key" },
     })
-    expect(changeFor(details, "baseUrl")).toMatch(
+    expect(changeFor(details, "base_url")).toMatch(
       /the owner configured this endpoint/,
     )
     expect(changeFor(details, "authentication")).toMatch(/only the owner/)
-    expect(changeFor(details, "readOnly")).toMatch(/yes, on only/)
+    expect(changeFor(details, "read_only")).toMatch(/yes, on only/)
   })
 
   it("never includes a secret, its name, or its id", async () => {
@@ -840,7 +842,7 @@ describe("an endpoint becomes the owner's when they attach a secret", () => {
         spec: spec(api.origin),
         readOnly: false,
       }),
-    ).rejects.toThrow(/baseUrl, spec, readOnly are theirs to change/)
+    ).rejects.toThrow(/base_url, spec, read_only are theirs to change/)
     expect((await getEndpoint(scope, slug)).readOnly).toBe(true)
 
     // Saying what is already so is not a change.
@@ -901,7 +903,7 @@ describe("an endpoint becomes the owner's when they attach a secret", () => {
 
     await expect(
       updateEndpointDetails(scope, slug, { readOnly: false }),
-    ).rejects.toThrow(/readOnly is theirs to change/)
+    ).rejects.toThrow(/read_only is theirs to change/)
     await expect(
       updateEndpointDetails(scope, slug, {
         baseUrl: "http://169.254.169.254/latest",
@@ -1238,6 +1240,14 @@ describe("what an assistant registers cannot reach the owner's network", () => {
     expect(api.requests).toHaveLength(0)
     // A refused address is the rule working, not an outage.
     expect((await getServer(ctx, id)).status).toBe("ok")
+    // The assistant hands the owner the endpoint's switch, last.
+    const refusal = await callServerTool(ctx, row, "listPets", {}, PUBLIC).then(
+      () => "",
+      (error: Error) => error.message,
+    )
+    expect(refusal.trimEnd().split("\n").at(-1)).toBe(
+      `[Allow private addresses for ${row.name}](${PUBLIC.publicUrl}/servers/${id}#public-only)`,
+    )
 
     // The owner decides: private addresses allowed for this endpoint.
     await updateEndpoint(ctx, id, {
@@ -1257,6 +1267,17 @@ describe("what an assistant registers cannot reach the owner's network", () => {
     )
     expect(allowed.isError).toBeUndefined()
     expect(api.requests).toHaveLength(1)
+
+    // Saving the form under Advanced, which leaves the page's switch out,
+    // keeps it as the owner set it.
+    await updateEndpoint(ctx, id, {
+      name: "Renamed",
+      baseUrl: row.url,
+      specSource: "upload",
+      readOnly: false,
+      authType: "none",
+    })
+    expect((await getServer(ctx, id)).publicOnly).toBe(false)
   })
 
   it("cannot be unlocked by the assistant, by any update, and the endpoint then belongs to the owner", async () => {
@@ -1417,7 +1438,7 @@ describe("the owner's note and detach, as an assistant asks for them", () => {
     await sibling(source.definitionId!)
 
     const renamed = await proposeEndpointDetach(scope, slug)
-    await db().mcpServer.update({ where: { id }, data: { name: "Renamed" } })
+    await writeServer(ctx, id, { name: "Renamed" })
     await expect(applyEndpointChange(ctx, renamed)).rejects.toThrow(
       /has changed since this was asked/,
     )

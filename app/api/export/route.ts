@@ -4,7 +4,7 @@ import { isPcpError } from "@/lib/core/errors"
 import { validatePassword } from "@/lib/core/vault"
 import { UNEXPECTED_ERROR } from "@/lib/server/action-state"
 import { confirmOwner } from "@/lib/server/password-attempts"
-import { isSameOrigin } from "@/lib/server/same-origin"
+import { isSameOrigin } from "@kaperkunde/security"
 import { currentSession } from "@/lib/server/session"
 
 export const dynamic = "force-dynamic"

@@ -3,10 +3,10 @@
 import { Plus } from "lucide-react"
 import { useActionState, useState } from "react"
 
-import { FormError } from "@/components/form-status"
+import { FormError } from "@kaperkunde/ui/form-status"
 import { MemoryAlwaysSwitch } from "@/components/memory-always-switch"
-import { SubmitButton } from "@/components/submit-button"
-import { Button } from "@/components/ui/button"
+import { SubmitButton } from "@kaperkunde/ui/submit-button"
+import { Button } from "@kaperkunde/ui/button"
 import {
   Dialog,
   DialogClose,
@@ -15,10 +15,10 @@ import {
   DialogFooter,
   DialogTitle,
   DialogTrigger,
-} from "@/components/ui/dialog"
-import { Input, Textarea } from "@/components/ui/input"
-import { Field } from "@/components/ui/label"
-import { List } from "@/components/ui/list"
+} from "@kaperkunde/ui/dialog"
+import { Input, Textarea } from "@kaperkunde/ui/input"
+import { Field } from "@kaperkunde/ui/label"
+import { List } from "@kaperkunde/ui/list"
 import {
   createMemoryAction,
   type MemoryActionResult,

@@ -9,6 +9,7 @@ import {
   importSkill,
   saveSkillFile,
   setTokenSkills,
+  shareSkill,
   updateSkill,
 } from "@/lib/core/skills"
 import {
@@ -132,6 +133,20 @@ export async function deleteSkillAction(
   })
 
   revalidatePath("/skills")
+
+  return result
+}
+
+/** An assistant's own skill, made shared by the owner. */
+export async function shareSkillAction(id: string): Promise<SkillActionResult> {
+  const ctx = await requireContext()
+  const result = await guarded(async () => {
+    const { name } = await shareSkill(ctx, id)
+    return { message: `${name} is shared.` }
+  })
+
+  revalidatePath("/skills")
+  revalidatePath(`/skills/${id}`)
 
   return result
 }

@@ -4,8 +4,8 @@ import { useState } from "react"
 
 import { SecretChoice } from "@/components/auth-fields-secret"
 import type { SecretOption } from "@/components/header-auth-fields"
-import { Input } from "@/components/ui/input"
-import { Field } from "@/components/ui/label"
+import { Input } from "@kaperkunde/ui/input"
+import { Field } from "@kaperkunde/ui/label"
 
 export type BasicAuthValues = {
   authUsername: string

@@ -1,10 +1,14 @@
+import type { PaceRangeInput } from "../pacing/input"
+import type { PaceRange } from "../pacing/limits"
 import type { CallToolResult } from "@modelcontextprotocol/server"
 
+import type { ToolTier } from "../constants"
 import { readFields, type AnswerShape } from "../answers"
 import { isConnectResult } from "../connect"
 import { isPcpError } from "../errors"
 import { bareType, isTextType } from "../media-types"
 import type { CodeCallOutcome, PermissionScope } from "../permissions"
+import { REUSE_EXECUTED_MS } from "../permission-rules"
 import {
   appendRequestLog,
   noteOwnerAsked,
@@ -19,6 +23,7 @@ import {
   openResult,
   resultNotice,
 } from "../tool-results"
+import { runEntryFor } from "../tool-tiers"
 import { loadResourceLimits, type ResourceLimits } from "../resources/state"
 import {
   DUPLICATE_RUN_MS,
@@ -28,11 +33,14 @@ import {
   MAX_MEDIA_PER_RUN,
   MAX_PARALLEL_CALLS,
   MAX_READS_PER_RUN,
+  MAX_SLEEP_MS,
   MAX_STEP_NAME_CHARS,
+  MAX_WAITS_PER_RUN,
   RUN_ANSWER_MS,
   RUN_PROGRESS_MS,
   RUN_TIMEOUT_MS,
 } from "./limits"
+import { DUPLICATE_WINDOW_WORDS, MAX_RERUN_REASON_CHARS } from "../calls/limits"
 import {
   compressImage,
   framesProgram,
@@ -74,8 +82,8 @@ import type { Bridge, BridgeReply, Executor, RunResult } from "./types"
  * - `call` goes to the gateway's caller, which looks the tool up among the
  *   token's own, at the token's level: blocked is an error, "ask" stops the
  *   run with the owner's permission link (the request is the same one a
- *   call_tool would leave), and an allowed tool runs through the same
- *   upstream path as call_tool (permissions.ts runCodeCall). Every call is
+ *   execute would leave), and an allowed tool runs through the same
+ *   upstream path as execute (permissions.ts runCodeCall). Every call is
  *   in the request log, under run_code, by server and tool.
  * - `read` opens one of the token's own kept results, as text, or as
  *   base64 for a file's bytes.
@@ -84,6 +92,9 @@ import type { Bridge, BridgeReply, Executor, RunResult } from "./types"
  *   program's or the assistant's) can name in place of the value.
  * - `tools` lists what the gateway's list_tools would: the token's servers,
  *   or one server's tools it can see, at its levels. It reaches no server.
+ * - `describe` gives what the gateway's describe would for one of those
+ *   tools (its inputSchema, what it returns, its access), without the
+ *   call_handle, since `call` takes names. It reaches no server either.
  * - `media` makes a smaller copy of one of the token's kept images
  *   (pcp.image.compress: crop, fit, grey, re-encode), decoded here in PCP's
  *   process (media.ts) and never in the program's engine, or takes frames
@@ -118,11 +129,20 @@ import type { Bridge, BridgeReply, Executor, RunResult } from "./types"
 /**
  * The run a program's call is made for. `onRun` is told the id of the run
  * a wrapper's tool starts for it (wrappers/run.ts), for the trace.
+ * `deadline` is when the run's own limit ends it (epoch milliseconds): a
+ * call waits for its turn under pacing until shortly before it
+ * (lib/core/pacing/), rather than be refused with work half done.
  */
 export type CallRun = {
   runId: string
   signal: AbortSignal
+  deadline: number
   onRun?: (runId: string) => void
+  /**
+   * A browser call's pace, as a wrapper's run chose it (wrappers/run.ts):
+   * handed on to the browser (upstream.ts CallOptions.pace).
+   */
+  pace?: PaceRange
 }
 
 /** How the gateway runs a program's call: by name, at the token's level. */
@@ -138,8 +158,20 @@ export type CodeCaller = (
      * where a call to a wrapper's tool says the run it started.
      */
     run: CallRun
-    /** Says, once the tool is found, whether its server marks it read-only. */
+    /** Says, once the tool is found, whether it is in the Read tier. */
     lookedUp?: (readOnly: boolean) => void
+    /**
+     * pcp.call's pace option, as the program gave it: only a wrapper's
+     * program has one (RunOptions.takesPace), which wrappers/run.ts holds
+     * to its wrapper's declared pace.
+     */
+    pace?: PaceRangeInput
+    /**
+     * The program repeats on purpose a call it (or the token) made a little
+     * while ago, with a reason (pcp.call's options): the duplicate guard
+     * lets it through (lib/core/calls/guard.ts).
+     */
+    rerun?: boolean
   } & AnswerShape,
 ) => Promise<CodeCallOutcome>
 
@@ -150,6 +182,16 @@ export type CodeCaller = (
 export type CodeLister = (
   server: string | null,
 ) => { ok: true; value: unknown } | { ok: false; error: string }
+
+/**
+ * How the gateway describes one tool for a program: describe's answer for
+ * a tool the token can see, as a value, with no call_handle. A tool it
+ * cannot see is refused as a call to it would be. Nothing is fetched.
+ */
+export type CodeDescriber = (
+  server: string,
+  tool: string,
+) => Promise<{ ok: true; value: unknown } | { ok: false; error: string }>
 
 /** What run_code shows of each part before keeping the rest. */
 const SHOWN_OUTPUT_CHARS = 20_000
@@ -255,6 +297,11 @@ export async function runCode(
     language?: string
     /** Run it even when the same program runs, or ran a moment ago. */
     rerun?: boolean
+    /**
+     * The tier of the entry it came through (run_<tier>): the same
+     * program through another entry is another run.
+     */
+    tier?: ToolTier
   },
   {
     signal,
@@ -270,12 +317,16 @@ export async function runCode(
 
   if (input.code.length > MAX_CODE_CHARS) {
     return text(
-      `The program is ${input.code.length.toLocaleString("en")} characters; run_code takes ${MAX_CODE_CHARS.toLocaleString("en")} at most.`,
+      `The program is ${input.code.length.toLocaleString("en")} characters; a run takes ${MAX_CODE_CHARS.toLocaleString("en")} at most.`,
       true,
     )
   }
 
-  const key = programKey(input.language ?? "javascript", input.code)
+  const key = programKey(
+    input.language ?? "javascript",
+    input.code,
+    input.tier ?? "destructive",
+  )
 
   if (input.rerun !== true) {
     const earlier = duplicateRun(
@@ -303,7 +354,11 @@ export async function runCode(
   // The client's signal is not the run's: the run ends by its own limits.
   const outcome = runProgram(
     scope,
-    { code: input.code },
+    {
+      code: input.code,
+      // Its calls are logged under the entry it came through.
+      logAs: runEntryFor(input.tier ?? "destructive"),
+    },
     { ...options, runId: record.id, trace: record.trace },
   )
     .then(
@@ -480,8 +535,13 @@ async function answerFor(
         ...(output ? [`It printed:\n${output}`] : []),
         ...effectLines(trace),
         isConnectResult(stop.result)
-          ? "Once the owner has connected it (check_server says when), run the program again."
-          : "Once the owner has answered below, run the program again (if they allowed the tool only once, check_permission gives that one call's answer instead; for the program to make it, they choose Always allow, or Allow for while that lasts).",
+          ? "On the owner's next message, whatever it says, call check_server as below; once it is connected, run the program again."
+          : `If the owner allows it once, that one call runs right then: don't run the program again for it — on the owner's next message, whatever it says, call check_permission with the id below for its answer (an identical call within ${REUSE_EXECUTED_MS / 60_000} minutes also gets that answer instead of a new ask). For the program to make the call itself, they choose Always allow or Allow for; once they have, run the program again.`,
+        ...(sideEffects(trace).length > 0
+          ? [
+              `Run again, a call before it that changed things and is made again with the same arguments within ${DUPLICATE_WINDOW_WORDS} throws an Error with code "duplicate_call" instead of happening twice: leave those calls out of the program, or catch that error.`,
+            ]
+          : []),
       ].join("\n\n"),
       stop.result,
     )
@@ -613,7 +673,7 @@ export async function checkRun(
 
     if (opened) {
       return text(
-        `${head} Its outcome, as run_code would have answered it (kept as result ${record.outcomeId}):\n\n${opened.text()}`,
+        `${head} Its outcome, as the run would have answered it (kept as result ${record.outcomeId}):\n\n${opened.text()}`,
         failed,
       )
     }
@@ -622,7 +682,7 @@ export async function checkRun(
   return text(
     [
       record.answered
-        ? `${head} run_code's own answer carried its outcome.`
+        ? `${head} The run's own answer carried its outcome.`
         : `${head} Its outcome is no longer kept.`,
       `Calls:\n${traceLines(record.trace)}`,
       ...(record.state === "finished" ? [] : effectLines(record.trace)),
@@ -634,6 +694,8 @@ export async function checkRun(
 export type RunOptions = {
   call: CodeCaller
   list?: CodeLister
+  /** pcp.describe; absent where pcp.tools is (a wrapper's program). */
+  describe?: CodeDescriber
   /** The request's own: the run stops when it goes away (a wrapper's). */
   signal?: AbortSignal
   executor?: Executor
@@ -642,6 +704,18 @@ export type RunOptions = {
   runId?: string
   /** Where the run's calls are traced, for a caller that reads it as it goes. */
   trace?: TraceEntry[]
+  /**
+   * The latest the caller's own run lasts (a run_code program that called
+   * a wrapper's tool): the run's calls wait under pacing until whichever
+   * of it and the run's own limit comes first.
+   */
+  deadline?: number
+  /**
+   * A wrapper's program: pcp.call takes a pace option ({min_ms, max_ms})
+   * for a browser call, which its caller holds to the wrapper's own pace.
+   * Anywhere else the option is refused.
+   */
+  takesPace?: boolean
 }
 
 /** How one program's run went, before it is put into words. */
@@ -678,15 +752,25 @@ export async function runProgram(
     code,
     input,
     label = "run_code",
-  }: { code: string; input?: string; label?: "run_code" | "wrapper" },
+    logAs = label,
+  }: {
+    code: string
+    input?: string
+    label?: "run_code" | "wrapper"
+    /** The tool its calls are logged under: the entry it came through. */
+    logAs?: string
+  },
   {
     call,
     list,
+    describe,
     signal,
     executor = runJavaScript,
     timeoutMs = RUN_TIMEOUT_MS,
     runId = newRunId(),
     trace = [],
+    deadline: outerDeadline,
+    takesPace = false,
   }: RunOptions,
 ): Promise<ProgramRun> {
   const limits = await loadResourceLimits()
@@ -702,6 +786,8 @@ export async function runProgram(
   const controller = new AbortController()
   /** What ended the run from outside the program, when something did. */
   let abortedFor: "time" | "gone" | null = null
+  /** When the run's limit ends it, or its caller's run before that. */
+  const deadline = Math.min(Date.now() + timeoutMs, outerDeadline ?? Infinity)
   const timer = setTimeout(() => {
     abortedFor ??= "time"
     controller.abort(
@@ -722,12 +808,17 @@ export async function runProgram(
 
   const started = Date.now()
   const output = new Output()
+  /** Notes already printed, each once a run. */
+  const noted = new Set<string>()
   let calls = 0
   /** A call was refused for being past MAX_CALLS_PER_RUN. */
   let overCalls = false
   let reads = 0
   let keeps = 0
   let media = 0
+  let waits = 0
+  /** pcp.withTimeout's timers under way, by the id the prelude gave each. */
+  const deadlines = new Map<string, () => void>()
   /** Where the owner has to act first, once a call said so. */
   const halt: { stop: { at: string; result: CallToolResult } | null } = {
     stop: null,
@@ -782,6 +873,33 @@ export async function runProgram(
       )
     }
 
+    let pace: PaceRangeInput | undefined
+
+    if (payload.pace !== undefined && payload.pace !== null) {
+      if (!takesPace) {
+        return refuse(
+          "pcp.call's pace is for a wrapper's program, within the pace its wrapper declares. A tab's own pace is set with the browser's tabs (action pace).",
+        )
+      }
+
+      const given = payload.pace
+
+      if (
+        !isRecord(given) ||
+        Object.keys(given).some(
+          (key) => key !== "min_ms" && key !== "max_ms",
+        ) ||
+        typeof given.min_ms !== "number" ||
+        typeof given.max_ms !== "number"
+      ) {
+        return refuse(
+          "pcp.call's pace is { min_ms, max_ms }: the shortest and the longest wait before the call, in milliseconds.",
+        )
+      }
+
+      pace = { min_ms: given.min_ms, max_ms: given.max_ms }
+    }
+
     let shape: AnswerShape
 
     try {
@@ -796,6 +914,21 @@ export async function runProgram(
       }
 
       throw error
+    }
+
+    // A repeat on purpose (calls/guard.ts) says why; the reason is the
+    // program's own words and is not kept.
+    const rerun = payload.rerun === true
+
+    if (
+      rerun &&
+      (typeof payload.reason !== "string" ||
+        payload.reason.trim() === "" ||
+        payload.reason.length > MAX_RERUN_REASON_CHARS)
+    ) {
+      return refuse(
+        `pcp.call's rerun needs a reason: { rerun: true, reason: "why it must happen again" }, ${MAX_RERUN_REASON_CHARS} characters at most.`,
+      )
     }
 
     // The step it is made in (pcp.step), for the trace only; the program's
@@ -848,6 +981,7 @@ export async function runProgram(
             run: {
               runId,
               signal: controller.signal,
+              deadline,
               onRun: (inner) => {
                 entry.runId = inner
               },
@@ -855,6 +989,8 @@ export async function runProgram(
             lookedUp: (readOnly) => {
               entry.readOnly = readOnly
             },
+            ...(pace ? { pace } : {}),
+            ...(rerun ? { rerun } : {}),
             ...shape,
           }),
           note,
@@ -885,8 +1021,9 @@ export async function runProgram(
 
       void appendRequestLog({
         vaultId: scope.ctx.vaultId,
+        dek: scope.ctx.dek,
         tokenId: scope.tokenId,
-        tool: label,
+        tool: logAs,
         server,
         upstreamTool: tool,
         ok: owner || outcome.ok,
@@ -895,6 +1032,8 @@ export async function runProgram(
         ...(owner || note.asked ? { asked: true } : {}),
         ...(note.request ? { request: note.request } : {}),
         ...(note.secret ? { secret: note.secret, origin: note.origin } : {}),
+        ...(note.exit ? { exit: note.exit } : {}),
+        ...(note.rerun ? { rerun: true } : {}),
       })
 
       if ("owner" in outcome) {
@@ -902,10 +1041,34 @@ export async function runProgram(
         return { stop: true }
       }
 
-      // The program is told the value or the error, nothing else.
+      // An old argument name the call used: the run's output says what to
+      // call it, once, where the assistant reads what the program printed.
+      for (const said of outcome.ok ? (outcome.notes ?? []) : []) {
+        if (!noted.has(said)) {
+          noted.add(said)
+          output.write(`[PCP] ${server}/${tool}: ${said}`)
+        }
+      }
+
+      // The program is told the value or the error, nothing else; a call
+      // pacing refused says so, and when to try again, and a tool error's
+      // own code ("timeout", "browser_busy") comes with it as it is.
       return outcome.ok
         ? { ok: true, value: outcome.value }
-        : { ok: false, error: outcome.error }
+        : {
+            ok: false,
+            error: outcome.error,
+            ...(outcome.code === "paced"
+              ? { code: "paced", retryAfterMs: outcome.retryAfterMs ?? 0 }
+              : outcome.code
+                ? {
+                    code: outcome.code,
+                    ...(outcome.retryAfterMs !== undefined
+                      ? { retryAfterMs: outcome.retryAfterMs }
+                      : {}),
+                  }
+                : {}),
+          }
     })
   }
 
@@ -919,6 +1082,23 @@ export async function runProgram(
 
     if (as !== "text" && as !== "base64") {
       return refuse('pcp.read reads as "text" (the default) or "base64".')
+    }
+
+    // A part of it: offset and length count bytes of a file (or of a text
+    // read as base64) and characters of a text, as read_result does.
+    const offset = isRecord(payload) ? payload.offset : undefined
+    const length = isRecord(payload) ? payload.length : undefined
+
+    for (const [name, value] of [
+      ["offset", offset],
+      ["length", length],
+    ] as const) {
+      if (
+        value !== undefined &&
+        (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0)
+      ) {
+        return refuse(`pcp.read's ${name} is a whole number, 0 or more.`)
+      }
     }
 
     if (++reads > MAX_READS_PER_RUN) {
@@ -942,12 +1122,25 @@ export async function runProgram(
     }
 
     try {
+      const ranged = offset !== undefined || length !== undefined
+      const start = (offset as number | undefined) ?? 0
+      const end = length === undefined ? undefined : start + (length as number)
       const value =
-        as === "base64" ? opened.bytes().toString("base64") : opened.text()
+        as === "base64"
+          ? (ranged
+              ? opened.bytes().subarray(start, end)
+              : opened.bytes()
+            ).toString("base64")
+          : ranged
+            ? opened.kind === "bytes"
+              ? // A file's bytes from offset, as text: cut where asked.
+                new TextDecoder().decode(opened.bytes().subarray(start, end))
+              : opened.text().slice(start, end)
+            : opened.text()
 
       if (value.length > limits.answerChars) {
         return refuse(
-          `Result ${id} is ${value.length.toLocaleString("en")} characters${as === "base64" ? " as base64" : ""}, more than a program reads at once (${limits.answerChars.toLocaleString("en")}). The owner can raise the largest file in PCP's settings, under Resources.`,
+          `Result ${id} is ${value.length.toLocaleString("en")} characters${as === "base64" ? " as base64" : ""}${ranged ? " in that part" : ""}, more than a program reads at once (${limits.answerChars.toLocaleString("en")}): read it in parts with offset and length. The owner can raise the largest file in PCP's settings, under Resources.`,
         )
       }
 
@@ -1271,6 +1464,121 @@ export async function runProgram(
     return list(server)
   }
 
+  async function describeTool(payload: unknown): Promise<BridgeReply> {
+    const name = (value: unknown) =>
+      typeof value === "string" && value !== "" && value.length <= 200
+
+    if (!isRecord(payload) || !name(payload.server) || !name(payload.tool)) {
+      return refuse(
+        'pcp.describe takes a server\'s name and a tool\'s, as pcp.tools gives them: pcp.describe("github", "list_issues").',
+      )
+    }
+
+    if (!describe) {
+      return refuse("PCP cannot describe tools here.")
+    }
+
+    return describe(payload.server as string, payload.tool as string)
+  }
+
+  /**
+   * Waits ms on PCP's clock, the run's own: answers true when the time is
+   * up, false when `cancel` ended it first. The run's end ends it too.
+   */
+  function waitFor(ms: number, id?: string): Promise<BridgeReply> {
+    if (controller.signal.aborted) {
+      return Promise.resolve(refuse("The run is over."))
+    }
+
+    return new Promise((resolve) => {
+      const done = (reply: BridgeReply) => {
+        clearTimeout(timer)
+        controller.signal.removeEventListener("abort", over)
+        if (id !== undefined) deadlines.delete(id)
+        resolve(reply)
+      }
+      const over = () => done(refuse("The run is over."))
+      const timer = setTimeout(() => done({ ok: true, value: true }), ms)
+
+      if (id !== undefined) {
+        deadlines.set(id, () => done({ ok: true, value: false }))
+      }
+
+      controller.signal.addEventListener("abort", over, { once: true })
+    })
+  }
+
+  /** A wait's milliseconds, or why they are not. */
+  function waitMs(payload: unknown, what: string): number | string {
+    const ms = isRecord(payload) ? payload.ms : undefined
+
+    if (typeof ms !== "number" || !Number.isFinite(ms) || ms < 0) {
+      return `${what} takes a number of milliseconds, 0 or more.`
+    }
+
+    if (++waits > MAX_WAITS_PER_RUN) {
+      return `A run waits at most ${MAX_WAITS_PER_RUN} times (pcp.sleep and pcp.withTimeout together).`
+    }
+
+    return Math.round(ms)
+  }
+
+  async function sleep(payload: unknown): Promise<BridgeReply> {
+    const ms = waitMs(payload, "pcp.sleep")
+
+    if (typeof ms === "string") {
+      return refuse(ms)
+    }
+
+    if (ms > MAX_SLEEP_MS) {
+      return refuse(
+        `pcp.sleep waits ${MAX_SLEEP_MS / 1000} seconds at most at once.`,
+      )
+    }
+
+    const left = deadline - Date.now()
+
+    if (ms > left) {
+      return refuse(
+        `The run has ${seconds(Math.max(0, left))} left, less than that wait of ${seconds(ms)}.`,
+      )
+    }
+
+    const reply = await waitFor(ms)
+    return "ok" in reply && reply.ok ? { ok: true, value: null } : reply
+  }
+
+  /**
+   * pcp.withTimeout's timer: the prelude races it against the function and
+   * cancels it when the function wins. Past what is left of the run, the
+   * run's end comes first.
+   */
+  async function startDeadline(payload: unknown): Promise<BridgeReply> {
+    const id = isRecord(payload) ? payload.id : undefined
+
+    if (typeof id !== "string" || id === "" || id.length > 40) {
+      return refuse("That timer has no id.")
+    }
+
+    const ms = waitMs(payload, "pcp.withTimeout")
+
+    if (typeof ms === "string") {
+      return refuse(ms)
+    }
+
+    return waitFor(Math.min(ms, Math.max(0, deadline - Date.now())), id)
+  }
+
+  function cancelDeadline(payload: unknown): BridgeReply {
+    const id = isRecord(payload) ? payload.id : undefined
+
+    if (typeof id === "string") {
+      deadlines.get(id)?.()
+    }
+
+    return { ok: true, value: null }
+  }
+
   const bridge: Bridge = async (op, payload) => {
     switch (op) {
       case "call":
@@ -1281,8 +1589,16 @@ export async function runProgram(
         return keep(payload)
       case "tools":
         return tools(payload)
+      case "describe":
+        return describeTool(payload)
       case "media":
         return mediaOp(payload)
+      case "sleep":
+        return sleep(payload)
+      case "deadline":
+        return startDeadline(payload)
+      case "cancel":
+        return cancelDeadline(payload)
       default:
         return refuse(`PCP does not know "${String(op).slice(0, 40)}".`)
     }
@@ -1401,7 +1717,7 @@ async function shownReturn(
   }
 
   if (returned.length > limits.textChars) {
-    return `(${returned.length.toLocaleString("en")} characters of JSON, more than run_code passes on: ${limits.textChars.toLocaleString("en")}. Return less, or keep it with pcp.keep and return the handle.)`
+    return `(${returned.length.toLocaleString("en")} characters of JSON, more than a run passes on: ${limits.textChars.toLocaleString("en")}. Return less, or keep it with pcp.keep and return the handle.)`
   }
 
   const kept = await keepResult(scope.ctx, {

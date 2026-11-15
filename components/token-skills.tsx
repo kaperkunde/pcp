@@ -4,12 +4,12 @@ import { ListChecks } from "lucide-react"
 import Link from "next/link"
 import { useActionState, useState } from "react"
 
-import { FormError, FormNote } from "@/components/form-status"
-import { SubmitButton } from "@/components/submit-button"
+import { FormError, FormNote } from "@kaperkunde/ui/form-status"
+import { SubmitButton } from "@kaperkunde/ui/submit-button"
 import { IconTile } from "@/components/ui/icon-tile"
-import { Checkbox } from "@/components/ui/input"
-import { List, ListSection } from "@/components/ui/list"
-import { SegmentedControl } from "@/components/ui/segmented-control"
+import { Checkbox } from "@kaperkunde/ui/input"
+import { List, ListSection } from "@kaperkunde/ui/list"
+import { SegmentedControl } from "@kaperkunde/ui/segmented-control"
 import {
   setTokenSkillsAction,
   type SkillActionResult,

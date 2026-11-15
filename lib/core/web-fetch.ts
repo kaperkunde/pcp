@@ -20,6 +20,13 @@ import {
 import type { VaultContext } from "./context"
 import { db } from "./db"
 import { invalid, notFound } from "./errors"
+import {
+  openRuleKey,
+  ruleKey,
+  ruleKeys,
+  sealedRuleKey,
+  sealRuleRows,
+} from "./fetch-rule-keys"
 import { newId } from "./ids"
 import { visible, type ShownText } from "./permission-rules"
 import {
@@ -29,7 +36,9 @@ import {
   type FetchOptions,
 } from "./fetch/fetch"
 import { MAX_FETCH_RULES } from "./fetch/limits"
-import { paceSite } from "./pacing"
+import type { ExitDialer } from "./exits/dial"
+import { listExitLevels, type ExitLevelView } from "./exits/exits"
+import { callDeadline, pacedResult, paceSite } from "./pacing"
 import type { FetchArgs } from "./fetch/request"
 import {
   emptyRules,
@@ -101,6 +110,8 @@ export type TokenFetchRules = {
   methods: FetchMethodView[]
   sites: FetchSiteView[]
   privateAddresses: FetchPrivateView
+  /** Every exit, with this token's level for it (blocked without a line). */
+  exits: ExitLevelView[]
 }
 
 function asAccess(value: string | null): ToolAccess | null {
@@ -114,10 +125,21 @@ function asAddedBy(value: string): FetchAddedBy {
   return value === "owner" ? "owner" : "assistant"
 }
 
-function ruleRows(vaultId: string, tokenId: string): Promise<WebFetchRule[]> {
-  return db().webFetchRule.findMany({
-    where: { vaultId, scope: { in: [tokenId, ALL_TOKENS] } },
-  })
+/** Rows with their keys opened (fetch-rule-keys.ts): a site, a method, ... */
+function opened(ctx: VaultContext, rows: WebFetchRule[]): WebFetchRule[] {
+  return rows.map((row) => ({ ...row, key: openRuleKey(ctx, row) }))
+}
+
+async function ruleRows(
+  ctx: VaultContext,
+  tokenId: string,
+): Promise<WebFetchRule[]> {
+  return opened(
+    ctx,
+    await db().webFetchRule.findMany({
+      where: { vaultId: ctx.vaultId, scope: { in: [tokenId, ALL_TOKENS] } },
+    }),
+  )
 }
 
 function toRuleSet(rows: WebFetchRule[]): FetchRuleSet {
@@ -147,12 +169,12 @@ function toRuleSet(rows: WebFetchRule[]): FetchRuleSet {
 
 /** The token's lines and the ones for all tokens, with its sites allowed for now. */
 export async function loadFetchRules(
-  vaultId: string,
+  ctx: VaultContext,
   tokenId: string,
 ): Promise<FetchRuleSet> {
   const [rows, allowedSites] = await Promise.all([
-    ruleRows(vaultId, tokenId),
-    loadSiteAllowances(tokenId),
+    ruleRows(ctx, tokenId),
+    loadSiteAllowances(ctx, tokenId),
   ])
 
   return { ...toRuleSet(rows), allowedSites }
@@ -212,20 +234,21 @@ export async function decideSite(
   host: string,
   group: FetchMethodGroup,
 ): Promise<SiteDecision> {
-  const rules = await loadFetchRules(scope.ctx.vaultId, scope.tokenId)
+  const rules = await loadFetchRules(scope.ctx, scope.tokenId)
 
   if (!knowsSite(rules, host)) {
     await roomForOneMore(scope.ctx.vaultId)
+    const id = newId()
 
     try {
       await db().webFetchRule.create({
         data: {
-          id: newId(),
+          id,
           vaultId: scope.ctx.vaultId,
           tokenId: scope.tokenId,
           scope: scope.tokenId,
           kind: "site",
-          key: host,
+          ...sealedRuleKey(scope.ctx, id, "site", host),
           access: null,
           addedBy: "assistant",
         },
@@ -251,36 +274,43 @@ export async function decideSite(
 
 /** The lines for all tokens only: what a tab the owner opened follows. */
 export async function loadSharedFetchRules(
-  vaultId: string,
+  ctx: VaultContext,
 ): Promise<FetchRuleSet> {
   return toRuleSet(
-    await db().webFetchRule.findMany({ where: { vaultId, scope: ALL_TOKENS } }),
+    opened(
+      ctx,
+      await db().webFetchRule.findMany({
+        where: { vaultId: ctx.vaultId, scope: ALL_TOKENS },
+      }),
+    ),
   )
 }
 
 /** Whether the owner allowed this token to reach private addresses. */
 export async function privateAllowedFor(
-  vaultId: string,
+  ctx: VaultContext,
   tokenId: string,
 ): Promise<boolean> {
-  return resolvePrivateAccess(await loadFetchRules(vaultId, tokenId))
+  return resolvePrivateAccess(await loadFetchRules(ctx, tokenId))
 }
 
 /** Notes when a site was last fetched, on the line that decided it. */
 export async function recordFetch(
-  vaultId: string,
+  ctx: VaultContext,
   tokenId: string,
   host: string,
 ): Promise<void> {
   const now = new Date()
+  const vaultId = ctx.vaultId
+  const key = { in: ruleKeys(ctx, "site", host) }
   const own = await db().webFetchRule.updateMany({
-    where: { vaultId, scope: tokenId, kind: "site", key: host },
+    where: { vaultId, scope: tokenId, kind: "site", key },
     data: { lastFetchedAt: now },
   })
 
   if (own.count === 0) {
     await db().webFetchRule.updateMany({
-      where: { vaultId, scope: ALL_TOKENS, kind: "site", key: host },
+      where: { vaultId, scope: ALL_TOKENS, kind: "site", key },
       data: { lastFetchedAt: now },
     })
   }
@@ -292,27 +322,24 @@ export async function recordFetch(
  * token's own level.
  */
 export async function writeSiteAccess(
-  vaultId: string,
+  ctx: VaultContext,
   tokenId: string,
   host: string,
   access: ToolAccess,
 ): Promise<void> {
+  const vaultId = ctx.vaultId
+  const id = newId()
+
+  await sealRuleRows(ctx, "site", host)
   await db().webFetchRule.upsert({
-    where: {
-      vaultId_scope_kind_key: {
-        vaultId,
-        scope: tokenId,
-        kind: "site",
-        key: host,
-      },
-    },
+    where: where(ctx, tokenId, "site", host),
     create: {
-      id: newId(),
+      id,
       vaultId,
       tokenId,
       scope: tokenId,
       kind: "site",
-      key: host,
+      ...sealedRuleKey(ctx, id, "site", host),
       access,
       addedBy: "assistant",
     },
@@ -334,7 +361,7 @@ export async function writeSiteAccess(
  *
  * Every request waits for the site's turn (lib/core/pacing/): each one
  * fetch/fetch.ts sends, redirects on the site included, and the read
- * through the browser.
+ * through the browser, each up to the one deadline.
  */
 export async function runFetch(
   ctx: VaultContext,
@@ -346,8 +373,22 @@ export async function runFetch(
     solver = fetchThroughBrowser,
     available = solverAvailable,
     clearance = hasClearance,
+    deadline = callDeadline(),
+    exit,
   }: {
     publicUrl: string
+    /**
+     * The exit the request goes out through, opened for this call
+     * (exits/use.ts); PCP's own address without. A page read through an
+     * exit is never read again through the browser, which would send it
+     * from PCP's own address.
+     */
+    exit?: ExitDialer
+    /**
+     * The latest each request may still go, under pacing: a request
+     * straight from an assistant's call or the owner's answer, by default.
+     */
+    deadline?: number
     fetcher?: (args: FetchArgs, options?: FetchOptions) => Promise<FetchAnswer>
     /** The read through the browser; the real one when left out. */
     solver?: typeof fetchThroughBrowser
@@ -358,25 +399,26 @@ export async function runFetch(
   },
 ): Promise<CallToolResult> {
   const host = fetchHostOf(args)
-  const pace = (site: string) => paceSite(ctx.vaultId, site, "web_fetch")
+  const pace = async (site: string) => {
+    const paced = await paceSite(ctx, site, "web_fetch", { deadline })
+    return paced ? pacedResult(paced) : null
+  }
   const options = {
-    allowPrivate: await privateAllowedFor(ctx.vaultId, tokenId),
+    allowPrivate: await privateAllowedFor(ctx, tokenId),
     publicUrl,
     pace,
+    ...(exit ? { exit } : {}),
   }
   const solve = async (): Promise<FetchAnswer> => {
     const paced = await pace(host)
 
     return paced
-      ? {
-          result: { content: [{ type: "text", text: paced }], isError: true },
-          challenged: false,
-        }
+      ? { result: paced, challenged: false }
       : solver(ctx, args, options)
   }
   // Whether the browser can read the page is asked only when it would:
   // most sites never check, and the answer can mean loading Playwright.
-  const reading = args.method === "GET"
+  const reading = args.method === "GET" && !exit
   let answer: FetchAnswer
 
   if (reading && clearance(ctx.vaultId, host) && (await available(ctx))) {
@@ -397,7 +439,7 @@ export async function runFetch(
     ? withNote(answer.result, await checkHint(ctx, tokenId))
     : answer.result
 
-  await recordFetch(ctx.vaultId, tokenId, host)
+  await recordFetch(ctx, tokenId, host)
   return result
 }
 
@@ -426,7 +468,14 @@ const CHANGING_METHODS_WARNING =
 /** What the owner is shown before a web request runs. */
 export function describeFetchAsk(
   args: FetchArgs,
-  { privateAllowed = false }: { privateAllowed?: boolean } = {},
+  {
+    privateAllowed = false,
+    exitLabel,
+  }: {
+    privateAllowed?: boolean
+    /** The exit's label, when the request goes out through one. */
+    exitLabel?: string
+  } = {},
 ): {
   title: string
   lines: string[]
@@ -462,9 +511,11 @@ export function describeFetchAsk(
       ...(body
         ? [`Body (${body.length.toLocaleString("en")} characters):\n${clipped}`]
         : []),
-      privateAllowed
-        ? "From PCP's own address, with none of your secrets; your own network too, since you allowed private addresses for this token"
-        : "From PCP's own address, public addresses only, with none of your secrets",
+      args.exit
+        ? `Through the exit ${args.exit}${exitLabel ? ` (${exitLabel})` : ""}, with none of your secrets; ${privateAllowed ? "the exit's own network too, since you allowed private addresses for this token" : "public addresses only"}`
+        : privateAllowed
+          ? "From PCP's own address, with none of your secrets; your own network too, since you allowed private addresses for this token"
+          : "From PCP's own address, public addresses only, with none of your secrets",
     ],
     warning: reading
       ? null
@@ -496,7 +547,10 @@ export function describeFetchAsk(
 
 // What the owner does on a token's page.
 
-function viewRules(rows: WebFetchRule[], tokenId: string): TokenFetchRules {
+function viewRules(
+  rows: WebFetchRule[],
+  tokenId: string,
+): Omit<TokenFetchRules, "exits"> {
   const own = rows.filter((row) => row.scope === tokenId)
   const shared = rows.filter((row) => row.scope === ALL_TOKENS)
   const find = (list: WebFetchRule[], kind: FetchRuleKind, key: string) =>
@@ -559,7 +613,10 @@ export async function listFetchRules(
   tokenId: string,
 ): Promise<TokenFetchRules> {
   await requireToken(ctx, tokenId)
-  return viewRules(await ruleRows(ctx.vaultId, tokenId), tokenId)
+  return {
+    ...viewRules(await ruleRows(ctx, tokenId), tokenId),
+    exits: await listExitLevels(ctx, tokenId),
+  }
 }
 
 function parseGroup(value: string): FetchMethodGroup {
@@ -590,23 +647,36 @@ export function parseSiteLevel(value: string): FetchSiteLevel {
   return value === "default" ? "default" : parseLevel(value)
 }
 
+/** The unique row of a scope's line; seal its rows first (sealRuleRows). */
 function where(
-  vaultId: string,
+  ctx: VaultContext,
   scope: string,
   kind: FetchRuleKind,
   key: string,
 ) {
-  return { vaultId_scope_kind_key: { vaultId, scope, kind, key } }
+  return {
+    vaultId_scope_kind_key: {
+      vaultId: ctx.vaultId,
+      scope,
+      kind,
+      key: ruleKey(ctx, kind, key),
+    },
+  }
 }
 
 async function findRule(
-  vaultId: string,
+  ctx: VaultContext,
   scope: string,
   kind: FetchRuleKind,
   key: string,
 ): Promise<WebFetchRule | null> {
-  return db().webFetchRule.findUnique({
-    where: where(vaultId, scope, kind, key),
+  return db().webFetchRule.findFirst({
+    where: {
+      vaultId: ctx.vaultId,
+      scope,
+      kind,
+      key: { in: ruleKeys(ctx, kind, key) },
+    },
   })
 }
 
@@ -620,7 +690,7 @@ export async function setFetchMethod(
   await requireLiveToken(ctx, tokenId)
   const key = parseGroup(group)
   const level = parseLevel(access)
-  const shared = await findRule(ctx.vaultId, ALL_TOKENS, "method", key)
+  const shared = await findRule(ctx, ALL_TOKENS, "method", key)
 
   // Ask needs a line only to override one for all tokens.
   if (level === "ask" && !shared) {
@@ -630,14 +700,14 @@ export async function setFetchMethod(
     return
   }
 
-  const existing = await findRule(ctx.vaultId, tokenId, "method", key)
+  const existing = await findRule(ctx, tokenId, "method", key)
 
   if (!existing) {
     await roomForOneMore(ctx.vaultId)
   }
 
   await db().webFetchRule.upsert({
-    where: where(ctx.vaultId, tokenId, "method", key),
+    where: where(ctx, tokenId, "method", key),
     create: {
       id: newId(),
       vaultId: ctx.vaultId,
@@ -663,7 +733,7 @@ export async function setFetchPrivate(
 ): Promise<void> {
   await requireLiveToken(ctx, tokenId)
   const level = parsePrivateLevel(access)
-  const shared = await findRule(ctx.vaultId, ALL_TOKENS, "private", PRIVATE_KEY)
+  const shared = await findRule(ctx, ALL_TOKENS, "private", PRIVATE_KEY)
 
   if (level === "blocked" && asAccess(shared?.access ?? null) !== "allowed") {
     await db().webFetchRule.deleteMany({
@@ -677,14 +747,14 @@ export async function setFetchPrivate(
     return
   }
 
-  const existing = await findRule(ctx.vaultId, tokenId, "private", PRIVATE_KEY)
+  const existing = await findRule(ctx, tokenId, "private", PRIVATE_KEY)
 
   if (!existing) {
     await roomForOneMore(ctx.vaultId)
   }
 
   await db().webFetchRule.upsert({
-    where: where(ctx.vaultId, tokenId, "private", PRIVATE_KEY),
+    where: where(ctx, tokenId, "private", PRIVATE_KEY),
     create: {
       id: newId(),
       vaultId: ctx.vaultId,
@@ -709,24 +779,24 @@ export async function setFetchSite(
   await requireLiveToken(ctx, tokenId)
   const key = normalizeSite(site)
   const access = fromSiteLevel(parseSiteLevel(level))
-  const existing = await findRule(ctx.vaultId, tokenId, "site", key)
-  const shared = existing
-    ? null
-    : await findRule(ctx.vaultId, ALL_TOKENS, "site", key)
+  const existing = await findRule(ctx, tokenId, "site", key)
+  const shared = existing ? null : await findRule(ctx, ALL_TOKENS, "site", key)
 
   if (!existing && !shared) {
     await roomForOneMore(ctx.vaultId)
   }
 
+  const id = newId()
+  await sealRuleRows(ctx, "site", key)
   await db().webFetchRule.upsert({
-    where: where(ctx.vaultId, tokenId, "site", key),
+    where: where(ctx, tokenId, "site", key),
     create: {
-      id: newId(),
+      id,
       vaultId: ctx.vaultId,
       tokenId,
       scope: tokenId,
       kind: "site",
-      key,
+      ...sealedRuleKey(ctx, id, "site", key),
       access,
       // A line the token had through all tokens keeps who first added it.
       addedBy: shared?.addedBy ?? "owner",
@@ -762,8 +832,8 @@ export async function setFetchRuleShared(
       : kind === "private"
         ? PRIVATE_KEY
         : normalizeSite(rawKey)
-  const mine = await findRule(ctx.vaultId, tokenId, kind, key)
-  const all = await findRule(ctx.vaultId, ALL_TOKENS, kind, key)
+  const mine = await findRule(ctx, tokenId, kind, key)
+  const all = await findRule(ctx, ALL_TOKENS, kind, key)
   const governing = mine ?? all
 
   if (kind === "site" && !governing) {
@@ -779,18 +849,29 @@ export async function setFetchRuleShared(
         ? (asAccess(governing?.access ?? null) ?? "blocked")
         : asAccess(governing!.access)
   const vaultId = ctx.vaultId
-  const own = { vaultId, scope: tokenId, kind, key }
-  const forAll = { vaultId, scope: ALL_TOKENS, kind, key }
+  const keys = { in: ruleKeys(ctx, kind, key) }
+  const own = { vaultId, scope: tokenId, kind, key: keys }
+  const forAll = { vaultId, scope: ALL_TOKENS, kind, key: keys }
   const meta = {
     addedBy: governing?.addedBy ?? "owner",
     lastFetchedAt: governing?.lastFetchedAt ?? null,
   }
+  const id = newId()
+  const created = { id, vaultId, kind, ...sealedRuleKey(ctx, id, kind, key) }
+
+  await sealRuleRows(ctx, kind, key)
 
   if (shared) {
     await db().$transaction([
       db().webFetchRule.upsert({
-        where: where(vaultId, ALL_TOKENS, kind, key),
-        create: { id: newId(), ...forAll, tokenId: null, access, ...meta },
+        where: where(ctx, ALL_TOKENS, kind, key),
+        create: {
+          ...created,
+          scope: ALL_TOKENS,
+          tokenId: null,
+          access,
+          ...meta,
+        },
         update: { access },
       }),
       db().webFetchRule.deleteMany({ where: own }),
@@ -814,8 +895,8 @@ export async function setFetchRuleShared(
   await db().$transaction([
     db().webFetchRule.deleteMany({ where: forAll }),
     db().webFetchRule.upsert({
-      where: where(vaultId, tokenId, kind, key),
-      create: { id: newId(), ...own, tokenId, access, ...meta },
+      where: where(ctx, tokenId, kind, key),
+      create: { ...created, scope: tokenId, tokenId, access, ...meta },
       update: { access },
     }),
   ])
@@ -831,24 +912,26 @@ export async function addFetchSite(
   const key = normalizeSite(input.site)
   const access = fromSiteLevel(parseSiteLevel(input.level))
   const vaultId = ctx.vaultId
-  const mine = await findRule(vaultId, tokenId, "site", key)
-  const all = await findRule(vaultId, ALL_TOKENS, "site", key)
+  const mine = await findRule(ctx, tokenId, "site", key)
+  const all = await findRule(ctx, ALL_TOKENS, "site", key)
   const scope = input.shared ? ALL_TOKENS : tokenId
 
   if (input.shared ? !all && !mine : !mine) {
     await roomForOneMore(vaultId)
   }
 
+  const id = newId()
+  await sealRuleRows(ctx, "site", key)
   await db().$transaction([
     db().webFetchRule.upsert({
-      where: where(vaultId, scope, "site", key),
+      where: where(ctx, scope, "site", key),
       create: {
-        id: newId(),
+        id,
         vaultId,
         tokenId: input.shared ? null : tokenId,
         scope,
         kind: "site",
-        key,
+        ...sealedRuleKey(ctx, id, "site", key),
         access,
         addedBy: "owner",
       },
@@ -858,7 +941,12 @@ export async function addFetchSite(
     ...(input.shared
       ? [
           db().webFetchRule.deleteMany({
-            where: { vaultId, scope: tokenId, kind: "site", key },
+            where: {
+              vaultId,
+              scope: tokenId,
+              kind: "site",
+              key: { in: ruleKeys(ctx, "site", key) },
+            },
           }),
         ]
       : []),
@@ -879,8 +967,9 @@ export async function removeFetchSite(
 ): Promise<void> {
   await requireLiveToken(ctx, tokenId)
   const key = normalizeSite(site)
+  const keys = { in: ruleKeys(ctx, "site", key) }
   const own = await db().webFetchRule.deleteMany({
-    where: { vaultId: ctx.vaultId, scope: tokenId, kind: "site", key },
+    where: { vaultId: ctx.vaultId, scope: tokenId, kind: "site", key: keys },
   })
 
   if (own.count > 0) {
@@ -888,7 +977,7 @@ export async function removeFetchSite(
   }
 
   const all = await db().webFetchRule.deleteMany({
-    where: { vaultId: ctx.vaultId, scope: ALL_TOKENS, kind: "site", key },
+    where: { vaultId: ctx.vaultId, scope: ALL_TOKENS, kind: "site", key: keys },
   })
 
   if (all.count === 0) {

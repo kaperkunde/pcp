@@ -78,10 +78,9 @@ async function allowPrivateAddresses(page: Page, slug: string) {
     .filter({ has: page.getByText(slug, { exact: true }) })
     .click()
   await expect(page).toHaveURL(/\/servers\/[0-9a-f-]+$/)
-  await showServerSettings(page)
+  // On the page, outside Advanced: the switch saves as it is turned.
   await expect(page.getByLabel("Public addresses only")).toBeChecked()
   await page.getByLabel("Public addresses only").uncheck()
-  await page.getByRole("button", { name: "Save changes" }).click()
 }
 
 const PRIVATE_FLAG =
@@ -155,21 +154,22 @@ test("a tool nobody decided on asks first, through a link, even for a client tha
     arguments: { a: 19, b: 23 },
   }
 
-  const asked = await callTool(baseURL!, token, "call_tool", args)
+  const asked = await callTool(baseURL!, token, "execute_destructive", args)
   expect(asked.body.result?.isError ?? false, toolText(asked)).toBe(false)
   expect(toolText(asked)).toContain("Not done yet")
   const { path, id } = permissionFrom(toolText(asked))
   expect(callsOf("add_numbers")).toBe(0)
 
   // Asking again waits on the same request.
-  const again = await callTool(baseURL!, token, "call_tool", args)
+  const again = await callTool(baseURL!, token, "execute_destructive", args)
   expect(permissionFrom(toolText(again)).id).toBe(id)
 
   // The link comes last, on a line of its own: some apps hide what an
-  // assistant writes before its next tool call.
-  expect(toolText(asked)).toContain("End your reply with this link")
+  // assistant writes before its next tool call. A markdown link labelled
+  // with what the owner is asked, so an app reading aloud says the label.
+  expect(toolText(asked)).toContain("never paste the bare address")
   expect(toolText(asked).trim().split("\n").at(-1)).toMatch(
-    new RegExp(`${path}$`),
+    new RegExp(`^\\[Allow ${SLUG}/add_numbers\\?\\]\\(.+${path}\\)$`),
   )
 
   // The owner sees it waiting from any page: the bell has a count, and its
@@ -195,7 +195,7 @@ test("a tool nobody decided on asks first, through a link, even for a client tha
   expect(toolText(outcome)).toContain("42")
 
   // "Always allow" settled it: the next call runs at once.
-  const direct = await callTool(baseURL!, token, "call_tool", {
+  const direct = await callTool(baseURL!, token, "execute_destructive", {
     ...args,
     arguments: { a: 1, b: 1 },
   })
@@ -205,9 +205,15 @@ test("a tool nobody decided on asks first, through a link, even for a client tha
   // A client that declares prompts and panels gets the same link, and
   // check_permission started before the owner answers waits for them.
   const echo = { server: SLUG, tool: "echo_auth", arguments: {} }
-  const prompted = await mcpToolCall2026(baseURL!, token, "call_tool", echo, {
-    capabilities: PROMPTS_AND_PANELS,
-  })
+  const prompted = await mcpToolCall2026(
+    baseURL!,
+    token,
+    "execute_destructive",
+    echo,
+    {
+      capabilities: PROMPTS_AND_PANELS,
+    },
+  )
   expect(prompted.body.result?.resultType).not.toBe("input_required")
   expect(toolText(prompted)).toContain("Not done yet")
   const waited = mcpToolCall2026(
@@ -234,7 +240,7 @@ test("an assistant lists its open requests and withdraws one it no longer needs"
   page,
   baseURL,
 }) => {
-  const asked = await callTool(baseURL!, token, "call_tool", {
+  const asked = await callTool(baseURL!, token, "execute_destructive", {
     server: SLUG,
     tool: "send_postcard",
     arguments: { to: "Bob", message: "Never mind" },
@@ -278,7 +284,7 @@ test("a blocked tool is hidden from the assistant and refused; a copy of the acc
     tool: "send_postcard",
     arguments: { to: "Ada", message: "Hi" },
   }
-  const asked = await callTool(baseURL!, token, "call_tool", postcard)
+  const asked = await callTool(baseURL!, token, "execute_destructive", postcard)
   // The handle describe gave before the owner blocked the tool.
   const described = await describeForCall(
     baseURL!,
@@ -304,7 +310,7 @@ test("a blocked tool is hidden from the assistant and refused; a copy of the acc
   })
   expect(hidden.body.result?.isError).toBe(true)
 
-  const refused = await callTool(baseURL!, token, "call_tool", {
+  const refused = await callTool(baseURL!, token, "execute_destructive", {
     call_handle: handle,
     arguments: postcard.arguments,
   })
@@ -331,18 +337,23 @@ test("a blocked tool is hidden from the assistant and refused; a copy of the acc
     page.getByRole("status").filter({ hasText: "Copied." }),
   ).toBeVisible()
 
-  const echoed = await callTool(baseURL!, second, "call_tool", {
+  const echoed = await callTool(baseURL!, second, "execute_destructive", {
     server: SLUG,
     tool: "echo_auth",
     arguments: {},
   })
   expect(toolText(echoed)).toContain("[redacted]")
   expect(toolText(echoed)).not.toContain(upstream.expectedToken)
-  const secondRefused = await callTool(baseURL!, second, "call_tool", postcard)
+  const secondRefused = await callTool(
+    baseURL!,
+    second,
+    "execute_destructive",
+    postcard,
+  )
   expect(secondRefused.body.result?.isError).toBe(true)
 })
 
-test("an assistant proposes tool levels; nothing changes until you save them", async ({
+test("an assistant proposes tool levels and tiers; nothing changes until you save them", async ({
   page,
   baseURL,
 }) => {
@@ -352,10 +363,14 @@ test("an assistant proposes tool levels; nothing changes until you save them", a
     changes: [
       { server: SLUG, access: "allowed" },
       { server: SLUG, tools: ["send_*"], access: "blocked" },
+      // echo_auth only reads: a tier proposed for it, which the owner
+      // takes back on the page.
+      { server: SLUG, tools: ["echo_auth"], tier: "write" },
     ],
   })
   expect(proposed.body.result?.isError ?? false, toolText(proposed)).toBe(false)
   expect(toolText(proposed)).toContain("3 tools would change")
+  expect(toolText(proposed)).toContain(`- ${SLUG}, to Write: echo_auth`)
   const { path, id } = permissionFrom(toolText(proposed))
 
   // Asking changed nothing: the tool still asks first.
@@ -378,29 +393,35 @@ test("an assistant proposes tool levels; nothing changes until you save them", a
     }),
   ).toBeChecked()
   await expect(page.locator("li[data-changed]")).toHaveCount(3)
+  const tierOfEcho = page.getByLabel(`Tier of ${SLUG}/echo_auth`)
+  await expect(tierOfEcho).toHaveValue("write")
+  await expect(page.getByText("Tier now: Read")).toBeVisible()
 
-  // The owner takes one back before saving, while the assistant waits.
+  // The owner takes one level and the tier back before saving, while the
+  // assistant waits.
   const waited = callTool(baseURL!, proposer, "check_permission", { id })
   await chooseProposedLevel(page, SLUG, "echo_auth", "Ask you first")
+  await tierOfEcho.selectOption("default")
   await expect(page.locator("li[data-changed]")).toHaveCount(2)
   await page.getByRole("button", { name: "Save changes" }).click()
   await expect(page.getByTestId("permission-outcome")).toContainText(
-    "You saved these levels.",
+    "You saved these levels and tiers.",
   )
 
-  expect(toolText(await waited)).toContain(
-    "They did not take 1 of the 3 levels",
-  )
+  const outcome = toolText(await waited)
+  expect(outcome).toContain("They did not take 1 of the 3 levels")
+  expect(outcome).toContain("They changed no tool's tier.")
+  expect(outcome).toContain("They did not take 1 of the 1 tiers you proposed")
 
   expect(await levelOf(baseURL!, proposer, "add_numbers")).toBe("allowed")
   expect(await levelOf(baseURL!, proposer, "echo_auth")).toBe("ask")
-  const ran = await callTool(baseURL!, proposer, "call_tool", {
+  const ran = await callTool(baseURL!, proposer, "execute_destructive", {
     server: SLUG,
     tool: "add_numbers",
     arguments: { a: 2, b: 3 },
   })
   expect(toolText(ran)).toBe("5")
-  const refused = await callTool(baseURL!, proposer, "call_tool", {
+  const refused = await callTool(baseURL!, proposer, "execute_destructive", {
     server: SLUG,
     tool: "send_postcard",
     arguments: { to: "Ada", message: "Hi" },
@@ -420,7 +441,12 @@ test("Allow for lets a tool run without asking until the time is up or you end i
     arguments: { a, b },
   })
 
-  const asked = await callTool(baseURL!, assistant, "call_tool", add(4, 5))
+  const asked = await callTool(
+    baseURL!,
+    assistant,
+    "execute_destructive",
+    add(4, 5),
+  )
   expect(toolText(asked)).toContain("Not done yet")
   await page.goto(permissionFrom(toolText(asked)).path)
   await page.getByLabel("How long").selectOption({ label: "15 minutes" })
@@ -429,7 +455,9 @@ test("Allow for lets a tool run without asking until the time is up or you end i
 
   // For now it runs at once, and the tool's level is as it was.
   expect(
-    toolText(await callTool(baseURL!, assistant, "call_tool", add(1, 2))),
+    toolText(
+      await callTool(baseURL!, assistant, "execute_destructive", add(1, 2)),
+    ),
   ).toBe("3")
 
   // The owner sees it on the token's page, with the tool's level as it was,
@@ -442,7 +470,9 @@ test("Allow for lets a tool run without asking until the time is up or you end i
   await page.getByRole("button", { name: "End now" }).click()
   await expect(page.getByText("Allowed for now")).toHaveCount(0)
   expect(
-    toolText(await callTool(baseURL!, assistant, "call_tool", add(6, 7))),
+    toolText(
+      await callTool(baseURL!, assistant, "execute_destructive", add(6, 7)),
+    ),
   ).toContain("Not done yet")
 })
 
@@ -474,12 +504,21 @@ test("an assistant can propose a server with a stored secret; it is added once y
   // is not.
   await expect(page.getByText(PRIVATE_FLAG)).toBeVisible()
   expect(toolText(asked)).not.toContain("private or local")
+  // Offered, and off: left alone it reaches public addresses only.
+  await expect(page.getByLabel("Allow private addresses")).not.toBeChecked()
   await page.getByRole("button", { name: "Add server" }).click()
-  await expect(page.getByTestId("permission-outcome")).toContainText(
-    "only reaches public ones",
-  )
+  const outcome = page.getByTestId("permission-outcome")
+  await expect(outcome).toContainText("only reaches public ones")
 
-  await allowPrivateAddresses(page, `proposed-${RUN}`)
+  // The outcome links the server's page at its switch, which has the focus.
+  const link = (await outcome.innerText()).match(
+    /\((https?:\/\/[^)\s]+#public-only)\)/,
+  )
+  expect(link).not.toBeNull()
+  await page.goto(new URL(link![1]!).pathname + "#public-only")
+  await expect(page.getByLabel("Public addresses only")).toBeFocused()
+  await expect(page.getByLabel("Public addresses only")).toBeChecked()
+  await page.getByLabel("Public addresses only").uncheck()
   await expect(
     page.getByRole("status").filter({ hasText: "Saved. Found 3 tools." }),
   ).toBeVisible()
@@ -488,6 +527,36 @@ test("an assistant can propose a server with a stored secret; it is added once y
   expect(after.instructions).toContain(
     `proposed-${RUN}: Proposed by an assistant. (3 tools)`,
   )
+})
+
+test("allowing private addresses as you agree adds a proposed server that reaches them", async ({
+  page,
+  baseURL,
+}) => {
+  const name = `Proposed private ${RUN}`
+
+  const asked = await callTool(baseURL!, token, "register_server", {
+    name,
+    url: upstream.mcpUrl,
+    auth_type: "header",
+    secret: SECRET_NAME,
+  })
+  const { path } = permissionFrom(toolText(asked))
+
+  await page.goto(path)
+  await expect(page.getByText(PRIVATE_FLAG)).toBeVisible()
+  await page.getByLabel("Allow private addresses").check()
+  await page.getByRole("button", { name: "Add server" }).click()
+  await expect(page.getByTestId("permission-outcome")).toContainText(
+    "with 3 tools",
+  )
+
+  await page.goto("/servers")
+  await page
+    .getByRole("link")
+    .filter({ has: page.getByText(`proposed-private-${RUN}`, { exact: true }) })
+    .click()
+  await expect(page.getByLabel("Public addresses only")).not.toBeChecked()
 })
 
 test("an assistant can propose a server with a secret you do not have yet; you type it in PCP", async ({
@@ -559,7 +628,10 @@ test("an OAuth server an assistant proposes is connected through a link", async 
   // Added, and the assistant is told how to get it connected.
   const added = await agreed
   expect(toolText(added)).toContain("needs connecting")
-  expect(added.body.result?.structuredContent?.kind).toBe("connect")
+  expect(added.body.result?.structuredContent).toMatchObject({
+    kind: "needs_owner",
+    reason: "connect",
+  })
   const connect = added.body.result!.structuredContent!.connect!
   expect(toolText(added)).toContain(`/servers/${connect.serverId}`)
   expect(connect.startUrl).toContain(
@@ -587,7 +659,7 @@ test("an OAuth server an assistant proposes is connected through a link", async 
   ).toMatchObject({ connected: true, toolCount: 3 })
 
   // Its tools ask first, like any other.
-  const call = await callTool(baseURL!, token, "call_tool", {
+  const call = await callTool(baseURL!, token, "execute_destructive", {
     server: connect.slug,
     tool: "echo_auth",
     arguments: {},
@@ -608,7 +680,7 @@ test("answering a request takes you to the next one waiting, oldest first, until
   const ask = async (tool: string, args: Record<string, unknown>) =>
     permissionFrom(
       toolText(
-        await callTool(baseURL!, walker, "call_tool", {
+        await callTool(baseURL!, walker, "execute_destructive", {
           server: SLUG,
           tool,
           arguments: args,

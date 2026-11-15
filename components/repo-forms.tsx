@@ -5,24 +5,25 @@ import { useRouter } from "next/navigation"
 import { useActionState, useEffect, useState, useTransition } from "react"
 
 import { useAnswer } from "@/components/answer-queue"
-import { FormError, FormNote } from "@/components/form-status"
+import { FormError, FormNote } from "@kaperkunde/ui/form-status"
 import { ChoiceField } from "@/components/server-form-parts"
-import { SubmitButton } from "@/components/submit-button"
-import { Button } from "@/components/ui/button"
+import { SubmitButton } from "@kaperkunde/ui/submit-button"
+import { Button } from "@kaperkunde/ui/button"
 import {
   Dialog,
   DialogContent,
   DialogDescription,
   DialogTitle,
   DialogTrigger,
-} from "@/components/ui/dialog"
-import { Input, Select } from "@/components/ui/input"
-import { Field } from "@/components/ui/label"
-import { Switch } from "@/components/ui/switch"
+} from "@kaperkunde/ui/dialog"
+import { Input, Select } from "@kaperkunde/ui/input"
+import { Field } from "@kaperkunde/ui/label"
+import { Switch } from "@kaperkunde/ui/switch"
 import {
   addItemsAction,
   answerChangeAction,
   createRepoAction,
+  addCommonRepoAction,
   deleteRepoAction,
   pollGitHubSignInAction,
   setExcludedAction,
@@ -490,6 +491,27 @@ function ActionButton({
   )
 }
 
+/**
+ * One click for PCP's common items: linked read-only, then browsed, or back
+ * to the capability's page it was offered on.
+ */
+export function AddCommonRepoButton({
+  forCapability,
+  variant = "secondary",
+}: {
+  forCapability?: string
+  variant?: "secondary" | "default"
+} = {}) {
+  return (
+    <ActionButton
+      label="Add PCP's common items"
+      pendingLabel="Adding…"
+      variant={variant}
+      run={() => addCommonRepoAction(forCapability)}
+    />
+  )
+}
+
 export function SyncRepoButton({ repoId }: { repoId: string }) {
   return (
     <ActionButton
@@ -670,11 +692,14 @@ export function ChangeAnswer({
   itemId,
   sha,
   hash,
+  flags,
   conflict,
 }: {
   itemId: string
   sha: string
   hash: string
+  /** How many things that reach further the page showed. */
+  flags: number
   conflict: boolean
 }) {
   // The same way through as a request's answer (components/answer-queue.tsx):
@@ -685,7 +710,11 @@ export function ChangeAnswer({
   )
   const answer = (choice: "approve" | "decline" | "keep") =>
     submit(async () => {
-      const result = await answerChangeAction(itemId, choice, { sha, hash })
+      const result = await answerChangeAction(itemId, choice, {
+        sha,
+        hash,
+        flags,
+      })
 
       return result.status === "ok"
         ? {

@@ -7,7 +7,8 @@ import type { AuthType } from "./servers"
  * that made the call: they say what to pass instead.
  */
 
-export type RegisterKind = "mcp" | "api" | "jmap" | "imap" | "caldav"
+export type RegisterKind =
+  "mcp" | "api" | "jmap" | "imap" | "caldav" | "service"
 
 export type MailProtocol = Extract<RegisterKind, "jmap" | "imap">
 
@@ -52,7 +53,22 @@ export type RegisterShape = {
   description?: string
   /** Another server of a definition the token sees, by a short name. */
   definition?: string
+  /** kind service: its definition, the SSH server, where it is published, its secrets. */
+  service?: unknown
+  ssh_server?: string
+  publish_address?: string
+  publish_ports?: unknown[]
+  env_secrets?: unknown[]
 }
+
+/** The arguments only a service takes. */
+const SERVICE_ARGS = [
+  "service",
+  "ssh_server",
+  "publish_address",
+  "publish_ports",
+  "env_secrets",
+] as const
 
 export function isMailRegistrationKind(
   kind: RegisterKind,
@@ -62,11 +78,15 @@ export function isMailRegistrationKind(
 
 /**
  * The kind a call is for: the one named, else that of the definition it is
- * made on (an API's or an MCP server's), else an API when it brings an
- * OpenAPI document, else an MCP server, as register_server always did.
+ * made on (an API's, an MCP server's or a service's), else a service when
+ * it brings a service's definition, else an API when it brings an OpenAPI
+ * document, else an MCP server, as register_server always did.
  */
 export function resolveKind(
-  args: Pick<RegisterShape, "kind" | "openapi_schema" | "openapi_url">,
+  args: Pick<
+    RegisterShape,
+    "kind" | "openapi_schema" | "openapi_url" | "service"
+  >,
   definitionKind?: string | null,
 ): RegisterKind {
   if (args.kind) {
@@ -74,7 +94,15 @@ export function resolveKind(
   }
 
   if (definitionKind) {
-    return definitionKind === "openapi" ? "api" : "mcp"
+    return definitionKind === "openapi"
+      ? "api"
+      : definitionKind === "service"
+        ? "service"
+        : "mcp"
+  }
+
+  if (args.service !== undefined) {
+    return "service"
   }
 
   return args.openapi_schema !== undefined || args.openapi_url !== undefined
@@ -88,9 +116,10 @@ const NOUN: Record<RegisterKind, string> = {
   jmap: "a JMAP mail account",
   imap: "an IMAP mail account",
   caldav: "a calendar account",
+  service: "a service",
 }
 
-const MISSING_URL: Record<Exclude<RegisterKind, "api">, string> = {
+const MISSING_URL: Record<Exclude<RegisterKind, "api" | "service">, string> = {
   mcp: "An MCP server needs its address in url. To add an API instead, pass its OpenAPI document in openapi_schema, or its address in openapi_url; for a mailbox, pass kind jmap or imap; for calendars and reminders, kind caldav.",
   jmap: "A JMAP mail account needs its server in url, like https://mail.example.com (PCP finds the session at /.well-known/jmap), or the full session URL.",
   imap: "An IMAP mail account needs its server in url, like mail.example.com, imaps://mail.example.com:993, or imap://mail.example.com:143 for STARTTLS.",
@@ -118,6 +147,20 @@ export function checkRegisterShape(
     }
   }
 
+  if (kind !== "service") {
+    const given = SERVICE_ARGS.filter((key) => args[key] !== undefined)
+
+    if (given.length > 0) {
+      return `${given.join(", ")} ${given.length === 1 ? "is" : "are"} for kind service; ${NOUN[kind]} takes none of them.`
+    }
+  } else {
+    const refused = checkServiceShape(args)
+
+    if (refused) {
+      return refused
+    }
+  }
+
   if (
     kind !== "api" &&
     (args.openapi_schema !== undefined ||
@@ -125,6 +168,10 @@ export function checkRegisterShape(
       args.spec_patches !== undefined)
   ) {
     return `openapi_schema, openapi_url and spec_patches are for kind api; ${NOUN[kind]} takes none of them.`
+  }
+
+  if (kind === "service") {
+    return null
   }
 
   if (kind === "api") {
@@ -231,8 +278,20 @@ function checkDefinitionShape(
   kind: RegisterKind,
   args: RegisterShape,
 ): string | null {
+  if (kind === "service") {
+    if (args.service !== undefined) {
+      return "With definition, what the service runs is the definition's: leave service out, and pass only this one's name, ssh_server, publish_address, publish_ports, env_secrets and note."
+    }
+
+    if (args.description !== undefined) {
+      return "With definition, the description is the definition's: leave description out, and put what is particular to this service in note."
+    }
+
+    return null
+  }
+
   if (kind !== "mcp" && kind !== "api") {
-    return "definition is for an MCP server or an API (kind mcp or api): a mail or calendar account is not another server of anything."
+    return "definition is for an MCP server, an API or a service (kind mcp, api or service): a mail or calendar account is not another server of anything."
   }
 
   if (
@@ -251,6 +310,51 @@ function checkDefinitionShape(
     return kind === "api"
       ? "With definition, pass the base URL this server's requests go to in url: each server of a definition has an address of its own."
       : "With definition, pass this server's address in url: each server of a definition has an address of its own."
+  }
+
+  return null
+}
+
+/**
+ * A service an assistant proposes runs on one of the owner's SSH servers
+ * from a definition (or on a definition it sees): it has no address of its
+ * own and signs in to nothing, so the arguments of the other kinds are not
+ * its. Its variables take secrets by name in env_secrets.
+ */
+function checkServiceShape(args: RegisterShape): string | null {
+  const others = (
+    [
+      "url",
+      "openapi_schema",
+      "openapi_url",
+      "spec_patches",
+      "read_only",
+      "secret",
+      "username",
+      "smtp_url",
+      "mail_from",
+      "header_name",
+      "value_template",
+      "extra_headers",
+      "client_id",
+      "oauth_scope",
+    ] as const
+  ).filter((key) => args[key] !== undefined)
+
+  if (others.length > 0) {
+    return `A service takes none of ${others.join(", ")}: it runs on one of the owner's SSH servers (ssh_server), is published there (publish_address, publish_ports) and its variables take secrets by name (env_secrets).`
+  }
+
+  if ((args.auth_type ?? "none") !== "none") {
+    return "A service signs in to nothing: leave auth_type out. A secret it needs goes to one of its variables, by name, in env_secrets."
+  }
+
+  if (args.definition === undefined && args.service === undefined) {
+    return "A service is proposed from its definition in service (the image pinned by digest, ports, variables, volumes, health check and what it registers), or as another of a service you see, by its short name in definition."
+  }
+
+  if (!args.ssh_server?.trim()) {
+    return "A service runs on one of the owner's SSH servers: pass its short name in ssh_server."
   }
 
   return null

@@ -8,8 +8,14 @@
 // a server on 0.0.0.0 resets it. A kernel without IPv6 cannot listen on ::
 // at all, and Next.js exits when the listen fails, so there it falls back
 // to 0.0.0.0. Any other HOSTNAME is the owner's and is left alone.
+//
+// It also stamps each request with the address that connected (x-pcp-peer),
+// which the app reads to know a proxy from a client.
 
+const http = require("node:http")
 const net = require("node:net")
+
+const { install } = require("./peer-stamp.cjs")
 
 /** The address to listen on, given HOSTNAME and whether :: can be bound. */
 function listenHost(hostname, ipv6) {
@@ -28,6 +34,9 @@ async function start() {
   if (process.env.HOSTNAME === "::") {
     process.env.HOSTNAME = listenHost("::", await canListenOnIPv6())
   }
+  // Before Next creates its server: every request is stamped with the address
+  // that connected (docker/peer-stamp.cjs).
+  install(http)
   require("./server.js")
 }
 

@@ -209,9 +209,10 @@ describe("generateTools", () => {
     })
   })
 
-  it("annotates by method", () => {
+  it("annotates by method, both hints stated: GET reads, POST writes, DELETE destroys", () => {
     expect(byName.listPets!.annotations).toMatchObject({
       readOnlyHint: true,
+      destructiveHint: false,
       idempotentHint: true,
       openWorldHint: true,
       title: "List pets",
@@ -220,7 +221,10 @@ describe("generateTools", () => {
       readOnlyHint: false,
       destructiveHint: true,
     })
-    expect(byName.createPet!.annotations.destructiveHint).toBeUndefined()
+    expect(byName.createPet!.annotations).toMatchObject({
+      readOnlyHint: false,
+      destructiveHint: false,
+    })
     expect(byName.createPet!.annotations.idempotentHint).toBeUndefined()
   })
 
@@ -478,6 +482,38 @@ describe("unsupported features", () => {
     })
     expect(required.tools).toEqual([])
     expect(required.skipped[0]!.reason).toBe("it needs a file upload")
+  })
+
+  it("names the file answers in the plan and says describe answers a file handle", () => {
+    const { tools } = one({
+      responses: {
+        "200": {
+          description: "The export",
+          content: {
+            "application/pdf": {},
+            "text/csv": { schema: { type: "string", format: "binary" } },
+            "text/plain": { schema: { type: "string" } },
+            "*/*": {},
+          },
+        },
+      },
+    })
+
+    expect(tools[0]!.operation.fileAnswers).toEqual([
+      "application/pdf",
+      "text/csv",
+    ])
+    expect(tools[0]!.output).toMatch(/^\{file: \{\$result: string/)
+
+    const plain = one({
+      responses: {
+        "200": {
+          description: "ok",
+          content: { "application/json": { schema: { type: "object" } } },
+        },
+      },
+    })
+    expect(plain.tools[0]!.operation.fileAnswers).toBeUndefined()
   })
 
   it("takes a binary body as one kept file", () => {
@@ -1129,5 +1165,63 @@ describe("what one endpoint's tools may add up to", () => {
       0,
     )
     expect(bytes).toBeLessThanOrEqual(4_000_000)
+  })
+})
+
+describe("JSON Schema 2020-12 in what a tool takes", () => {
+  it("writes a tuple in a body as prefixItems, which 2020-12 has in place of an items list", () => {
+    const generated = generateTools(
+      parseSpecText(
+        JSON.stringify({
+          openapi: "3.1.0",
+          info: { title: "Points", version: "1" },
+          servers: [{ url: "https://points.example.com" }],
+          paths: {
+            "/points": {
+              post: {
+                operationId: "addPoint",
+                requestBody: {
+                  required: true,
+                  content: {
+                    "application/json": {
+                      schema: {
+                        type: "object",
+                        properties: {
+                          at: {
+                            type: "array",
+                            items: [{ type: "number" }, { type: "number" }],
+                            additionalItems: false,
+                          },
+                        },
+                      },
+                    },
+                  },
+                },
+                responses: { "204": { description: "Added" } },
+              },
+            },
+          },
+        }),
+      ),
+      OPTIONS,
+    )
+
+    expect(generated.tools[0]!.inputSchema).toMatchObject({
+      additionalProperties: false,
+      properties: {
+        body: {
+          properties: {
+            at: {
+              type: "array",
+              prefixItems: [{ type: "number" }, { type: "number" }],
+              items: false,
+            },
+          },
+        },
+      },
+    })
+    expect(JSON.stringify(generated.tools[0]!.inputSchema)).not.toContain(
+      '"items":[',
+    )
   })
 })

@@ -19,6 +19,19 @@ import { PROXY_CONNECT_TIMEOUT_MS } from "./limits"
  * with an absolute URL. Nothing is decrypted, rewritten or logged: which
  * hosts the browser reached stays out of PCP's logs, as web_fetch's sites
  * do.
+ *
+ * A tab that goes through an exit (lib/core/exits/) has a context of its
+ * own whose proxy is one of these with `connect`: there the exit looks the
+ * name up and checks every address from its own side, and the connection
+ * leaves from the exit. Each exit's context has its own proxy, since a
+ * proxy cannot tell tabs apart.
+ *
+ * While a tab runs an assistant's script (evaluate.ts), `admit` holds a
+ * new connection to any other site until the script is done, and then
+ * refuses the ones the script reached for (a WebSocket, which DevTools'
+ * request interception does not see): since a proxy cannot tell tabs
+ * apart, another tab's new connection elsewhere waits those few seconds
+ * too, and then goes on.
  */
 
 /** Why an address was refused, or "ok". */
@@ -109,11 +122,51 @@ function parseAuthority(
   }
 }
 
+/** A refusal from `connect`: the verdict it carries, if it is one. */
+function refusalOf(error: unknown): Refused | null {
+  if (error instanceof Refused) return error
+  const verdict = (error as { verdict?: unknown } | null)?.verdict
+  // An exit's link-local and metadata addresses are refused for every
+  // token, as its own are.
+  return verdict === "private" || verdict === "own"
+    ? new Refused(verdict)
+    : verdict === "local"
+      ? new Refused("own")
+      : null
+}
+
+/**
+ * Whether a connection to a host may go: true at once for most, or a
+ * promise held while a tab runs a script (runtime.ts admitConnection).
+ */
+export type ConnectionAdmit = (
+  /** The site as siteKey writes it: the host, and a port but 80 and 443. */
+  site: string,
+) => boolean | Promise<boolean>
+
+/** A host and port the browser dials, as the site siteKey would name. */
+export function siteOfAuthority(host: string, port: number): string {
+  const name = bare(host).toLowerCase().replace(/\.$/, "")
+  const shown = name.includes(":") ? `[${name}]` : name
+  return port === 80 || port === 443 ? shown : `${shown}:${port}`
+}
+
 export async function startBrowserProxy({
   check,
+  connect,
+  admit,
 }: {
   /** Decides each address as the browser is about to connect to it. */
   check: AddressCheck
+  /**
+   * Dials somewhere else than from PCP's machine (an exit): resolves the
+   * name, checks every address and connects, all on the exit's side. An
+   * error with a `verdict` of "private", "own" or "local" is a refusal. Replaces
+   * `check` and PCP's own lookup.
+   */
+  connect?: (host: string, port: number) => Promise<Duplex>
+  /** Holds or refuses a connection while a tab runs a script. */
+  admit?: ConnectionAdmit
 }): Promise<BrowserProxy> {
   const sockets = new Set<Duplex>()
   const refusals = new Map<
@@ -127,9 +180,11 @@ export async function startBrowserProxy({
   }
 
   const remember = (host: string, error: unknown) => {
-    if (error instanceof Refused) {
+    const refused = refusalOf(error)
+
+    if (refused) {
       refusals.set(bare(host).toLowerCase(), {
-        verdict: error.verdict,
+        verdict: refused.verdict,
         at: Date.now(),
       })
 
@@ -139,7 +194,43 @@ export async function startBrowserProxy({
     }
   }
 
+  /** Runs `go` once the host is admitted, `refuse` if it is not. */
+  const whenAdmitted = (
+    site: string,
+    go: () => void,
+    refuse: () => void,
+  ): void => {
+    const verdict = admit ? admit(site) : true
+
+    if (verdict === true) {
+      go()
+      return
+    }
+
+    void Promise.resolve(verdict)
+      .catch(() => false)
+      .then((admitted) => (admitted ? go() : refuse()))
+  }
+
   const server = http.createServer((req, res) => {
+    whenAdmitted(
+      (() => {
+        try {
+          const url = new URL(req.url ?? "")
+          return siteOfAuthority(url.hostname, Number(url.port || 80))
+        } catch {
+          return ""
+        }
+      })(),
+      () => forward(req, res),
+      () => {
+        if (!res.headersSent) res.writeHead(403)
+        res.end()
+      },
+    )
+  })
+
+  const forward = (req: http.IncomingMessage, res: http.ServerResponse) => {
     let target: URL
 
     try {
@@ -155,6 +246,44 @@ export async function startBrowserProxy({
     }
 
     const port = Number(target.port || 80)
+
+    if (connect) {
+      const headers = { ...req.headers }
+      delete headers["proxy-connection"]
+      delete headers["proxy-authorization"]
+
+      const upstream = http.request({
+        host: bare(target.hostname),
+        port,
+        method: req.method,
+        path: `${target.pathname}${target.search}`,
+        headers,
+        setHost: false,
+        timeout: PROXY_CONNECT_TIMEOUT_MS,
+        createConnection: (_options, callback) => {
+          connect(target.hostname, port).then(
+            (socket) => callback(null, socket as net.Socket),
+            (error: Error) => {
+              remember(target.hostname, error)
+              callback(error, undefined as unknown as net.Socket)
+            },
+          )
+          return undefined
+        },
+      })
+
+      upstream.on("response", (answer) => {
+        res.writeHead(answer.statusCode ?? 502, answer.rawHeaders)
+        answer.pipe(res)
+      })
+      upstream.on("timeout", () => upstream.destroy(new Error("timeout")))
+      upstream.on("error", (error) => {
+        if (!res.headersSent) res.writeHead(refusalOf(error) ? 403 : 502)
+        res.end()
+      })
+      req.pipe(upstream)
+      return
+    }
 
     resolveChecked(target.hostname, port, check).then(
       (address) => {
@@ -189,7 +318,7 @@ export async function startBrowserProxy({
         res.writeHead(error instanceof Refused ? 403 : 502).end()
       },
     )
-  })
+  }
 
   server.on("connect", (req, client: Duplex, head: Buffer) => {
     track(client)
@@ -198,6 +327,66 @@ export async function startBrowserProxy({
 
     if (!authority) {
       client.end("HTTP/1.1 400 Bad Request\r\n\r\n")
+      return
+    }
+
+    whenAdmitted(
+      siteOfAuthority(authority.host, authority.port),
+      () => {
+        // Gone while it was held (its page closed): nothing to open.
+        if (!client.destroyed) tunnel(client, authority, head)
+      },
+      () => client.end("HTTP/1.1 403 Forbidden\r\n\r\n"),
+    )
+  })
+
+  const tunnel = (
+    client: Duplex,
+    authority: { host: string; port: number },
+    head: Buffer,
+  ) => {
+    if (connect) {
+      let settled = false
+      const timer = setTimeout(() => {
+        if (settled) return
+        settled = true
+        client.end("HTTP/1.1 504 Gateway Timeout\r\n\r\n")
+      }, PROXY_CONNECT_TIMEOUT_MS)
+
+      connect(authority.host, authority.port).then(
+        (upstream) => {
+          clearTimeout(timer)
+
+          if (settled || client.destroyed) {
+            upstream.destroy()
+            return
+          }
+
+          settled = true
+          track(upstream)
+          upstream.on("error", () => client.destroy())
+          client.on("close", () => upstream.destroy())
+          client.write("HTTP/1.1 200 Connection Established\r\n\r\n")
+
+          if (head.length > 0) {
+            upstream.write(head)
+          }
+
+          upstream.pipe(client)
+          client.pipe(upstream)
+        },
+        (error) => {
+          clearTimeout(timer)
+          remember(authority.host, error)
+          if (settled) return
+          settled = true
+          client.end(
+            refusalOf(error)
+              ? "HTTP/1.1 403 Forbidden\r\n\r\n"
+              : "HTTP/1.1 502 Bad Gateway\r\n\r\n",
+          )
+        },
+      )
       return
     }
 
@@ -238,7 +427,7 @@ export async function startBrowserProxy({
         )
       },
     )
-  })
+  }
 
   server.on("connection", (socket) => track(socket))
   server.on("clientError", (_error, socket) => socket.destroy())

@@ -8,6 +8,9 @@ import { findBrowserServer } from "@/lib/core/browser/server"
 import { listOwnerNotices } from "@/lib/core/owner-notices"
 import { listPendingRequests } from "@/lib/core/permissions"
 import { runDueSyncs } from "@/lib/core/repos/sync"
+import { ensureSealed } from "@/lib/core/sealing/convert"
+import { catchUpVault } from "@/lib/core/vault-upkeep"
+import { deliverUploads, reconcileServices } from "@/lib/core/upstream"
 import { availableUpdate } from "@/lib/core/updates/state"
 import { getVault } from "@/lib/core/vault"
 import { PCP_VERSION } from "@/lib/core/version"
@@ -27,9 +30,10 @@ export default async function DashboardLayout({
   children: ReactNode
 }) {
   const { ctx } = await requireSession()
+  const publicUrl = await publicUrlFor(ctx)
   const [vault, pending, notices, update, browser] = await Promise.all([
     getVault(ctx.vaultId),
-    publicUrlFor(ctx).then((publicUrl) => listPendingRequests(ctx, publicUrl)),
+    listPendingRequests(ctx, publicUrl),
     listOwnerNotices(ctx),
     availableUpdate(),
     findBrowserServer(ctx),
@@ -38,6 +42,26 @@ export default async function DashboardLayout({
   // Linked repositories due a sync are synced once this page is sent, with
   // the key the owner's session brought: nothing holds one in between.
   after(() => runDueSyncs(ctx))
+  // What an older PCP kept in plain text is sealed, a batch at a time;
+  // and what once ran at boot (endpoints another version built, the
+  // browser's tools) runs once per process, now that a key is here.
+  after(() =>
+    Promise.all([
+      ensureSealed(ctx).catch((error) =>
+        console.error("[sealing] could not seal the vault's rows", error),
+      ),
+      catchUpVault(ctx),
+    ]),
+  )
+  // Services you left running whose container stopped (the SSH server
+  // restarted) are started again the same way, throttled.
+  after(() => reconcileServices(ctx, { publicUrl }))
+  // Files an assistant's upload link took for a store are saved there.
+  after(() =>
+    deliverUploads(ctx, { publicUrl }).catch((error) =>
+      console.error("[uploads] saving into a store failed", error),
+    ),
+  )
 
   return (
     <OwnerQueueProvider
@@ -50,7 +74,7 @@ export default async function DashboardLayout({
         notices,
       }}
     >
-      <div className="flex min-h-screen flex-col md:flex-row">
+      <div className="flex min-h-dvh flex-col md:flex-row">
         <AppSidebar
           vaultName={vault.name}
           version={PCP_VERSION}

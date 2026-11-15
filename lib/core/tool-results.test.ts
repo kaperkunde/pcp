@@ -19,6 +19,7 @@ import {
   RESULT_TTL_MS,
   resultKeeper,
   resultNotices,
+  resultName,
 } from "./tool-results"
 import { scratchDatabase } from "./test-db"
 import {
@@ -70,6 +71,34 @@ function textOf(result: CallToolResult): string {
     .map((part) => (part.type === "text" ? part.text : ""))
     .join("")
 }
+
+describe("the tool a result came from", () => {
+  it("is sealed in the row, and read back, also from a row from before", async () => {
+    const kept = await keepResult(ctx, {
+      tokenId,
+      serverId: null,
+      toolName: "fetch_marker_tool",
+      text: "an answer",
+      mediaType: "text/plain",
+    })
+
+    const [row] = await db().$queryRawUnsafe<Array<{ tool_name: string }>>(
+      `SELECT "tool_name" FROM "tool_result"`,
+    )
+    expect(row!.tool_name).not.toContain("fetch_marker_tool")
+    expect(await describeResults(ctx, tokenId, [kept.id])).toMatchObject([
+      { found: true, toolName: "fetch_marker_tool" },
+    ])
+
+    await db().toolResult.update({
+      where: { id: kept.id },
+      data: { toolName: "plain_from_before" },
+    })
+    expect(await describeResults(ctx, tokenId, [kept.id])).toMatchObject([
+      { found: true, toolName: "plain_from_before" },
+    ])
+  })
+})
 
 describe("keeping and reading", () => {
   it("reads back exactly what was kept, a slice at a time", async () => {
@@ -369,7 +398,8 @@ describe("keeping a file", () => {
       where: { id: kept.id },
     })
 
-    expect(row).toMatchObject({ kind: "bytes", name: "dot.png" })
+    expect(row).toMatchObject({ kind: "bytes", plainName: null })
+    expect(resultName(ctx, row)).toBe("dot.png")
     expect(Buffer.from(row.ciphertext).includes(PNG)).toBe(false)
 
     const opened = await openResult(ctx, { tokenId, id: kept.id })

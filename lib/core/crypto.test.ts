@@ -1,3 +1,5 @@
+import { createHmac, hkdfSync } from "node:crypto"
+
 import { describe, expect, it, vi } from "vitest"
 
 import {
@@ -8,15 +10,18 @@ import {
   encrypt,
   encryptString,
   generateDek,
+  keyedHash,
+  labelKey,
   newHkdfParams,
   newScryptParams,
   parseKdfParams,
   randomSecret,
-  safeEqual,
   sha256Hex,
   unwrapDek,
   wrapDek,
 } from "./crypto"
+import { vectorHash } from "./embeddings"
+import { targetKey } from "./permission-fold"
 
 describe("envelope encryption", () => {
   it("round-trips a value under the data key", () => {
@@ -112,18 +117,51 @@ describe("key grants", () => {
 })
 
 describe("helpers", () => {
-  it("hashes and compares in constant time", () => {
+  it("hashes", () => {
     expect(sha256Hex("abc")).toBe(
       "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
     )
-    expect(safeEqual("a", "a")).toBe(true)
-    expect(safeEqual("a", "b")).toBe(false)
-    expect(safeEqual("a", "ab")).toBe(false)
   })
 
   it("makes URL-safe secrets with 256 bits of entropy", () => {
     const secret = randomSecret()
     expect(secret).toMatch(/^[A-Za-z0-9_-]{43}$/)
     expect(randomSecret()).not.toBe(secret)
+  })
+
+  describe("keyed hashes", () => {
+    const dek = Buffer.alloc(32, 7)
+
+    it("derives a label's key by HKDF of the vault key", () => {
+      expect(labelKey(dek, "pcp call handle v1")).toEqual(
+        Buffer.from(
+          hkdfSync("sha256", dek, Buffer.alloc(0), "pcp call handle v1", 32),
+        ),
+      )
+      expect(labelKey(dek, "a")).not.toEqual(labelKey(dek, "b"))
+    })
+
+    it("is HMAC-SHA256 under the label's key, in hex", () => {
+      const key = Buffer.from(
+        hkdfSync("sha256", dek, Buffer.alloc(0), "some label", 32),
+      )
+
+      expect(keyedHash(dek, "some label", "text")).toBe(
+        createHmac("sha256", key).update("text").digest("hex"),
+      )
+      expect(keyedHash(generateDek(), "some label", "text")).not.toBe(
+        keyedHash(dek, "some label", "text"),
+      )
+    })
+
+    // Pinned from before the helper: rows and handles made then still match.
+    it("leaves the hashes stored before it unchanged", () => {
+      expect(targetKey(dek, "skill:abc")).toBe(
+        "5f30ce852183c8984d74049c910eada3b0c685fed050db8ee778c6172fb98fd4",
+      )
+      expect(
+        vectorHash(labelKey(dek, "pcp embedding vector hash v1"), "fp", "text"),
+      ).toBe("9353cd4da621205047080fb28753617c111f279bdb3657006ff878c35b7bb8b0")
+    })
   })
 })

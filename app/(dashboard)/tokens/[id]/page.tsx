@@ -1,8 +1,8 @@
 import type { Metadata } from "next"
 
 import { LocalDate, RelativeDate } from "@/components/local-date"
-import { PageColumn } from "@/components/page-column"
-import { PageHeader } from "@/components/page-header"
+import { PageColumn } from "@kaperkunde/ui/page"
+import { PageHeader } from "@kaperkunde/ui/page"
 import { TokenAvatar } from "@/components/token-avatar"
 import {
   TokenAllowances,
@@ -11,14 +11,16 @@ import {
   TokenReachForm,
   TokenWaiting,
 } from "@/components/token-detail"
+import { TokenScriptSites } from "@/components/token-scripts"
 import { TokenSkillsForm } from "@/components/token-skills"
 import { TokenTools } from "@/components/token-tools"
-import { Badge } from "@/components/ui/badge"
-import { ButtonLink } from "@/components/ui/button"
-import { List, ListRow } from "@/components/ui/list"
+import { Badge } from "@kaperkunde/ui/badge"
+import { ButtonLink } from "@kaperkunde/ui/button"
+import { List, ListRow } from "@kaperkunde/ui/list"
 import { listTokenAllowances } from "@/lib/core/allowances"
+import { listScriptSites } from "@/lib/core/browser-scripts"
 import { listOpenPermissions } from "@/lib/core/permissions"
-import { listSkills, tokenSkills } from "@/lib/core/skills"
+import { listSharedSkills, tokenSkills } from "@/lib/core/skills"
 import { listTokenToolAccess } from "@/lib/core/tool-access"
 import { listFetchRules } from "@/lib/core/web-fetch"
 import { publicUrlFor } from "@/lib/server/public-url"
@@ -46,14 +48,15 @@ export default async function TokenPage({
     id,
   )
   const publicUrl = await publicUrlFor(ctx)
-  const [access, waiting, allowances, fetchRules, skills, seen] =
+  const [access, waiting, allowances, fetchRules, skills, seen, scripts] =
     await Promise.all([
       listTokenToolAccess(ctx, id),
       listOpenPermissions(ctx, id, publicUrl),
       listTokenAllowances(ctx, id),
       token.webFetch || browser ? listFetchRules(ctx, id) : null,
-      listSkills(ctx),
+      listSharedSkills(ctx),
       tokenSkills(ctx, id),
+      browser ? listScriptSites(ctx, id) : [],
     ])
   const advanced = `/tokens/${id}/advanced`
 
@@ -120,7 +123,17 @@ export default async function TokenPage({
                     ? "Review the change"
                     : request.kind === "repo_share"
                       ? "Review the push"
-                      : null,
+                      : request.kind === "secret_sites_change"
+                        ? "Review the sites"
+                        : // Its levels and tiers are set beside the approval.
+                          request.proposedAccess
+                          ? "Review levels and decide"
+                          : null,
+            revision: request.revision,
+            conflicts: request.conflicts.map(({ id, tokenName }) => ({
+              id,
+              tokenName,
+            })),
             title: request.title,
             lines: request.lines,
             full: request.full,
@@ -134,6 +147,7 @@ export default async function TokenPage({
               request.kind === "memory_share" && request.memory
                 ? { asked: request.memory.always }
                 : null,
+            privateAddresses: request.offersPrivateAddresses,
           }))}
         />
       ) : null}
@@ -150,6 +164,10 @@ export default async function TokenPage({
               : { ...allowance, until: allowance.until.toISOString() },
           )}
         />
+      ) : null}
+
+      {scripts.length > 0 ? (
+        <TokenScriptSites tokenId={id} sites={scripts} />
       ) : null}
 
       <TokenReachForm

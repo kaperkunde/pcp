@@ -1,5 +1,3 @@
-import type { McpServer } from "@/lib/generated/prisma/client"
-
 import {
   DEFAULT_HEADER_NAME,
   DEFAULT_VALUE_TEMPLATE,
@@ -18,7 +16,25 @@ import {
 } from "./definition-rows"
 import { invalid, notFound, PcpError } from "./errors"
 import { newId } from "./ids"
+import { closeSshConnections } from "./ssh/client"
 import { normalizeAuthorizeParams } from "./oauth-client"
+import {
+  byServerName,
+  findServerBySlug,
+  openServer,
+  openServers,
+  type OpenServer,
+  serverCreateData,
+  serverSlugTaken,
+  updateServerRow,
+  writeServer,
+} from "./server-meta"
+import {
+  openTools,
+  sealedToolOverride,
+  byToolName,
+  toolNameWhere,
+} from "./tool-rows"
 import {
   checkNewSecret,
   createSecret,
@@ -33,7 +49,8 @@ import {
  * authenticated to. A server is an MCP server, an API endpoint (kind
  * "openapi", lib/core/endpoints.ts), a mail account (kinds "jmap" and
  * "imap", lib/core/mail/), a calendar account (kind "caldav",
- * lib/core/caldav/) or an SSH server (kind "ssh", lib/core/ssh/).
+ * lib/core/caldav/), an SSH server (kind "ssh", lib/core/ssh/) or a storage
+ * root, a folder on an SSH server (kind "storage", lib/core/storage/).
  * Talking to them is lib/core/upstream.ts.
  */
 
@@ -47,7 +64,16 @@ export type AuthType = "none" | "header" | "oauth" | "basic"
 export type StoredAuthType = AuthType | "key"
 
 export type ServerKind =
-  "mcp" | "openapi" | "jmap" | "imap" | "caldav" | "ssh" | "browser" | "wrapper"
+  | "mcp"
+  | "openapi"
+  | "jmap"
+  | "imap"
+  | "caldav"
+  | "ssh"
+  | "browser"
+  | "wrapper"
+  | "service"
+  | "storage"
 
 export type MailKind = Extract<ServerKind, "jmap" | "imap">
 
@@ -60,6 +86,8 @@ const SERVER_KINDS: readonly ServerKind[] = [
   "ssh",
   "browser",
   "wrapper",
+  "service",
+  "storage",
 ]
 
 /**
@@ -84,6 +112,17 @@ export function isBrowserKind(kind: string): kind is "browser" {
   return kind === "browser"
 }
 
+/**
+ * A storage root's url: the folder and its SSH server are in storage_root
+ * (lib/core/storage/), reached over that server's SSH connection.
+ */
+export const STORAGE_URL = "pcp:storage"
+
+/** A folder on one of the owner's SSH servers, read and written over SFTP. */
+export function isStorageKind(kind: string): kind is "storage" {
+  return kind === "storage"
+}
+
 /** A mail account rather than an MCP server or an API endpoint. */
 export function isMailKind(kind: string): kind is MailKind {
   return kind === "jmap" || kind === "imap"
@@ -97,6 +136,11 @@ export function isCalendarKind(kind: string): kind is "caldav" {
 /** A server PCP runs commands on over SSH. */
 export function isSshKind(kind: string): kind is "ssh" {
   return kind === "ssh"
+}
+
+/** A container PCP runs on one of the owner's SSH servers (lib/core/services/). */
+export function isServiceKind(kind: string): kind is "service" {
+  return kind === "service"
 }
 
 /** What a kind is called in a sentence: "an API endpoint". */
@@ -115,6 +159,10 @@ export function kindNoun(kind: string): string {
       return "the browser"
     case "wrapper":
       return "a wrapper"
+    case "service":
+      return "a service"
+    case "storage":
+      return "a storage folder"
     default:
       return "an MCP server"
   }
@@ -181,7 +229,9 @@ export type ServerInput = {
   /**
    * Refuse private, loopback and link-local addresses, and PCP's own, for
    * every request PCP makes to the server, its OAuth requests included. Set
-   * on a server an assistant proposed; the owner's form sets or clears it.
+   * on a server an assistant proposed. The owner's add form sets it; on an
+   * existing server it is the page's own switch (setServerPublicOnly), and
+   * an update that leaves it out keeps it as it is.
    */
   publicOnly?: boolean
   /**
@@ -541,7 +591,7 @@ export async function extraAuthHeaders(
  * assistant's argument may never set one of them.
  */
 export async function authHeaderNames(
-  server: Pick<McpServer, "id" | "authType" | "authHeaderName">,
+  server: Pick<OpenServer, "id" | "authType" | "authHeaderName">,
 ): Promise<string[]> {
   // Basic authentication is the Authorization header, whatever the row says.
   if (server.authType === "basic") {
@@ -797,19 +847,14 @@ async function requireTextSecret(ctx: VaultContext, id: string) {
 }
 
 export async function uniqueSlug(
-  vaultId: string,
+  ctx: VaultContext,
   base: string,
   exceptId?: string,
 ) {
   let slug = base
 
   for (let n = 2; ; n++) {
-    const clash = await db().mcpServer.findUnique({
-      where: { vaultId_slug: { vaultId, slug } },
-      select: { id: true },
-    })
-
-    if (!clash || clash.id === exceptId) {
+    if (!(await serverSlugTaken(ctx, slug, exceptId))) {
       return slug
     }
 
@@ -862,17 +907,16 @@ export async function listServers(ctx: VaultContext): Promise<ServerSummary[]> {
   const rows = await db().mcpServer.findMany({
     where: { vaultId: ctx.vaultId },
     include: { _count: { select: { tools: true } } },
-    orderBy: { name: "asc" },
   })
 
-  return rows.map(summarize)
+  return openServers(ctx, rows).sort(byServerName).map(summarize)
 }
 
 export async function getServer(ctx: VaultContext, id: string) {
   const row = await db().mcpServer.findFirst({
     where: { id, vaultId: ctx.vaultId },
     include: {
-      tools: { orderBy: { name: "asc" } },
+      tools: true,
       _count: { select: { tools: true } },
     },
   })
@@ -881,13 +925,17 @@ export async function getServer(ctx: VaultContext, id: string) {
     throw notFound("That server")
   }
 
-  return row
+  return {
+    ...openServer(ctx, row),
+    tools: openTools(ctx, row.tools).sort(byToolName),
+  }
 }
 
-export async function getServerBySlug(ctx: VaultContext, slug: string) {
-  return db().mcpServer.findUnique({
-    where: { vaultId_slug: { vaultId: ctx.vaultId, slug } },
-  })
+export async function getServerBySlug(
+  ctx: VaultContext,
+  slug: string,
+): Promise<OpenServer | null> {
+  return findServerBySlug(ctx, slug)
 }
 
 export async function createServer(
@@ -903,21 +951,26 @@ export async function createServer(
   await withNewSecret(ctx, newSecret, async (secretId) =>
     db().mcpServer.create({
       data: {
-        id,
-        vaultId: ctx.vaultId,
-        slug: await uniqueSlug(ctx.vaultId, slugify(data.name)),
-        ...data,
-        ...(definition
-          ? { definitionId: definition.id, description: definition.description }
-          : {}),
-        ...secretColumns(data, secretId),
+        ...serverCreateData(ctx, {
+          id,
+          vaultId: ctx.vaultId,
+          slug: await uniqueSlug(ctx, slugify(data.name)),
+          ...data,
+          ...(definition
+            ? {
+                definitionId: definition.id,
+                description: definition.description,
+              }
+            : {}),
+          ...secretColumns(data, secretId),
+        }),
         authHeaders: extraAuthHeadersWrite(authExtraHeaders, {
           replace: false,
         }),
       },
     }),
   )
-  await ensureDefinition(id)
+  await ensureDefinition(ctx, id)
 
   return { id }
 }
@@ -955,6 +1008,8 @@ export async function updateServer(
 
   const { data, authExtraHeaders, newSecret } = await normalizeInput(ctx, input)
   const extrasBefore = await extraAuthHeaders(id)
+  // The page's switch sets it (setServerPublicOnly); the form leaves it out.
+  data.publicOnly = input.publicOnly ?? existing.publicOnly
 
   // Switching away from OAuth, or to a different client, drops the tokens
   // PCP obtained: they belong to the old configuration.
@@ -962,17 +1017,14 @@ export async function updateServer(
 
   await withNewSecret(ctx, newSecret, async (secretId) => {
     Object.assign(data, secretColumns(data, secretId))
-    await db().mcpServer.update({
-      where: { id },
-      data: {
-        ...data,
-        authHeaders: extraAuthHeadersWrite(authExtraHeaders, {
-          replace: true,
-        }),
-        ...(dropTokens
-          ? { oauthTokensId: null, oauthConnectedAt: null, status: "unknown" }
-          : {}),
-      },
+    await writeServer(ctx, id, {
+      ...data,
+      authHeaders: extraAuthHeadersWrite(authExtraHeaders, {
+        replace: true,
+      }),
+      ...(dropTokens
+        ? { oauthTokensId: null, oauthConnectedAt: null, status: "unknown" }
+        : {}),
     })
   })
 
@@ -981,13 +1033,83 @@ export async function updateServer(
   }
 
   // The description is the definition's: every instance carries it.
-  await shareDescription(id)
+  await shareDescription(ctx, id)
 
   return {
     reconnect:
       CONNECTION_FIELDS.some((key) => data[key] !== existing[key]) ||
       JSON.stringify(authExtraHeaders) !== JSON.stringify(extrasBefore),
   }
+}
+
+/**
+ * Makes an MCP server send one secret header, keeping its further headers:
+ * what remaking a service does to the MCP server it registered, when its
+ * definition names a header (services.ts followRegisteredAuth). Only a
+ * server with no credential or a header one is changed: one the owner moved
+ * to OAuth keeps it. A change marks its tools to be read again. Answers
+ * whether anything changed.
+ */
+export async function setMcpHeaderCredential(
+  ctx: VaultContext,
+  id: string,
+  credential: { headerName: string; valueTemplate: string; secretId: string },
+): Promise<boolean> {
+  const vaultId = ctx.vaultId
+  const found = await db().mcpServer.findFirst({
+    where: { id, vaultId, kind: "mcp" },
+  })
+  const row = found ? openServer(ctx, found) : null
+
+  if (!row || (row.authType !== "none" && row.authType !== "header")) {
+    return false
+  }
+
+  const headerName = validateHeaderName(credential.headerName)
+  const template = validateValueTemplate(credential.valueTemplate)
+
+  if (
+    row.authType === "header" &&
+    row.authHeaderName === headerName &&
+    row.authValueTemplate === template &&
+    row.authSecretId === credential.secretId
+  ) {
+    return false
+  }
+
+  const secret = await db().secret.findFirst({
+    where: { id: credential.secretId, vaultId, kind: "text" },
+    select: { id: true },
+  })
+
+  if (!secret) {
+    throw invalid("That secret does not exist.")
+  }
+
+  const extras = row.authType === "header" ? await extraAuthHeaders(id) : []
+
+  if (
+    extras.some(
+      (extra) => extra.headerName.toLowerCase() === headerName.toLowerCase(),
+    )
+  ) {
+    throw invalid(
+      `${row.name} sends ${headerName} as a further header already: take that one out on its page and update the service again, or set the header there yourself.`,
+    )
+  }
+
+  await writeServer(ctx, id, {
+    authType: "header",
+    authHeaderName: headerName,
+    authValueTemplate: template,
+    authSecretId: credential.secretId,
+    // Another credential can mean other tools: read them again.
+    status: "unknown",
+    statusMessage: "",
+    lastSyncedAt: null,
+  })
+
+  return true
 }
 
 /**
@@ -1068,15 +1190,12 @@ async function writeOAuthClient(
     client.oauthClientId !== existing.oauthClientId
 
   await withNewSecret(ctx, newSecret, (secretId) =>
-    db().mcpServer.update({
-      where: { id: existing.id },
-      data: {
-        ...client,
-        oauthClientSecretId: secretId ?? client.oauthClientSecretId,
-        ...(dropTokens
-          ? { oauthTokensId: null, oauthConnectedAt: null, status: "unknown" }
-          : {}),
-      },
+    writeServer(ctx, existing.id, {
+      ...client,
+      oauthClientSecretId: secretId ?? client.oauthClientSecretId,
+      ...(dropTokens
+        ? { oauthTokensId: null, oauthConnectedAt: null, status: "unknown" }
+        : {}),
     }),
   )
 
@@ -1099,19 +1218,14 @@ export async function renameServerSlug(
     )
   }
 
-  const clash = await db().mcpServer.findUnique({
-    where: { vaultId_slug: { vaultId: ctx.vaultId, slug: cleaned } },
-    select: { id: true },
-  })
-
-  if (clash && clash.id !== id) {
+  if (await serverSlugTaken(ctx, cleaned, id)) {
     throw new PcpError(
       "conflict",
       `Another server is already called ${cleaned}.`,
     )
   }
 
-  await db().mcpServer.update({ where: { id }, data: { slug: cleaned } })
+  await writeServer(ctx, id, { slug: cleaned })
 }
 
 export async function setServerEnabled(
@@ -1123,9 +1237,82 @@ export async function setServerEnabled(
   await db().mcpServer.update({ where: { id }, data: { enabled } })
 }
 
+/**
+ * The owner's "Public addresses only" switch on an MCP server's or an API
+ * endpoint's page. Only the owner reaches this: no assistant's tool clears
+ * it (endpoint-admin.ts never writes it, and register_server has no
+ * argument for it).
+ */
+export async function setServerPublicOnly(
+  ctx: VaultContext,
+  id: string,
+  publicOnly: boolean,
+): Promise<OpenServer> {
+  const existing = await getServer(ctx, id)
+
+  if (existing.kind !== "mcp" && existing.kind !== "openapi") {
+    throw new PcpError(
+      "state",
+      `This is ${kindNoun(existing.kind)}, which has no public addresses switch.`,
+    )
+  }
+
+  return updateServerRow(ctx, id, { publicOnly })
+}
+
 export async function deleteServer(ctx: VaultContext, id: string) {
   const existing = await getServer(ctx, id)
+
+  // Its container is on the SSH server: services/services.ts removes it
+  // there first.
+  if (existing.kind === "service") {
+    throw new PcpError(
+      "state",
+      "Remove a service on its own page: PCP removes its container from the SSH server first.",
+    )
+  }
+  // A store's files: PCP's own store is always there, and an encrypted
+  // store's files go with its keys, so it is emptied or made plain first.
+  if (existing.kind === "storage") {
+    const root = await db().storageRoot.findUnique({
+      where: { serverId: id },
+      select: { backend: true, mode: true, converting: true },
+    })
+
+    if (root?.backend === "local") {
+      throw new PcpError(
+        "state",
+        "PCP's own store stays: delete its files instead, or keep them.",
+      )
+    }
+
+    if (
+      (root?.mode === "encrypted" || root?.converting) &&
+      (await db().storageEntry.count({ where: { serverId: id } })) > 0
+    ) {
+      throw new PcpError(
+        "state",
+        "This store holds encrypted files only PCP can open: make it plain first (its files stay on the server), or delete them, then remove it.",
+      )
+    }
+  }
+
+  // Its exits go with it (a cascade), and their levels with them.
+  const exits = await db().exit.findMany({
+    where: { OR: [{ serverId: id }, { serviceId: id }] },
+    select: { id: true },
+  })
+  if (exits.length > 0) {
+    await db().webFetchRule.deleteMany({
+      where: {
+        vaultId: ctx.vaultId,
+        kind: "exit",
+        key: { in: exits.map((exit) => exit.id) },
+      },
+    })
+  }
   await db().mcpServer.delete({ where: { id } })
+  if (existing.kind === "ssh") closeSshConnections(id)
   // The last instance takes its definition with it; others keep it.
   await forgetUnusedDefinition(existing.definitionId)
 
@@ -1148,22 +1335,42 @@ export async function setToolDescription(
   await getServer(ctx, serverId)
   const trimmed = override?.trim().slice(0, 2000) || null
 
+  const tool = await db().mcpTool.findFirstOrThrow({
+    where: toolNameWhere(ctx, serverId, toolName),
+    select: { id: true },
+  })
   await db().mcpTool.update({
-    where: { serverId_name: { serverId, name: toolName } },
-    data: { descriptionOverride: trimmed },
+    where: { id: tool.id },
+    data: sealedToolOverride(ctx, tool.id, trimmed),
   })
   // A tool's description is the definition's: every instance gets it.
-  await shareToolDescription(serverId, toolName, trimmed)
+  await shareToolDescription(ctx, serverId, toolName, trimmed)
 }
 
+/**
+ * What the last contact with a server found. The message is sealed with
+ * the server's other values, so only a request that holds the vault's key
+ * writes one. Best effort: it follows what happened (a command that ran, a
+ * call that failed) and never takes its place, so a write that fails (the
+ * server removed meanwhile) is logged, by the server's id only, and passed
+ * over.
+ */
 export async function setServerStatus(
+  ctx: VaultContext,
   serverId: string,
   status: ServerStatus,
   message = "",
   extra: { lastSyncedAt?: Date } = {},
 ): Promise<void> {
-  await db().mcpServer.update({
-    where: { id: serverId },
-    data: { status, statusMessage: message.slice(0, 500), ...extra },
-  })
+  try {
+    await writeServer(ctx, serverId, {
+      status,
+      statusMessage: message.slice(0, 500),
+      ...extra,
+    })
+  } catch {
+    console.error("[servers] could not record a server's status", {
+      server: serverId,
+    })
+  }
 }

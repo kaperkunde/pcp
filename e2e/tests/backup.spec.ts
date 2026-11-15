@@ -92,6 +92,10 @@ test("restores the file, undoing what came after it", async ({
   )
 
   await restoreCard.getByLabel("Export password").fill(EXPORT_PASSWORD)
+  // The tokens' names are sealed in the file under the vault's own key.
+  await restoreCard
+    .getByLabel("Password of the vault in the file")
+    .fill(OWNER_PASSWORD)
   await restoreCard.getByRole("button", { name: "Check the export" }).click()
 
   // What the file holds, and what restoring it does, before anything changes.

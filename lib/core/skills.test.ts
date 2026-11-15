@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import {
   createApiToken,
+  deleteApiToken,
   resolveApiToken,
   resolveTokenForOwner,
 } from "./api-tokens"
@@ -11,6 +12,7 @@ import {
   MAX_SKILL_BODY,
   MAX_SKILL_DESCRIPTION,
   MAX_SKILL_FILE_CHARS,
+  MAX_OWN_SKILLS,
   MAX_SKILL_FILES,
   MAX_SKILLS,
 } from "./constants"
@@ -20,11 +22,9 @@ import { db } from "./db"
 import {
   buildGatewayServer,
   buildInstructions,
-  DESCRIBE_TOOL_RENAMED,
   instructionsPreview,
   loadGatewayServers,
   READ_MEMORY_NOTE,
-  SEARCH_TOOLS_RENAMED,
   skillInstructions,
   type GatewayScope,
 } from "./gateway"
@@ -45,13 +45,16 @@ import {
   getSkill,
   importSkill,
   instructionSkills,
+  listSharedSkills,
   listSkills,
   MAX_INSTRUCTION_SKILLS,
+  OWN_SKILL_FRAME,
   parseSkillMd,
   runSkillCommand,
   saveSkillFile,
   serializeSkillMd,
   setTokenSkills,
+  shareSkill,
   SKILL_FRAME,
   SKILL_INSTRUCTIONS_CHARS,
   skillsFor,
@@ -65,6 +68,7 @@ import {
 import { scratchDatabase } from "./test-db"
 import { copyTokenAccess, writeToolAccess } from "./tool-access"
 import { setupVault } from "./vault"
+import { entryCall, listEveryTool } from "./test-handles"
 
 // Skills against a scratch database: the SKILL.md format, what a skill may
 // hold, which tokens see which, an assistant's change that waits for the
@@ -116,9 +120,9 @@ beforeEach(async () => {
       data: {
         id: randomUUID(),
         serverId,
-        name,
-        description: `${name.replace("_", " ")}s for the owner.`,
-        inputSchema: JSON.stringify({ type: "object" }),
+        plainName: name,
+        plainDescription: `${name.replace("_", " ")}s for the owner.`,
+        plainInputSchema: JSON.stringify({ type: "object" }),
       },
     })
   }
@@ -408,10 +412,9 @@ describe("which tokens see which skills", () => {
       tools: [],
     })
     expect(scope.skillIds).toBeNull()
-    expect((await skillsFor(ctx, null)).map((skill) => skill.name)).toEqual([
-      "other",
-      "send-postcards",
-    ])
+    expect(
+      (await skillsFor(ctx, null, null)).map((skill) => skill.name),
+    ).toEqual(["other", "send-postcards"])
 
     await setTokenSkills(ctx, scope.tokenId, {
       all: false,
@@ -680,6 +683,189 @@ describe("an assistant's change to a skill", () => {
   })
 })
 
+describe("several changes to one skill while a request waits", () => {
+  const path = "/skills/send-postcards/SKILL.md"
+  const edit = (scoped: SkillScope, old_str: string, new_str: string) =>
+    runSkillCommand(scoped, { command: "str_replace", path, old_str, new_str })
+  const ask = async (on: GatewayScope, outcome: SkillOutcome) =>
+    withPermission(on, askOf(outcome))
+
+  async function otherToken(): Promise<GatewayScope> {
+    const { token } = await createApiToken(ctx, {
+      name: "Codex",
+      allowAllServers: true,
+      keepMemories: true,
+    })
+    return { ...(await resolveApiToken(token))!, publicUrl: PUBLIC_URL }
+  }
+
+  it("folds a second edit into the request still waiting, which the owner approves whole", async () => {
+    const { id } = await ownerSkill()
+
+    await ask(scope, await edit(skillScope(), "1. Look up", "1. First look up"))
+    const first = await onlyRequestId()
+    const folded = textOf(
+      await ask(
+        scope,
+        await edit(skillScope(), "2. Send it", "2. Then send it"),
+      ),
+    )
+
+    expect(folded).toContain(
+      `Folded into the open request ${first} (now shows both changes); the owner approves them together.`,
+    )
+    // The link still ends the answer.
+    expect(folded.trimEnd()).toMatch(new RegExp(`/permissions/${first}\\)?$`))
+    expect(await db().permissionRequest.count()).toBe(1)
+
+    const view = await getPermissionView(ctx, first, web)
+    expect(view?.lines).toContain("Version: 1 → 2")
+    expect(view?.skill?.diff).toEqual(
+      expect.arrayContaining([
+        {
+          kind: "added",
+          text: "1. First look up the address in addresses.md.",
+        },
+        {
+          kind: "added",
+          text: "2. Then send it with postcards/send_postcard.",
+        },
+      ]),
+    )
+
+    const answer = await decidePermission(ctx, first, "allow_once", {
+      ...web,
+      revision: view!.revision,
+    })
+    expect(answer.isError, textOf(answer)).toBeFalsy()
+    expect(await getSkill(ctx, id)).toMatchObject({
+      version: 2,
+      body: expect.stringMatching(/First look up[\s\S]*Then send it/),
+    })
+  })
+
+  it("finds the same request when an edit is asked again, and refuses an answer to what the owner did not read", async () => {
+    await ownerSkill()
+
+    await ask(scope, await edit(skillScope(), "1. Look up", "1. First look up"))
+    const first = await onlyRequestId()
+    const before = (await getPermissionView(ctx, first, web))!.revision
+    await ask(scope, await edit(skillScope(), "1. Look up", "1. First look up"))
+    expect((await getPermissionView(ctx, first, web))!.revision).toBe(before)
+
+    await ask(scope, await edit(skillScope(), "2. Send it", "2. Then send it"))
+    expect(await db().permissionRequest.count()).toBe(1)
+
+    const stale = await decidePermission(ctx, first, "allow_once", {
+      ...web,
+      revision: before,
+    })
+    expect(stale.isError).toBe(true)
+    expect(textOf(stale)).toContain(
+      "added to this request while you had it open",
+    )
+    expect((await getPermissionView(ctx, first, web))?.status).toBe("pending")
+
+    await expect(
+      edit(skillScope(), "2. Send it", "2. Then send it"),
+    ).rejects.toThrow(`Your open request ${first} holds your earlier changes`)
+  })
+
+  it("adds a file to a skill whose adding still waits", async () => {
+    await ask(
+      scope,
+      await runSkillCommand(skillScope(), {
+        command: "create",
+        path,
+        file_text: POSTCARDS,
+      }),
+    )
+    const first = await onlyRequestId()
+    await ask(
+      scope,
+      await runSkillCommand(skillScope(), {
+        command: "create",
+        path: "/skills/send-postcards/addresses.md",
+        file_text: "Grace: 1 Main Street",
+      }),
+    )
+    expect(await db().permissionRequest.count()).toBe(1)
+
+    await expect(
+      runSkillCommand(skillScope(), {
+        command: "delete",
+        path: "/skills/send-postcards",
+      }),
+    ).rejects.toThrow(/not added yet: your open request/)
+
+    await decidePermission(ctx, first, "allow_once", web)
+    const [skill] = await listSkills(ctx)
+    expect(skill).toMatchObject({ name: "send-postcards", version: 1 })
+    expect(skill!.files).toEqual([
+      { path: "addresses.md", text: "Grace: 1 Main Street" },
+    ])
+  })
+
+  it("asks anew once the owner answered, and explains a change that went stale", async () => {
+    await ownerSkill()
+
+    await ask(scope, await edit(skillScope(), "1. Look up", "1. First look up"))
+    const first = await onlyRequestId()
+    await decidePermission(ctx, first, "decline", web)
+
+    await ask(scope, await edit(skillScope(), "2. Send it", "2. Then send it"))
+    const second = await onlyRequestId()
+    expect(second).not.toBe(first)
+    expect((await getSkill(ctx, (await listSkills(ctx))[0]!.id)).version).toBe(
+      1,
+    )
+
+    // Another token's change to the same skill: a request of its own, and
+    // each page says the two conflict.
+    const codex = await otherToken()
+    await ask(
+      codex,
+      await edit(
+        { ctx, tokenId: codex.tokenId, skillIds: codex.skillIds },
+        "1. Look up",
+        "1. Find",
+      ),
+    )
+    const theirs = (await db().permissionRequest.findFirst({
+      where: { tokenId: codex.tokenId },
+    }))!.id
+    const mine = await getPermissionView(ctx, second, web)
+    const other = await getPermissionView(ctx, theirs, web)
+    expect(mine?.conflicts).toEqual([
+      expect.objectContaining({ id: theirs, tokenName: "Codex" }),
+    ])
+    expect(other?.conflicts).toEqual([
+      expect.objectContaining({ id: second, tokenName: "Claude" }),
+    ])
+    // Not the assistant's to read.
+    expect(
+      textOf(
+        await ask(
+          scope,
+          await edit(skillScope(), "2. Send it", "2. Then send it"),
+        ),
+      ),
+    ).not.toContain(theirs)
+
+    await decidePermission(ctx, theirs, "allow_once", web)
+    expect((await getPermissionView(ctx, second, web))?.conflicts).toEqual([])
+
+    const answer = await decidePermission(ctx, second, "allow_once", web)
+    expect(answer.isError).toBe(true)
+    const told = textOf(await checkPermission(scope, second))
+    expect(told).toContain("did not go through")
+    expect(told).toContain(
+      "they were shown a change to version 1; it is at version 2 now",
+    )
+    expect(told).toContain("propose your change anew on top of version 2")
+  })
+})
+
 describe("the owner's note on a skill, as an assistant proposes it", () => {
   const notePath = "/skills/send-postcards/.note"
 
@@ -744,6 +930,31 @@ describe("the owner's note on a skill, as an assistant proposes it", () => {
       path: notePath,
     })
     expect("ask" in away && away.ask.kind).toBe("note_change")
+  })
+
+  it("is proposed again in the request still waiting, the newer note replacing the older", async () => {
+    await ownerSkill()
+    const propose = async (note: string) => {
+      const outcome = await runSkillCommand(skillScope(), {
+        command: "create",
+        path: notePath,
+        file_text: note,
+      })
+      if (!("ask" in outcome)) {
+        throw new Error("expected a note's request")
+      }
+      return textOf(await withPermission(scope, outcome.ask))
+    }
+
+    await propose("For the family ones only.")
+    const first = await onlyRequestId()
+    expect(await propose("For friends and family.")).toContain(
+      `Replaced the note in your open request ${first}`,
+    )
+    expect(await db().permissionRequest.count()).toBe(1)
+    expect((await getPermissionView(ctx, first, web))?.lines).toContain(
+      "Your note after, which every assistant that sees this skill reads as yours:\nFor friends and family.",
+    )
   })
 
   it("is refused when it is not one line that fits, and is never a file's name", async () => {
@@ -818,7 +1029,7 @@ describe("the skills paragraph of the instructions", () => {
     expect(told).not.toContain("search_tools")
     expect(
       buildInstructions([], {
-        skills: await instructionSkills(ctx, null),
+        skills: await instructionSkills(ctx, null, null),
       }),
     ).toContain("search finds the owner's skills by a few words")
   })
@@ -828,7 +1039,7 @@ describe("search and describe", () => {
   async function connect() {
     const [clientSide, serverSide] = InMemoryTransport.createLinkedPair()
     await buildGatewayServer(scope, await loadGatewayServers(scope), {
-      skills: await instructionSkills(ctx, scope.skillIds),
+      skills: await instructionSkills(ctx, scope.skillIds, scope.tokenId),
     }).connect(serverSide)
     const client = new Client({ name: "test", version: "1.0.0" })
     await client.connect(clientSide)
@@ -840,7 +1051,7 @@ describe("search and describe", () => {
     name: string,
     args: Record<string, unknown>,
   ) {
-    const result = await client.callTool({ name, arguments: args })
+    const result = await client.callTool(entryCall(name, args))
     return { isError: result.isError === true, text: textOf(result) }
   }
 
@@ -865,12 +1076,12 @@ describe("search and describe", () => {
     // The tool and the skill both name the task; the memory only mentions it.
     expect(lines.slice(0, 2).sort()).toEqual([
       "skill skill:send-postcards — Send a postcard to a friend: who, what to write, and when.",
-      "tool postcards/send_postcard — send postcards for the owner.",
+      "tool postcards/send_postcard [destructive: execute_destructive] — send postcards for the owner.",
     ])
     expect(lines.slice(2)).toContain(
       "memory /memories/shared/friends.md — Grace likes postcards from the sea.",
     )
-    expect(lines.at(-1)).toBe("describe takes a ref as it is here.")
+    expect(lines.at(-1)).toBe("search takes a ref as it is here, as ref.")
 
     // Words no tool has find the skill and the memory alone.
     const friend = await call(client, "search", {
@@ -878,7 +1089,10 @@ describe("search and describe", () => {
     })
     expect(friend.text).toContain("skill skill:send-postcards")
     expect(friend.text).toContain("memory /memories/shared/friends.md")
-    expect(friend.text).not.toContain("tool ")
+    // (PCP's own execute_write is named by "write": not a server's tool.)
+    expect(
+      friend.text.split("\n").filter((line) => line.startsWith("tool ")),
+    ).toEqual([])
 
     const skillsOnly = await call(client, "search", {
       query: "postcard",
@@ -928,7 +1142,7 @@ describe("search and describe", () => {
       "- skill:send-postcards/addresses.md (20 characters)",
     )
     expect(described.text).toMatch(
-      /- postcards\/send_postcard \(asks the owner first\): call_handle ch_\S+/,
+      /- postcards\/send_postcard \(asks the owner first; Destructive, run with execute_destructive\): call_handle ch_\S+/,
     )
     expect(described.text).toContain(
       "- postcards/gone_tool: not a tool this token can call",
@@ -947,7 +1161,7 @@ describe("search and describe", () => {
     await client.close()
   })
 
-  it("describes a tool as describe_tool did, by ref or by server and tool, and a memory as view does", async () => {
+  it("describes a tool by ref or by server and tool, and a memory as view does", async () => {
     const client = await connect()
     const byRef = await call(client, "describe", {
       ref: "postcards/send_postcard",
@@ -979,34 +1193,14 @@ describe("search and describe", () => {
     await client.close()
   })
 
-  it("keeps search_tools and describe_tool working as before, each saying what took its place", async () => {
+  it("no longer has search_tools and describe_tool, whose release has passed, nor lists describe (#113)", async () => {
     const client = await connect()
-    const search = await call(client, "search_tools", { query: "postcard" })
-    const [lead, blank, ...rest] = search.text.split("\n")
+    const names = (await listEveryTool(client)).tools.map((tool) => tool.name)
 
-    expect(lead).toBe(SEARCH_TOOLS_RENAMED)
-    expect(lead).toBe(
-      "search_tools is now search (tools, skills and memories); use search.",
-    )
-    expect(blank).toBe("")
-    expect(rest[0]).toMatch(/^postcards\/send_postcard — /)
-    expect(search.text).not.toContain("skill:")
-
-    const described = await call(client, "describe_tool", {
-      server: "postcards",
-      tool: "send_postcard",
-    })
-    expect(described.text.startsWith(`${DESCRIBE_TOOL_RENAMED}\n\n`)).toBe(true)
-    expect(
-      JSON.parse(described.text.slice(DESCRIBE_TOOL_RENAMED.length + 2)),
-    ).toMatchObject({ tool: "send_postcard" })
-
-    const missing = await call(client, "describe_tool", {
-      server: "postcards",
-      tool: "nope",
-    })
-    expect(missing.isError).toBe(true)
-    expect(missing.text.startsWith(DESCRIBE_TOOL_RENAMED)).toBe(true)
+    expect(names).toContain("search")
+    expect(names).not.toContain("describe")
+    expect(names).not.toContain("search_tools")
+    expect(names).not.toContain("describe_tool")
     await client.close()
   })
 
@@ -1041,5 +1235,407 @@ describe("search and describe", () => {
     expect(mixed.isError).toBe(true)
     expect(mixed.text).toContain("kept apart")
     await client.close()
+  })
+})
+
+describe("a token's own skills", () => {
+  const DIARY = `---
+name: diary
+description: "Keep a diary of the day's work."
+---
+
+1. Write what was done.
+`
+  const own = (args: Record<string, unknown>) =>
+    runSkillCommand(skillScope(), args as never)
+
+  async function otherToken(name = "Other") {
+    const { id, token } = await createApiToken(ctx, {
+      name,
+      allowAllServers: true,
+      keepMemories: true,
+    })
+    const resolved = (await resolveApiToken(token))!
+    return {
+      id,
+      scope: { ...resolved, publicUrl: PUBLIC_URL } as GatewayScope,
+      skills: { ctx, tokenId: id, skillIds: resolved.skillIds } as SkillScope,
+    }
+  }
+
+  async function connectAs(as: GatewayScope) {
+    const [clientSide, serverSide] = InMemoryTransport.createLinkedPair()
+    await buildGatewayServer(as, await loadGatewayServers(as), {
+      skills: await instructionSkills(ctx, as.skillIds, as.tokenId),
+    }).connect(serverSide)
+    const client = new Client({ name: "test", version: "1.0.0" })
+    await client.connect(clientSide)
+    return {
+      client,
+      call: async (name: string, args: Record<string, unknown>) =>
+        textOf(await client.callTool(entryCall(name, args))),
+    }
+  }
+
+  it("are created, changed, renamed and deleted at once, without a request", async () => {
+    expect(
+      said(
+        await own({
+          command: "create",
+          path: "/skills/mine/diary/SKILL.md",
+          file_text: DIARY,
+        }),
+      ),
+    ).toContain("Saved /skills/mine/diary/SKILL.md, version 1")
+    let [skill] = await listSkills(ctx)
+    expect(skill).toMatchObject({
+      name: "diary",
+      pathName: "mine/diary",
+      visibility: "private",
+      tokenId: scope.tokenId,
+      tokenName: "Claude",
+      author: "assistant",
+      version: 1,
+    })
+
+    said(
+      await own({
+        command: "str_replace",
+        path: "/skills/mine/diary/SKILL.md",
+        old_str: "1. Write what was done.",
+        new_str: "1. Write what was done, and why.",
+      }),
+    )
+    said(
+      await own({
+        command: "create",
+        path: "/skills/mine/diary/template.md",
+        file_text: "Date:",
+      }),
+    )
+    said(
+      await own({
+        command: "rename",
+        path: "/skills/mine/diary/template.md",
+        new_path: "/skills/mine/diary/day.md",
+      }),
+    )
+    said(
+      await own({
+        command: "rename",
+        path: "/skills/mine/diary",
+        new_path: "/skills/mine/journal",
+      }),
+    )
+    ;[skill] = await listSkills(ctx)
+    expect(skill).toMatchObject({
+      name: "journal",
+      version: 5,
+      files: [{ path: "day.md", text: "Date:" }],
+      body: expect.stringContaining("and why."),
+    })
+    expect(
+      said(await own({ command: "view", path: "/skills/mine" })),
+    ).toContain("- /skills/mine/journal/SKILL.md (version 5, files: day.md)")
+    expect(
+      said(await own({ command: "view", path: "/skills/mine/journal" })),
+    ).toContain("the owner has not approved it")
+
+    said(await own({ command: "delete", path: "/skills/mine/journal/day.md" }))
+    expect(
+      said(await own({ command: "delete", path: "/skills/mine/journal" })),
+    ).toContain("Deleted /skills/mine/journal/SKILL.md")
+    expect(await listSkills(ctx)).toEqual([])
+    expect(await db().permissionRequest.count()).toBe(0)
+  })
+
+  it("are seen by their token alone: search, describe and the instructions", async () => {
+    await ownerSkill()
+    said(
+      await own({
+        command: "create",
+        path: "/skills/mine/diary/SKILL.md",
+        file_text: DIARY,
+      }),
+    )
+    const other = await otherToken()
+
+    expect(
+      (await skillsFor(ctx, null, scope.tokenId)).map((s) => s.pathName),
+    ).toEqual(["send-postcards", "mine/diary"])
+    expect(
+      (await skillsFor(ctx, null, other.id)).map((s) => s.pathName),
+    ).toEqual(["send-postcards"])
+    expect(await instructionSkills(ctx, null, scope.tokenId)).toContainEqual({
+      name: "mine/diary",
+      description: "(Your own.) Keep a diary of the day's work.",
+      note: null,
+    })
+    expect(await instructionsPreview(ctx, other.id)).not.toContain("diary")
+    expect(
+      said(
+        await runSkillCommand(other.skills, {
+          command: "view",
+          path: "/skills",
+        }),
+      ),
+    ).not.toContain("diary")
+    await expect(
+      runSkillCommand(other.skills, {
+        command: "view",
+        path: "/skills/mine/diary",
+      }),
+    ).rejects.toThrow(/no skill at/)
+
+    const mine = await connectAs(scope)
+    expect(await mine.call("search", { query: "diary" })).toContain(
+      "skill skill:mine/diary",
+    )
+    const described = await mine.call("describe", { ref: "skill:mine/diary" })
+    expect(described).toContain(OWN_SKILL_FRAME)
+    expect(described).not.toContain(SKILL_FRAME)
+    expect(
+      await mine.call("describe", { ref: "/skills/mine/diary/SKILL.md" }),
+    ).toContain("name: diary")
+    await mine.client.close()
+
+    const theirs = await connectAs(other.scope)
+    expect(await theirs.call("search", { query: "diary" })).not.toContain(
+      "mine/diary",
+    )
+    expect(
+      await theirs.call("describe", { ref: "skill:mine/diary" }),
+    ).toContain("no skill called mine/diary")
+    await theirs.client.close()
+  })
+
+  it("have names unique per token, beside the shared ones, and are bounded", async () => {
+    await ownerSkill()
+    const create = (as: SkillScope, name: string) =>
+      runSkillCommand(as, {
+        command: "create",
+        path: `/skills/mine/${name}/SKILL.md`,
+        file_text: DIARY.replace("name: diary", `name: ${name}`),
+      })
+
+    // A shared skill's name is free for one of a token's own.
+    said(await create(skillScope(), "send-postcards"))
+    said(await create(skillScope(), "diary"))
+    // Another token keeps its own of the same name.
+    said(await create((await otherToken()).skills, "diary"))
+    await expect(
+      own({
+        command: "rename",
+        path: "/skills/mine/diary",
+        new_path: "/skills/mine/send-postcards",
+      }),
+    ).rejects.toThrow(/keep a skill called send-postcards already/)
+    // "mine" is where they are kept, never a skill's name.
+    await expect(
+      createSkill(ctx, {
+        name: "mine",
+        description: "No.",
+        body: "No.",
+        tools: [],
+      }),
+    ).rejects.toThrow(/not a skill's name/)
+
+    for (let index = 2; index < MAX_OWN_SKILLS; index++) {
+      said(await create(skillScope(), `s${index}`))
+    }
+    await expect(create(skillScope(), "one-more")).rejects.toThrow(
+      new RegExp(`already keep ${MAX_OWN_SKILLS} skills`),
+    )
+  })
+
+  it("become shared through a request the owner answers, and only as shown", async () => {
+    said(
+      await own({
+        command: "create",
+        path: "/skills/mine/diary/SKILL.md",
+        file_text: DIARY,
+      }),
+    )
+    const [kept] = await listSkills(ctx)
+
+    // A shared skill stays shared.
+    await ownerSkill()
+    await expect(
+      own({
+        command: "rename",
+        path: "/skills/send-postcards",
+        new_path: "/skills/mine/send-postcards",
+      }),
+    ).rejects.toThrow(/stays shared/)
+
+    await expect(
+      own({
+        command: "rename",
+        path: "/skills/mine/diary",
+        new_path: "/skills/send-postcards",
+      }),
+    ).rejects.toThrow(/shared skill called send-postcards exists already/)
+
+    await setTokenSkills(ctx, scope.tokenId, { all: false, skillIds: [] })
+    scope = { ...scope, skillIds: [] }
+
+    const ask = askOf(
+      await own({
+        command: "rename",
+        path: "/skills/mine/diary",
+        new_path: "/skills/team-diary",
+      }),
+    )
+    expect(ask.input).toMatchObject({
+      skillId: kept!.id,
+      basis: 1,
+      share: true,
+    })
+    const shown = describeSkillAsk(ask)
+    expect(shown.title).toBe("Share the skill team-diary with your assistants?")
+    expect(shown.skill).toMatchObject({
+      name: "diary",
+      newName: "team-diary",
+      sharing: true,
+    })
+
+    expect(textOf(await withPermission(scope, ask))).toContain("Not done yet")
+    // Until the owner answers, it stays the token's own.
+    expect((await getSkill(ctx, kept!.id)).visibility).toBe("private")
+    expect(
+      textOf(
+        await decidePermission(ctx, await onlyRequestId(), "allow_once", web),
+      ),
+    ).toContain("your skill is shared as team-diary")
+
+    expect(await getSkill(ctx, kept!.id)).toMatchObject({
+      name: "team-diary",
+      visibility: "shared",
+      tokenId: null,
+      version: 2,
+      author: "assistant",
+    })
+    // A token that sees only some skills goes on seeing it.
+    expect((await tokenSkills(ctx, scope.tokenId)).skillIds).toEqual([kept!.id])
+  })
+
+  it("are not shared when they changed since the owner was asked", async () => {
+    said(
+      await own({
+        command: "create",
+        path: "/skills/mine/diary/SKILL.md",
+        file_text: DIARY,
+      }),
+    )
+    const ask = askOf(
+      await own({
+        command: "rename",
+        path: "/skills/mine/diary",
+        new_path: "/skills/diary",
+      }),
+    )
+    await withPermission(scope, ask)
+    said(
+      await own({
+        command: "create",
+        path: "/skills/mine/diary/more.md",
+        file_text: "More.",
+      }),
+    )
+
+    const answer = textOf(
+      await decidePermission(ctx, await onlyRequestId(), "allow_once", web),
+    )
+    expect(answer).toMatch(/changed since the owner was asked/)
+    expect((await listSkills(ctx))[0]).toMatchObject({
+      visibility: "private",
+      version: 2,
+    })
+  })
+
+  it("are the owner's to read, edit, delete and share, and no other token's to see", async () => {
+    said(
+      await own({
+        command: "create",
+        path: "/skills/mine/diary/SKILL.md",
+        file_text: DIARY,
+      }),
+    )
+    const [kept] = await listSkills(ctx)
+    const other = await otherToken()
+
+    expect(await listSharedSkills(ctx)).toEqual([])
+    await expect(
+      setTokenSkills(ctx, other.id, { all: false, skillIds: [kept!.id] }),
+    ).rejects.toThrow(/does not exist any more/)
+
+    await updateSkill(ctx, kept!.id, {
+      name: "diary",
+      description: "The owner's words.",
+      body: "Steps.",
+      tools: [],
+    })
+    expect(await getSkill(ctx, kept!.id)).toMatchObject({
+      visibility: "private",
+      tokenId: scope.tokenId,
+      author: "owner",
+      version: 2,
+    })
+
+    await shareSkill(ctx, kept!.id)
+    expect(await getSkill(ctx, kept!.id)).toMatchObject({
+      visibility: "shared",
+      tokenId: null,
+      author: "owner",
+    })
+    expect(
+      (await skillsFor(ctx, null, other.id)).map((s) => s.pathName),
+    ).toEqual(["diary"])
+
+    said(
+      await own({
+        command: "create",
+        path: "/skills/mine/diary/SKILL.md",
+        file_text: DIARY,
+      }),
+    )
+    const second = (await listSkills(ctx)).find(
+      (s) => s.visibility === "private",
+    )!
+    await expect(shareSkill(ctx, second.id)).rejects.toThrow(
+      /shared skill called diary exists already/,
+    )
+    await deleteSkill(ctx, second.id)
+    expect(await listSkills(ctx)).toHaveLength(1)
+  })
+
+  it("stay when their token is deleted, the owner's alone", async () => {
+    said(
+      await own({
+        command: "create",
+        path: "/skills/mine/diary/SKILL.md",
+        file_text: DIARY,
+      }),
+    )
+    await deleteApiToken(ctx, scope.tokenId)
+
+    const [kept] = await listSkills(ctx)
+    expect(kept).toMatchObject({
+      visibility: "private",
+      tokenId: null,
+      tokenName: null,
+    })
+    const other = await otherToken()
+    expect(await skillsFor(ctx, null, other.id)).toEqual([])
+    // It holds no name: the owner can share it, and a token can keep its own.
+    said(
+      await runSkillCommand(other.skills, {
+        command: "create",
+        path: "/skills/mine/diary/SKILL.md",
+        file_text: DIARY,
+      }),
+    )
+    await shareSkill(ctx, kept!.id)
+    expect((await getSkill(ctx, kept!.id)).visibility).toBe("shared")
   })
 })

@@ -6,7 +6,7 @@ import path from "node:path"
 import type { CallToolResult } from "@modelcontextprotocol/server"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
-import type { McpServer } from "@/lib/generated/prisma/client"
+import { openServer } from "../server-meta"
 
 import { createApiToken, resolveApiToken, revokeApiToken } from "../api-tokens"
 import type { VaultContext } from "../context"
@@ -46,6 +46,7 @@ import { loadProfile } from "./profile"
 import { closeAllBrowsers, runningBrowser } from "./runtime"
 import { createBrowserServer } from "./server"
 import { isOwnerNeeded, type OwnerNeeded } from "./types"
+import type { OpenServer } from "../server-meta"
 
 // What the owner does from PCP's pages, against a real Chromium: a tab of
 // their own that no assistant sees until they hand it to a token they
@@ -66,7 +67,7 @@ let api: TestApi
 let elsewhere: TestApi
 let ctx: VaultContext
 let tokenId: string
-let server: McpServer
+let server: OpenServer
 
 beforeEach(async () => {
   ;({ cleanup } = await scratchDatabase())
@@ -79,9 +80,12 @@ beforeEach(async () => {
     allowAllServers: true,
   })
   tokenId = (await resolveApiToken(token))!.tokenId
-  server = await db().mcpServer.findUniqueOrThrow({
-    where: { id: (await createBrowserServer(ctx)).id },
-  })
+  server = openServer(
+    ctx,
+    await db().mcpServer.findUniqueOrThrow({
+      where: { id: (await createBrowserServer(ctx)).id },
+    }),
+  )
   const pages: Parameters<typeof startTestApi>[0] = (request, res) => {
     if (request.url === "/icon.png") {
       res.setHeader("content-type", "image/png")
@@ -508,7 +512,7 @@ describe.skipIf(!executable)("the owner's tabs", { timeout: 90_000 }, () => {
         id: "another-token",
         vaultId: "another",
         grantId: "another-grant",
-        name: "Bob's",
+        plainName: "Bob's",
         prefix: "pcp_",
         allowAllServers: true,
       },
@@ -598,6 +602,10 @@ describe.skipIf(!executable)("the owner's tabs", { timeout: 90_000 }, () => {
 
     const { scratchDir } = runningBrowser(ctx.vaultId)!
     expect(path.dirname(scratchDir)).toBe(os.tmpdir())
+    // The process's id in the name, for the cleanup after a crash (#100).
+    expect(path.basename(scratchDir)).toMatch(
+      new RegExp(`^pcp-chromium-${process.pid}-[A-Za-z0-9]{6}$`),
+    )
     const [product] = await fs.readdir(path.join(scratchDir, "config"))
     expect(
       existsSync(path.join(scratchDir, "config", product!, "Crash Reports")),

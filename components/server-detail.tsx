@@ -10,35 +10,38 @@ import {
   type ReactNode,
 } from "react"
 
-import { CopyableValue } from "@/components/copyable-value"
-import { FormError, FormNote } from "@/components/form-status"
+import { CopyableValue } from "@kaperkunde/ui/copy-button"
+import { FormError, FormNote } from "@kaperkunde/ui/form-status"
 import { ItemAboutRows } from "@/components/item-about"
 import { LocalDate, RelativeDate } from "@/components/local-date"
-import { PageHeader } from "@/components/page-header"
+import { PageHeader } from "@kaperkunde/ui/page"
 import { ServerStatusBadge } from "@/components/server-status-badge"
 import { ServerTools, type ServerTool } from "@/components/server-tools"
+import { ServiceRemove } from "@/components/service-card"
 import {
   SharedDefinitionNote,
   SharedInstancesProvider,
 } from "@/components/shared-definition"
-import { SubmitButton } from "@/components/submit-button"
-import { Badge } from "@/components/ui/badge"
-import { Button, buttonVariants } from "@/components/ui/button"
-import { Disclosure } from "@/components/ui/disclosure"
+import { SubmitButton } from "@kaperkunde/ui/submit-button"
+import { Badge } from "@kaperkunde/ui/badge"
+import { Button, buttonVariants } from "@kaperkunde/ui/button"
+import { Disclosure } from "@kaperkunde/ui/disclosure"
 import { IconTile, serverKindLabel } from "@/components/ui/icon-tile"
-import { Input } from "@/components/ui/input"
-import { Field } from "@/components/ui/label"
-import { List, ListRow, ListSection, RowValue } from "@/components/ui/list"
-import { SwitchRow } from "@/components/ui/switch"
+import { Input } from "@kaperkunde/ui/input"
+import { Field } from "@kaperkunde/ui/label"
+import { List, ListRow, ListSection, RowValue } from "@kaperkunde/ui/list"
+import { SwitchRow } from "@kaperkunde/ui/switch"
 import {
   deleteServerAction,
   disconnectOAuthAction,
   refreshToolsAction,
   setOAuthClientAction,
   setServerEnabledAction,
+  setServerPublicOnlyAction,
   setSignInParamsAction,
   type ServerActionResult,
 } from "@/lib/actions/servers"
+import { PUBLIC_ONLY_ANCHOR } from "@/lib/core/constants"
 import type { ItemAbout } from "@/lib/core/item-about"
 import type { AuthType, ServerKind, ServerStatus } from "@/lib/core/servers"
 import type { OAuthConnection } from "@/lib/core/upstream"
@@ -90,8 +93,9 @@ export type ServerDetailProps = {
 
 /**
  * One server's page: its state and main action at the top, what needs the
- * owner right under it, then About (description, sign-in, on/off), the
- * kind's own section, its tools, everything set once under Advanced, and
+ * owner right under it, then About (description, sign-in, on/off, and for
+ * an MCP server or an endpoint "Public addresses only"), the kind's own
+ * section, its tools, everything set once under Advanced, and
  * Remove last. DESIGN.md › What goes where.
  */
 export function ServerDetail({
@@ -115,6 +119,10 @@ export function ServerDetail({
   const [pending, startTransition] = useTransition()
   const [result, setResult] = useState<ServerActionResult>({ status: "idle" })
   const [enabled, setEnabled] = useOptimistic(server.enabled)
+  const [publicOnly, setPublicOnly] = useOptimistic(server.publicOnly)
+  // An MCP server's and an endpoint's address rule: on the page, where a
+  // refusal's link (#public-only) leads.
+  const addressRule = server.kind === "mcp" || endpoint
   // Kept here rather than in the form: saving moves the server on from
   // "needs a client", which removes the form, and the note should stay.
   const [clientState, saveClient] = useActionState<
@@ -127,6 +135,16 @@ export function ServerDetail({
       setResult(await action())
     })
   }
+
+  // A refusal's or an approval's link names the switch: it gets the focus.
+  useEffect(() => {
+    if (!addressRule || window.location.hash !== `#${PUBLIC_ONLY_ANCHOR}`) {
+      return
+    }
+    const target = document.getElementById(PUBLIC_ONLY_ANCHOR)
+    target?.scrollIntoView({ behavior: "smooth", block: "center" })
+    target?.focus({ preventScroll: true })
+  }, [addressRule])
 
   /** Unfolds Advanced, and puts the cursor in one of its fields. */
   function openAdvanced(field?: string) {
@@ -149,9 +167,13 @@ export function ServerDetail({
       ? "Check account"
       : ssh
         ? "Check sign-in"
-        : browser
-          ? "Check browser"
-          : "Refresh tools"
+        : server.kind === "service"
+          ? "Check service"
+          : browser
+            ? "Check browser"
+            : server.kind === "storage"
+              ? "Check folder"
+              : "Refresh tools"
   const statusTrouble = server.statusMessage && server.status !== "ok"
   const instances = (about?.instances ?? []).map((instance) => instance.slug)
 
@@ -182,10 +204,6 @@ export function ServerDetail({
             ) : null}
             {wrapper && server.flow ? (
               <Badge variant="secondary">Browser flow</Badge>
-            ) : null}
-            {/* An endpoint says so under Advanced, with its other facts. */}
-            {server.kind === "mcp" && server.publicOnly ? (
-              <Badge variant="secondary">Public addresses only</Badge>
             ) : null}
           </span>
         }
@@ -330,6 +348,27 @@ export function ServerDetail({
               })
             }}
           />
+          {addressRule ? (
+            <SwitchRow
+              id={PUBLIC_ONLY_ANCHOR}
+              label="Public addresses only"
+              description={
+                endpoint
+                  ? "Refuse private, local and link-local addresses, for the schema and for every call. On for endpoints an assistant registers; turn it off only for an API on your own network that you trust this endpoint to reach, or when this machine can only reach the internet through a proxy."
+                  : "Refuse private, local and link-local addresses, and PCP's own, for every request to the server and its sign-in, redirects included. On for servers an assistant proposes; turn it off only for a server on your own network that you trust, or when this machine can only reach the internet through a proxy."
+              }
+              checked={publicOnly}
+              disabled={pending}
+              className="scroll-mt-24"
+              onChange={(event) => {
+                const next = event.target.checked
+                startTransition(async () => {
+                  setPublicOnly(next)
+                  setResult(await setServerPublicOnlyAction(server.id, next))
+                })
+              }}
+            />
+          ) : null}
         </List>
       </ListSection>
 
@@ -373,7 +412,7 @@ export function ServerDetail({
 function advancedSummary(kind: ServerKind): string {
   switch (kind) {
     case "openapi":
-      return "Schema, base URL, sign-in, edits to the schema, public addresses, name, pacing"
+      return "Schema, base URL, sign-in, edits to the schema, name, pacing"
     case "jmap":
     case "imap":
       return "Addresses, sign-in, sender, read-only, name, pacing"
@@ -381,12 +420,16 @@ function advancedSummary(kind: ServerKind): string {
       return "Address, sign-in, read-only, name, pacing"
     case "ssh":
       return "Host, port, login, name, pacing"
+    case "service":
+      return "Name, description, secrets for its variables, pacing"
+    case "storage":
+      return "Folder, whose files, umask, read-only, name, pacing"
     case "wrapper":
       return "The whole definition as JSON, short name, name"
     case "browser":
       return "Name and description, pacing"
     default:
-      return "Address, public addresses, sign-in, headers, sign-in app, short name, pacing"
+      return "Address, sign-in, headers, sign-in app, short name, pacing"
   }
 }
 
@@ -412,7 +455,9 @@ function SignInRow({
   if (
     server.kind === "browser" ||
     server.kind === "wrapper" ||
-    server.kind === "ssh"
+    server.kind === "ssh" ||
+    server.kind === "service" ||
+    server.kind === "storage"
   ) {
     return null
   }
@@ -471,8 +516,9 @@ function SignInRow({
 
 /**
  * An endpoint's facts its form does not show as they are: where requests
- * go (the form's base URL is left empty, for the owner to type), where the
- * schema came from and when it was read, and which addresses it may reach.
+ * go (the form's base URL is left empty, for the owner to type), and where
+ * the schema came from and when it was read. Which addresses it may reach
+ * is the switch in About.
  * Every other kind's form shows its own settings whole.
  */
 function EndpointFacts({ server }: { server: ServerDetailProps["server"] }) {
@@ -491,12 +537,6 @@ function EndpointFacts({ server }: { server: ServerDetailProps["server"] }) {
         ),
     },
     { label: "Read", value: <LocalDate value={server.lastSyncedAt} /> },
-    {
-      label: "Addresses",
-      value: server.publicOnly
-        ? "Public addresses only"
-        : "Private addresses allowed",
-    },
   ]
 
   return (
@@ -518,6 +558,11 @@ function EndpointFacts({ server }: { server: ServerDetailProps["server"] }) {
 
 /** Last on the page, centred and red, with what it does. */
 function RemoveServer({ server }: { server: ServerDetailProps["server"] }) {
+  // Its container goes first, with choices of what else goes with it.
+  if (server.kind === "service") {
+    return <ServiceRemove serviceId={server.id} name={server.name} />
+  }
+
   const what =
     server.kind === "openapi"
       ? "Deletes the endpoint, its tool list and PCP's copy of its schema. Secrets you added stay."
@@ -526,12 +571,14 @@ function RemoveServer({ server }: { server: ServerDetailProps["server"] }) {
         : server.kind === "caldav"
           ? "Takes the account out of PCP, with its tool list and any OAuth tokens PCP holds for it. Your calendars and reminders stay on the server, and secrets you added stay."
           : server.kind === "ssh"
-            ? "Takes the server out of PCP and deletes PCP's key for it. Nothing on the server changes: take the key out of authorized_keys there too."
-            : server.kind === "browser"
-              ? "Takes the browser away from assistants and closes its tabs. The sign-ins it keeps stay until you forget them on the Browser page."
-              : server.kind === "wrapper"
-                ? "Deletes the wrapper and its tools. The tools it stands in for show in search again; secrets you added stay."
-                : "Deletes the server, its tool list and any OAuth tokens PCP holds for it. Secrets you added stay."
+            ? "Takes the server out of PCP and deletes PCP's key for it. Nothing on the server changes: take the key out of authorized_keys there too. Its storage folders stay in PCP, without a way to reach them."
+            : server.kind === "storage"
+              ? "Takes the folder out of PCP, with its tools. The folder and its files stay on the server."
+              : server.kind === "browser"
+                ? "Takes the browser away from assistants and closes its tabs. The sign-ins it keeps stay until you forget them on the Browser page."
+                : server.kind === "wrapper"
+                  ? "Deletes the wrapper and its tools. The tools it stands in for show in search again; secrets you added stay."
+                  : "Deletes the server, its tool list and any OAuth tokens PCP holds for it. Secrets you added stay."
 
   return (
     <div className="flex flex-col items-center gap-1.5 pt-2 text-center">
@@ -577,6 +624,7 @@ function RenewalNotice({
   // load, as the route redirects to the server's sign-in page.
   useEffect(() => {
     if (state.status === "ok") {
+      // eslint-disable-next-line @next/next/no-location-assign-relative-destination -- a full load on purpose
       window.location.assign(start)
     }
   }, [state, start])

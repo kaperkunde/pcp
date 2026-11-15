@@ -1,13 +1,13 @@
 import Link from "next/link"
 import type { Metadata } from "next"
 
-import { PageColumn } from "@/components/page-column"
-import { PageHeader } from "@/components/page-header"
+import { PageColumn } from "@kaperkunde/ui/page"
+import { PageHeader } from "@kaperkunde/ui/page"
 import { AddItemsButton } from "@/components/repo-forms"
 import { RepoFilesReview } from "@/components/repo-review"
-import { Badge } from "@/components/ui/badge"
-import { ButtonLink } from "@/components/ui/button"
-import { Card } from "@/components/ui/card"
+import { Badge } from "@kaperkunde/ui/badge"
+import { ButtonLink } from "@kaperkunde/ui/button"
+import { Card } from "@kaperkunde/ui/card"
 import { isPcpError } from "@/lib/core/errors"
 import { resolveItem, type ResolvedItem } from "@/lib/core/repos/apply"
 import type { ItemDocument } from "@/lib/core/repos/documents"
@@ -18,7 +18,8 @@ import {
   listRemote,
   type FetchedItem,
 } from "@/lib/core/repos/remote"
-import { reviewItem, type ItemReview } from "@/lib/core/repos/review"
+import { reviewInVault } from "@/lib/core/repos/found-review"
+import type { ItemReview } from "@/lib/core/repos/review"
 import { clientFor, getRepo } from "@/lib/core/repos/store"
 import { requireContext } from "@/lib/server/session"
 
@@ -35,14 +36,17 @@ type Shown = {
 }
 
 /**
- * A new MCP server or endpoint is added on a page of its own: the
+ * A new MCP server, endpoint or service is added on a page of its own: the
  * repository has its definition, and the owner gives their server's own
- * address, sign-in and note there.
+ * address, sign-in and note there (a service's SSH server, where it is
+ * published and its secrets, as it is launched).
  */
 function needsInstance(entry: Shown): boolean {
   return (
     !!entry.review?.isNew &&
-    (entry.review.ref.kind === "endpoint" || entry.review.ref.kind === "server")
+    (entry.review.ref.kind === "endpoint" ||
+      entry.review.ref.kind === "server" ||
+      entry.review.ref.kind === "service")
   )
 }
 
@@ -124,7 +128,12 @@ export default async function AddPage({
           return {
             root,
             fetched,
-            review: reviewItem(current, fetched.document),
+            review: await reviewInVault(
+              ctx,
+              current,
+              fetched.document,
+              found?.kind ? found.id : null,
+            ),
             resolved,
             problem:
               resolved.problems.length > 0 ? resolved.problems.join(" ") : null,
@@ -194,8 +203,9 @@ export default async function AddPage({
           {entry.fetched && !entry.problem && needsInstance(entry) ? (
             <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl bg-field p-3 text-sm">
               <span className="text-muted-foreground">
-                The repository has what it is. Where yours is and how it signs
-                in are yours to give.
+                {entry.review?.ref.kind === "service"
+                  ? "The repository has what it runs. Where it runs, where it is published and its secrets are yours to give."
+                  : "The repository has what it is. Where yours is and how it signs in are yours to give."}
               </span>
               <ButtonLink
                 href={`/settings/repositories/${id}/import?${new URLSearchParams(
@@ -204,7 +214,9 @@ export default async function AddPage({
                 variant="secondary"
                 size="sm"
               >
-                Add with your address
+                {entry.review?.ref.kind === "service"
+                  ? "Launch it"
+                  : "Add with your address"}
               </ButtonLink>
             </div>
           ) : null}

@@ -3,8 +3,16 @@ import { hkdfSync } from "node:crypto"
 import type { FileLink } from "@/lib/generated/prisma/client"
 
 import type { VaultContext } from "./context"
-import { asBytes, decrypt, encrypt, randomSecret, sha256Hex } from "./crypto"
+import {
+  asBytes,
+  decrypt,
+  encrypt,
+  encryptString,
+  randomSecret,
+  sha256Hex,
+} from "./crypto"
 import { db } from "./db"
+import { openLinkName, sealLinkName } from "./link-names"
 import { invalid, notFound } from "./errors"
 import { newId } from "./ids"
 import {
@@ -14,7 +22,7 @@ import {
   isTextBytes,
   isTextType,
 } from "./media-types"
-import { appendRequestLog } from "./request-log"
+import { appendKeylessLog, type KeylessTool } from "./request-log"
 import { loadResourceLimits } from "./resources/state"
 import { describeResults, openResult, RESULT_TTL_MS } from "./tool-results"
 
@@ -45,6 +53,10 @@ import { describeResults, openResult, RESULT_TTL_MS } from "./tool-results"
  * Every use is in the request log, by name, as a call is. Links are not
  * exported, are wiped with the vault, go with their token, and the cleanup
  * removes them once their time is up.
+ *
+ * An upload page (upload-links.ts) is the one link for the owner rather
+ * than the assistant's computer: each file it takes is a row here too, made
+ * with the page (`uploadLinkId`), which no request reaches by its own hash.
  */
 
 /** How long a link works: time to run curl, not to keep a file. */
@@ -57,7 +69,17 @@ export const MAX_LIVE_LINKS_PER_TOKEN = 20
 /** What a link's secret looks like: randomSecret's 32 bytes, base64url. */
 const SECRET = /^[A-Za-z0-9_-]{43}$/
 
-function linkKey(secret: string, id: string): Buffer {
+/** Whether a string has the shape of a link's secret; checks nothing else. */
+export function isLinkSecret(secret: string): boolean {
+  return SECRET.test(secret)
+}
+
+/**
+ * The key a file sent by link is held under: from the link's secret and the
+ * row's id, so only the link opens it. Also an upload page's
+ * (upload-links.ts), for its purpose and each of its files.
+ */
+export function linkKey(secret: string, id: string): Buffer {
   return Buffer.from(
     hkdfSync(
       "sha256",
@@ -69,12 +91,19 @@ function linkKey(secret: string, id: string): Buffer {
   )
 }
 
-function fileAad(id: string): string {
+export function fileAad(id: string): string {
   return `file_link:${id}`
 }
 
-function keyAad(id: string): string {
+export function keyAad(id: string): string {
   return `file_link_key:${id}`
+}
+
+export { openLinkName, sealLinkName }
+
+/** An upload's store folder, then its path there (store-uploads.ts). */
+export function storePathAad(id: string): string {
+  return `file_link_store_path:${id}`
 }
 
 /** Where a link is fetched or sent: under PCP's public address. */
@@ -82,13 +111,20 @@ export function fileLinkUrl(publicUrl: string, secret: string): string {
   return `${publicUrl.replace(/\/+$/, "")}/api/files/${secret}`
 }
 
-async function roomForLink(
+export async function roomForLink(
   ctx: VaultContext,
   tokenId: string,
   now: Date,
 ): Promise<void> {
+  // An upload page's files count against the pages it may keep open
+  // (upload-links.ts), not here.
   const live = await db().fileLink.count({
-    where: { vaultId: ctx.vaultId, tokenId, expiresAt: { gt: now } },
+    where: {
+      vaultId: ctx.vaultId,
+      tokenId,
+      uploadLinkId: null,
+      expiresAt: { gt: now },
+    },
   })
 
   if (live >= MAX_LIVE_LINKS_PER_TOKEN) {
@@ -146,7 +182,7 @@ export async function shareResult(
       kind: "download",
       secretHash: sha256Hex(secret),
       resultId: opened.id,
-      name: opened.name,
+      sealedName: sealLinkName(linkKey(secret, id), id, opened.name),
       mediaType,
       length: bytes.length,
       ciphertext: asBytes(encrypt(linkKey(secret, id), bytes, fileAad(id))),
@@ -184,6 +220,8 @@ export async function receiveFile(
     publicUrl: string
     name?: string | null
     type?: string | null
+    /** A store to save the file in too (store-uploads.ts). */
+    destination?: { storeId: string; folder: string } | null
   },
   now = new Date(),
 ): Promise<UploadLink> {
@@ -202,12 +240,24 @@ export async function receiveFile(
       kind: "upload",
       secretHash: sha256Hex(secret),
       resultId,
-      name: input.name ?? null,
+      sealedName: sealLinkName(linkKey(secret, id), id, input.name ?? null),
       mediaType: input.type ?? "",
       wrappedKey: asBytes(encrypt(ctx.dek, linkKey(secret, id), keyAad(id))),
       maxUses: 1,
       createdAt: now,
       expiresAt,
+      ...(input.destination
+        ? {
+            storeId: input.destination.storeId,
+            storePath: asBytes(
+              encryptString(
+                ctx.dek,
+                input.destination.folder,
+                storePathAad(id),
+              ),
+            ),
+          }
+        : {}),
     },
   })
 
@@ -217,7 +267,7 @@ export async function receiveFile(
 /** A link's request, refused: the status and what to say. */
 export type LinkRefusal = { ok: false; status: number; message: string }
 
-const GONE: LinkRefusal = {
+export const GONE: LinkRefusal = {
   ok: false,
   status: 404,
   message:
@@ -244,10 +294,9 @@ async function findLink(
   if (
     !link ||
     link.kind !== kind ||
+    link.uploadLinkId !== null ||
     link.expiresAt <= now ||
-    link.token.revokedAt ||
-    !link.token.shareFiles ||
-    (link.token.expiresAt && link.token.expiresAt <= now)
+    !tokenCanUseLinks(link.token, now)
   ) {
     return null
   }
@@ -255,13 +304,30 @@ async function findLink(
   return link
 }
 
-function logUse(
+/** Whether a link's token is live and may still move files by link. */
+export function tokenCanUseLinks(
+  token: {
+    revokedAt: Date | null
+    expiresAt: Date | null
+    shareFiles: boolean
+  },
+  now: Date,
+): boolean {
+  return (
+    !token.revokedAt &&
+    token.shareFiles &&
+    !(token.expiresAt && token.expiresAt <= now)
+  )
+}
+
+export function logUse(
   link: Pick<FileLink, "vaultId" | "tokenId">,
-  tool: string,
+  tool: KeylessTool,
   ok: boolean,
   started: number,
 ): Promise<void> {
-  return appendRequestLog({
+  // A link's request holds no vault key: the name is PCP's own.
+  return appendKeylessLog({
     vaultId: link.vaultId,
     tokenId: link.tokenId,
     tool,
@@ -303,14 +369,16 @@ export async function downloadByLink(
     }
   }
 
-  const bytes = decrypt(
-    linkKey(secret, link.id),
-    Buffer.from(link.ciphertext),
-    fileAad(link.id),
-  )
+  const key = linkKey(secret, link.id)
+  const bytes = decrypt(key, Buffer.from(link.ciphertext), fileAad(link.id))
 
   await logUse(link, "file_link/download", true, started)
-  return { ok: true, name: link.name, mediaType: link.mediaType, bytes }
+  return {
+    ok: true,
+    name: openLinkName(key, link),
+    mediaType: link.mediaType,
+    bytes,
+  }
 }
 
 /** Types a sender sets for any bytes, which say nothing of the file. */
@@ -319,6 +387,35 @@ const SAYS_NOTHING = new Set([
   "application/octet-stream",
   "application/x-www-form-urlencoded",
 ])
+
+/**
+ * The media type of a file sent by link: the one asked for, else what the
+ * request says, else (when it says nothing of the file) what its name and
+ * first bytes say.
+ */
+export function sentMediaType({
+  asked,
+  contentType,
+  name,
+  bytes,
+}: {
+  asked: string
+  contentType: string | null
+  name: string | null
+  bytes: Buffer
+}): string {
+  const sent = bareType(contentType ?? "")
+  const said = (contentType ?? "").trim().slice(0, 200)
+
+  return (
+    asked ||
+    (SAYS_NOTHING.has(sent)
+      ? fileMediaType(name ?? "", bytes)
+      : isTextType(said) && !charsetOf(said) && isTextBytes(bytes)
+        ? `${sent}; charset=utf-8`
+        : said)
+  )
+}
 
 /** Reads a body up to `max` bytes; null past it. */
 async function readCapped(
@@ -339,6 +436,42 @@ async function readCapped(
   }
 
   return Buffer.concat(chunks)
+}
+
+/**
+ * The file a request sends, as its body: never a form, and no larger than
+ * PCP keeps of one file (the resource limit), counted as it comes.
+ */
+export async function readSentFile(
+  body: AsyncIterable<Uint8Array> | null,
+  {
+    contentType,
+    contentLength,
+  }: { contentType: string | null; contentLength: number | null },
+): Promise<{ ok: true; bytes: Buffer } | LinkRefusal> {
+  if (bareType(contentType ?? "").startsWith("multipart/")) {
+    return {
+      ok: false,
+      status: 415,
+      message:
+        "Send the file's bytes as the body (curl -T file, or --data-binary @file), not as a form.",
+    }
+  }
+
+  const { fileBytes } = await loadResourceLimits()
+  const tooLarge: LinkRefusal = {
+    ok: false,
+    status: 413,
+    message: `The file is larger than PCP keeps of one (${fileBytes.toLocaleString("en")} bytes). The owner can raise that in PCP's settings, under Resources.`,
+  }
+
+  if (contentLength !== null && contentLength > fileBytes) {
+    return tooLarge
+  }
+
+  const bytes = await readCapped(body, fileBytes)
+
+  return bytes ? { ok: true, bytes } : tooLarge
 }
 
 export type ReceivedFile = {
@@ -380,44 +513,25 @@ export async function uploadByLink(
     }
   }
 
-  const sent = bareType(contentType ?? "")
+  const read = await readSentFile(body, { contentType, contentLength })
 
-  if (sent.startsWith("multipart/")) {
-    return {
-      ok: false,
-      status: 415,
-      message:
-        "Send the file's bytes as the body (curl -T file, or --data-binary @file), not as a form.",
+  if (!read.ok) {
+    // A form is refused before anything is read: not a use of the link.
+    if (read.status !== 415) {
+      await logUse(link, "file_link/upload", false, started)
     }
+
+    return read
   }
 
-  const { fileBytes } = await loadResourceLimits()
-  const tooLarge: LinkRefusal = {
-    ok: false,
-    status: 413,
-    message: `The file is larger than PCP keeps of one (${fileBytes.toLocaleString("en")} bytes). The owner can raise that in PCP's settings, under Resources.`,
-  }
-
-  if (contentLength !== null && contentLength > fileBytes) {
-    await logUse(link, "file_link/upload", false, started)
-    return tooLarge
-  }
-
-  const bytes = await readCapped(body, fileBytes)
-
-  if (!bytes) {
-    await logUse(link, "file_link/upload", false, started)
-    return tooLarge
-  }
-
-  const said = (contentType ?? "").trim().slice(0, 200)
-  const mediaType =
-    link.mediaType ||
-    (SAYS_NOTHING.has(sent)
-      ? fileMediaType(link.name ?? "", bytes)
-      : isTextType(said) && !charsetOf(said) && isTextBytes(bytes)
-        ? `${sent}; charset=utf-8`
-        : said)
+  const { bytes } = read
+  const name = openLinkName(linkKey(secret, link.id), link)
+  const mediaType = sentMediaType({
+    asked: link.mediaType,
+    contentType,
+    name,
+    bytes,
+  })
   const readableUntil = new Date(now.getTime() + RESULT_TTL_MS)
   const { count } = await db().fileLink.updateMany({
     where: { id: link.id, receivedAt: null },
@@ -447,7 +561,7 @@ export async function uploadByLink(
   return {
     ok: true,
     resultId: link.resultId,
-    name: link.name,
+    name,
     mediaType,
     size: bytes.length,
     readableUntil,

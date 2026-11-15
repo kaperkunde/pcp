@@ -250,7 +250,7 @@ export function lintDocument(
 
   if (undescribed > 0) {
     problems.push({
-      problem: `${undescribed} GET operation${undescribed === 1 ? " does" : "s do"} not describe ${undescribed === 1 ? "its" : "their"} answer as JSON, so describe cannot say what ${undescribed === 1 ? "it returns" : "they return"}.`,
+      problem: `${undescribed} GET operation${undescribed === 1 ? " does" : "s do"} not describe ${undescribed === 1 ? "its" : "their"} answer as JSON, so search cannot say what ${undescribed === 1 ? "it returns" : "they return"}.`,
       at: "/paths",
     })
   }

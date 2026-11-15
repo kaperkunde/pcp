@@ -1,11 +1,11 @@
-import { ButtonLink } from "@/components/ui/button"
+import { ButtonLink } from "@kaperkunde/ui/button"
 import {
   Card,
   CardContent,
   CardDescription,
   CardHeader,
   CardTitle,
-} from "@/components/ui/card"
+} from "@kaperkunde/ui/card"
 
 /**
  * Before there is anything here: an assistant can do the adding. It finds

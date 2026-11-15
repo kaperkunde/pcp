@@ -11,6 +11,11 @@
 # builds' checkouts only; develop's package.json keeps the release version,
 # and no commit is made.
 #
+# Its notes are its changelog: the pull requests merged since the build or
+# release before, each by its "## Changelog" section or its title, and the
+# commits pushed without one (scripts/changelog.mjs, as release.yml writes
+# CHANGELOG.md), then the images' signed digests once they are built.
+#
 # A pre-release is never GitHub's latest release, so releases/latest (the
 # stable channel's update check, the README's download links, the app's
 # updater) keeps pointing at main's. The images go to ghcr.io as <version>
@@ -57,8 +62,11 @@ jobs:
     needs: ci
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    # pull-requests: the notes read the pull requests merged since the build
+    # before.
     permissions:
       contents: write
+      pull-requests: read
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
@@ -79,12 +87,25 @@ jobs:
           echo "version=$version" >> "$GITHUB_OUTPUT"
       - name: Write the notes
         env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
           VERSION: ${{ steps.version.outputs.version }}
           SHA: ${{ github.sha }}
+        # What changed since the build or release before: its commits, and
+        # the pull requests merged into develop from the day before the first
+        # of them, of which the script keeps those whose merge commit is in
+        # the range. PCP shows the notes as plain text.
         run: |
-          # What changed since the build or release before: the commits'
-          # subjects, which PCP shows as plain text.
-          previous="$(git describe --tags --abbrev=0 --match 'v*' HEAD 2>/dev/null || true)"
+          previous="$(git describe --tags --abbrev=0 --match 'v*' --exclude "v$VERSION" HEAD 2>/dev/null || true)"
+          range="${previous:+$previous..}HEAD"
+          git log --max-count=500 --format='%H%x09%P%x09%cI%x09%s' "$range" > "$RUNNER_TEMP/commits.txt"
+          since="$(node scripts/changelog.mjs since --commits "$RUNNER_TEMP/commits.txt")"
+          set -- --base develop --state merged --limit 200 \
+            --json number,title,body,url,mergedAt,mergeCommit
+          if [ -n "$since" ]; then
+            set -- "$@" --search "merged:>=$since"
+          fi
+          gh pr list "$@" > "$RUNNER_TEMP/prs.json"
           {
             echo "A build of develop, ahead of the releases. It may break."
             echo
@@ -93,10 +114,9 @@ jobs:
             if [ -n "$previous" ]; then
               echo "Changes since $previous:"
               echo
-              git log --no-merges --format='- %s (%h)' "$previous..HEAD" | head -n 50
-            else
-              git log --no-merges --format='- %s (%h)' HEAD | head -n 20
             fi
+            node scripts/changelog.mjs notes --repo "$GH_REPO" \
+              --prs "$RUNNER_TEMP/prs.json" --commits "$RUNNER_TEMP/commits.txt"
           } > "$RUNNER_TEMP/notes.md"
           cat "$RUNNER_TEMP/notes.md"
       - name: Tag and draft
@@ -134,9 +154,13 @@ jobs:
     with:
       version: ${{ needs.release.outputs.version }}
       channel-tag: develop
+    # id-token and attestations: the images are signed and attested
+    # (build-images.yml), keyless, with this run's OIDC token.
     permissions:
       contents: read
       packages: write
+      id-token: write
+      attestations: write
 
   publish:
     name: publish
@@ -154,12 +178,37 @@ jobs:
           VERSION: ${{ needs.release.outputs.version }}
           APPS: ${{ needs.desktop.result }}
           IMAGE: ${{ needs.image.result }}
+          DIGEST: ${{ needs.image.outputs.digest }}
+          SANDBOX_DIGEST: ${{ needs.image.outputs.sandbox-digest }}
         run: |
           if [ "$APPS" != "success" ]; then
             echo "::warning::A desktop app build did not succeed; v$VERSION is published without it. Re-run the failed job to attach it."
           fi
           if [ "$IMAGE" != "success" ]; then
             echo "::warning::The container images did not build; v$VERSION is published without them and ghcr.io/$GH_REPO:develop stays at the build before. Re-run the failed job."
+          fi
+          # The images' digests, signed (build-images.yml), at the end of the
+          # notes: a re-run writes the section again rather than twice.
+          if [ "$IMAGE" = "success" ]; then
+            notes="$RUNNER_TEMP/notes.md"
+            gh release view "v$VERSION" --json body --jq .body > "$notes"
+            sed -i '/^## Container images$/,$d' "$notes"
+            {
+              echo
+              echo "## Container images"
+              echo
+              echo "By digest, signed with cosign by PCP's image workflow:"
+              echo
+              echo "- ghcr.io/$GH_REPO:$VERSION@$DIGEST"
+              echo "- ghcr.io/$GH_REPO-sandbox:$VERSION@$SANDBOX_DIGEST"
+              echo
+              echo "install.sh checks the signature before it runs an image. To check one yourself:"
+              echo
+              echo '```'
+              echo "cosign verify --certificate-identity-regexp '^https://github\.com/$GH_REPO/\.github/workflows/build-images\.yml@refs/heads/(main|develop)\$' --certificate-oidc-issuer https://token.actions.githubusercontent.com ghcr.io/$GH_REPO@$DIGEST"
+              echo '```'
+            } >> "$notes"
+            gh release edit "v$VERSION" --notes-file "$notes"
           fi
           gh release edit "v$VERSION" --draft=false --prerelease
       - name: Remove older builds

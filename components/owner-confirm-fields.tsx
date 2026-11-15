@@ -9,9 +9,9 @@ import {
   useTouchId,
   whenFocused,
 } from "@/components/desktop-bridge"
-import { Button } from "@/components/ui/button"
-import { Input } from "@/components/ui/input"
-import { Field } from "@/components/ui/label"
+import { Button } from "@kaperkunde/ui/button"
+import { Input } from "@kaperkunde/ui/input"
+import { Field } from "@kaperkunde/ui/label"
 import { UsernameField } from "@/components/username-field"
 import { TOUCH_ID_REJECTED } from "@/lib/core/constants"
 
@@ -122,7 +122,7 @@ export function OwnerConfirmFields({
         <div>
           <Button
             type="button"
-            variant="outline"
+            variant="secondary"
             onClick={() => void confirmWithTouchId()}
           >
             <Fingerprint aria-hidden />

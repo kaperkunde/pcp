@@ -1,4 +1,6 @@
-import { randomSecret, safeEqual, sha256Hex } from "../crypto"
+import { safeEqual } from "@kaperkunde/security"
+
+import { randomSecret, sha256Hex } from "../crypto"
 import { db } from "../db"
 import { isLocalHostname } from "../local-address"
 import { describeFetchError, discard, readCapped } from "../openapi/http"

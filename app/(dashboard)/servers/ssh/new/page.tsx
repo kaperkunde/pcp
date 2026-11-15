@@ -1,7 +1,7 @@
 import type { Metadata } from "next"
 
-import { PageColumn } from "@/components/page-column"
-import { PageHeader } from "@/components/page-header"
+import { PageColumn } from "@kaperkunde/ui/page"
+import { PageHeader } from "@kaperkunde/ui/page"
 import { EMPTY_SSH_SERVER, SshServerForm } from "@/components/ssh-server-form"
 import { IconTile } from "@/components/ui/icon-tile"
 import { requireContext } from "@/lib/server/session"

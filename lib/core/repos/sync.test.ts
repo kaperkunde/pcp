@@ -41,6 +41,9 @@ import {
 } from "./test-vault"
 import type { ItemKind } from "./layout"
 import { localItems } from "./local"
+import { serializeItem, type WrapperDocument } from "./documents"
+import { createBrowserServer } from "../browser/server"
+import { getWrapper } from "../wrappers/admin"
 
 // Linked repositories end to end against a fake GitHub: what a repository
 // offers and adding it, pushing one commit per item, the four ways a sync
@@ -669,5 +672,80 @@ describe("due syncs", () => {
     })
     forgetSyncLooks()
     expect(await runDueSyncs(ctx, { now })).toEqual({ synced: 0 })
+  })
+})
+
+describe("a wrapper's pace", () => {
+  const FLOW: WrapperDocument = {
+    kind: "flow",
+    name: "open-shop",
+    version: 1,
+    displayName: "Open the shop",
+    description: "Opens the shop.",
+    callLevels: "token",
+    tools: [
+      {
+        name: "open",
+        title: null,
+        description: "Opens the shop.",
+        inputSchema: { type: "object" },
+        annotations: null,
+        calls: ["browser/navigate"],
+        replaces: [],
+        program:
+          'return await pcp.call("browser", "navigate", { url: "https://shop.example.com/" })',
+      },
+    ],
+    secrets: [],
+  }
+
+  it("holds a new pace from a trusted repository for the owner, flagged past their bounds, and applies it once they take it", async () => {
+    await createBrowserServer(ctx)
+    fake.addRepo("ada", "shared", { files: serializeItem(FLOW) })
+    fake.tokens.set(PAT, { push: true })
+    const secretId = (
+      await createSecret(ctx, { name: "GitHub token", value: PAT })
+    ).id
+    const { id: repoId } = await createRepo(ctx, {
+      owner: "ada",
+      name: "shared",
+      trust: "trusted",
+      access: "write",
+      secretId,
+    })
+    const repo = await getRepo(ctx, repoId)
+    const gh = await clientFor(ctx, repo)
+    const listing = await listRemote(gh, repo, repo.branch)
+    const [browsed] = await browseItems(gh, repo, listing)
+    const [added] = await addFromRepo(ctx, repoId, {
+      commit: listing.head.commit,
+      items: [{ root: "flows/open-shop", hash: browsed!.fetched!.hash }],
+    })
+    expect(added).toMatchObject({ ok: true })
+    const [item] = await listRepoItems(ctx, repoId)
+    const wrapperId = item!.itemId
+
+    const paced = {
+      ...FLOW,
+      pace: { actions: { min_ms: 20, max_ms: 60 } },
+    }
+    const files = serializeItem(paced)
+    expect(files["flows/open-shop/wrapper.yaml"]).toContain("pcp_format: 5\n")
+    fake.commit("ada", "shared", files)
+
+    // Not text alone: it waits for the owner, even from a trusted repository.
+    expect(await syncItem(ctx, item!.id)).toMatchObject({ outcome: "review" })
+    expect((await getWrapper(ctx, { id: wrapperId })).pace).toBeUndefined()
+    const change = await pendingChange(ctx, item!.id)
+    expect(change.review.textOnly).toBe(false)
+    expect(change.review.flags.map((flag) => flag.kind)).toEqual(["pace"])
+    expect(change.review.flags[0]!.message).toContain(
+      "Outside what you let assistants set without asking: before actions in a page 0.02 to 0.06 s",
+    )
+
+    await approveChange(ctx, item!.id, change.pending)
+    expect((await getWrapper(ctx, { id: wrapperId })).pace).toEqual({
+      actions: { min_ms: 20, max_ms: 60 },
+    })
   })
 })

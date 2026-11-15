@@ -3,6 +3,7 @@ import { schedule, type ScheduledTask } from "node-cron"
 import { logUsage } from "../request-log"
 import { CLEANUP_SCHEDULES } from "./limits"
 import { runCleanup } from "./run"
+import { scrub } from "./space"
 import {
   describeRemoved,
   getCleanupConfig,
@@ -62,6 +63,15 @@ export function cleanUp(
   trigger: NonNullable<CleanupStatus["trigger"]>,
 ): Promise<CleanupStatus> {
   return chain(() => runCleanup(trigger))
+}
+
+/**
+ * Wipes what a removal left in the write-ahead log (and, with `rebuild`,
+ * in the file's free pages), after any cleanup under way: VACUUM and a
+ * checkpoint cannot run beside another. See scrub in ./space.ts.
+ */
+export function scrubFreedPages(options: { rebuild: boolean }): Promise<void> {
+  return chain(() => scrub(options))
 }
 
 /** At boot: one run now (as PCP always did), then the schedule. */

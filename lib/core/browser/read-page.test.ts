@@ -64,9 +64,12 @@ describe("read_page's text", () => {
     // The hidden code block went as hidden; the others as JSON.
     expect(left).toEqual({ hidden: 6, json: 2, jsonChars: 2 * STATE.length })
     expect(leftOutNote(left)).toBe(
-      `Left out: 2 blocks of JSON data the page carries (${(2 * STATE.length).toLocaleString("en")} characters), which it does not show.`,
+      `Left out: 6 elements the page's HTML marks hidden, and 2 blocks of JSON data the page carries (${(2 * STATE.length).toLocaleString("en")} characters), which it does not show.`,
     )
-    expect(leftOutNote({ hidden: 3, json: 0, jsonChars: 0 })).toBeNull()
+    expect(leftOutNote({ hidden: 1, json: 0, jsonChars: 0 })).toBe(
+      "Left out: 1 element the page's HTML marks hidden, which it does not show.",
+    )
+    expect(leftOutNote({ hidden: 0, json: 0, jsonChars: 0 })).toBeNull()
   })
 
   it("leaves web_fetch's Markdown as it was", () => {

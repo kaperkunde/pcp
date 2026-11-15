@@ -18,6 +18,7 @@ import { OAuthError } from "./errors"
 import { MAX_PARAM_LENGTH } from "./limits"
 import { isOwnResource, oauthUrls } from "./metadata"
 import { issueCode } from "./tokens"
+import { TOKEN_NAME_SELECT, tokenName } from "../token-names"
 
 /**
  * The authorization endpoint's logic (RFC 6749 §4.1.1, OAuth 2.1): what a
@@ -374,14 +375,20 @@ export async function tokensForClient(
   ctx: VaultContext,
   clientId: string,
 ): Promise<Array<{ id: string; name: string; createdAt: Date }>> {
-  return db().apiToken.findMany({
+  const rows = await db().apiToken.findMany({
     where: {
       vaultId: ctx.vaultId,
       oauthClientId: clientId,
       revokedAt: null,
       OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }],
     },
-    select: { id: true, name: true, createdAt: true },
+    select: { ...TOKEN_NAME_SELECT, createdAt: true },
     orderBy: { createdAt: "desc" },
   })
+
+  return rows.map((row) => ({
+    id: row.id,
+    name: tokenName(ctx, row),
+    createdAt: row.createdAt,
+  }))
 }

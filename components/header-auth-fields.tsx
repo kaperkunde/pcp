@@ -7,10 +7,10 @@ import {
   SecretChoice,
   type SecretOption,
 } from "@/components/auth-fields-secret"
-import { Button } from "@/components/ui/button"
-import { Disclosure } from "@/components/ui/disclosure"
-import { Input, Select } from "@/components/ui/input"
-import { Field } from "@/components/ui/label"
+import { Button } from "@kaperkunde/ui/button"
+import { Disclosure } from "@kaperkunde/ui/disclosure"
+import { Input, Select } from "@kaperkunde/ui/input"
+import { Field } from "@kaperkunde/ui/label"
 import { MAX_AUTH_HEADERS, SECRET_PLACEHOLDER } from "@/lib/core/constants"
 
 export type { SecretOption }

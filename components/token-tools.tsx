@@ -4,16 +4,16 @@ import { ChevronRight, RefreshCw, Search } from "lucide-react"
 import { useId, useOptimistic, useState, useTransition } from "react"
 
 import { AllTokensCheckbox } from "@/components/all-tokens-checkbox"
-import { FormError, FormNote } from "@/components/form-status"
-import { Badge } from "@/components/ui/badge"
-import { Button } from "@/components/ui/button"
+import { FormError, FormNote } from "@kaperkunde/ui/form-status"
+import { Badge } from "@kaperkunde/ui/badge"
+import { Button } from "@kaperkunde/ui/button"
 import { IconTile, serverKindLabel } from "@/components/ui/icon-tile"
-import { Select } from "@/components/ui/input"
-import { List, ListSection } from "@/components/ui/list"
+import { Select } from "@kaperkunde/ui/input"
+import { List, ListSection } from "@kaperkunde/ui/list"
 import {
   SegmentedControl,
   type SegmentedOption,
-} from "@/components/ui/segmented-control"
+} from "@kaperkunde/ui/segmented-control"
 import { refreshToolsAction } from "@/lib/actions/servers"
 import {
   setServerToolAccessAction,

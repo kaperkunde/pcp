@@ -7,8 +7,8 @@ import {
   CardDescription,
   CardHeader,
   CardTitle,
-} from "@/components/ui/card"
-import { Disclosure } from "@/components/ui/disclosure"
+} from "@kaperkunde/ui/card"
+import { Disclosure } from "@kaperkunde/ui/disclosure"
 import { IconTile } from "@/components/ui/icon-tile"
 
 /**

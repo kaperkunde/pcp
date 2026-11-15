@@ -1,10 +1,10 @@
 import { spawn, type ChildProcess } from "node:child_process"
 import { randomBytes } from "node:crypto"
 import fs from "node:fs/promises"
-import os from "node:os"
 import path from "node:path"
 
 import { DISPLAY_START_TIMEOUT_MS, SCREEN } from "./limits"
+import { makeScratchDir, removeScratchDir } from "./scratch"
 
 /**
  * A screen for the browser on a server: Chromium runs with a window on a
@@ -251,7 +251,7 @@ function authEntry(cookie: Buffer): Buffer {
 }
 
 async function start(): Promise<Running | null> {
-  const folder = await fs.mkdtemp(path.join(os.tmpdir(), "pcp-display-"))
+  const folder = await makeScratchDir("display")
   const authFile = path.join(folder, "Xauthority")
 
   await fs.writeFile(authFile, authEntry(randomBytes(16)), { mode: 0o600 })
@@ -295,7 +295,7 @@ async function start(): Promise<Running | null> {
 
   if (number === null) {
     child.kill("SIGKILL")
-    await fs.rm(folder, { recursive: true, force: true }).catch(() => {})
+    await removeScratchDir(folder)
     console.error(
       "[browser] the virtual display did not start; the browser runs headless",
     )
@@ -312,7 +312,7 @@ async function start(): Promise<Running | null> {
 
 function stop(running: Running): void {
   running.process.kill("SIGTERM")
-  void fs.rm(running.folder, { recursive: true, force: true }).catch(() => {})
+  void removeScratchDir(running.folder)
 }
 
 /**

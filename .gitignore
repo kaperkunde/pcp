@@ -38,6 +38,7 @@ next-env.d.ts
 /e2e/.auth
 /e2e/.artifacts
 /e2e/.state
+/e2e/.screenshots
 /test-results
 /playwright-report
 /blob-report

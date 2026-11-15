@@ -1,7 +1,7 @@
 import { TriangleAlert } from "lucide-react"
 
 import { Diff } from "@/components/skill-review"
-import { Badge } from "@/components/ui/badge"
+import { Badge } from "@kaperkunde/ui/badge"
 import type { RepoShown } from "@/lib/core/repos/assist"
 import type { FileChange, ReviewFlag } from "@/lib/core/repos/review"
 import { cn } from "@/lib/utils"

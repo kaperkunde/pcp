@@ -1,7 +1,7 @@
 import type { Metadata } from "next"
 
-import { PageColumn } from "@/components/page-column"
-import { PageHeader } from "@/components/page-header"
+import { PageColumn } from "@kaperkunde/ui/page"
+import { PageHeader } from "@kaperkunde/ui/page"
 import { IconTile } from "@/components/ui/icon-tile"
 import { EMPTY_WRAPPER, WrapperForm } from "@/components/wrapper-form"
 import { listSecrets } from "@/lib/core/secrets"

@@ -24,6 +24,7 @@ import {
   pollGitHubSignIn,
   startGitHubSignIn,
 } from "./signin"
+import { secretNameWhere } from "../secret-meta"
 
 // PCP's GitHub client against a fake GitHub on this machine: no redirect
 // followed, every answer bounded and read against a schema, a file checked
@@ -266,7 +267,7 @@ describe("the device flow", () => {
 
     expect(done.status).toBe("done")
     const secret = await db().secret.findFirstOrThrow({
-      where: { name: GITHUB_SIGNIN_SECRET },
+      where: secretNameWhere(ctx, GITHUB_SIGNIN_SECRET),
     })
     expect(secret.kind).toBe("oauth")
     expect(JSON.parse(await revealSecret(ctx, secret.id))).toMatchObject({
@@ -320,7 +321,9 @@ describe("the device flow", () => {
         .status,
     ).toBe("denied")
     expect(
-      await db().secret.count({ where: { name: GITHUB_SIGNIN_SECRET } }),
+      await db().secret.count({
+        where: secretNameWhere(ctx, GITHUB_SIGNIN_SECRET),
+      }),
     ).toBe(0)
   })
 

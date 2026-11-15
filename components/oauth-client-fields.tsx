@@ -2,11 +2,11 @@
 
 import type { ReactNode } from "react"
 
-import { CopyableValue } from "@/components/copyable-value"
+import { CopyableValue } from "@kaperkunde/ui/copy-button"
 import type { SecretOption } from "@/components/header-auth-fields"
-import { Disclosure } from "@/components/ui/disclosure"
-import { Input, Select } from "@/components/ui/input"
-import { Field } from "@/components/ui/label"
+import { Disclosure } from "@kaperkunde/ui/disclosure"
+import { Input, Select } from "@kaperkunde/ui/input"
+import { Field } from "@kaperkunde/ui/label"
 
 export type OAuthClientValues = {
   oauthClientId: string

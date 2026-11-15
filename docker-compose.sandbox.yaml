@@ -21,7 +21,9 @@ services:
 
   sandbox:
     # The same tag as PCP's (docker-compose.yaml): they speak one protocol.
-    image: ghcr.io/kaperkunde/pcp-sandbox:${PCP_TAG:-latest}
+    # PCP_SANDBOX_TAG pins it by its own digest (0.5.0@sha256:…, from the
+    # release notes) beside PCP_TAG's.
+    image: ghcr.io/kaperkunde/pcp-sandbox:${PCP_SANDBOX_TAG:-${PCP_TAG:-latest}}
     build: sandbox
     restart: unless-stopped
     depends_on: [pcp]

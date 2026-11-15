@@ -1,9 +1,5 @@
-import { clsx, type ClassValue } from "clsx"
-import { twMerge } from "tailwind-merge"
-
-export function cn(...inputs: ClassValue[]) {
-  return twMerge(clsx(inputs))
-}
+/** Class names joined, later Tailwind classes winning (@kaperkunde/ui's). */
+export { cn } from "@kaperkunde/ui/cn"
 
 /** "3 min ago", "2 h ago", "4 d ago": how long since, from the reader's clock. */
 export function timeAgo(value: Date | string, now = Date.now()): string {

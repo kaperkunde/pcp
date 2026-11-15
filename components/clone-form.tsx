@@ -14,12 +14,12 @@ import {
   FormSection,
   ServerFormFrame,
 } from "@/components/server-form-parts"
-import { FormError } from "@/components/form-status"
-import { SubmitButton } from "@/components/submit-button"
-import { ButtonLink } from "@/components/ui/button"
-import { Input } from "@/components/ui/input"
-import { Field } from "@/components/ui/label"
-import { SwitchRow } from "@/components/ui/switch"
+import { FormError } from "@kaperkunde/ui/form-status"
+import { SubmitButton } from "@kaperkunde/ui/submit-button"
+import { ButtonLink } from "@kaperkunde/ui/button"
+import { Input } from "@kaperkunde/ui/input"
+import { Field } from "@kaperkunde/ui/label"
+import { SwitchRow } from "@kaperkunde/ui/switch"
 import {
   cloneServerAction,
   type DefinitionActionResult,

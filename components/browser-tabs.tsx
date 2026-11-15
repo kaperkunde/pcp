@@ -4,9 +4,9 @@ import Link from "next/link"
 
 import { LocalDate, RelativeDate } from "@/components/local-date"
 import { PermissionDecision } from "@/components/permission-decision"
-import { Badge } from "@/components/ui/badge"
-import { Button } from "@/components/ui/button"
-import { List, ListRow } from "@/components/ui/list"
+import { Badge } from "@kaperkunde/ui/badge"
+import { Button } from "@kaperkunde/ui/button"
+import { List, ListRow } from "@kaperkunde/ui/list"
 import {
   TAB_STATE_LABELS,
   tabHost,

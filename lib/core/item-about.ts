@@ -247,7 +247,7 @@ export async function itemAbout(
   if (itemKind === "skill") {
     const skill = await db().skill.findFirst({
       where: { id, vaultId: ctx.vaultId },
-      select: { id: true, personalNote: true },
+      select: { id: true, personalNote: true, visibility: true },
     })
 
     if (!skill) {
@@ -263,7 +263,12 @@ export async function itemAbout(
       canClone: false,
       source: await sourceOf(ctx, link, "skill"),
       sync: await syncOf(ctx, link),
-      sharing: await sharingOf(ctx, link, "skill"),
+      // A token's own skill is never offered to a repository.
+      sharing: await sharingOf(
+        ctx,
+        link,
+        skill.visibility === "shared" ? "skill" : null,
+      ),
       note: readSkillNote(ctx, skill),
     }
   }

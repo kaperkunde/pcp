@@ -4,21 +4,23 @@ import { ChevronDown } from "lucide-react"
 import Link from "next/link"
 import { useActionState, useId, useState } from "react"
 
-import { FormError, FormNote } from "@/components/form-status"
+import { FormError, FormNote } from "@kaperkunde/ui/form-status"
 import {
   changesServers,
   useSharedInstances,
 } from "@/components/shared-definition"
-import { SubmitButton } from "@/components/submit-button"
-import { Badge } from "@/components/ui/badge"
-import { Button } from "@/components/ui/button"
-import { Textarea } from "@/components/ui/input"
-import { List, ListSection } from "@/components/ui/list"
+import { SubmitButton } from "@kaperkunde/ui/submit-button"
+import { Badge } from "@kaperkunde/ui/badge"
+import { Button } from "@kaperkunde/ui/button"
+import { Textarea } from "@kaperkunde/ui/input"
+import { List, ListSection } from "@kaperkunde/ui/list"
 import {
   setToolDescriptionAction,
   type ServerActionResult,
 } from "@/lib/actions/servers"
+import { setToolTierAction } from "@/lib/actions/tool-tiers"
 import { showReplacedToolAction } from "@/lib/actions/wrappers"
+import { ToolTierSelect, type ShownTier } from "@/components/tool-tier-select"
 import type { ServerKind } from "@/lib/core/servers"
 import { cn } from "@/lib/utils"
 
@@ -31,7 +33,13 @@ export type ServerTool = {
   operation: { method: string; path: string } | null
   /** Wrappers' tools that stand in for this one in search. */
   replacedBy?: Array<{ id: string; name: string; tool: string }>
+  /** Its tier: Read, Write or Destructive, and whether you chose it. */
+  tier: ShownTier
 }
+
+/** What a tool's tier is for, under every server's tools. */
+const TIERS_ABOUT =
+  "Each tool's tier (Read, Write or Destructive) says how much it can do: assistants run it through the entry for its tier, and an app can let Read tools through without asking each time. Default is what the tool says of itself."
 
 /** How many tools the page shows before "Show all". */
 const PREVIEW = 5
@@ -47,6 +55,10 @@ function about(kind: ServerKind): string {
       return "What an assistant can find with search: the same calendar and reminder tools for every account, less the ones that change things on a read-only account."
     case "ssh":
       return "What an assistant can find with search: run_command, one command per call. Leave it at ask, and you see each command before it runs."
+    case "storage":
+      return "What an assistant can find with search: listing, finding, getting and saving files in this folder, making folders, moving and deleting, never outside it. Delete removes for good; leave it at ask."
+    case "service":
+      return "What an assistant can find with search: the service's status and logs, and starting, stopping and restarting it. The tools the service itself offers are on the server it serves."
     case "browser":
       return "What an assistant can find with search: the browser's own tools. Allow the ones that only read a page, and keep the ones that act on it at ask until you trust the assistant there."
     case "wrapper":
@@ -67,6 +79,10 @@ function none(kind: ServerKind): string {
       return "No tools yet: PCP offers them once it has signed in and found your calendars. Check the settings under Advanced, then check the account again."
     case "ssh":
       return "No tools yet: check the sign-in again."
+    case "service":
+      return "No tools yet: check the service again."
+    case "storage":
+      return "No tools yet: check the folder again."
     case "browser":
       return "No tools yet: check the browser again."
     default:
@@ -130,7 +146,7 @@ export function ServerTools({
           </Button>
         ) : null
       }
-      footer={about(kind)}
+      footer={`${about(kind)} ${TIERS_ABOUT}`}
     >
       {tools.length === 0 ? (
         <List>
@@ -161,7 +177,10 @@ function ToolRow({ serverId, tool }: { serverId: string; tool: ServerTool }) {
   const shared = instances.length > 1
 
   return (
-    <li className="flex flex-col gap-1.5 px-4 py-3 text-sm">
+    <li
+      id={`tool-${encodeURIComponent(tool.name)}`}
+      className="flex scroll-mt-20 flex-col gap-1.5 px-4 py-3 text-sm"
+    >
       <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1">
         <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
           {tool.operation ? (
@@ -187,13 +206,26 @@ function ToolRow({ serverId, tool }: { serverId: string; tool: ServerTool }) {
             <Badge variant="secondary">Left out of search</Badge>
           ) : null}
         </div>
-        <Button
-          variant="ghost"
-          size="xs"
-          onClick={() => setEditing((value) => !value)}
-        >
-          {editing ? "Cancel" : "Edit description"}
-        </Button>
+        <div className="flex flex-wrap items-start justify-end gap-2">
+          <ToolTierSelect
+            action={setToolTierAction}
+            fields={{ serverId, tool: tool.name }}
+            tool={tool.name}
+            shown={tool.tier}
+            confirmText={
+              shared
+                ? `${changesServers(instances)}. Change this tool's tier for all of them?`
+                : undefined
+            }
+          />
+          <Button
+            variant="ghost"
+            size="xs"
+            onClick={() => setEditing((value) => !value)}
+          >
+            {editing ? "Cancel" : "Edit description"}
+          </Button>
+        </div>
       </div>
       {editing ? (
         <form

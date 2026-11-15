@@ -6,12 +6,13 @@ import { MAX_INSTRUCTIONS_CHARS } from "./constants"
 import { currentTemplate, templateText } from "./instructions-defaults"
 import { hasConflictMarkers, mergeLines, type LineMerge } from "./line-merge"
 import { hiddenCharacter, withoutPresentation } from "./memories"
+import { TOKEN_NAME_SELECT, tokenName } from "./token-names"
 
 /**
  * The owner's instructions for one assistant: text kept on its token,
  * encrypted under the vault's key with "api_token:<id>" as associated data,
  * and given to the assistant at the start of every conversation (the
- * gateway's instructions, and read_memory every for a token that keeps
+ * gateway's instructions, and search with no arguments (or read_memory every) for a token that keeps
  * memories, since clients cut instructions short).
  *
  * A new token gets a copy of PCP's suggested instructions
@@ -109,8 +110,7 @@ async function tokenRow(ctx: VaultContext, tokenId: string) {
   const row = await db().apiToken.findFirst({
     where: { id: tokenId, vaultId: ctx.vaultId },
     select: {
-      id: true,
-      name: true,
+      ...TOKEN_NAME_SELECT,
       revokedAt: true,
       instructions: true,
       instructionsBase: true,
@@ -240,8 +240,7 @@ export async function outdatedInstructions(
       instructionsBase: { lt: current.version },
     },
     select: {
-      id: true,
-      name: true,
+      ...TOKEN_NAME_SELECT,
       instructions: true,
       instructionsBase: true,
     },
@@ -261,7 +260,7 @@ export async function outdatedInstructions(
     return [
       {
         tokenId: row.id,
-        tokenName: row.name,
+        tokenName: tokenName(ctx, row),
         mine,
         theirs: current.text,
         merge: mergeLines(base, mine, current.text),

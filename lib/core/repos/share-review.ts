@@ -1,8 +1,14 @@
+import { isIP } from "node:net"
+
 import YAML from "yaml"
 
 import type { VaultContext } from "../context"
 import { db } from "../db"
-import { shareDescription } from "../definition-rows"
+import {
+  shareDescription,
+  writeDefinition,
+  definitionSlugWhere,
+} from "../definition-rows"
 import {
   checkPersonalNote,
   readServerNote,
@@ -10,10 +16,21 @@ import {
   setPersonalNote,
 } from "../definitions"
 import { changeEndpoint, storedSpec } from "../endpoints"
-import { invalid, PcpError } from "../errors"
+import { invalid, notFound, PcpError } from "../errors"
 import type { DiffLine } from "../line-merge"
 import { canonicalJson } from "../permission-rules"
+import {
+  findServers,
+  openServer,
+  openServers,
+  type OpenServer,
+  SERVER_META_SELECT,
+  writeServer,
+  serverSlug,
+  serverSlugWhere,
+} from "../server-meta"
 import { getServer, normalizeNameAndDescription } from "../servers"
+import { isLoopback, readPublish } from "../services/definition"
 import { getSkill, updateSkill } from "../skills"
 import { sha256Hex } from "../crypto"
 
@@ -25,7 +42,7 @@ import {
   type ItemKind,
   type RepoFiles,
 } from "./layout"
-import { instanceSignIn, localItem } from "./local"
+import { instanceSignIn, localItem, serviceOwnLines } from "./local"
 import {
   findPersonalData,
   ownerFactsFrom,
@@ -132,27 +149,28 @@ export type ShareReview = {
 /**
  * What the vault knows of its owner, for the personal-data check: PCP's
  * public address, every server's and account's address, the email
- * addresses they sign in or send with, their SSH servers, and their name.
- * Read with no secret: these are plain columns.
+ * addresses they sign in or send with, their SSH servers (the machines
+ * services run on among them) and the addresses services are published on,
+ * and their name, opened with the vault's key.
  */
 export async function vaultOwnerFacts(
   ctx: VaultContext,
   { publicUrl }: { publicUrl?: string | null } = {},
 ): Promise<OwnerFacts> {
-  const [servers, vault] = await Promise.all([
-    db().mcpServer.findMany({
-      where: { vaultId: ctx.vaultId },
-      select: {
-        kind: true,
-        url: true,
-        smtpUrl: true,
-        authUsername: true,
-        mailFrom: true,
-      },
-    }),
+  const [servers, vault, services] = await Promise.all([
+    db()
+      .mcpServer.findMany({
+        where: { vaultId: ctx.vaultId },
+        select: { ...SERVER_META_SELECT, kind: true },
+      })
+      .then((rows) => openServers(ctx, rows)),
     db().vault.findUnique({
       where: { id: ctx.vaultId },
       select: { name: true },
+    }),
+    db().serviceSpec.findMany({
+      where: { server: { vaultId: ctx.vaultId } },
+      select: { publish: true, host: { select: SERVER_META_SELECT } },
     }),
   ])
   const emails = servers.flatMap((server) =>
@@ -166,9 +184,27 @@ export async function vaultOwnerFacts(
     serverAddresses: servers.flatMap((server) =>
       [server.url, server.smtpUrl].filter((value): value is string => !!value),
     ),
-    ownAddresses: servers
-      .filter((server) => server.kind === "ssh")
-      .map((server) => server.url),
+    ownAddresses: [
+      ...servers
+        .filter((server) => server.kind === "ssh")
+        .map((server) => server.url),
+      // A service's SSH server (once deleted, still the owner's machine
+      // until the service goes), and an address of its own it is published
+      // on: never 0.0.0.0 or loopback, which say nothing of the owner.
+      ...services.flatMap((service) => {
+        const published = readPublish(service.publish).address
+
+        return [
+          ...(service.host ? [openServer(ctx, service.host).url] : []),
+          ...(isIP(published) !== 0 &&
+          published !== "0.0.0.0" &&
+          published !== "::" &&
+          !isLoopback(published)
+            ? [published]
+            : []),
+        ]
+      }),
+    ],
     emails,
     ownerName: vault?.name ?? null,
   })
@@ -289,10 +325,10 @@ async function staysPrivate(
   }
 
   const row = await getServer(ctx, id)
-  const instances = row.definitionId
-    ? await db().mcpServer.findMany({
-        where: { definitionId: row.definitionId, vaultId: ctx.vaultId },
-        orderBy: { createdAt: "asc" },
+  const instances: OpenServer[] = row.definitionId
+    ? await findServers(ctx, {
+        definitionId: row.definitionId,
+        vaultId: ctx.vaultId,
       })
     : [row]
   const ids = instances.map((instance) => instance.id)
@@ -313,6 +349,17 @@ async function staysPrivate(
     const note = readServerNote(ctx, instance)
     return note ? [`${instance.slug}: ${note}`] : []
   })
+  const services =
+    row.kind === "service"
+      ? await Promise.all(
+          instances.map(async (instance) => ({
+            slug: instance.slug,
+            ...(await serviceOwnLines(ctx, instance)),
+          })),
+        )
+      : []
+  const each = (lines: string[]) =>
+    lines.length > 0 ? lines.join("; ") : "None"
   const lines = [
     {
       label: "Names here",
@@ -320,20 +367,63 @@ async function staysPrivate(
         .map((instance) => `${instance.name} (${instance.slug})`)
         .join(", "),
     },
-    ...(row.kind === "wrapper"
-      ? []
-      : [
+    ...(row.kind === "service"
+      ? [
           {
-            label: row.kind === "openapi" ? "Base URLs" : "Addresses",
-            value: instances
-              .map((instance) => `${instance.slug}: ${instance.url}`)
-              .join(", "),
+            label: "Runs on",
+            value: each(
+              services.map((service) => `${service.slug}: ${service.runsOn}`),
+            ),
           },
           {
-            label: "Signs in with",
-            value: signIn.length > 0 ? signIn.join("; ") : "No credential",
+            label: "Published on",
+            value: each(
+              services.map(
+                (service) => `${service.slug}: ${service.published}`,
+              ),
+            ),
           },
-        ]),
+          {
+            label: "Containers",
+            value: each(
+              services.map(
+                (service) => `${service.slug}: ${service.container}`,
+              ),
+            ),
+          },
+          {
+            label: "Secrets for its variables",
+            value: each(
+              services.flatMap((service) =>
+                service.secrets.map((line) => `${service.slug}: ${line}`),
+              ),
+            ),
+          },
+          {
+            label: "What it registered",
+            value: each(
+              services.flatMap((service) =>
+                service.registered
+                  ? [`${service.slug}: ${service.registered}`]
+                  : [],
+              ),
+            ),
+          },
+        ]
+      : row.kind === "wrapper"
+        ? []
+        : [
+            {
+              label: row.kind === "openapi" ? "Base URLs" : "Addresses",
+              value: instances
+                .map((instance) => `${instance.slug}: ${instance.url}`)
+                .join(", "),
+            },
+            {
+              label: "Signs in with",
+              value: signIn.length > 0 ? signIn.join("; ") : "No credential",
+            },
+          ]),
     {
       label: "On or off, pace, read-only and private addresses",
       value: "Each server's own",
@@ -427,10 +517,10 @@ async function prepare(
                     definitionId: row.definitionId,
                     vaultId: ctx.vaultId,
                   },
-                  select: { slug: true },
+                  select: SERVER_META_SELECT,
                   orderBy: { createdAt: "asc" },
                 })
-              ).map((instance) => instance.slug)
+              ).map((instance) => serverSlug(ctx, instance))
             : [row.slug]
         })()
 
@@ -585,6 +675,12 @@ export async function setSharedDescription(
 ): Promise<void> {
   if (item.kind === "skill") {
     const skill = await getSkill(ctx, item.id)
+
+    // A token's own skill is never shared from here.
+    if (skill.visibility !== "shared") {
+      throw notFound("That skill")
+    }
+
     await updateSkill(ctx, item.id, {
       name: skill.name,
       description,
@@ -607,11 +703,8 @@ export async function setSharedDescription(
     description,
   }).description
 
-  await db().mcpServer.update({
-    where: { id: row.id },
-    data: { description: text },
-  })
-  await shareDescription(row.id)
+  await writeServer(ctx, row.id, { description: text })
+  await shareDescription(ctx, row.id)
 }
 
 /** The sentences of a text, as written. */
@@ -692,12 +785,12 @@ export async function renameShared(
   }).name
   const slug = checkItemName(input.slug.trim().toLowerCase())
   const [definition, server] = await Promise.all([
-    db().serverDefinition.findUnique({
-      where: { vaultId_slug: { vaultId: ctx.vaultId, slug } },
+    db().serverDefinition.findFirst({
+      where: definitionSlugWhere(ctx, slug),
       select: { id: true },
     }),
-    db().mcpServer.findUnique({
-      where: { vaultId_slug: { vaultId: ctx.vaultId, slug } },
+    db().mcpServer.findFirst({
+      where: serverSlugWhere(ctx, slug),
       select: { definitionId: true },
     }),
   ])
@@ -712,10 +805,7 @@ export async function renameShared(
     )
   }
 
-  await db().serverDefinition.update({
-    where: { id: row.definitionId },
-    data: { name, slug },
-  })
+  await writeDefinition(ctx, row.definitionId, { name, slug })
 }
 
 /**
@@ -729,7 +819,7 @@ export async function keepAddressPrivate(
   serverId: string,
 ): Promise<void> {
   const row = await getServer(ctx, serverId)
-  const spec = await storedSpec(serverId)
+  const spec = await storedSpec(ctx, serverId)
 
   if (row.kind !== "openapi" || !spec) {
     throw invalid("Only an API endpoint's schema names its server's address.")

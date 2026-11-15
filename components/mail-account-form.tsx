@@ -17,9 +17,9 @@ import {
   OAuthClientFields,
   type OAuthClientValues,
 } from "@/components/oauth-client-fields"
-import { Input } from "@/components/ui/input"
-import { Field } from "@/components/ui/label"
-import { SwitchRow } from "@/components/ui/switch"
+import { Input } from "@kaperkunde/ui/input"
+import { Field } from "@kaperkunde/ui/label"
+import { SwitchRow } from "@kaperkunde/ui/switch"
 import {
   createMailAccountAction,
   updateMailAccountAction,

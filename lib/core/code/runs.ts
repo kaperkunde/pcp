@@ -28,8 +28,8 @@ export type TraceEntry = {
   /** How long it took, once it ended. */
   ms: number | null
   /**
-   * Whether its server marks it read-only (as call_read_only_tool decides);
-   * null until the call was looked up, and for one that was refused.
+   * Whether it is in the Read tier (tool-tiers.ts); null until the call was
+   * looked up, and for one that was refused.
    */
   readOnly: boolean | null
   /** It failed on the way (not reached, timed out): it may have gone through. */
@@ -88,9 +88,20 @@ export function newRunId(): string {
   return `run_${randomBytes(8).toString("hex")}`
 }
 
-/** What tells one program from another for the duplicate guard. */
-export function programKey(language: string, code: string): string {
-  return createHash("sha256").update(`${language}\n${code}`).digest("hex")
+/**
+ * What tells one program from another for the duplicate guard: its
+ * language, its text and the tier of the entry it came through, so the
+ * same program sent again through run_destructive after
+ * run_read refused a call runs rather than answering with that run.
+ */
+export function programKey(
+  language: string,
+  code: string,
+  tier: string,
+): string {
+  return createHash("sha256")
+    .update(`${language}\n${tier}\n${code}`)
+    .digest("hex")
 }
 
 /** A call of the trace, as a line of an answer. */
@@ -116,7 +127,7 @@ export function callLine(entry: TraceEntry, now = Date.now()): string {
 }
 
 /**
- * The calls that may have changed something: not marked read-only, and
+ * The calls that may have changed something: not in the Read tier, and
  * completed (well or not) or still under way.
  */
 export function sideEffects(trace: TraceEntry[]): TraceEntry[] {
@@ -288,4 +299,34 @@ export function duplicateRun(
 /** Forgets every run; for tests. */
 export function forgetRuns(): void {
   registry().clear()
+}
+
+type Labels = Map<string, string>
+
+const LABELS = Symbol.for("pcp.code.runLabels")
+
+function labels(): Labels {
+  const holder = globalThis as unknown as { [LABELS]?: Labels }
+  holder[LABELS] ??= new Map()
+  return holder[LABELS]
+}
+
+/**
+ * Names a wrapper's run by its tool ("server/tool"), for the browser's
+ * list of tabs (which run opened each): the newest MAX_REMEMBERED_RUNS,
+ * nothing else of the run.
+ */
+export function labelRun(id: string, label: string): void {
+  const named = labels()
+  named.set(id, label)
+
+  for (const old of named.keys()) {
+    if (named.size <= MAX_REMEMBERED_RUNS) break
+    named.delete(old)
+  }
+}
+
+/** What a run is of: a wrapper's tool, "run_code", or null when unknown. */
+export function runLabel(id: string): string | null {
+  return labels().get(id) ?? (registry().has(id) ? "run_code" : null)
 }

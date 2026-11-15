@@ -2,9 +2,9 @@
 
 import { useId, useState } from "react"
 
-import { Input } from "@/components/ui/input"
-import { Field } from "@/components/ui/label"
-import { Switch } from "@/components/ui/switch"
+import { Input } from "@kaperkunde/ui/input"
+import { Field } from "@kaperkunde/ui/label"
+import { Switch } from "@kaperkunde/ui/switch"
 import type { PacingOverride, PacingPolicy } from "@/lib/core/pacing/limits"
 
 function seconds(ms: number): string {

@@ -3,9 +3,9 @@ import { Globe } from "lucide-react"
 import { DdnsCard, HttpsCard, PcpggCard } from "@/components/network-forms"
 import { OutsideAccessCard } from "@/components/outside-access-card"
 import { PublicUrlForm } from "@/components/settings-forms"
-import { Disclosure } from "@/components/ui/disclosure"
+import { Disclosure } from "@kaperkunde/ui/disclosure"
 import { IconTile } from "@/components/ui/icon-tile"
-import { List, ListSection } from "@/components/ui/list"
+import { List, ListSection } from "@kaperkunde/ui/list"
 import type { NetworkOverview } from "@/lib/core/network/runtime"
 
 /** How PCP is reached, in a few words, for the grey line under the row. */

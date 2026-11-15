@@ -1,5 +1,6 @@
 import path from "node:path"
 
+import { appPlaywrightConfig } from "@kaperkunde/config/playwright"
 import { defineConfig, devices } from "@playwright/test"
 
 import {
@@ -34,305 +35,332 @@ function signedIn(project: string) {
   }
 }
 
-export default defineConfig({
-  testDir: "./e2e/tests",
-  outputDir: "./e2e/.artifacts/test-results",
-  globalSetup: "./e2e/global-setup.ts",
-  // Projects share one database and one owner; run them in order.
-  fullyParallel: false,
-  workers: 1,
-  forbidOnly: !!process.env.CI,
-  timeout: 60_000,
-  expect: { timeout: 10_000 },
-  reporter: [
-    ["list"],
-    ["html", { outputFolder: "./e2e/.artifacts/report", open: "never" }],
-  ],
-  use: {
-    baseURL,
-    trace: "retain-on-failure",
-    screenshot: "only-on-failure",
-    // A machine with a Chromium of its own (a sandbox without network, say)
-    // can point at it instead of the revision Playwright would download.
-    ...(process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE
-      ? {
-          launchOptions: {
-            executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE,
-          },
-        }
-      : {}),
-  },
-  // The production build, served as the image serves it
-  // (e2e/scripts/serve.mjs): `pnpm test:e2e` builds it first. Pages come
-  // hydrated and compiled, so nothing waits on the dev server's first
-  // compile. PCP_E2E_DEV=1 runs `pnpm dev` instead, for iterating on a spec
-  // with the app's code changing under it.
-  webServer: {
-    command: process.env.PCP_E2E_DEV
-      ? "pnpm dev"
-      : "node e2e/scripts/serve.mjs",
-    url: `${baseURL}/api/health`,
-    reuseExistingServer: !process.env.CI,
-    timeout: 120_000,
-    env: {
-      PCP_DATA_DIR: E2E_DATA_DIR,
-      // Host settings (HTTPS, pcp.gg, the update check) are covered by unit
-      // tests, not by a project. If a spec ever reaches them, they stay on
-      // this machine: listeners on high ports, a Let's Encrypt where nothing
-      // answers, no public address lookup, no GitHub, no pcp.gg.
-      PCP_HTTP_PORT: String(E2E_EDGE_HTTP_PORT),
-      PCP_HTTPS_PORT: String(E2E_EDGE_HTTPS_PORT),
-      PCP_ACME_DIRECTORY: "http://127.0.0.1:9/directory",
-      PCP_PUBLIC_IP_URL: "http://127.0.0.1:9/ip",
-      // The update check asks a port nothing answers on, never GitHub.
-      PCP_RELEASES_URL: E2E_RELEASES_URL,
-      PCP_PCPGG_RELAY_URL: E2E_PCPGG_RELAY_URL,
-      // Linked repositories talk to the fake GitHub (e2e/fixtures/github.ts)
-      // on a fixed port, never to GitHub. A production build reads these
-      // only when it was built with PCP_TEST_BUILD=1, as `pnpm test:e2e`
-      // builds it.
-      PCP_GITHUB_API_URL: E2E_GITHUB_URL,
-      PCP_GITHUB_URL: E2E_GITHUB_URL,
-      // The suite acts far faster than a person: pacing (lib/core/pacing/)
-      // would make every browser and web fetch step wait. Unit tests cover
-      // it; its settings are still shown and saved.
-      PCP_PACING: "off",
+// The shared base (@kaperkunde/config): specs in e2e/tests, artifacts in
+// e2e/.artifacts, one worker, so the projects (which share one database and
+// one owner) run in order, traces and screenshots kept on failure, and a
+// Chromium of the machine's own when PLAYWRIGHT_CHROMIUM_EXECUTABLE names one
+// (a sandbox without network, say).
+export default defineConfig(
+  appPlaywrightConfig({
+    globalSetup: "./e2e/global-setup.ts",
+    timeout: 60_000,
+    expect: { timeout: 10_000 },
+    use: { baseURL },
+    // The production build, served as the image serves it
+    // (e2e/scripts/serve.mjs): `pnpm test:e2e` builds it first. Pages come
+    // hydrated and compiled, so nothing waits on the dev server's first
+    // compile. PCP_E2E_DEV=1 runs `pnpm dev` instead, for iterating on a spec
+    // with the app's code changing under it.
+    webServer: {
+      command: process.env.PCP_E2E_DEV
+        ? "pnpm dev"
+        : "node e2e/scripts/serve.mjs",
+      url: `${baseURL}/api/health`,
+      reuseExistingServer: !process.env.CI,
+      timeout: 120_000,
+      env: {
+        PCP_DATA_DIR: E2E_DATA_DIR,
+        // Host settings (HTTPS, pcp.gg, the update check) are covered by unit
+        // tests, not by a project. If a spec ever reaches them, they stay on
+        // this machine: listeners on high ports, a Let's Encrypt where nothing
+        // answers, no public address lookup, no GitHub, no pcp.gg.
+        PCP_HTTP_PORT: String(E2E_EDGE_HTTP_PORT),
+        PCP_HTTPS_PORT: String(E2E_EDGE_HTTPS_PORT),
+        PCP_ACME_DIRECTORY: "http://127.0.0.1:9/directory",
+        PCP_PUBLIC_IP_URL: "http://127.0.0.1:9/ip",
+        // The update check asks a port nothing answers on, never GitHub.
+        PCP_RELEASES_URL: E2E_RELEASES_URL,
+        PCP_PCPGG_RELAY_URL: E2E_PCPGG_RELAY_URL,
+        // Linked repositories talk to the fake GitHub (e2e/fixtures/github.ts)
+        // on a fixed port, never to GitHub. A production build reads these
+        // only when it was built with PCP_TEST_BUILD=1, as `pnpm test:e2e`
+        // builds it.
+        PCP_GITHUB_API_URL: E2E_GITHUB_URL,
+        PCP_GITHUB_URL: E2E_GITHUB_URL,
+        // The suite acts far faster than a person: pacing (lib/core/pacing/)
+        // would make every browser and web fetch step wait. Unit tests cover
+        // it; its settings are still shown and saved.
+        PCP_PACING: "off",
+      },
     },
-  },
-  projects: [
-    {
-      // First visit: setup, the recovery key, lock and unlock. Writes
-      // e2e/.state/setup.json, and e2e/.auth/<project>.json for each project
-      // that starts signed in.
-      name: "setup",
-      testMatch: /setup\.spec\.ts/,
-      use: { ...devices["Desktop Chrome"] },
-    },
-    {
-      name: "secrets",
-      testMatch: /secrets\.spec\.ts/,
-      dependencies: ["setup"],
-      use: signedIn("secrets"),
-    },
-    {
-      // A header-authenticated upstream, an API token, and the gateway's
-      // three tools over plain HTTP.
-      name: "gateway",
-      testMatch: /gateway\.spec\.ts/,
-      dependencies: ["setup"],
-      use: signedIn("gateway"),
-    },
-    {
-      // The Servers page's Add menu, and an OAuth upstream added from it:
-      // connected through the browser, used, then disconnected.
-      name: "oauth",
-      testMatch: /(^|\/)oauth\.spec\.ts$/,
-      dependencies: ["setup"],
-      use: signedIn("oauth"),
-    },
-    {
-      // PCP's own authorization server: an assistant finds it from /mcp's
-      // 401, registers itself, the owner signs in and allows it, and the
-      // token it gets works, rotates, and is revoked under API tokens.
-      name: "oauth-server",
-      testMatch: /oauth-server\.spec\.ts/,
-      dependencies: ["setup"],
-      use: signedIn("oauth-server"),
-    },
-    {
-      // An API that signs in with OAuth: proposed by an assistant with the
-      // owner's client ID, the client secret typed in on the approval page,
-      // connected, and called with the token, which the assistant never
-      // sees.
-      name: "endpoint-oauth",
-      testMatch: /endpoint-oauth\.spec\.ts/,
-      dependencies: ["setup"],
-      use: signedIn("endpoint-oauth"),
-    },
-    {
-      // An OAuth upstream that lets no app register itself: its redirect URI
-      // on the add form, and the owner's own client connecting it.
-      name: "oauth-client",
-      testMatch: /oauth-client\.spec\.ts/,
-      dependencies: ["setup"],
-      use: signedIn("oauth-client"),
-    },
-    {
-      // An API described by an OpenAPI schema: added from a URL with a
-      // secret, its operations found and called through the gateway; one an
-      // assistant proposes, and what it may change once the owner's.
-      name: "endpoints",
-      testMatch: /endpoints\.spec\.ts/,
-      dependencies: ["setup"],
-      use: signedIn("endpoints"),
-    },
-    {
-      // A mail account: JMAP with an app password, its tools called through
-      // the gateway, a read-only one that cannot send, and one an assistant
-      // proposes, whose password the owner types in on PCP's page.
-      name: "mail",
-      testMatch: /mail\.spec\.ts/,
-      dependencies: ["setup"],
-      use: signedIn("mail"),
-    },
-    {
-      // A calendar account: CalDAV shaped like iCloud's, with an app password
-      // typed into the form; events, free time and reminders through the
-      // gateway; and one an assistant proposes, whose password the owner
-      // types in on PCP's page.
-      name: "calendar",
-      testMatch: /calendar\.spec\.ts/,
-      dependencies: ["setup"],
-      use: signedIn("calendar"),
-    },
-    {
-      // An SSH server: added in PCP, PCP's key put in authorized_keys, the
-      // host key pinned; a command an assistant asks for, shown to the owner
-      // first; and a server that later shows another host key.
-      name: "ssh",
-      testMatch: /ssh\.spec\.ts/,
-      dependencies: ["setup"],
-      use: signedIn("ssh"),
-    },
-    {
-      // Per-token tool access and the owner's permission: the link (also for
-      // a client that offers prompts and panels), Block, copying access,
-      // tool levels and servers an assistant proposes.
-      name: "permissions",
-      testMatch: /permissions\.spec\.ts/,
-      dependencies: ["setup"],
-      use: signedIn("permissions"),
-    },
-    {
-      // A token that keeps memories: sharing one through the owner's
-      // permission, and what is read in every conversation.
-      name: "memories",
-      testMatch: /memories\.spec\.ts/,
-      dependencies: ["setup"],
-      use: signedIn("memories"),
-    },
-    {
-      // Skills: written on the Skills page, found with search and read with
-      // describe, and an assistant's change waiting for the owner.
-      name: "skills",
-      testMatch: /skills\.spec\.ts/,
-      dependencies: ["setup"],
-      use: signedIn("skills"),
-    },
-    {
-      // Definitions and instances: an endpoint's About card, the owner's
-      // private note, cloning it with an address of its own, and Detach.
-      name: "definitions",
-      testMatch: /definitions\.spec\.ts/,
-      dependencies: ["setup"],
-      use: signedIn("definitions"),
-    },
-    {
-      // Linked repositories against a fake GitHub: linking one, adding a
-      // skill from it after reading it whole, an update available that waits
-      // for the owner, and pushing one of theirs after its review.
-      name: "repositories",
-      testMatch: /repositories\.spec\.ts/,
-      dependencies: ["setup"],
-      use: signedIn("repositories"),
-    },
-    {
-      // APIs an assistant proposes with more than a bearer token: HTTP Basic
-      // with the password typed in on the approval page, and a key and a
-      // secret key in two headers; each sent by PCP, and kept from the
-      // assistant.
-      name: "endpoint-credentials",
-      testMatch: /endpoint-credentials\.spec\.ts/,
-      dependencies: ["setup"],
-      use: signedIn("endpoint-credentials"),
-    },
-    {
-      // A token that fetches web pages: the tool and its instructions, a new
-      // site asking first and listed on the token's Advanced page, and
-      // public addresses only until the owner allows private ones.
-      name: "web-fetch",
-      testMatch: /web-fetch\.spec\.ts/,
-      dependencies: ["setup"],
-      use: signedIn("web-fetch"),
-    },
-    {
-      // A token that runs code: the tool and its instructions, a program
-      // calling tools with the server's secret, a picture moved by its
-      // handle, a blocked tool caught, and an "ask" tool stopping the
-      // program until the owner allows it.
-      name: "run-code",
-      testMatch: /run-code\.spec\.ts/,
-      dependencies: ["setup"],
-      use: signedIn("run-code"),
-    },
-    {
-      // File links: a token that may move files by link gets share_result
-      // and receive_file; a file PUT to one link is downloaded from another,
-      // as a file, a few times and then no more.
-      name: "file-links",
-      testMatch: /file-links\.spec\.ts/,
-      dependencies: ["setup"],
-      use: signedIn("file-links"),
-    },
-    {
-      // Wrappers: a token that may propose them gets their tools; a wrapper
-      // over a tool that wants its key as an argument, approved with the key
-      // typed in on the request's page; its tool puts the key in and the
-      // answer shows it redacted; the tool it replaces leaves search.
-      name: "wrappers",
-      testMatch: /wrappers\.spec\.ts/,
-      dependencies: ["setup"],
-      use: signedIn("wrappers"),
-    },
-    {
-      // The browser: added by the owner, its tools and instructions, a new
-      // site asking first, refs to act on a page, a link to another site
-      // stopped, and the sign-ins kept across a restart and forgotten.
-      name: "browser",
-      testMatch: /browser\.spec\.ts/,
-      dependencies: ["setup"],
-      use: signedIn("browser"),
-    },
-    {
-      // The Log page: a token's calls by tool and outcome, never what they
-      // sent.
-      name: "log",
-      testMatch: /log\.spec\.ts/,
-      dependencies: ["setup"],
-      use: signedIn("log"),
-    },
-    {
-      // Touch ID with a stand-in for the Mac app. Signs every browser out,
-      // so it comes after the projects that start signed in, and signs in
-      // on its own.
-      name: "touch-id",
-      testMatch: /touch-id\.spec\.ts/,
-      dependencies: ["setup"],
-      use: { ...devices["Desktop Chrome"] },
-    },
-    {
-      // Signs every browser out, so it comes last and signs in on its own.
-      name: "recovery",
-      testMatch: /recovery\.spec\.ts/,
-      dependencies: ["setup"],
-      use: { ...devices["Desktop Chrome"] },
-    },
-    {
-      // Exports the vault to a file and restores it, which signs every
-      // browser out too: after recovery, signing in on its own.
-      name: "backup",
-      testMatch: /backup\.spec\.ts/,
-      dependencies: ["setup"],
-      use: { ...devices["Desktop Chrome"] },
-    },
-    {
-      // Deletes the vault from Settings and sets it up again with the same
-      // name and password, which ends every session and token: after
-      // backup, signing in on its own.
-      name: "reset",
-      testMatch: /reset\.spec\.ts/,
-      dependencies: ["setup"],
-      use: { ...devices["Desktop Chrome"] },
-    },
-  ],
-})
+    projects: [
+      {
+        // First visit: setup, the recovery key, lock and unlock. Writes
+        // e2e/.state/setup.json, and e2e/.auth/<project>.json for each project
+        // that starts signed in.
+        name: "setup",
+        testMatch: /setup\.spec\.ts/,
+        use: { ...devices["Desktop Chrome"] },
+      },
+      {
+        // The owner's key pages at a desktop window and a phone's width,
+        // compared with the pictures in e2e/screenshots. Right after setup,
+        // so the pages hold only what the spec adds. The committed pictures
+        // are CI's (its Chromium and fonts); anywhere else they are kept in
+        // e2e/.screenshots, made on the first run and compared after.
+        name: "screens",
+        testMatch: /screens\.spec\.ts/,
+        dependencies: ["setup"],
+        use: signedIn("screens"),
+        snapshotPathTemplate: process.env.CI
+          ? "{testDir}/../screenshots/{arg}{ext}"
+          : "{testDir}/../.screenshots/{arg}{ext}",
+      },
+      {
+        name: "secrets",
+        testMatch: /secrets\.spec\.ts/,
+        dependencies: ["setup"],
+        use: signedIn("secrets"),
+      },
+      {
+        // A header-authenticated upstream, an API token, and the gateway's
+        // three tools over plain HTTP.
+        name: "gateway",
+        testMatch: /gateway\.spec\.ts/,
+        dependencies: ["setup"],
+        use: signedIn("gateway"),
+      },
+      {
+        // The Servers page's Add menu, and an OAuth upstream added from it:
+        // connected through the browser, used, then disconnected.
+        name: "oauth",
+        testMatch: /(^|\/)oauth\.spec\.ts$/,
+        dependencies: ["setup"],
+        use: signedIn("oauth"),
+      },
+      {
+        // PCP's own authorization server: an assistant finds it from /mcp's
+        // 401, registers itself, the owner signs in and allows it, and the
+        // token it gets works, rotates, and is revoked under API tokens.
+        name: "oauth-server",
+        testMatch: /oauth-server\.spec\.ts/,
+        dependencies: ["setup"],
+        use: signedIn("oauth-server"),
+      },
+      {
+        // An API that signs in with OAuth: proposed by an assistant with the
+        // owner's client ID, the client secret typed in on the approval page,
+        // connected, and called with the token, which the assistant never
+        // sees.
+        name: "endpoint-oauth",
+        testMatch: /endpoint-oauth\.spec\.ts/,
+        dependencies: ["setup"],
+        use: signedIn("endpoint-oauth"),
+      },
+      {
+        // An OAuth upstream that lets no app register itself: its redirect URI
+        // on the add form, and the owner's own client connecting it.
+        name: "oauth-client",
+        testMatch: /oauth-client\.spec\.ts/,
+        dependencies: ["setup"],
+        use: signedIn("oauth-client"),
+      },
+      {
+        // An API described by an OpenAPI schema: added from a URL with a
+        // secret, its operations found and called through the gateway; one an
+        // assistant proposes, and what it may change once the owner's.
+        name: "endpoints",
+        testMatch: /endpoints\.spec\.ts/,
+        dependencies: ["setup"],
+        use: signedIn("endpoints"),
+      },
+      {
+        // A mail account: JMAP with an app password, its tools called through
+        // the gateway, a read-only one that cannot send, and one an assistant
+        // proposes, whose password the owner types in on PCP's page.
+        name: "mail",
+        testMatch: /mail\.spec\.ts/,
+        dependencies: ["setup"],
+        use: signedIn("mail"),
+      },
+      {
+        // A calendar account: CalDAV shaped like iCloud's, with an app password
+        // typed into the form; events, free time and reminders through the
+        // gateway; and one an assistant proposes, whose password the owner
+        // types in on PCP's page.
+        name: "calendar",
+        testMatch: /calendar\.spec\.ts/,
+        dependencies: ["setup"],
+        use: signedIn("calendar"),
+      },
+      {
+        // An SSH server: added in PCP, PCP's key put in authorized_keys, the
+        // host key pinned; a command an assistant asks for, shown to the owner
+        // first; and a server that later shows another host key.
+        name: "ssh",
+        testMatch: /ssh\.spec\.ts/,
+        dependencies: ["setup"],
+        use: signedIn("ssh"),
+      },
+      {
+        // A storage folder on an SSH server: added on its page, browsed and
+        // changed in its file browser, and an assistant's save shown to the
+        // owner first and kept inside the folder.
+        name: "storage",
+        testMatch: /storage\.spec\.ts/,
+        dependencies: ["setup"],
+        use: signedIn("storage"),
+      },
+      {
+        // The Files section: every store listed, PCP's own browsed, files
+        // uploaded (picked and dropped), previewed, read in a range,
+        // downloaded and deleted.
+        name: "files",
+        testMatch: /files\.spec\.ts/,
+        dependencies: ["setup"],
+        use: signedIn("files"),
+      },
+      {
+        // A service on an SSH server: launched from its page with a secret
+        // for its variable, its API endpoint registered in the same step,
+        // stopped and started again. The engine is a fake docker run by a
+        // real sh on the test SSH server.
+        name: "services",
+        testMatch: /services\.spec\.ts/,
+        dependencies: ["setup"],
+        use: signedIn("services"),
+      },
+      {
+        // Per-token tool access and the owner's permission: the link (also for
+        // a client that offers prompts and panels), Block, copying access,
+        // tool levels and servers an assistant proposes.
+        name: "permissions",
+        testMatch: /permissions\.spec\.ts/,
+        dependencies: ["setup"],
+        use: signedIn("permissions"),
+      },
+      {
+        // A token that keeps memories: sharing one through the owner's
+        // permission, and what is read in every conversation.
+        name: "memories",
+        testMatch: /memories\.spec\.ts/,
+        dependencies: ["setup"],
+        use: signedIn("memories"),
+      },
+      {
+        // Skills: written on the Skills page, found with search and read with
+        // describe, and an assistant's change waiting for the owner.
+        name: "skills",
+        testMatch: /skills\.spec\.ts/,
+        dependencies: ["setup"],
+        use: signedIn("skills"),
+      },
+      {
+        // Definitions and instances: an endpoint's About card, the owner's
+        // private note, cloning it with an address of its own, and Detach.
+        name: "definitions",
+        testMatch: /definitions\.spec\.ts/,
+        dependencies: ["setup"],
+        use: signedIn("definitions"),
+      },
+      {
+        // Linked repositories against a fake GitHub: linking one, adding a
+        // skill from it after reading it whole, an update available that waits
+        // for the owner, and pushing one of theirs after its review.
+        name: "repositories",
+        testMatch: /repositories\.spec\.ts/,
+        dependencies: ["setup"],
+        use: signedIn("repositories"),
+      },
+      {
+        // APIs an assistant proposes with more than a bearer token: HTTP Basic
+        // with the password typed in on the approval page, and a key and a
+        // secret key in two headers; each sent by PCP, and kept from the
+        // assistant.
+        name: "endpoint-credentials",
+        testMatch: /endpoint-credentials\.spec\.ts/,
+        dependencies: ["setup"],
+        use: signedIn("endpoint-credentials"),
+      },
+      {
+        // A token that fetches web pages: the tool and its instructions, a new
+        // site asking first and listed on the token's Advanced page, and
+        // public addresses only until the owner allows private ones.
+        name: "web-fetch",
+        testMatch: /web-fetch\.spec\.ts/,
+        dependencies: ["setup"],
+        use: signedIn("web-fetch"),
+      },
+      {
+        // A token that runs code: the tool and its instructions, a program
+        // calling tools with the server's secret, a picture moved by its
+        // handle, a blocked tool caught, and an "ask" tool stopping the
+        // program until the owner allows it.
+        name: "run-code",
+        testMatch: /run-code\.spec\.ts/,
+        dependencies: ["setup"],
+        use: signedIn("run-code"),
+      },
+      {
+        // File links: a token that may move files by link gets share_result
+        // and receive_file; a file PUT to one link is downloaded from another,
+        // as a file, a few times and then no more; an upload link's page takes
+        // the owner's files without a session, and check_upload hands them on.
+        name: "file-links",
+        testMatch: /file-links\.spec\.ts/,
+        dependencies: ["setup"],
+        use: signedIn("file-links"),
+      },
+      {
+        // Wrappers: a token that may propose them gets their tools; a wrapper
+        // over a tool that wants its key as an argument, approved with the key
+        // typed in on the request's page; its tool puts the key in and the
+        // answer shows it redacted; the tool it replaces leaves search.
+        name: "wrappers",
+        testMatch: /wrappers\.spec\.ts/,
+        dependencies: ["setup"],
+        use: signedIn("wrappers"),
+      },
+      {
+        // The browser: added by the owner, its tools and instructions, a new
+        // site asking first, refs to act on a page, a link to another site
+        // stopped, and the sign-ins kept across a restart and forgotten.
+        name: "browser",
+        testMatch: /browser\.spec\.ts/,
+        dependencies: ["setup"],
+        use: signedIn("browser"),
+      },
+      {
+        // The Log page: a token's calls by tool and outcome, never what they
+        // sent.
+        name: "log",
+        testMatch: /log\.spec\.ts/,
+        dependencies: ["setup"],
+        use: signedIn("log"),
+      },
+      {
+        // Touch ID with a stand-in for the Mac app. Signs every browser out,
+        // so it comes after the projects that start signed in, and signs in
+        // on its own.
+        name: "touch-id",
+        testMatch: /touch-id\.spec\.ts/,
+        dependencies: ["setup"],
+        use: { ...devices["Desktop Chrome"] },
+      },
+      {
+        // Signs every browser out, so it comes last and signs in on its own.
+        name: "recovery",
+        testMatch: /recovery\.spec\.ts/,
+        dependencies: ["setup"],
+        use: { ...devices["Desktop Chrome"] },
+      },
+      {
+        // Exports the vault to a file and restores it, which signs every
+        // browser out too: after recovery, signing in on its own.
+        name: "backup",
+        testMatch: /backup\.spec\.ts/,
+        dependencies: ["setup"],
+        use: { ...devices["Desktop Chrome"] },
+      },
+      {
+        // Deletes the vault from Settings and sets it up again with the same
+        // name and password, which ends every session and token: after
+        // backup, signing in on its own.
+        name: "reset",
+        testMatch: /reset\.spec\.ts/,
+        dependencies: ["setup"],
+        use: { ...devices["Desktop Chrome"] },
+      },
+    ],
+  }),
+)

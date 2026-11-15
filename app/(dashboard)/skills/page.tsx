@@ -1,10 +1,11 @@
 import { ListChecks } from "lucide-react"
 import type { Metadata } from "next"
 
-import { PageHeader } from "@/components/page-header"
+import { PageHeader } from "@kaperkunde/ui/page"
 import { SkillAddDialog } from "@/components/skill-add-dialog"
+import { Badge } from "@kaperkunde/ui/badge"
 import { IconTile } from "@/components/ui/icon-tile"
-import { List, ListRow, ListSection, RowValue } from "@/components/ui/list"
+import { List, ListRow, ListSection, RowValue } from "@kaperkunde/ui/list"
 import { listSkills } from "@/lib/core/skills"
 import { requireContext } from "@/lib/server/session"
 
@@ -12,7 +13,9 @@ export const metadata: Metadata = { title: "Skills" }
 
 /**
  * The owner's skills: procedures assistants follow when a task matches.
- * Each one opens on a page of its own, where it is edited.
+ * Each one opens on a page of its own, where it is edited. An assistant's
+ * own skills (lib/core/skills.ts, /skills/mine/) are listed too, marked
+ * with the token that keeps them.
  */
 export default async function SkillsPage() {
   const ctx = await requireContext()
@@ -22,7 +25,7 @@ export default async function SkillsPage() {
     <>
       <PageHeader
         title="Skills"
-        description="Procedures your assistants follow when a task matches: how you want a kind of task done. Each assistant sees them by name and description, and reads one whole before such a task. An assistant changes a skill only after you agree to exactly what it would become."
+        description="Procedures your assistants follow when a task matches: how you want a kind of task done. Each assistant sees them by name and description, and reads one whole before such a task. An assistant changes a skill only after you agree to exactly what it would become. An assistant that keeps memories may also keep skills of its own, which only it sees, marked here with its name."
         action={<SkillAddDialog />}
       />
       <ListSection
@@ -48,7 +51,20 @@ export default async function SkillsPage() {
                 as="li"
                 href={`/skills/${skill.id}`}
                 icon={<IconTile icon={ListChecks} />}
-                title={skill.name}
+                title={
+                  skill.visibility === "private" ? (
+                    <span className="flex flex-wrap items-center gap-2">
+                      {skill.name}
+                      <Badge variant="secondary">
+                        {skill.tokenName
+                          ? `${skill.tokenName}'s own`
+                          : "From a deleted token"}
+                      </Badge>
+                    </span>
+                  ) : (
+                    skill.name
+                  )
+                }
                 description={skill.description}
                 trailing={<RowValue>Version {skill.version}</RowValue>}
               />

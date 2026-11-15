@@ -4,15 +4,15 @@ import { Cable, Lock, RefreshCw } from "lucide-react"
 import { useRouter } from "next/navigation"
 import { type FormEvent, useActionState, useEffect, useState } from "react"
 
-import { FormError, FormNote } from "@/components/form-status"
+import { FormError, FormNote } from "@kaperkunde/ui/form-status"
 import { LocalDate } from "@/components/local-date"
 import { PublicUrlConfirm } from "@/components/settings-forms"
 import { SettingsItem } from "@/components/settings-item"
-import { SubmitButton } from "@/components/submit-button"
-import { Badge } from "@/components/ui/badge"
-import { Button, ButtonLink } from "@/components/ui/button"
-import { Checkbox, Input, Select } from "@/components/ui/input"
-import { Field, Label } from "@/components/ui/label"
+import { SubmitButton } from "@kaperkunde/ui/submit-button"
+import { Badge } from "@kaperkunde/ui/badge"
+import { Button, ButtonLink } from "@kaperkunde/ui/button"
+import { Checkbox, Input, Select } from "@kaperkunde/ui/input"
+import { Field, Label } from "@kaperkunde/ui/label"
 import {
   disableDdnsAction,
   disableHttpsAction,
@@ -243,7 +243,7 @@ function PcpggStatus({
           ) : state === "offline" ? (
             <Badge variant="warning">Offline</Badge>
           ) : (
-            <Badge variant="outline">Connecting…</Badge>
+            <Badge variant="secondary">Connecting…</Badge>
           )}
           <span>
             {state === "online" && name ? (
@@ -711,7 +711,7 @@ function DdnsStatusLine({
         ) : status.lastUpdatedAt ? (
           <Badge>Working</Badge>
         ) : (
-          <Badge variant="outline">Waiting</Badge>
+          <Badge variant="secondary">Waiting</Badge>
         )}
         <span>
           {name ? <strong>{name}</strong> : "Your name"}
@@ -976,7 +976,7 @@ function HttpsStatus({
         ) : status.state === "failed" ? (
           <Badge variant="destructive">No certificate</Badge>
         ) : (
-          <Badge variant="outline">Getting a certificate…</Badge>
+          <Badge variant="secondary">Getting a certificate…</Badge>
         )}
         {domain ? <strong>{domain}</strong> : null}
       </div>

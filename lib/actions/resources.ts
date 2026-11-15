@@ -26,6 +26,7 @@ const NAMES: Record<ResourceField, string> = {
   fileMb: "the largest file",
   keptMb: "kept results per token",
   browserIdleMinutes: "the browser's idle minutes",
+  storeMb: "PCP's own store",
 }
 
 export async function saveResourcesAction(
@@ -44,7 +45,7 @@ export async function saveResourcesAction(
         continue
       }
 
-      if (!/^\d{1,7}$/.test(value)) {
+      if (!/^\d{1,9}$/.test(value)) {
         throw invalid(
           `Enter ${NAMES[name]} as a whole number, or leave it empty for PCP to pick.`,
         )

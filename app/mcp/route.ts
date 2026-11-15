@@ -1,26 +1,33 @@
-import { createMcpHandler } from "@modelcontextprotocol/server"
+import { createMcpHandler, INVALID_REQUEST } from "@modelcontextprotocol/server"
 import { after } from "next/server"
 
 import { afterAnswerScope } from "@/lib/core/after-answer"
 import { resolveApiToken } from "@/lib/core/api-tokens"
-import { clientHello, clientSeen } from "@/lib/core/client-hello"
+import { clientHello, clientSeen, requestClient } from "@/lib/core/client-hello"
+import { detectClient, noteClientSeen } from "@/lib/core/clients/detect"
 import {
   buildGatewayServer,
   ensureCatalogue,
   loadGatewayServers,
   type GatewayScope,
 } from "@/lib/core/gateway"
+import { usableExitNames } from "@/lib/core/exits/use"
 import { instructionMemories } from "@/lib/core/memories"
 import { instructionSkills } from "@/lib/core/skills"
+import { readOwnToolTiers } from "@/lib/core/tool-tiers"
 import { bearerChallenge } from "@/lib/core/oauth-server/metadata"
 import {
   ACCESS_TOKEN_PREFIX,
   resolveAccessToken,
 } from "@/lib/core/oauth-server/tokens"
-import { checkRateLimit } from "@/lib/core/rate-limit"
+import { checkRateLimit } from "@kaperkunde/security"
 import { publicUrlFor, publicUrlWithoutSession } from "@/lib/server/public-url"
 import { loadResourceLimits } from "@/lib/core/resources/state"
 import { runDueSyncs } from "@/lib/core/repos/sync"
+import { ensureSealed } from "@/lib/core/sealing/convert"
+import { catchUpVault } from "@/lib/core/vault-upkeep"
+import { deliverUploads, reconcileServices } from "@/lib/core/upstream"
+import { ensureOwnStore } from "@/lib/core/storage/roots"
 
 /**
  * The gateway endpoint: https://<pcp>/mcp
@@ -47,6 +54,10 @@ const mcpHandler = createMcpHandler(
       throw new Error("the gateway was called without a resolved token")
     }
 
+    // PCP's own store is always there: made on a vault's first request
+    // when it is from before stores (and at setup otherwise).
+    await ensureOwnStore(scope.ctx)
+
     const servers = await ensureCatalogue(
       scope,
       await loadGatewayServers(scope),
@@ -58,7 +69,13 @@ const mcpHandler = createMcpHandler(
       memories: scope.keepMemories
         ? await instructionMemories(scope.ctx, scope.tokenId)
         : null,
-      skills: await instructionSkills(scope.ctx, scope.skillIds),
+      skills: await instructionSkills(scope.ctx, scope.skillIds, scope.tokenId),
+      // web_fetch's exit argument names the exits this token may use.
+      exitNames: scope.webFetch
+        ? await usableExitNames(scope.ctx, scope.tokenId)
+        : [],
+      // What PCP's own tools advertise follows the owner's tiers for them.
+      ownTiers: await readOwnToolTiers(scope.ctx),
     })
   },
   {
@@ -67,12 +84,14 @@ const mcpHandler = createMcpHandler(
   },
 )
 
+// Stateless, in both eras: no session (Mcp-Session-Id) and no stream to
+// resume (Last-Event-ID), so neither header is asked for or shown.
 const CORS_HEADERS: Record<string, string> = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "GET, POST, DELETE, OPTIONS",
   "Access-Control-Allow-Headers":
-    "Authorization, Content-Type, Accept, MCP-Protocol-Version, Mcp-Method, Mcp-Name, Mcp-Session-Id, Last-Event-ID",
-  "Access-Control-Expose-Headers": "WWW-Authenticate, Mcp-Session-Id",
+    "Authorization, Content-Type, Accept, MCP-Protocol-Version, Mcp-Method, Mcp-Name",
+  "Access-Control-Expose-Headers": "WWW-Authenticate",
 }
 
 function withCors(response: Response): Response {
@@ -89,6 +108,11 @@ function withCors(response: Response): Response {
   })
 }
 
+/**
+ * A request refused before it reaches the MCP server: no token, too many,
+ * a batch. JSON-RPC's Invalid Request, never a code in the -32000 to -32019
+ * range MCP has left to older servers.
+ */
 function jsonRpcError(
   status: number,
   message: string,
@@ -97,7 +121,7 @@ function jsonRpcError(
   return new Response(
     JSON.stringify({
       jsonrpc: "2.0",
-      error: { code: -32000, message },
+      error: { code: INVALID_REQUEST, message },
       id: null,
     }),
     {
@@ -137,7 +161,7 @@ async function handle(request: Request): Promise<Response> {
     )
   }
 
-  if (!checkRateLimit(`mcp:${resolved.tokenId}`, RATE_LIMIT)) {
+  if (!checkRateLimit(`mcp:${resolved.tokenId}`, RATE_LIMIT).allowed) {
     return withCors(
       jsonRpcError(429, "Too many requests; slow down.", {
         "Retry-After": "30",
@@ -145,11 +169,11 @@ async function handle(request: Request): Promise<Response> {
     )
   }
 
+  const body = request.method === "POST" ? await request.clone().text() : ""
+
   // The rate limit counts requests. A JSON-RPC batch is many calls in one, so
   // it would get around it: the current protocol has no batches either.
   if (request.method === "POST") {
-    const body = await request.clone().text()
-
     if (body.trimStart().startsWith("[")) {
       return withCors(
         jsonRpcError(
@@ -180,9 +204,17 @@ async function handle(request: Request): Promise<Response> {
     }
   }
 
+  // The app on the other end and the profile it is answered with
+  // (lib/core/clients/): the owner's choice for the token, else what this
+  // request and the token's last initialize show. The client last seen is
+  // kept on the token for its Advanced page once this answer is sent.
+  const client = detectClient(resolved, requestClient(body, request.headers))
+  after(() => noteClientSeen(resolved, client).catch(() => {}))
+
   const scope: GatewayScope = {
     ...resolved,
     publicUrl: await publicUrlFor(resolved.ctx, request),
+    client,
   }
 
   // What a call hands on to do once it has answered (an IMAP send's look
@@ -204,6 +236,27 @@ async function handle(request: Request): Promise<Response> {
   // Linked repositories due a sync are synced once this answer is sent,
   // with the key this request brought: nothing holds one in between.
   after(() => runDueSyncs(resolved.ctx))
+  // What an older PCP kept in plain text is sealed, a batch at a time;
+  // and what once ran at boot (endpoints another version built, the
+  // browser's tools) runs once per process, now that a key is here.
+  after(() =>
+    Promise.all([
+      ensureSealed(resolved.ctx).catch((error) =>
+        console.error("[sealing] could not seal the vault's rows", error),
+      ),
+      catchUpVault(resolved.ctx),
+    ]),
+  )
+  // Services the owner left running whose container stopped are started
+  // again the same way, throttled: never on a timer.
+  after(() => reconcileServices(resolved.ctx, { publicUrl: scope.publicUrl }))
+  // Files that arrived by an upload link for a store are saved there the
+  // same way: the link holds no key that opens the store.
+  after(() =>
+    deliverUploads(resolved.ctx, { publicUrl: scope.publicUrl }).catch(
+      (error) => console.error("[uploads] saving into a store failed", error),
+    ),
+  )
 
   return withCors(response)
 }

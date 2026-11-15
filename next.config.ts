@@ -2,10 +2,11 @@ import { realpathSync } from "fs"
 import { createRequire } from "module"
 import type { NextConfig } from "next"
 import path from "path"
-import { fileURLToPath } from "url"
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url))
-const requireHere = createRequire(import.meta.url)
+// Next.js 16 compiles this file to CommonJS before it runs it, where
+// `import.meta` is a syntax error; __dirname and __filename are there in
+// CommonJS and in Vitest alike (scripts/standalone.test.ts imports it).
+const requireHere = createRequire(__filename)
 
 /**
  * A file in an installed package, by its real path: through pnpm's

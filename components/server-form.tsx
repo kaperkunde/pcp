@@ -2,7 +2,7 @@
 
 import { useActionState, useState } from "react"
 
-import { FormError, FormNote } from "@/components/form-status"
+import { FormError, FormNote } from "@kaperkunde/ui/form-status"
 import {
   HeaderAuthFields,
   type ExtraHeaderValues,
@@ -10,11 +10,11 @@ import {
 } from "@/components/header-auth-fields"
 import { OAuthClientFields } from "@/components/oauth-client-fields"
 import { useSharedChangeGuard } from "@/components/shared-definition"
-import { SubmitButton } from "@/components/submit-button"
-import { Card } from "@/components/ui/card"
-import { Disclosure } from "@/components/ui/disclosure"
-import { Checkbox, Input, Select, Textarea } from "@/components/ui/input"
-import { Field, Label } from "@/components/ui/label"
+import { SubmitButton } from "@kaperkunde/ui/submit-button"
+import { Card } from "@kaperkunde/ui/card"
+import { Disclosure } from "@kaperkunde/ui/disclosure"
+import { Checkbox, Input, Select, Textarea } from "@kaperkunde/ui/input"
+import { Field, Label } from "@kaperkunde/ui/label"
 import {
   createServerAction,
   updateServerAction,
@@ -183,23 +183,26 @@ export function ServerForm({
         />
       </Field>
 
-      <div className="flex flex-col gap-1.5">
-        <Label className="font-normal" htmlFor={`${prefix}-public-only`}>
-          <Checkbox
-            id={`${prefix}-public-only`}
-            name="publicOnly"
-            defaultChecked={initial.publicOnly}
-          />
-          Public addresses only
-        </Label>
-        <p className="text-xs text-muted-foreground">
-          Refuse private, local and link-local addresses, and PCP&apos;s own,
-          for every request to the server and its sign-in, redirects included.
-          On for servers an assistant proposes; turn it off only for a server on
-          your own network that you trust, or when this machine can only reach
-          the internet through a proxy.
-        </p>
-      </div>
+      {/* Editing, it is the page's own switch, in About. */}
+      {editing ? null : (
+        <div className="flex flex-col gap-1.5">
+          <Label className="font-normal" htmlFor={`${prefix}-public-only`}>
+            <Checkbox
+              id={`${prefix}-public-only`}
+              name="publicOnly"
+              defaultChecked={initial.publicOnly}
+            />
+            Public addresses only
+          </Label>
+          <p className="text-xs text-muted-foreground">
+            Refuse private, local and link-local addresses, and PCP&apos;s own,
+            for every request to the server and its sign-in, redirects included.
+            On for servers an assistant proposes; turn it off only for a server
+            on your own network that you trust, or when this machine can only
+            reach the internet through a proxy.
+          </p>
+        </div>
+      )}
 
       <Field label="Authentication" htmlFor={`${prefix}-auth`}>
         <Select

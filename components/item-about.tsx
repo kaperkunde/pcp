@@ -5,13 +5,13 @@ import Link from "next/link"
 import { useRouter } from "next/navigation"
 import { useId, useState, useTransition } from "react"
 
-import { FormError, FormNote } from "@/components/form-status"
+import { FormError, FormNote } from "@kaperkunde/ui/form-status"
 import { RelativeDate } from "@/components/local-date"
-import { Button, ButtonLink } from "@/components/ui/button"
+import { Button, ButtonLink } from "@kaperkunde/ui/button"
 import { serverKindLabel } from "@/components/ui/icon-tile"
-import { Input } from "@/components/ui/input"
-import { ListRow, RowValue } from "@/components/ui/list"
-import { Switch } from "@/components/ui/switch"
+import { Input } from "@kaperkunde/ui/input"
+import { ListRow, RowValue } from "@kaperkunde/ui/list"
+import { Switch } from "@kaperkunde/ui/switch"
 import {
   detachServerAction,
   setNoteAction,

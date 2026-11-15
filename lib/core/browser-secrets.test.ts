@@ -1,12 +1,17 @@
 import type { CallToolResult } from "@modelcontextprotocol/server"
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
 
+import { openServer } from "./server-meta"
+
 import { listTokenAllowances, pruneAllowances } from "./allowances"
 import { createApiToken, resolveApiToken } from "./api-tokens"
 import {
   admitSecretUse,
   bindOrigin,
+  canCoverSubdomains,
   checkSecretRequest,
+  checkSecretSitesChange,
+  coveringOrigins,
   endSecretAllowance,
   grantSecretUse,
   isBoundOrigin,
@@ -15,6 +20,10 @@ import {
   originOf,
   parseOrigins,
   SECRET_ONCE_MS,
+  showSecretSitesChange,
+  signInsAt,
+  siteCovers,
+  sitesOf,
   takeSecretUse,
   unbindOrigin,
 } from "./browser-secrets"
@@ -31,6 +40,7 @@ import {
 } from "./permissions"
 import {
   createSecret,
+  readTypedLogin,
   readTypedValue,
   revealSecret,
   revealTotpCode,
@@ -40,7 +50,10 @@ import { createServer } from "./servers"
 import { scratchDatabase } from "./test-db"
 import { totpCode } from "./totp"
 import { writeToolAccess } from "./tool-access"
+import { DEFAULT_PASSWORD_RECIPE } from "./constants"
+import { SECRET_SIGN_IN_WINDOW_MS } from "./browser/limits"
 import { setupVault } from "./vault"
+import { secretName, secretNameWhere } from "./secret-meta"
 
 // Secrets the browser types, against a scratch database: the sites a secret
 // belongs to, a token's allowance per secret and site (once, an hour,
@@ -152,7 +165,9 @@ describe("a secret's sites", () => {
     expect(await bindOrigin(ctx, secretId, "https://shop.example/login")).toBe(
       SHOP,
     )
-    expect(await listBrowserOrigins(ctx)).toEqual(new Map([[secretId, [SHOP]]]))
+    expect(await listBrowserOrigins(ctx)).toEqual(
+      new Map([[secretId, [{ origin: SHOP, subdomains: false }]]]),
+    )
     await grantSecretUse(ctx, {
       tokenId,
       secretId,
@@ -162,8 +177,192 @@ describe("a secret's sites", () => {
 
     await unbindOrigin(ctx, secretId, SHOP)
 
-    expect(await isBoundOrigin(secretId, SHOP)).toBe(false)
+    expect(await isBoundOrigin(ctx, secretId, SHOP)).toBe(false)
     expect(await listSecretAllowances(ctx)).toEqual([])
+  })
+})
+
+describe("a site with its subdomains", () => {
+  const WATERNET = "https://waternet.nl"
+
+  it("covers hosts under it within its registrable domain only", () => {
+    const site = { origin: WATERNET, subdomains: true }
+
+    expect(siteCovers(site, WATERNET)).toBe(true)
+    expect(siteCovers(site, "https://www.waternet.nl")).toBe(true)
+    expect(siteCovers(site, "https://a.b.waternet.nl")).toBe(true)
+    // Lookalikes, another scheme or port, and the exact site without the flag.
+    expect(siteCovers(site, "https://notwaternet.nl")).toBe(false)
+    expect(siteCovers(site, "https://waternet.nl.evil.com")).toBe(false)
+    expect(siteCovers(site, "https://waternet.nlx")).toBe(false)
+    expect(siteCovers(site, "http://www.waternet.nl")).toBe(false)
+    expect(siteCovers(site, "https://www.waternet.nl:8443")).toBe(false)
+    expect(
+      siteCovers(
+        { origin: WATERNET, subdomains: false },
+        "https://www.waternet.nl",
+      ),
+    ).toBe(false)
+    // A public suffix under it is someone else's registrable domain.
+    expect(
+      siteCovers(
+        { origin: "https://amazonaws.com", subdomains: true },
+        "https://bucket.s3.amazonaws.com",
+      ),
+    ).toBe(false)
+    expect(
+      siteCovers(
+        { origin: "https://ada.github.io", subdomains: true },
+        "https://www.ada.github.io",
+      ),
+    ).toBe(true)
+  })
+
+  it("is only for a host with a registrable domain", () => {
+    expect(canCoverSubdomains("https://www.example.co.uk")).toBe(true)
+    expect(canCoverSubdomains("https://co.uk")).toBe(false)
+    expect(canCoverSubdomains("https://github.io")).toBe(false)
+    expect(canCoverSubdomains("https://s3.amazonaws.com")).toBe(false)
+    expect(canCoverSubdomains("http://localhost:3000")).toBe(false)
+    expect(canCoverSubdomains("https://192.168.1.10")).toBe(false)
+    expect(canCoverSubdomains("https://[::1]")).toBe(false)
+  })
+
+  it("is looked up by the parents of a host, down to its domain", () => {
+    expect(coveringOrigins("https://a.b.waternet.nl:8443")).toEqual([
+      "https://b.waternet.nl:8443",
+      "https://waternet.nl:8443",
+    ])
+    expect(coveringOrigins("https://www.example.co.uk")).toEqual([
+      "https://example.co.uk",
+    ])
+    expect(coveringOrigins("https://waternet.nl")).toEqual([])
+    expect(coveringOrigins("http://127.0.0.1:8080")).toEqual([])
+  })
+
+  it("binds the secret there, names it there and lets an always use through there", async () => {
+    await expect(
+      bindOrigin(ctx, secretId, "https://github.io", { subdomains: true }),
+    ).rejects.toThrow(/cannot stand for its subdomains/)
+    await bindOrigin(ctx, secretId, WATERNET, { subdomains: true })
+
+    expect(await sitesOf(ctx, secretId)).toEqual([
+      { origin: WATERNET, subdomains: true },
+    ])
+    expect(await isBoundOrigin(ctx, secretId, "https://mijn.waternet.nl")).toBe(
+      true,
+    )
+    expect(
+      await isBoundOrigin(ctx, secretId, "https://waternet.nl.evil.com"),
+    ).toBe(false)
+    expect(
+      (await signInsAt(ctx, "https://www.waternet.nl", 5)).map((s) => s.name),
+    ).toEqual(["Shop password"])
+    expect(await signInsAt(ctx, "https://notwaternet.nl", 5)).toEqual([])
+
+    await grantSecretUse(ctx, {
+      tokenId,
+      secretId,
+      origin: "https://www.waternet.nl",
+      level: "always",
+    })
+    expect(
+      await takeSecretUse(ctx, {
+        tokenId,
+        secretId,
+        origin: "https://www.waternet.nl",
+      }),
+    ).toBe(true)
+  })
+
+  it("takes the allowances under it away with it, or when it stops covering them", async () => {
+    await bindOrigin(ctx, secretId, WATERNET, { subdomains: true })
+    for (const origin of [
+      "https://www.waternet.nl",
+      "https://mijn.waternet.nl",
+    ]) {
+      await grantSecretUse(ctx, { tokenId, secretId, origin, level: "hour" })
+    }
+    // Added on its own too: that one stays when the flag goes.
+    await bindOrigin(ctx, secretId, "https://mijn.waternet.nl")
+
+    // Added again without the flag: only the host itself.
+    await bindOrigin(ctx, secretId, WATERNET, { subdomains: false })
+    expect(
+      (await listSecretAllowances(ctx)).map((allowance) => allowance.origin),
+    ).toEqual(["https://mijn.waternet.nl"])
+
+    await bindOrigin(ctx, secretId, WATERNET, { subdomains: true })
+    await grantSecretUse(ctx, {
+      tokenId,
+      secretId,
+      origin: "https://www.waternet.nl",
+      level: "hour",
+    })
+    await unbindOrigin(ctx, secretId, WATERNET)
+    expect(
+      (await listSecretAllowances(ctx)).map((allowance) => allowance.origin),
+    ).toEqual(["https://mijn.waternet.nl"])
+  })
+
+  it("keeps a bound site's subdomains unless the owner says otherwise", async () => {
+    await bindOrigin(ctx, secretId, WATERNET, { subdomains: true })
+    // An "always" answer binds the exact origin, leaving the flag as it is.
+    await bindOrigin(ctx, secretId, WATERNET)
+    expect(await sitesOf(ctx, secretId)).toEqual([
+      { origin: WATERNET, subdomains: true },
+    ])
+  })
+})
+
+describe("the sign-ins at a site", () => {
+  it("are the owner's secrets bound to its origin, with what they said of each, never a value", async () => {
+    const codes = await createSecret(ctx, {
+      name: "Shop code",
+      value: SEED,
+      kind: "totp",
+    })
+    const loose = await createSecret(ctx, {
+      name: "Old code",
+      value: SEED,
+      kind: "totp",
+    })
+    const elsewhere = await createSecret(ctx, {
+      name: "Bank password",
+      value: "bank-value",
+    })
+    await updateSecret(ctx, secretId, {
+      loginName: "ada@example.com",
+      note: "The family account",
+      totpCompanionId: codes.id,
+    })
+    await bindOrigin(ctx, secretId, SHOP)
+    await bindOrigin(ctx, codes.id, SHOP)
+    await bindOrigin(ctx, loose.id, SHOP)
+    await bindOrigin(ctx, elsewhere.id, "https://bank.example")
+
+    const found = await signInsAt(ctx, SHOP, 5)
+
+    // The companion is named with its secret, not again on its own.
+    expect(found).toEqual([
+      {
+        name: "Shop password",
+        kind: "text",
+        loginName: "ada@example.com",
+        note: "The family account",
+        totp: "Shop code",
+      },
+      {
+        name: "Old code",
+        kind: "totp",
+        loginName: null,
+        note: null,
+        totp: null,
+      },
+    ])
+    expect(JSON.stringify(found)).not.toContain(VALUE)
+    expect(await signInsAt(ctx, "https://other.example", 5)).toEqual([])
+    expect(await signInsAt(ctx, SHOP, 1)).toHaveLength(1)
   })
 })
 
@@ -204,6 +403,114 @@ describe("the gate a type call passes", () => {
     expect(JSON.stringify(ask)).not.toContain(VALUE)
   })
 
+  it("passes the login name through the same gate, saying it is the login name", async () => {
+    const ask = await asks(
+      admitSecretUse(ctx, {
+        tokenId,
+        serverId,
+        name: "Shop password",
+        use: pageAt(SHOP),
+        part: "username",
+      }),
+    )
+    expect(ask).toMatchObject({
+      kind: "secret_use",
+      input: { secretName: "Shop password", part: "username" },
+    })
+
+    await grantSecretUse(ctx, {
+      tokenId,
+      secretId,
+      origin: SHOP,
+      level: "once",
+    })
+    expect(
+      await admitSecretUse(ctx, {
+        tokenId,
+        serverId,
+        name: "Shop password",
+        use: pageAt(SHOP),
+        part: "username",
+      }),
+    ).toMatchObject({ id: secretId })
+    // One sign-in: the password follows on the same once allowance.
+    expect(
+      await admitSecretUse(ctx, {
+        tokenId,
+        serverId,
+        name: "Shop password",
+        use: pageAt(SHOP),
+      }),
+    ).toMatchObject({ id: secretId })
+
+    await expect(readTypedLogin(ctx, secretId)).rejects.toThrow(
+      /keeps no login name/,
+    )
+    await updateSecret(ctx, secretId, { loginName: "ada@example.com" })
+    expect(await readTypedLogin(ctx, secretId)).toBe("ada@example.com")
+  })
+
+  it("lets a once allowance cover one sign-in: each part once, in the tab, within the window", async () => {
+    const admit = (part: "username" | "password", now: Date, tabId = "t1") =>
+      admitSecretUse(
+        ctx,
+        {
+          tokenId,
+          serverId,
+          name: "Shop password",
+          use: { ...pageAt(SHOP), tabId },
+          part,
+        },
+        now,
+      )
+    const start = new Date()
+    const later = (ms: number) => new Date(start.getTime() + ms)
+
+    // Password first, then the login name: one sign-in.
+    await grantSecretUse(
+      ctx,
+      { tokenId, secretId, origin: SHOP, level: "once" },
+      start,
+    )
+    await admit("password", start)
+    // The same part again is a second sign-in, and so is another tab.
+    await asks(admit("password", later(1_000)))
+    await asks(admit("username", later(1_000), "t2"))
+    await admit("username", later(60_000))
+    // Both parts used: the next sign-in asks again.
+    await asks(admit("username", later(61_000)))
+    await asks(admit("password", later(61_000)))
+
+    // The other part comes too late: asked again.
+    await grantSecretUse(
+      ctx,
+      { tokenId, secretId, origin: SHOP, level: "once" },
+      start,
+    )
+    await admit("username", start)
+    await asks(admit("password", later(SECRET_SIGN_IN_WINDOW_MS + 1)))
+
+    // The owner ending the allowance ends the sign-in too.
+    await grantSecretUse(
+      ctx,
+      { tokenId, secretId, origin: SHOP, level: "once" },
+      start,
+    )
+    await admit("username", start)
+    await endSecretAllowance(ctx, { tokenId, secretId, origin: SHOP })
+    await asks(admit("password", later(1_000)))
+
+    // An hour's allowance is untouched by any of it.
+    await grantSecretUse(
+      ctx,
+      { tokenId, secretId, origin: SHOP, level: "hour" },
+      start,
+    )
+    await admit("username", start)
+    await admit("username", later(1_000))
+    await admit("password", later(2_000), "t2")
+  })
+
   it("refuses a secret it does not hold, or one the browser does not type", async () => {
     await expect(
       admitSecretUse(ctx, {
@@ -238,15 +545,19 @@ describe("the gate a type call passes", () => {
     const use = { tokenId, secretId, origin: SHOP }
 
     expect(
-      await takeSecretUse({ ...use, origin: "https://evil.example" }),
+      await takeSecretUse(ctx, { ...use, origin: "https://evil.example" }),
     ).toBe(false)
-    expect(await takeSecretUse(use)).toBe(true)
-    expect(await takeSecretUse(use)).toBe(false)
+    expect(await takeSecretUse(ctx, use)).toBe(true)
+    expect(await takeSecretUse(ctx, use)).toBe(false)
 
     // Unused, it runs out.
     await grantSecretUse(ctx, { ...use, level: "once" })
     expect(
-      await takeSecretUse(use, new Date(Date.now() + SECRET_ONCE_MS + 1_000)),
+      await takeSecretUse(
+        ctx,
+        use,
+        new Date(Date.now() + SECRET_ONCE_MS + 1_000),
+      ),
     ).toBe(false)
   })
 
@@ -259,15 +570,15 @@ describe("the gate a type call passes", () => {
     )
     const use = { tokenId, secretId, origin: SHOP }
 
-    expect(await takeSecretUse(use, now)).toBe(true)
+    expect(await takeSecretUse(ctx, use, now)).toBe(true)
     expect(
-      await takeSecretUse(use, new Date(now.getTime() + 59 * 60_000)),
+      await takeSecretUse(ctx, use, new Date(now.getTime() + 59 * 60_000)),
     ).toBe(true)
     expect(
-      await takeSecretUse(use, new Date(now.getTime() + 61 * 60_000)),
+      await takeSecretUse(ctx, use, new Date(now.getTime() + 61 * 60_000)),
     ).toBe(false)
     // The hour is not the site's: nothing was added to the secret.
-    expect(await isBoundOrigin(secretId, SHOP)).toBe(false)
+    expect(await isBoundOrigin(ctx, secretId, SHOP)).toBe(false)
 
     expect(await pruneAllowances(new Date(now.getTime() + 61 * 60_000))).toBe(1)
     expect(await listSecretAllowances(ctx)).toEqual([])
@@ -282,9 +593,9 @@ describe("the gate a type call passes", () => {
     })
     const use = { tokenId, secretId, origin: SHOP }
 
-    expect(await isBoundOrigin(secretId, SHOP)).toBe(true)
+    expect(await isBoundOrigin(ctx, secretId, SHOP)).toBe(true)
     expect(
-      await takeSecretUse(use, new Date(Date.now() + 365 * 86_400_000)),
+      await takeSecretUse(ctx, use, new Date(Date.now() + 365 * 86_400_000)),
     ).toBe(true)
     // Pruning leaves an always alone.
     expect(await pruneAllowances(new Date(Date.now() + 365 * 86_400_000))).toBe(
@@ -305,7 +616,7 @@ describe("the gate a type call passes", () => {
       allowAllServers: true,
     })
     const other = (await resolveApiToken(token))!.tokenId
-    expect(await takeSecretUse({ ...use, tokenId: other })).toBe(false)
+    expect(await takeSecretUse(ctx, { ...use, tokenId: other })).toBe(false)
 
     // It is on the token's page and the secret's, and ends there.
     expect(await listTokenAllowances(ctx, tokenId)).toEqual([
@@ -319,7 +630,7 @@ describe("the gate a type call passes", () => {
       },
     ])
     await endSecretAllowance(ctx, use)
-    expect(await takeSecretUse(use)).toBe(false)
+    expect(await takeSecretUse(ctx, use)).toBe(false)
   })
 
   it("holds an always only while the site is the secret's", async () => {
@@ -331,7 +642,9 @@ describe("the gate a type call passes", () => {
     })
     await db().secretBrowserOrigin.deleteMany({})
 
-    expect(await takeSecretUse({ tokenId, secretId, origin: SHOP })).toBe(false)
+    expect(await takeSecretUse(ctx, { tokenId, secretId, origin: SHOP })).toBe(
+      false,
+    )
   })
 })
 
@@ -373,9 +686,9 @@ describe("one-time codes", () => {
       /too short/,
     )
     await updateSecret(ctx, id, { name: "Codes 2" })
-    expect((await db().secret.findUniqueOrThrow({ where: { id } })).name).toBe(
-      "Codes 2",
-    )
+    expect(
+      secretName(ctx, await db().secret.findUniqueOrThrow({ where: { id } })),
+    ).toBe("Codes 2")
   })
 
   it("never go out as a server's secret", async () => {
@@ -428,9 +741,12 @@ describe("request_secret", () => {
   })
 
   it("is a request the owner answers on PCP's page, and a tool error for a name PCP holds", async () => {
-    const server = await db().mcpServer.findUniqueOrThrow({
-      where: { id: serverId },
-    })
+    const server = openServer(
+      ctx,
+      await db().mcpServer.findUniqueOrThrow({
+        where: { id: serverId },
+      }),
+    )
     const options = { publicUrl: PUBLIC_URL, tokenId }
 
     const asked = await runCall(ctx, server, "request_secret", ASK, options)
@@ -511,13 +827,19 @@ describe("request_secret", () => {
     expect(textOf(done)).toContain('{"$secret": "Mail password"}')
     expect(textOf(done)).not.toContain(SEED)
     const secret = await db().secret.findFirstOrThrow({
-      where: { name: "Mail password" },
+      where: secretNameWhere(ctx, "Mail password"),
     })
     expect(secret.kind).toBe("totp")
     expect(await revealSecret(ctx, secret.id)).toBe(SEED)
     expect(await listBrowserOrigins(ctx)).toEqual(
       new Map([
-        [secret.id, ["https://mail.example", "https://webmail.example"]],
+        [
+          secret.id,
+          [
+            { origin: "https://mail.example", subdomains: false },
+            { origin: "https://webmail.example", subdomains: false },
+          ],
+        ],
       ]),
     )
     expect(
@@ -558,19 +880,379 @@ describe("request_secret", () => {
     expect(done.isError).not.toBe(true)
     expect(await revealSecret(ctx, id)).toBe("theirs")
     expect(
-      await takeSecretUse({
+      await takeSecretUse(ctx, {
         tokenId,
         secretId: id,
         origin: "https://mail.example",
       }),
     ).toBe(true)
     expect(
-      await takeSecretUse({
+      await takeSecretUse(ctx, {
         tokenId,
         secretId: id,
         origin: "https://mail.example",
       }),
     ).toBe(false)
+  })
+})
+
+describe("request_secret with a login name and a made password", () => {
+  const ASK = {
+    name: "Energy",
+    purpose: "To sign up at the energy company.",
+    origins: ["https://www.frankenergie.nl"],
+    username: "ada@example.com",
+    generate: { length: 20, symbols: false },
+  }
+
+  async function requested(args: Record<string, unknown> = ASK) {
+    const server = openServer(
+      ctx,
+      await db().mcpServer.findUniqueOrThrow({
+        where: { id: serverId },
+      }),
+    )
+    const asked = await runCall(ctx, server, "request_secret", args, {
+      publicUrl: PUBLIC_URL,
+      tokenId,
+    })
+    expect(textOf(asked)).toContain("Not done yet")
+    return db().permissionRequest.findFirstOrThrow({
+      where: { kind: "secret_request" },
+    })
+  }
+
+  it("checks both before the owner is asked, and never for one-time codes", async () => {
+    expect(await checkSecretRequest(ctx, serverId, ASK)).toMatchObject({
+      username: "ada@example.com",
+      generate: { ...DEFAULT_PASSWORD_RECIPE, length: 20, symbols: false },
+    })
+    await expect(
+      checkSecretRequest(ctx, serverId, { ...ASK, kind: "totp" }),
+    ).rejects.toThrow(/neither username nor generate/)
+    await expect(
+      checkSecretRequest(ctx, serverId, { ...ASK, username: "a\nb" }),
+    ).rejects.toThrow(/one line/)
+    await expect(
+      checkSecretRequest(ctx, serverId, { ...ASK, generate: { length: 4 } }),
+    ).rejects.toThrow(/8 to 128/)
+
+    // The tool's own schema says the same before anything runs.
+    const server = openServer(
+      ctx,
+      await db().mcpServer.findUniqueOrThrow({
+        where: { id: serverId },
+      }),
+    )
+    const refused = await runCall(
+      ctx,
+      server,
+      "request_secret",
+      { ...ASK, kind: "totp" },
+      { publicUrl: PUBLIC_URL, tokenId },
+    )
+    expect(refused.isError).toBe(true)
+  })
+
+  it("shows the owner the login name and the recipe, to change on the page", async () => {
+    const row = await requested()
+    const view = await getPermissionView(ctx, row.id, { publicUrl: PUBLIC_URL })
+
+    expect(view!.secretToEnter).toMatchObject({
+      name: "Energy",
+      username: "ada@example.com",
+      generate: { length: 20, symbols: false },
+    })
+    expect(view!.lines.join("\n")).toContain("Login name: ada@example.com")
+    expect(view!.lines.join("\n")).toContain(
+      "make a new password: 20 characters",
+    )
+  })
+
+  it("stores a password PCP makes with the login name the owner left, and never hands it back", async () => {
+    const row = await requested()
+
+    const done = await decidePermission(ctx, row.id, "allow_once", {
+      publicUrl: PUBLIC_URL,
+      generate: { length: 32, symbols: false, exclude: "0O" },
+      loginName: "ada+energy@example.com",
+    })
+
+    expect(done.isError, textOf(done)).not.toBe(true)
+    const secret = await db().secret.findFirstOrThrow({
+      where: secretNameWhere(ctx, "Energy"),
+    })
+    const value = await revealSecret(ctx, secret.id)
+    expect(value).toMatch(/^[A-NP-Za-z1-9]{32}$/)
+    expect(textOf(done)).not.toContain(value)
+    expect(textOf(done)).toContain("PCP made its value itself")
+    expect(textOf(done)).toContain('"part": "username"')
+    expect(await readTypedLogin(ctx, secret.id)).toBe("ada+energy@example.com")
+    const stored = await db().permissionRequest.findUniqueOrThrow({
+      where: { id: row.id },
+    })
+    expect(Buffer.from(stored.resultCiphertext!).toString()).not.toContain(
+      value,
+    )
+  })
+
+  it("refuses a recipe the owner changed into one that cannot be met, and keeps the request open", async () => {
+    const row = await requested()
+    const refused = await decidePermission(ctx, row.id, "allow_once", {
+      publicUrl: PUBLIC_URL,
+      generate: { length: 12, exclude: "0123456789" },
+    })
+
+    expect(refused.isError).toBe(true)
+    expect(textOf(refused)).toContain("every one of the digits")
+    expect(
+      (
+        await db().permissionRequest.findUniqueOrThrow({
+          where: { id: row.id },
+        })
+      ).status,
+    ).toBe("pending")
+  })
+
+  it("stores what the owner typed when they turn Generate off", async () => {
+    const row = await requested()
+    await decidePermission(ctx, row.id, "allow_once", {
+      publicUrl: PUBLIC_URL,
+      secretValue: "typed-by-ada",
+      loginName: "",
+    })
+    const secret = await db().secret.findFirstOrThrow({
+      where: secretNameWhere(ctx, "Energy"),
+    })
+    expect(await revealSecret(ctx, secret.id)).toBe("typed-by-ada")
+    await expect(readTypedLogin(ctx, secret.id)).rejects.toThrow(
+      /keeps no login name/,
+    )
+  })
+})
+
+describe("update_secret_sites", () => {
+  const FRANK = "https://www.frankenergie.nl"
+
+  beforeEach(async () => {
+    await bindOrigin(ctx, secretId, "https://www.frankenergy.nl")
+    await bindOrigin(ctx, secretId, SHOP)
+  })
+
+  async function proposed(args: Record<string, unknown>) {
+    const server = openServer(
+      ctx,
+      await db().mcpServer.findUniqueOrThrow({
+        where: { id: serverId },
+      }),
+    )
+    return runCall(ctx, server, "update_secret_sites", args, {
+      publicUrl: PUBLIC_URL,
+      tokenId,
+    })
+  }
+
+  it("checks the change before the owner is asked", async () => {
+    expect(
+      await checkSecretSitesChange(ctx, serverId, {
+        name: "Shop password",
+        reason: "The site moved.",
+        add: [
+          { origin: `${FRANK}/login` },
+          { origin: "https://frankenergie.nl", subdomains: true },
+        ],
+        remove: ["https://www.frankenergy.nl/"],
+      }),
+    ).toEqual({
+      serverId,
+      secretName: "Shop password",
+      reason: "The site moved.",
+      add: [
+        { origin: FRANK, subdomains: false },
+        { origin: "https://frankenergie.nl", subdomains: true },
+      ],
+      remove: ["https://www.frankenergy.nl"],
+    })
+
+    const check = (args: Record<string, unknown>) =>
+      checkSecretSitesChange(ctx, serverId, {
+        name: "Shop password",
+        reason: "Because.",
+        ...args,
+      })
+    await expect(
+      check({ name: "Nope", add: [{ origin: FRANK }] }),
+    ).rejects.toThrow(/no secret called "Nope"/)
+    await expect(
+      check({ reason: " ", add: [{ origin: FRANK }] }),
+    ).rejects.toThrow(/Say why/)
+    await expect(check({ remove: ["https://other.example"] })).rejects.toThrow(
+      /not one of the sites/,
+    )
+    await expect(check({ add: [{ origin: SHOP }] })).rejects.toThrow(
+      /Nothing would change/,
+    )
+    await expect(
+      check({ add: [{ origin: "https://github.io", subdomains: true }] }),
+    ).rejects.toThrow(/cannot stand for its subdomains/)
+    await expect(
+      check({ add: [{ origin: SHOP, subdomains: true }], remove: [SHOP] }),
+    ).rejects.toThrow(/both added and taken away/)
+    await expect(check({})).rejects.toThrow(/Nothing would change/)
+  })
+
+  it("always asks the owner, even where the tool is allowed", async () => {
+    await writeToolAccess(tokenId, serverId, "update_secret_sites", "allowed")
+
+    const asked = await proposed({
+      name: "Shop password",
+      reason: "Typo in the domain.",
+      add: [{ origin: FRANK }],
+    })
+
+    expect(textOf(asked)).toContain("Not done yet")
+    expect(
+      await db().permissionRequest.findFirstOrThrow({
+        where: { kind: "secret_sites_change" },
+      }),
+    ).toMatchObject({ toolName: "update_secret_sites", serverId })
+    expect(await sitesOf(ctx, secretId)).toHaveLength(2)
+
+    const refused = await proposed({ name: "Shop password", reason: "x" })
+    expect(refused.isError).toBe(true)
+  })
+
+  it("shows the sites now and each change, flagging a lookalike and leaving it unticked", async () => {
+    await proposed({
+      name: "Shop password",
+      reason: "Typo in the domain.",
+      add: [
+        { origin: FRANK },
+        { origin: "https://www.shop.example", subdomains: false },
+      ],
+      remove: ["https://www.frankenergy.nl"],
+    })
+    const row = await db().permissionRequest.findFirstOrThrow({
+      where: { kind: "secret_sites_change" },
+    })
+    const view = await getPermissionView(ctx, row.id, { publicUrl: PUBLIC_URL })
+
+    expect(view!.title).toBe('Change where "Shop password" is typed?')
+    expect(view!.decisions.map((decision) => decision.value)).toEqual([
+      "allow_once",
+      "decline",
+    ])
+    expect(view!.secretSites).toMatchObject({
+      secretName: "Shop password",
+      current: [
+        { origin: SHOP, subdomains: false },
+        { origin: "https://www.frankenergy.nl", subdomains: false },
+      ],
+      changes: [
+        { key: `add:${FRANK}`, action: "add" },
+        { key: "add:https://www.shop.example", lookalike: null },
+        { key: "remove:https://www.frankenergy.nl", action: "remove" },
+      ],
+    })
+    // frankenergie.nl beside frankenergy.nl: a letter or two apart.
+    expect(view!.secretSites!.changes[0]!.lookalike).toMatch(
+      /letter or two away from frankenergy\.nl/,
+    )
+    expect(view!.warning).toMatch(/Check these/)
+    expect(view!.lines.join("\n")).toContain(
+      "Take away: https://www.frankenergy.nl",
+    )
+  })
+
+  it("makes only the ticked changes, to the sites as shown, and refuses once they moved", async () => {
+    await grantSecretUse(ctx, {
+      tokenId,
+      secretId,
+      origin: "https://www.frankenergy.nl",
+      level: "hour",
+    })
+    await proposed({
+      name: "Shop password",
+      reason: "Typo in the domain.",
+      add: [
+        { origin: "https://frankenergie.nl", subdomains: true },
+        { origin: "https://else.example" },
+      ],
+      remove: ["https://www.frankenergy.nl"],
+    })
+    const row = await db().permissionRequest.findFirstOrThrow({
+      where: { kind: "secret_sites_change" },
+    })
+    const shown = await showSecretSitesChange(
+      ctx,
+      await checkSecretSitesChange(ctx, serverId, {
+        name: "Shop password",
+        reason: "x",
+        add: [{ origin: "https://frankenergie.nl", subdomains: true }],
+      }),
+    )
+
+    // Nothing ticked is no answer.
+    const none = await decidePermission(ctx, row.id, "allow_once", {
+      publicUrl: PUBLIC_URL,
+      sites: { basis: shown.basis, keep: [] },
+    })
+    expect(none.isError).toBe(true)
+
+    // The sites changed since the page was read.
+    await bindOrigin(ctx, secretId, "https://late.example")
+    const stale = await decidePermission(ctx, row.id, "allow_once", {
+      publicUrl: PUBLIC_URL,
+      sites: {
+        basis: shown.basis,
+        keep: [
+          "add:https://frankenergie.nl",
+          "remove:https://www.frankenergy.nl",
+        ],
+      },
+    })
+    expect(stale.isError).toBe(true)
+    expect(textOf(stale)).toContain("changed since")
+    await unbindOrigin(ctx, secretId, "https://late.example")
+
+    const done = await decidePermission(ctx, row.id, "allow_once", {
+      publicUrl: PUBLIC_URL,
+      sites: {
+        basis: shown.basis,
+        keep: [
+          "add:https://frankenergie.nl",
+          "remove:https://www.frankenergy.nl",
+        ],
+      },
+    })
+
+    expect(done.isError, textOf(done)).not.toBe(true)
+    expect(textOf(done)).toContain(
+      "Added: https://frankenergie.nl and its subdomains.",
+    )
+    expect(textOf(done)).toContain("Not done: adding https://else.example.")
+    expect(await sitesOf(ctx, secretId)).toEqual([
+      { origin: "https://frankenergie.nl", subdomains: true },
+      { origin: SHOP, subdomains: false },
+    ])
+    expect(
+      await isBoundOrigin(ctx, secretId, "https://mijn.frankenergie.nl"),
+    ).toBe(true)
+    // The site taken away took this token's allowance there with it.
+    expect(await listSecretAllowances(ctx)).toEqual([])
+  })
+
+  it("changes nothing on Not now", async () => {
+    await proposed({
+      name: "Shop password",
+      reason: "Typo.",
+      remove: [SHOP],
+    })
+    const row = await db().permissionRequest.findFirstOrThrow({
+      where: { kind: "secret_sites_change" },
+    })
+    await decidePermission(ctx, row.id, "decline", { publicUrl: PUBLIC_URL })
+    expect(await sitesOf(ctx, secretId)).toHaveLength(2)
   })
 })
 
@@ -665,7 +1347,7 @@ describe("the owner's answer to a secret's use", () => {
       executor,
     )
 
-    expect(await isBoundOrigin(secretId, SHOP)).toBe(true)
+    expect(await isBoundOrigin(ctx, secretId, SHOP)).toBe(true)
     expect(await listSecretAllowances(ctx)).toMatchObject([
       { origin: SHOP, until: null },
     ])

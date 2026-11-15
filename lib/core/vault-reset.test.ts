@@ -11,14 +11,19 @@ import { createMemory } from "./memories"
 import { DDNS_CONFIG_KEY } from "./network/ddns"
 import { appendRequestLog, logDays } from "./request-log"
 import { createSecret } from "./secrets"
+import { createSshExit, writeExitAccess } from "./exits/exits"
+import { createSshServer } from "./ssh/hosts"
 import { createServer } from "./servers"
 import { createSkill, setTokenSkills } from "./skills"
 import { createSession, resolveSession } from "./sessions"
 import { SETTING_PUBLIC_URL, setSetting } from "./settings"
+import { serverCreateData } from "./server-meta"
 import { scratchDatabase } from "./test-db"
 import { keepResult } from "./tool-results"
+import { createUploadLink } from "./upload-links"
 import { setExcluded } from "./repos/store"
 import { addLinkedRepo } from "./repos/test-vault"
+import { setToolTier } from "./tool-tiers"
 import { isSetUp, ownerVault, setupVault, unlockOwnerVault } from "./vault"
 import { deleteVault } from "./vault-reset"
 
@@ -78,7 +83,44 @@ async function populate() {
     authValueTemplate: "Bearer {{secret}}",
     authSecretId: secret.id,
   })
-  await storeTools(server.id, [
+  // A service on an SSH server: rows only, nothing connects here.
+  await db().mcpServer.create({
+    data: serverCreateData(ctx, {
+      id: "svc1",
+      vaultId,
+      kind: "service",
+      name: "Docs service",
+      slug: "docs-service",
+      url: "pcp:service",
+      serviceSpec: {
+        create: {
+          plainDefinition: "{}",
+          hash: "0",
+          engine: "docker",
+          containerName: "pcp-docs",
+          env: JSON.stringify({ API_KEY: secret.id }),
+          registeredId: server.id,
+        },
+      },
+    }),
+  })
+  // A storage root on an SSH server: rows only, nothing connects here.
+  await db().mcpServer.create({
+    data: serverCreateData(ctx, {
+      id: "files1",
+      vaultId,
+      kind: "storage",
+      name: "Scans",
+      slug: "scans",
+      url: "pcp:storage",
+      storageRoot: { create: { path: "/srv/scans", mode: "encrypted" } },
+      storageEntries: {
+        create: { id: "entry1", nameKey: "k", meta: new Uint8Array([1]) },
+      },
+      storagePending: { create: { objectId: "0".repeat(32) } },
+    }),
+  })
+  await storeTools(ctx, server.id, [
     { name: "alpha", description: "First", inputSchema: { type: "object" } },
   ])
   const { id: tokenId, token } = await createApiToken(ctx, {
@@ -93,6 +135,12 @@ async function populate() {
     mediaType: "text/plain",
   })
   await receiveFile(ctx, { tokenId, publicUrl: "https://pcp.example" })
+  await createUploadLink(ctx, {
+    tokenId,
+    publicUrl: "https://pcp.example",
+    purpose: "Receipts",
+    maxFiles: 2,
+  })
   await grantSecretUse(ctx, {
     tokenId,
     secretId: secret.id,
@@ -118,12 +166,48 @@ async function populate() {
     tools: [],
   })
   await setExcluded(ctx, repoId, { kind: "skill", id: kept.id }, true)
+  const { id: sshId } = await createSshServer(ctx, {
+    name: "VPS",
+    host: "vps.example",
+    username: "deploy",
+  })
+  const { id: exitId } = await createSshExit(ctx, {
+    serverId: sshId,
+    name: "us-vps",
+  })
+  await writeExitAccess(vaultId, tokenId, exitId, "allowed")
+  // The owner's tier for a tool, kept apart from its row.
+  await setToolTier(ctx, server.id, "alpha", "read")
   await setSetting(ctx, SETTING_PUBLIC_URL, "https://pcp.example")
+  // A call the duplicate guard remembers.
+  await db().callRecord.create({
+    data: {
+      vaultId,
+      tokenId,
+      id: "call1",
+      serverId: server.id,
+      toolName: "alpha",
+      argsHash: "h",
+      tier: "write",
+      status: "succeeded",
+    },
+  })
+  // A search vector cached for the owner's embeddings provider.
+  await db().embeddingVector.create({
+    data: {
+      id: "vec1",
+      vaultId,
+      hash: "h",
+      dimensions: 1,
+      ciphertext: new Uint8Array([1]),
+    },
+  })
   await setHostJson(DDNS_CONFIG_KEY, { provider: "duckdns", subdomain: "ada" })
   const { cookieValue } = await createSession(ctx)
   const deviceKey = await createDeviceKey(ctx)
   await appendRequestLog({
     vaultId,
+    dek: ctx.dek,
     tokenId,
     tool: "call_tool",
     ok: true,
@@ -144,7 +228,16 @@ describe("deleteVault", { timeout: 30_000 }, () => {
     expect(before.repo_item).toBe(1)
     expect(before.secret_browser_origin).toBe(1)
     expect(before.api_token_secret_allowance).toBe(1)
+    expect(before.call_record).toBe(1)
     expect(before.server_definition).toBe(1)
+    expect(before.service_spec).toBe(1)
+    expect(before.storage_root).toBe(1)
+    expect(before.storage_entry).toBe(1)
+    expect(before.storage_pending).toBe(1)
+    expect(before.exit).toBe(1)
+    expect(before.upload_link).toBe(1)
+    expect(before.tool_tier).toBe(1)
+    expect(before.embedding_vector).toBe(1)
 
     await deleteVault(ctx)
 

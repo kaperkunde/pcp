@@ -1,5 +1,3 @@
-import type { McpServer } from "@/lib/generated/prisma/client"
-
 import { storeTools, type SyncResult } from "../catalogue"
 import type { VaultContext } from "../context"
 import { db } from "../db"
@@ -14,12 +12,19 @@ import {
 } from "../servers"
 import { chromiumExecutable } from "./executable"
 import { browserTools } from "./tools"
+import {
+  findServer,
+  type OpenServer,
+  serverCreateData,
+  writeServer,
+} from "../server-meta"
 
 /**
  * The browser's row in the registry: a server of kind "browser", one per
  * vault, added by the owner. Its tools are fixed (tools.ts), so they are
- * written when it is added, when PCP starts (instrumentation.ts: a newer
- * version may have changed them) and whenever it is checked; checking it
+ * written when it is added, on the first request this process sees of the
+ * vault (vault-upkeep.ts: a newer version may have changed them) and
+ * whenever it is checked; checking it
  * is finding Chromium on this machine.
  */
 
@@ -29,10 +34,8 @@ export const BROWSER_DESCRIPTION =
 
 export async function findBrowserServer(
   ctx: VaultContext,
-): Promise<McpServer | null> {
-  return db().mcpServer.findFirst({
-    where: { vaultId: ctx.vaultId, kind: "browser" },
-  })
+): Promise<OpenServer | null> {
+  return findServer(ctx, { vaultId: ctx.vaultId, kind: "browser" })
 }
 
 /**
@@ -45,7 +48,7 @@ export async function findBrowserServer(
 export async function tokenReachesBrowser(
   ctx: VaultContext,
   tokenId: string,
-): Promise<McpServer | null> {
+): Promise<OpenServer | null> {
   const server = await findBrowserServer(ctx)
 
   if (!server?.enabled) {
@@ -74,35 +77,38 @@ export async function tokenReachesBrowser(
 }
 
 export async function syncBrowserTools(
-  server: Pick<McpServer, "id">,
+  ctx: VaultContext,
+  server: Pick<OpenServer, "id">,
 ): Promise<SyncResult> {
-  const toolCount = await storeTools(server.id, browserTools())
+  const toolCount = await storeTools(ctx, server.id, browserTools())
 
   if (!(await chromiumExecutable())) {
     const message =
       "Chromium is not installed on the machine PCP runs on; install it on the Browser page."
-    await setServerStatus(server.id, "error", message, {
+    await setServerStatus(ctx, server.id, "error", message, {
       lastSyncedAt: new Date(),
     })
     return { status: "error", message, toolCount }
   }
 
-  await setServerStatus(server.id, "ok", "", { lastSyncedAt: new Date() })
+  await setServerStatus(ctx, server.id, "ok", "", { lastSyncedAt: new Date() })
   return { status: "ok", message: "", toolCount }
 }
 
 /**
- * Every vault's browser row checked again: Chromium belongs to the
- * machine, so installing it readies them all.
+ * The vault's browser row checked again: its tools are fixed in the code,
+ * so a new version brings them up to date, and whether Chromium is here
+ * can change with it or with an install. Its status is sealed under the
+ * vault's key, so this runs inside a request that holds it: the first one
+ * this process sees of the vault (lib/core/vault-upkeep.ts), and the
+ * owner's install. Another vault's browser follows on its own next
+ * request.
  */
-export async function syncAllBrowserTools(): Promise<void> {
-  const servers = await db().mcpServer.findMany({
-    where: { kind: "browser" },
-    select: { id: true },
-  })
+export async function syncVaultBrowserTools(ctx: VaultContext): Promise<void> {
+  const server = await findBrowserServer(ctx)
 
-  for (const server of servers) {
-    await syncBrowserTools(server)
+  if (server) {
+    await syncBrowserTools(ctx, server)
   }
 }
 
@@ -117,18 +123,18 @@ export async function createBrowserServer(
   const id = newId()
 
   await db().mcpServer.create({
-    data: {
+    data: serverCreateData(ctx, {
       id,
       vaultId: ctx.vaultId,
       kind: "browser",
       name: BROWSER_NAME,
-      slug: await uniqueSlug(ctx.vaultId, slugify(BROWSER_NAME)),
+      slug: await uniqueSlug(ctx, slugify(BROWSER_NAME)),
       description: BROWSER_DESCRIPTION,
       url: BROWSER_URL,
       authType: "none",
-    },
+    }),
   })
-  await syncBrowserTools({ id })
+  await syncBrowserTools(ctx, { id })
 
   return { id }
 }
@@ -145,8 +151,5 @@ export async function updateBrowserServer(
   }
 
   const { name, description } = normalizeNameAndDescription(input)
-  await db().mcpServer.update({
-    where: { id: server.id },
-    data: { name, description },
-  })
+  await writeServer(ctx, server.id, { name, description })
 }

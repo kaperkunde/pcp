@@ -1,4 +1,7 @@
 import {
+  ACTION_TIMEOUT_MS,
+  DRAG_STEP_MS,
+  DRAG_STEPS,
   INPUT_REPLAY_DELAY_MS,
   INPUT_RESYNC_MS,
   MAX_INPUT_BACKLOG_MS,
@@ -7,6 +10,7 @@ import {
 } from "./limits"
 import type { ParsedInputBatch, ParsedInputEvent } from "./input-protocol"
 import { MODIFIER_BITS } from "./input-protocol"
+import { bounded } from "./queue"
 import type { Tab } from "./runtime"
 
 /**
@@ -91,6 +95,11 @@ function keyText(event: Extract<ParsedInputEvent, { key: string }>) {
   return [...event.key].length === 1 ? event.key : undefined
 }
 
+/**
+ * One event of the owner's input, or of an assistant's mouse (clickAt,
+ * wheelAt, dragBetween below), sent to the tab as DevTools input, its
+ * point kept inside the viewport.
+ */
 async function dispatch(
   tab: Tab,
   event: ParsedInputEvent,
@@ -243,4 +252,119 @@ export function dispatchInput(
   const result = clock.chain.then(run, run)
   clock.chain = result.catch(() => {})
   return result
+}
+
+/**
+ * An assistant's mouse: click, scroll and drag at a point of the viewport
+ * (CSS pixels), for what a page draws without elements to name (a canvas,
+ * a map). The same DevTools events as the owner's input above, made one
+ * after the other and each waited for, so the page has them all before
+ * the call answers.
+ */
+
+export type MouseButton = "left" | "right" | "middle"
+export type Point = { x: number; y: number }
+
+const BUTTON_BITS: Record<MouseButton, number> = {
+  left: 1,
+  right: 2,
+  middle: 4,
+}
+
+/** The point kept inside the viewport, as dispatch sends it. */
+export function inViewport(point: Point): Point {
+  return {
+    x: clamp(point.x, VIEWPORT.width),
+    y: clamp(point.y, VIEWPORT.height),
+  }
+}
+
+async function send(tab: Tab, event: ParsedInputEvent): Promise<void> {
+  await bounded(
+    dispatch(tab, event, Date.now() / 1000),
+    ACTION_TIMEOUT_MS,
+    "Input.dispatchMouseEvent",
+  )
+}
+
+function mouse(
+  type: "move" | "down" | "up",
+  { x, y }: Point,
+  button: MouseButton,
+  { held = false, clickCount = 1 }: { held?: boolean; clickCount?: number },
+): ParsedInputEvent {
+  const buttons = held ? BUTTON_BITS[button] : 0
+
+  return type === "move"
+    ? { type, t: 0, x, y, buttons, modifiers: 0 }
+    : {
+        type,
+        t: 0,
+        x,
+        y,
+        button,
+        buttons,
+        clickCount,
+        modifiers: 0,
+      }
+}
+
+/** A click (two for double) with a button at a point. */
+export async function clickAt(
+  tab: Tab,
+  point: Point,
+  {
+    button = "left",
+    double = false,
+  }: { button?: MouseButton; double?: boolean } = {},
+): Promise<Point> {
+  const at = inViewport(point)
+  await send(tab, mouse("move", at, button, {}))
+
+  for (const clickCount of double ? [1, 2] : [1]) {
+    await send(tab, mouse("down", at, button, { held: true, clickCount }))
+    await send(tab, mouse("up", at, button, { clickCount }))
+  }
+
+  return at
+}
+
+/** The wheel turned at a point, by dx and dy CSS pixels. */
+export async function wheelAt(
+  tab: Tab,
+  point: Point,
+  delta: { dx: number; dy: number },
+): Promise<Point> {
+  const at = inViewport(point)
+  await send(tab, mouse("move", at, "left", {}))
+  await send(tab, { type: "wheel", t: 0, ...at, ...delta, modifiers: 0 })
+  return at
+}
+
+/**
+ * A drag: the button pressed at one point, moved in steps to the other
+ * while held, and let go there.
+ */
+export async function dragBetween(
+  tab: Tab,
+  from: Point,
+  to: Point,
+  { button = "left" }: { button?: MouseButton } = {},
+): Promise<{ from: Point; to: Point }> {
+  const start = inViewport(from)
+  const end = inViewport(to)
+  await send(tab, mouse("move", start, button, {}))
+  await send(tab, mouse("down", start, button, { held: true }))
+
+  for (let step = 1; step <= DRAG_STEPS; step++) {
+    const point = {
+      x: start.x + ((end.x - start.x) * step) / DRAG_STEPS,
+      y: start.y + ((end.y - start.y) * step) / DRAG_STEPS,
+    }
+    await send(tab, mouse("move", point, button, { held: true }))
+    await sleep(DRAG_STEP_MS)
+  }
+
+  await send(tab, mouse("up", end, button, {}))
+  return { from: start, to: end }
 }

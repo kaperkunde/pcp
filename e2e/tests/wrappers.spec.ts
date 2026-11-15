@@ -88,12 +88,12 @@ test("an assistant proposes a wrapper; the owner reads it and types the key in",
       {
         name: "lookup",
         description: "Looks a text up; the key is filled in.",
-        inputSchema: {
+        input_schema: {
           type: "object",
           properties: { text: { type: "string" } },
           required: ["text"],
         },
-        outputSchema: { type: "string" },
+        output_schema: { type: "string" },
         program: `return await pcp.call("${SLUG}", "keyed_echo", { api_key: { $secret: "${KEY_NAME}" }, text: args.text })`,
         calls: [`${SLUG}/keyed_echo`],
         replaces: [`${SLUG}/keyed_echo`],
@@ -102,6 +102,7 @@ test("an assistant proposes a wrapper; the owner reads it and types the key in",
     secrets: [
       { secret: KEY_NAME, tool: `${SLUG}/keyed_echo`, argument: "/api_key" },
     ],
+    tool_access: [{ tools: ["lookup"], access: "allowed" }],
   })
   expect(toolText(asked)).toContain("Not done yet")
   const id = toolText(asked).match(/\/permissions\/([\w-]+)/)?.[1]
@@ -123,10 +124,18 @@ test("an assistant proposes a wrapper; the owner reads it and types the key in",
   await expect(places.getByRole("row").nth(1)).toContainText(
     `${SLUG}/keyed_echo /api_key`,
   )
+  // The level the assistant proposed, filled in beside the approval: the
+  // owner takes it back to asking first before agreeing.
+  const levels = page.getByRole("region", { name: "Levels and tiers" })
+  await expect(levels.getByLabel("Level of lookup")).toHaveValue("allowed")
+  await levels.getByLabel("Level of lookup").selectOption("ask")
   await page.getByLabel(`Value of the secret "${KEY_NAME}"`).fill(KEY)
   await page.getByRole("button", { name: "Make the change" }).click()
   await expect(page.getByTestId("permission-outcome")).toContainText(
     `was added as ${WRAPPER_SLUG}`,
+  )
+  await expect(page.getByTestId("permission-outcome")).toContainText(
+    "set this token's level for 1 tool",
   )
 })
 
@@ -147,8 +156,8 @@ test("the wrapper's tool puts the key in, and the assistant never sees it", asyn
     server: WRAPPER_SLUG,
     tool: "lookup",
   })
-  expect(toolText(described)).toContain('"returns": "string"')
-  const answer = await callTool(baseURL!, token, "call_tool", {
+  expect(toolText(described)).toMatch(/"outputSchema": \{\s*"type": "string"/)
+  const answer = await callTool(baseURL!, token, "execute_destructive", {
     server: WRAPPER_SLUG,
     tool: "lookup",
     arguments: { text: "hello" },
@@ -162,7 +171,7 @@ test("the wrapper's tool puts the key in, and the assistant never sees it", asyn
   })
 
   // The assistant cannot put the secret in itself.
-  const own = await callTool(baseURL!, token, "call_tool", {
+  const own = await callTool(baseURL!, token, "execute_destructive", {
     server: SLUG,
     tool: "keyed_echo",
     arguments: { api_key: { $secret: KEY_NAME }, text: "x" },

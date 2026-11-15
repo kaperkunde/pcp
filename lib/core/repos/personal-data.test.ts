@@ -263,3 +263,33 @@ describe("the hits", () => {
     expect(findPersonalData(files, FACTS)).toEqual([])
   })
 })
+
+describe("a service's definition", () => {
+  it("finds the SSH server a service runs on, and the address it is published on, when a document names them", () => {
+    const facts = ownerFactsFrom({
+      serverAddresses: [],
+      ownAddresses: ["ssh://deploy@build.ada-home.net:22", "192.168.7.20"],
+      emails: [],
+    })
+    const hits = findPersonalData(
+      {
+        "services/docling.yaml": [
+          "pcp_format: 3",
+          "name: Docling",
+          "description: Runs on build.ada-home.net, at 192.168.7.20:5001.",
+          `image: ghcr.io/docling-project/docling-serve-cpu@sha256:${"c".repeat(64)}`,
+          "ports:",
+          "  - container: 5001",
+        ].join("\n"),
+      },
+      facts,
+    )
+
+    expect(hits.map((hit) => hit.match)).toEqual(
+      expect.arrayContaining(["build.ada-home.net", "192.168.7.20"]),
+    )
+    // The image and its digest are what a definition is, never a hit.
+    expect(hits.some((hit) => hit.match.includes("ghcr.io"))).toBe(false)
+    expect(hits.some((hit) => hit.match.includes("cccc"))).toBe(false)
+  })
+})

@@ -1,6 +1,10 @@
+/**
+ * The same-origin check PCP's route handlers make (@kaperkunde/security),
+ * held to what they rely on.
+ */
 import { describe, expect, it } from "vitest"
 
-import { isSameOrigin, originFromHeaders } from "./same-origin"
+import { isSameOrigin, originFromHeaders } from "@kaperkunde/security"
 
 function request(headers: Record<string, string>): Request {
   return new Request("http://pcp.internal:3000/api/export", {

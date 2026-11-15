@@ -6,7 +6,7 @@ import {
   resolveApiToken,
 } from "@/lib/core/api-tokens"
 import { db } from "@/lib/core/db"
-import { resetRateLimits } from "@/lib/core/rate-limit"
+import { resetRateLimits } from "@kaperkunde/security"
 import {
   createSession,
   resolveSession,

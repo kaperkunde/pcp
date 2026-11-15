@@ -24,6 +24,11 @@ export type DocumentWatch = {
   /** That document's HTTP status, or null before the first. */
   status: () => number | null
   /**
+   * That document's media type from its Content-Type header, lower case
+   * and without parameters ("application/pdf", "image/png"), or null.
+   */
+  contentType: () => string | null
+  /**
    * Waits until the main frame shows a document that is not a check, loaded
    * as far as DOMContentLoaded: "passed" (at once if it already does),
    * "still" when the time runs out on a check, "gone" when the page closes.
@@ -45,10 +50,18 @@ function isMainDocument(page: Page, response: Response): boolean {
   }
 }
 
+/** A Content-Type header's media type, lower case, or null. */
+export function mediaTypeOf(header: string | undefined): string | null {
+  const type = header?.split(";")[0]?.trim().toLowerCase()
+
+  return type && /^[a-z0-9.+-]+\/[a-z0-9.+-]+$/.test(type) ? type : null
+}
+
 /** Starts watching a page; for its whole life, before its first load. */
 export function watchDocuments(page: Page): DocumentWatch {
   let challenged = false
   let status: number | null = null
+  let contentType: string | null = null
   let loaded = true
   let closed = false
   const waiters = new Set<() => void>()
@@ -69,8 +82,10 @@ export function watchDocuments(page: Page): DocumentWatch {
       return
     }
 
-    challenged = isChallenge(response.headers())
+    const headers = response.headers()
+    challenged = isChallenge(headers)
     status = code
+    contentType = mediaTypeOf(headers["content-type"])
     loaded = false
     wake()
   })
@@ -86,6 +101,7 @@ export function watchDocuments(page: Page): DocumentWatch {
   return {
     challenged: () => challenged,
     status: () => status,
+    contentType: () => contentType,
     pass: (timeoutMs) =>
       new Promise<ChallengeOutcome>((resolve) => {
         const finish = (outcome: ChallengeOutcome) => {

@@ -7,11 +7,13 @@ import {
   type LogOutcome,
   type LogQuery,
 } from "./request-log"
+import { TOKEN_NAME_SELECT, tokenName } from "./token-names"
 
 /**
- * The Log page: the vault's lines of the request log, with what the log
- * itself does not hold (it keeps ids, never names) filled in from the
- * database: each token's name, and how a request the call made was answered.
+ * The Log page: the vault's lines of the request log, their names opened
+ * with the vault's key, with what the log itself does not hold (it keeps
+ * ids, never a token's name) filled in from the database: each token's
+ * name, and how a request the call made was answered.
  */
 
 /** Where a permission request a call made stands now. */
@@ -92,10 +94,10 @@ export async function activityLog(
   now = new Date(),
 ): Promise<ActivityPage> {
   const [page, tokens] = await Promise.all([
-    readRequestLog(ctx.vaultId, query),
+    readRequestLog(ctx, query),
     db().apiToken.findMany({
       where: { vaultId: ctx.vaultId },
-      select: { id: true, name: true, revokedAt: true },
+      select: { ...TOKEN_NAME_SELECT, revokedAt: true },
       orderBy: { createdAt: "desc" },
     }),
   ])
@@ -111,7 +113,9 @@ export async function activityLog(
           select: { id: true, status: true, expiresAt: true },
         })
       : []
-  const names = new Map(tokens.map((token) => [token.id, token.name]))
+  const names = new Map(
+    tokens.map((token) => [token.id, tokenName(ctx, token)]),
+  )
   const states = new Map(
     requests.map((request) => [request.id, stateOf(request, now)]),
   )
@@ -125,7 +129,7 @@ export async function activityLog(
     next: page.next,
     tokens: tokens.map((token) => ({
       id: token.id,
-      name: token.name,
+      name: names.get(token.id) ?? "",
       revoked: token.revokedAt !== null,
     })),
   }

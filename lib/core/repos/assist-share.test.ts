@@ -17,13 +17,23 @@ import {
   openShareRequest,
 } from "../permissions"
 import { createSecret } from "../secrets"
-import { createSkill, getSkill, setTokenSkills, updateSkill } from "../skills"
+import {
+  createSkill,
+  getSkill,
+  listSkills,
+  saveSkillByOwner,
+  setTokenSkills,
+  updateSkill,
+} from "../skills"
 import { scratchDatabase } from "../test-db"
 import { setupVault } from "../vault"
 
 import { startFakeGitHub, type FakeGitHub } from "./fake-github"
+import { findLocalItem, localItem, localItems } from "./local"
 import { REVIEW_CHANGED, shareReview } from "./share-review"
-import { createRepo } from "./store"
+import { createRepo, setExcluded } from "./store"
+import { secretNameWhere } from "../secret-meta"
+import { entryCall } from "../test-handles"
 
 // An assistant proposing that an item go to a linked repository, through
 // the memory tool's /repos/share/: one item, a request that writes and
@@ -67,7 +77,9 @@ async function writeRepo(
     private: hidden,
     files: { "README.md": "Shared things." },
   })
-  const secret = await db().secret.findFirst({ where: { name: "GitHub" } })
+  const secret = await db().secret.findFirst({
+    where: secretNameWhere(ctx, "GitHub"),
+  })
   const secretId =
     secret?.id ?? (await createSecret(ctx, { name: "GitHub", value: PAT })).id
 
@@ -121,7 +133,7 @@ async function connect(
   return {
     tokenId: scope.tokenId,
     call: async (name: string, args: Record<string, unknown>) => {
-      const result = await client.callTool({ name, arguments: args })
+      const result = await client.callTool(entryCall(name, args))
       return {
         isError: result.isError === true,
         text: (result.content as Array<{ text?: string }>)
@@ -366,5 +378,64 @@ describe("an assistant proposing a push", () => {
       }),
     ).rejects.toThrow(/not the item this request is about/)
     expect(fake.log("ada", "shared")).toHaveLength(1)
+  })
+})
+
+describe("a token's own skill", () => {
+  it("is never an item: not listed, proposed, reviewed, pushed or kept out", async () => {
+    const repoId = await writeRepo("shared")
+    await notes()
+    const { call } = await connect()
+
+    const saved = await call("memory", {
+      command: "create",
+      path: "/skills/mine/diary/SKILL.md",
+      file_text: "---\nname: diary\ndescription: Keep a diary.\n---\nWrite.",
+    })
+    expect(saved.text).toContain("Saved /skills/mine/diary/SKILL.md")
+    const diary = (await listSkills(ctx)).find(
+      (skill) => skill.visibility === "private",
+    )!
+
+    const items = await call("memory", {
+      command: "view",
+      path: "/repos/share/ada/shared",
+    })
+    expect(items.text).toContain("/repos/share/ada/shared/skills/notes")
+    expect(items.text).not.toContain("diary")
+    const asked = await call(
+      "memory",
+      propose("/repos/share/ada/shared/skills/diary"),
+    )
+    expect(asked.isError).toBe(true)
+    expect(await db().permissionRequest.count()).toBe(0)
+
+    expect((await localItems(ctx)).map((item) => item.document.name)).toEqual([
+      "notes",
+    ])
+    expect(await findLocalItem(ctx, { kind: "skill", name: "diary" })).toBe(
+      null,
+    )
+    await expect(localItem(ctx, "skill", diary.id)).rejects.toThrow(
+      /That skill/,
+    )
+    await expect(
+      shareReview(ctx, repoId, { kind: "skill", id: diary.id }),
+    ).rejects.toThrow(/That skill/)
+    await expect(
+      setExcluded(ctx, repoId, { kind: "skill", id: diary.id }, true),
+    ).rejects.toThrow(/That skill/)
+    await expect(
+      saveSkillByOwner(ctx, diary.id, {
+        name: "diary",
+        description: "From a repository.",
+        body: "Overwritten.",
+        tools: [],
+        version: 9,
+      }),
+    ).rejects.toThrow(/That skill/)
+    expect(fake.files("ada", "shared")).toEqual({
+      "README.md": "Shared things.",
+    })
   })
 })

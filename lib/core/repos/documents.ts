@@ -1,4 +1,12 @@
 import YAML from "yaml"
+import { browserToolSpec } from "../browser/tools"
+import {
+  emptyPace,
+  fromWrapperPaceInput,
+  toWrapperPaceInput,
+  wrapperPaceInput,
+  type WrapperPaceInput,
+} from "../pacing/input"
 import { z } from "zod"
 
 import { checkSyntax } from "../code/quickjs"
@@ -23,6 +31,10 @@ import {
   type SkillExtra,
   type SkillFile,
 } from "../skills"
+import {
+  parseServiceDefinition,
+  type ServiceDefinition,
+} from "../services/definition"
 import { readStrictYaml } from "../strict-yaml"
 import {
   splitRef,
@@ -49,6 +61,7 @@ import {
   SPEC_YAML,
   WRAPPER_YAML,
   type ItemFiles,
+  type ItemKind,
   type ItemRef,
   type ItemShape,
   type RepoFiles,
@@ -58,8 +71,8 @@ import { MAX_DOCUMENT_DEPTH } from "./limits"
 
 /**
  * Shared items as files in a linked repository, and back: a skill, a
- * wrapper (or a browser flow, which is one), an API endpoint and an MCP
- * server, each in its native format where it has one (an Agent Skill's
+ * wrapper (or a browser flow, which is one), an API endpoint, an MCP
+ * server and a service, each in its native format where it has one (an Agent Skill's
  * SKILL.md, a wrapper tool's program as JavaScript, an OpenAPI document as
  * PCP holds it) and in a YAML document of PCP's otherwise. Layout is
  * layout.ts's.
@@ -92,10 +105,72 @@ import { MAX_DOCUMENT_DEPTH } from "./limits"
  * what. A format-1 document still reads: what it says of its instance is
  * kept apart (`instance`), used only to fill in the first instance when it
  * is added, and never written over a server the vault has.
+ *
+ * Format 3 adds services (`services/<name>.yaml`): a container's definition
+ * (services/definition.ts), what every instance of it shares. Nothing else
+ * changed shape, so the other kinds are still written as format 2
+ * (`FORMAT_OF_KIND`): a PCP that reads format 2 goes on reading them, and
+ * leaves the services/ folder alone (layout.ts knows no such folder there).
+ * A service's own part (the SSH server it runs on, where its ports are
+ * published, which secret each variable takes, its container's name, what
+ * it registered, the owner's note) is never in a document.
+ *
+ * Format 4 adds two fields to a service's definition: a secret header on
+ * an MCP server it registers (`registers: {kind: mcp, …, auth}`, as kind
+ * openapi has had since format 3) and a files folder (`files: {volume,
+ * path}`, a folder in one of its volumes that put_file and get_file copy
+ * files into and out of). Only a service document that has either is
+ * written as format 4 (`serviceFormat`), so an older PCP reads every other
+ * document as before and refuses that one as written by a newer PCP rather
+ * than half-reading it; a format-3 document that names either is refused,
+ * as a PCP that reads format 3 would.
+ *
+ * Format 5 adds a wrapper's own pace (`pace`: the pace of the browser
+ * calls its tools make, per kind of action and per browser tool, in the
+ * shape create_wrapper takes it). Only a wrapper or flow document that has
+ * one is written as format 5 (`wrapperFormat`); every other stays as it
+ * was, and a document of an older format that names a pace is refused.
  */
 
 /** The newest document format this PCP reads and writes. */
-export const PCP_FORMAT = 2
+export const PCP_FORMAT = 5
+
+/**
+ * The format each kind is written in: the first that holds it. A kind
+ * whose shape has not changed keeps the format it had, so a newer PCP's
+ * documents still read in an older one, and a hash of an item does not
+ * change when only PCP did.
+ */
+export const FORMAT_OF_KIND: Record<ItemKind, number> = {
+  skill: 2,
+  wrapper: 2,
+  flow: 2,
+  endpoint: 2,
+  server: 2,
+  service: 3,
+}
+
+/**
+ * The format of a service's document: 4 when it holds a field format 4
+ * added (`registers.auth` on kind mcp, or a files folder, `files`), else 3.
+ * Only a document that holds a new field is written in the new format, so
+ * an older PCP reads every other one, and refuses that one as "written by a
+ * newer PCP" rather than half-reading it.
+ */
+export function serviceFormat(definition: ServiceDefinition): number {
+  return (definition.registers.kind === "mcp" && definition.registers.auth) ||
+    definition.files
+    ? 4
+    : FORMAT_OF_KIND.service
+}
+
+/**
+ * The format of a wrapper's or a flow's document: 5 when it has a pace of
+ * its own, which format 5 added, else the one its kind was first written in.
+ */
+export function wrapperFormat(document: WrapperDocument): number {
+  return document.pace ? 5 : FORMAT_OF_KIND[document.kind]
+}
 
 // ---- Documents --------------------------------------------------------------
 
@@ -145,6 +220,8 @@ export type WrapperDocument = {
   callLevels: CallLevels
   tools: WrapperToolDocument[]
   secrets: SecretBindingDocument[]
+  /** The pace of its browser calls (format 5); left out when it has none. */
+  pace?: WrapperPaceInput
 }
 
 /** A header a secret goes in; `secret` null: none chosen yet. */
@@ -220,8 +297,27 @@ export type ServerDocument = {
   auth: ServerAuthDocument
 }
 
+/**
+ * A service's definition (services/definition.ts): the image by digest and
+ * the tag it updates from, its ports, its variables by name (and a fixed
+ * value that is no secret), named volumes, arguments, the health check and
+ * what PCP registers for it. Never where it runs or with which secrets.
+ */
+export type ServiceDocument = {
+  kind: "service"
+  name: string
+  version: number
+  displayName: string
+  description: string
+  definition: ServiceDefinition
+}
+
 export type ItemDocument =
-  SkillDocument | WrapperDocument | EndpointDocument | ServerDocument
+  | SkillDocument
+  | WrapperDocument
+  | EndpointDocument
+  | ServerDocument
+  | ServiceDocument
 
 export function refOf(document: ItemDocument): ItemRef {
   return { kind: document.kind, name: document.name }
@@ -249,7 +345,8 @@ export function shapeOf(document: ItemDocument): ItemShape {
         spec: document.spec.format,
       }
     case "server":
-      return { kind: "server", name: document.name }
+    case "service":
+      return { kind: document.kind, name: document.name }
   }
 }
 
@@ -315,6 +412,115 @@ function authYaml(auth: EndpointAuthDocument) {
 }
 
 /**
+ * A service's definition as its document writes it, after the name and
+ * description: every field in one order, and what is its default (an empty
+ * list, no health check, nothing registered, a variable's empty
+ * description) left out, as reading it puts it back.
+ */
+function serviceYaml(definition: ServiceDefinition): Record<string, unknown> {
+  const registers = definition.registers
+  const listed = <T>(key: string, list: T[]) =>
+    list.length > 0 ? { [key]: list } : {}
+
+  return {
+    image: definition.image ?? "",
+    ...(definition.source !== undefined ? { source: definition.source } : {}),
+    ...listed(
+      "ports",
+      definition.ports.map((port) => ({ container: port.container })),
+    ),
+    ...listed(
+      "env",
+      definition.env.map((entry) => ({
+        name: entry.name,
+        ...(entry.description ? { description: entry.description } : {}),
+        ...(entry.required ? { required: true } : {}),
+        ...(entry.plain ? { plain: true } : {}),
+        ...(entry.value !== undefined ? { value: entry.value } : {}),
+      })),
+    ),
+    ...listed(
+      "volumes",
+      definition.volumes.map((volume) => ({
+        name: volume.name,
+        path: volume.path,
+      })),
+    ),
+    ...listed("args", definition.args),
+    ...listed("cap_add", definition.cap_add),
+    ...listed("devices", definition.devices),
+    ...(definition.health.kind === "none"
+      ? {}
+      : {
+          health: {
+            kind: definition.health.kind,
+            port: definition.health.port,
+            path: definition.health.path,
+          },
+        }),
+    ...(registers.kind === "none"
+      ? {}
+      : {
+          registers:
+            registers.kind === "mcp"
+              ? {
+                  kind: "mcp",
+                  port: registers.port,
+                  path: registers.path,
+                  ...(registers.auth
+                    ? {
+                        auth: {
+                          env: registers.auth.env,
+                          header: registers.auth.header,
+                          template: registers.auth.template,
+                        },
+                      }
+                    : {}),
+                }
+              : registers.kind === "exit"
+                ? {
+                    kind: "exit",
+                    port: registers.port,
+                    protocol: registers.protocol,
+                    ...(registers.auth
+                      ? {
+                          auth: {
+                            user_env: registers.auth.user_env,
+                            password_env: registers.auth.password_env,
+                          },
+                        }
+                      : {}),
+                  }
+                : {
+                    kind: "openapi",
+                    port: registers.port,
+                    specPath: registers.specPath,
+                    ...(registers.basePath !== "/"
+                      ? { basePath: registers.basePath }
+                      : {}),
+                    ...(registers.auth
+                      ? {
+                          auth: {
+                            env: registers.auth.env,
+                            header: registers.auth.header,
+                            template: registers.auth.template,
+                          },
+                        }
+                      : {}),
+                  },
+        }),
+    ...(definition.files
+      ? {
+          files: {
+            volume: definition.files.volume,
+            path: definition.files.path,
+          },
+        }
+      : {}),
+  }
+}
+
+/**
  * An item as files, by path from the repository's root. Deterministic: the
  * same item is always the same text, so a hash of it (hash.ts) changes only
  * when the item does.
@@ -326,7 +532,7 @@ export function serializeItem(document: ItemDocument): RepoFiles {
   switch (document.kind) {
     case "skill": {
       files[itemPath(ref, SKILL_MD)] = serializeSkillMd(document, {
-        format: PCP_FORMAT,
+        format: FORMAT_OF_KIND.skill,
       })
 
       for (const file of [...document.files].sort((a, b) =>
@@ -341,11 +547,12 @@ export function serializeItem(document: ItemDocument): RepoFiles {
     case "wrapper":
     case "flow": {
       files[itemPath(ref, WRAPPER_YAML)] = yaml({
-        pcp_format: PCP_FORMAT,
+        pcp_format: wrapperFormat(document),
         version: document.version,
         name: document.displayName,
         description: document.description,
         callLevels: document.callLevels,
+        ...(document.pace ? { pace: document.pace } : {}),
         tools: document.tools.map((tool) => ({
           name: tool.name,
           ...(tool.title !== null ? { title: tool.title } : {}),
@@ -381,7 +588,7 @@ export function serializeItem(document: ItemDocument): RepoFiles {
         itemPath(ref, document.spec.format === "json" ? SPEC_JSON : SPEC_YAML)
       ] = document.spec.text
       files[itemPath(ref, ENDPOINT_YAML)] = yaml({
-        pcp_format: PCP_FORMAT,
+        pcp_format: FORMAT_OF_KIND.endpoint,
         version: document.version,
         name: document.displayName,
         description: document.description,
@@ -402,11 +609,22 @@ export function serializeItem(document: ItemDocument): RepoFiles {
 
     case "server": {
       files[itemRoot(ref)] = yaml({
-        pcp_format: PCP_FORMAT,
+        pcp_format: FORMAT_OF_KIND.server,
         version: document.version,
         name: document.displayName,
         description: document.description,
         auth: authYaml(document.auth),
+      })
+      break
+    }
+
+    case "service": {
+      files[itemRoot(ref)] = yaml({
+        pcp_format: serviceFormat(document.definition),
+        version: document.version,
+        name: document.displayName,
+        description: document.description,
+        ...serviceYaml(document.definition),
       })
       break
     }
@@ -571,6 +789,8 @@ const wrapperSchema = z.strictObject({
   // A document that does not say follows the calling token's levels: the
   // narrower of the two.
   callLevels: z.enum(["approved", "token"]).default("token"),
+  // Format 5.
+  pace: wrapperPaceInput.optional(),
   tools: z
     .array(
       z.strictObject({
@@ -961,11 +1181,30 @@ async function parseWrapper(item: ItemFiles): Promise<WrapperDocument> {
         path[0] === "tools" &&
         (path[2] === "title" || path[2] === "description")),
   )
-  formatOf(raw, what)
+  const format = formatOf(raw, what)
   const parsed = parseWith(wrapperSchema, raw, what)
   const { displayName, description } = nameAndDescription(parsed, what)
   const names = new Set<string>()
   const files = [WRAPPER_YAML]
+
+  if (parsed.pace && format < 5) {
+    throw invalid(
+      `${what} is in format ${format}, which has no pace: write it as format 5 to have one.`,
+    )
+  }
+
+  let pace: WrapperPaceInput | undefined
+
+  try {
+    const checked = parsed.pace
+      ? fromWrapperPaceInput(parsed.pace, (tool) => !!browserToolSpec(tool))
+      : null
+    pace =
+      checked && !emptyPace(checked) ? toWrapperPaceInput(checked) : undefined
+  } catch (error) {
+    if (error instanceof PcpError) throw invalid(`${what}: ${error.message}`)
+    throw error
+  }
   const tools: WrapperToolDocument[] = []
 
   for (const tool of parsed.tools) {
@@ -1110,6 +1349,7 @@ async function parseWrapper(item: ItemFiles): Promise<WrapperDocument> {
     callLevels: parsed.callLevels,
     tools,
     secrets,
+    ...(pace ? { pace } : {}),
   }
 }
 
@@ -1268,6 +1508,116 @@ function parseServer(item: ItemFiles): ServerDocument {
   }
 }
 
+/** What a service's document holds besides its definition. */
+const serviceHead = z.object({
+  pcp_format: z.number(),
+  version,
+  name: text,
+  description: text.default(""),
+})
+
+/**
+ * What a service has of its own, which a document never carries: named
+ * here so a document that has one is refused in so many words, not as an
+ * unknown key.
+ */
+const SERVICE_INSTANCE_KEYS: Record<string, string> = {
+  host: "the SSH server it runs on",
+  ssh: "the SSH server it runs on",
+  server: "the SSH server it runs on",
+  publish: "where its ports are published",
+  address: "where its ports are published",
+  secrets: "which secret each variable takes",
+  bindings: "which secret each variable takes",
+  container: "its container's name",
+  containerName: "its container's name",
+  registered: "what it registered",
+  values: "the values typed for its variables",
+  plainValues: "the values typed for its variables",
+  exit: "the exit it adds",
+  note: "the owner's note",
+}
+
+function parseService(item: ItemFiles): ServiceDocument {
+  const what = itemRoot(item.ref)
+  const [file, ...others] = Object.keys(item.files)
+
+  if (!file || others.length > 0) {
+    throw invalid(`${what} is one file.`)
+  }
+
+  const raw = readDocument(
+    item.files[file]!,
+    what,
+    (path) =>
+      (path.length === 1 &&
+        (path[0] === "name" || path[0] === "description")) ||
+      (path.length === 3 && path[0] === "env" && path[2] === "description"),
+  )
+  const format = formatOf(raw, what)
+
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
+    throw invalid(`${what} is a YAML mapping.`)
+  }
+
+  // A build from a repository is the owner's alone, on their launch page:
+  // a document names an image pinned by digest. (Format 3 never had one.)
+  if ("build" in raw) {
+    throw invalid(
+      `${what} builds its image from a repository, which only the owner sets up on PCP's launch page: a service's document names an image pinned by digest.`,
+    )
+  }
+
+  const own = Object.keys(raw).filter((key) => key in SERVICE_INSTANCE_KEYS)
+
+  if (own.length > 0) {
+    throw invalid(
+      `${what} names what each service has of its own (${[...new Set(own.map((key) => SERVICE_INSTANCE_KEYS[key]))].join(", ")}): a service's document is its definition only. Take it out.`,
+    )
+  }
+
+  const rest = Object.fromEntries(
+    Object.entries(raw).filter(
+      ([key]) =>
+        !["pcp_format", "version", "name", "description"].includes(key),
+    ),
+  )
+  const head = parseWith(serviceHead, raw, what)
+  const { displayName, description } = nameAndDescription(head, what)
+  let definition: ServiceDefinition
+
+  try {
+    definition = parseServiceDefinition(rest)
+  } catch (error) {
+    throw withWhere(error, what)
+  }
+
+  if (
+    format < 4 &&
+    definition.registers.kind === "mcp" &&
+    definition.registers.auth
+  ) {
+    throw invalid(
+      `${what} is in format ${format}, whose MCP server sends no secret header: write it as format 4 to have registers.auth.`,
+    )
+  }
+
+  if (format < 4 && definition.files) {
+    throw invalid(
+      `${what} is in format ${format}, which has no files folder: write it as format 4 to have files.`,
+    )
+  }
+
+  return {
+    kind: "service",
+    name: item.ref.name,
+    version: head.version,
+    displayName,
+    description,
+    definition,
+  }
+}
+
 /**
  * One item's files read into what they propose, checked as far as can be
  * without the vault (apply.ts resolveItem does the rest: which servers,
@@ -1286,6 +1636,8 @@ export async function parseItem(item: ItemFiles): Promise<ItemDocument> {
       return parseEndpoint(item)
     case "server":
       return parseServer(item)
+    case "service":
+      return parseService(item)
   }
 }
 
