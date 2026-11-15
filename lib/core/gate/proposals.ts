@@ -17,6 +17,7 @@ import {
   type ServerLimits,
 } from "./config"
 import { gateClassOf, GATE_DEFAULTS, type GateClass } from "./limits"
+import { endCooling, placeView, serverPlace } from "./state"
 import { limitsBasis, readServerLimits, writeServerLimits } from "./store"
 
 /**
@@ -223,4 +224,82 @@ export function limitsLine(gateClass: GateClass, own: ServerLimits): string {
     (field) =>
       `${LIMIT_WORDS[field].label.toLowerCase()} ${showValue(field, limits[field])}${field in own ? "" : " (default)"}`,
   ).join(", ")
+}
+
+/** A server's Limits section, as its page shows it. */
+export type ServerLimitsView = {
+  limits: LimitsShown
+  cooling: { reason: string; since: Date; until: Date } | null
+  running: number
+  waiting: number
+  since: Date
+  windows: Array<{
+    label: string
+    calls: number
+    errors: number
+    throttles: number
+    bytes: number
+    p50Ms: number | null
+    p95Ms: number | null
+  }>
+}
+
+/** The Limits section of a server's page; null for one without limits. */
+export async function serverLimitsView(
+  ctx: VaultContext,
+  server: { id: string; kind: string },
+): Promise<ServerLimitsView | null> {
+  const gateClass = gateClassOf(server.kind)
+
+  if (!gateClass) {
+    return null
+  }
+
+  const own = await readServerLimits(ctx, server.id)
+  const view = placeView(serverPlace(ctx.vaultId, server.id))
+
+  return {
+    limits: limitsShown(gateClass, own),
+    cooling: view.cooling
+      ? {
+          reason: view.cooling.reason,
+          since: new Date(view.cooling.since),
+          until: new Date(view.cooling.until),
+        }
+      : null,
+    running: view.running,
+    waiting: view.waiting,
+    since: new Date(view.since),
+    windows: [
+      { label: "Last minute", ...view.minute },
+      { label: "Last hour", ...view.hour },
+      { label: "Last day", ...view.day },
+    ],
+  }
+}
+
+/** The owner's own save of a server's limits, on its page. */
+export async function saveOwnerLimits(
+  ctx: VaultContext,
+  serverId: string,
+  input: unknown,
+): Promise<ServerLimits> {
+  const row = await db().mcpServer.findFirst({
+    where: { id: serverId, vaultId: ctx.vaultId },
+    select: { kind: true },
+  })
+
+  if (!row || !gateClassOf(row.kind)) {
+    throw invalid("That server has no limits of its own.")
+  }
+
+  return writeServerLimits(ctx, serverId, checkLimits(input))
+}
+
+/** The owner ends a server's cool-down now, on its page. */
+export async function endServerCooling(
+  ctx: VaultContext,
+  serverId: string,
+): Promise<void> {
+  endCooling(serverPlace(ctx.vaultId, serverId))
 }

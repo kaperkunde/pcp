@@ -8,6 +8,7 @@ import { MailAccountForm } from "@/components/mail-account-form"
 import { PageColumn } from "@kaperkunde/ui/page"
 import { ServerDetail } from "@/components/server-detail"
 import { ServerForm } from "@/components/server-form"
+import { ServerLimits } from "@/components/server-limits"
 import { ServerPacingForm } from "@/components/server-pacing-form"
 import { ExitsCard } from "@/components/exits-card"
 import { ServiceCard } from "@/components/service-card"
@@ -23,6 +24,7 @@ import { isPcpError } from "@/lib/core/errors"
 import { oauthRedirectUrl } from "@/lib/core/oauth-client"
 import { storedSpec } from "@/lib/core/endpoints"
 import { readCallPlan } from "@/lib/core/openapi/plan"
+import { serverLimitsView } from "@/lib/core/gate/proposals"
 import { pacingOverview, serverPacing } from "@/lib/core/pacing/config"
 import { listSecrets } from "@/lib/core/secrets"
 import {
@@ -371,6 +373,18 @@ export default async function ServerPage({
       />
     )
 
+  // How fast PCP calls it (lib/core/gate/): its limits, load and pace in
+  // one section; the browser keeps its pace per site under Advanced.
+  const limitsView = await serverLimitsView(ctx, server)
+  const limits = limitsView ? (
+    <ServerLimits
+      key={JSON.stringify(limitsView.limits)}
+      serverId={server.id}
+      view={limitsView}
+      pacing={pacing}
+    />
+  ) : null
+
   return (
     <PageColumn width="narrow">
       <ServerDetail
@@ -423,7 +437,8 @@ export default async function ServerPage({
         notice={notice}
         redirectUrl={redirectUrl}
         settings={settings}
-        pacing={pacing}
+        pacing={limits ? null : pacing}
+        limits={limits}
         about={about}
       >
         {ssh ? <SshAccessCard serverId={server.id} view={ssh} /> : null}
