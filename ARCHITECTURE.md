@@ -895,7 +895,9 @@ call's own time and share it; closed when idle two minutes (a timer only
 closes) or ten minutes old, when a command broke it, when the server closed
 it, or when a NOOP asked of one that sat 30 seconds goes unanswered; keyed by
 the account and a hash of its address and login, so a changed password,
-address or secret starts over. Anything else that asks the server for less:
+address or secret starts over (as does a time limit the owner raised past
+the usual minute, which the socket must wait for: see "The call gate").
+Anything else that asks the server for less:
 the mailbox names every call needs to find a mailbox by role come from a LIST
 without STATUS, kept 30 seconds per account (only `list_mailboxes` asks for
 counts, and a delete of a mailbox asks STATUS of that one); a search with no
