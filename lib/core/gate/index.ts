@@ -23,6 +23,7 @@ import {
   holdAt,
   placeView,
   recordEnd,
+  recordLateThrottle,
   release,
   serverPlace,
   sitePlace,
@@ -307,7 +308,21 @@ async function runTimed(
     }
     const linger = setTimeout(giveBack, LINGER_MS)
     linger.unref?.()
-    void call.then(giveBack, giveBack).finally(() => clearTimeout(linger))
+    void call
+      .then(
+        (result) => throttleOf(result),
+        (error: unknown) => throttleOf(error),
+      )
+      .then((throttle) => {
+        if (throttle) {
+          recordLateThrottle(key, label, limits, throttle)
+        }
+      })
+      .catch(() => {})
+      .finally(() => {
+        giveBack()
+        clearTimeout(linger)
+      })
 
     return familyError(
       `${label} did not answer within ${showDuration(limits.timeoutMs)}, its time limit for a call, so PCP stopped waiting. What it was asked may still happen there; check before you call it again.`,

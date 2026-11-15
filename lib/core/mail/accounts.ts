@@ -65,6 +65,7 @@ import {
 import { CallTrace } from "./diagnostics"
 import { dropMailSession } from "./imap-pool"
 import { fetchJmapSession, openJmapBackend } from "./jmap"
+import { noticeThrottle } from "./throttle"
 import {
   DEFAULT_SEARCH_LIMIT,
   MAIL_CALL_TIMEOUT_MS,
@@ -1050,10 +1051,18 @@ export async function callMailTool(
       scrub,
     })
 
-    return withNotes(
+    const answer = withNotes(
       jsonToolResult(value, { redact: credential.redact }),
       checked.notes,
     )
+    // Answered, but marked [THROTTLED]: the server is slowing PCP down.
+    const marked = server.kind === "imap" ? noticeThrottle(trace.notices) : null
+
+    if (marked) {
+      outcome = "throttled"
+    }
+
+    return withThrottle(answer, marked)
   } catch (error) {
     outcome = throttleOf(error) ? "throttled" : "error"
 

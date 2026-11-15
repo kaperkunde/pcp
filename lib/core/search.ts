@@ -355,12 +355,17 @@ function leadSaysAWord(
   })
 }
 
-/** EXACT when the query names the candidate, PREFIX when it starts its name. */
+/**
+ * EXACT when the query names the candidate, or gives its title word for
+ * word ("Update a repository" among an API's hundreds of updates); PREFIX
+ * when it starts its name.
+ */
 function nameTier(candidate: ToolCandidate, names: string[]): number {
   const bare = normalName(candidate.name)
   const full = normalName(`${candidate.server}/${candidate.name}`)
+  const title = candidate.title ? normalName(candidate.title) : null
 
-  if (names.some((name) => name === bare || name === full)) {
+  if (names.some((name) => name === bare || name === full || name === title)) {
     return EXACT
   }
 

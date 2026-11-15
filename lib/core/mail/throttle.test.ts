@@ -10,7 +10,7 @@ import {
   knownJmapLimits,
   rememberJmapLimits,
 } from "./jmap"
-import { imapThrottle } from "./throttle"
+import { imapThrottle, noticeThrottle } from "./throttle"
 import type { MailCredential } from "./types"
 
 // Every protocol's own "slow down" comes out as an Error carrying
@@ -28,6 +28,26 @@ describe("Retry-After", () => {
     expect(parseRetryAfter("999999999")).toBe(60 * 60 * 1000)
     expect(parseRetryAfter("soon")).toBeUndefined()
     expect(parseRetryAfter(null)).toBeUndefined()
+  })
+})
+
+describe("IMAP answers that went through but say [THROTTLED]", () => {
+  // Gmail, throttling an account, still answers OK but marks each answer
+  // and takes seconds over each (seen live on 15 Nov 2026).
+  it("are a request to slow down", () => {
+    expect(
+      noticeThrottle(["4 OK Success [THROTTLED]", "5 OK Success [THROTTLED]"]),
+    ).toEqual({
+      reason:
+        "The IMAP server marks its answers [THROTTLED]: it is slowing PCP down",
+    })
+  })
+
+  it("are not an alert or an answer without the mark", () => {
+    expect(noticeThrottle([])).toBeNull()
+    expect(
+      noticeThrottle(["* OK [ALERT] Please log in via your web browser"]),
+    ).toBeNull()
   })
 })
 

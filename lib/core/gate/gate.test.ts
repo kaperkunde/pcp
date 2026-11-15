@@ -514,6 +514,30 @@ describe("a call through the gate", () => {
     expect(serverGateView(ctx, server.id).running).toBe(0)
   })
 
+  it("cools a server down when a call past its time limit comes back throttled", async () => {
+    await writeServerLimits(ctx, server.id, { timeoutMs: 1_000 })
+    let finish!: () => void
+    const slow = new Promise<CallToolResult>((resolve) => {
+      finish = () =>
+        resolve(
+          Object.assign(answer("late"), {
+            pcpThrottle: { reason: "it marks its answers [THROTTLED]" },
+          }),
+        )
+    })
+
+    const result = await gateServerCall(ctx, server, "search", {}, () => slow)
+
+    expect(errorCodeOf(result)).toBe("timeout")
+    expect(serverCooling(ctx, server.id)).toBeNull()
+    finish()
+    await slow
+    await new Promise((resolve) => setImmediate(resolve))
+    expect(serverCooling(ctx, server.id)).toMatchObject({
+      reason: "it marks its answers [THROTTLED]",
+    })
+  })
+
   it("cools a server down on its throttle, refuses calls fast with paced, and says so in its state", async () => {
     const throttled = Object.assign(
       new PcpError("upstream", "Docs could not be reached (HTTP 429)."),

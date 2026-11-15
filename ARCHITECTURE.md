@@ -911,7 +911,10 @@ never on disk. A server's own "slow down" (IMAP `[THROTTLED]`, a BYE or
 `[LIMIT]`/`[UNAVAILABLE]` that is about rate, JMAP HTTP 429 or the
 `maxConcurrentRequests` limit error, CalDAV 429 or 503 with Retry-After)
 comes out as an Error carrying `pcpThrottle` (`lib/core/throttle-signal.ts`)
-for the call gate to read; JMAP also keeps to the session's
+for the call gate to read, and so does an answer that went through with its
+lines marked `[THROTTLED]` (Gmail, throttling an account, answers OK but
+seconds late each time; `noticeThrottle`), even one that came back after the
+call's time limit; JMAP also keeps to the session's
 `maxConcurrentRequests` and `maxCallsInRequest` once it has read them. An
 email's id is `<uid>.<uidvalidity>.<mailbox path>`, so an id
 from before a mailbox was rebuilt is refused rather than naming another
