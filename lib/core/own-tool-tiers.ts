@@ -76,16 +76,21 @@ export async function listOwnToolTiers(
 
 /**
  * PCP's own tools the duplicate guard can hold a repeat of back, at the tier
- * they advertise now (a tool that is Read, idempotent or declares `never`
+ * they advertise now, the owner's choice first (a tool that is Read, idempotent or declares `never`
  * is left out, as tools/guard.ts decides), by name, for Settings → Repeated
  * calls.
  */
 export async function listGuardedOwnTools(
   ctx: VaultContext,
 ): Promise<Array<{ name: string; title: string }>> {
+  const chosen = await readOwnToolTiers(ctx)
+
   return builtOwnTools(ctx)
     .filter((tool) =>
-      ownToolGuarded(tool, tierFromAnnotations(tool.annotations)),
+      ownToolGuarded(
+        tool,
+        chosen[tool.name] ?? tierFromAnnotations(tool.annotations),
+      ),
     )
     .map((tool) => ({ name: tool.name, title: tool.title }))
     .sort((a, b) => a.name.localeCompare(b.name))

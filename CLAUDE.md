@@ -335,7 +335,8 @@ so in the summary; the bump itself waits for the request.
   before anything connects. An IMAP account keeps one signed-in session for
   its calls (`mail/imap-pool.ts`, as the SSH pool does: opened only by a call
   that hands in the login, at most `IMAP_MAX_CONNECTIONS` per account, idled
-  out, dropped when broken or when the address or login changes, never
+  out, dropped when broken, when the address or login changes or when a
+  raised time limit needs a longer socket timeout, never
   reopened by a timer); other than that it lists mailbox names without STATUS
   (counts only for `list_mailboxes`), logs out for at most 3 seconds, and
   keeps its call timings and the server's own [ALERT]/BYE lines in memory
