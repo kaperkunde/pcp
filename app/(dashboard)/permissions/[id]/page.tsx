@@ -2,6 +2,7 @@ import {
   BookOpen,
   ChevronLeft,
   FolderGit2,
+  Gauge,
   Globe,
   KeyRound,
   ListChecks,
@@ -145,6 +146,7 @@ export default async function PermissionPage({
   const roomy = Boolean(
     (access && pending) ||
     view.proposedAccess !== null ||
+    view.proposedLimits !== null ||
     view.wrapper !== null ||
     view.skill !== null ||
     view.repo !== null,
@@ -282,6 +284,7 @@ export default async function PermissionPage({
               }
               privateAddresses={view.offersPrivateAddresses}
               access={view.proposedAccess}
+              limits={view.proposedLimits}
               sites={view.secretSites}
             />
           </>
@@ -364,6 +367,8 @@ function RequestTile({ view }: { view: PermissionView }) {
       return <IconTile size="lg" icon={SquareCode} className={tile} />
     case "tab_pace":
       return <IconTile size="lg" icon={Timer} className={tile} />
+    case "limits_change":
+      return <IconTile size="lg" icon={Gauge} className={tile} />
     default:
       return <IconTile size="lg" icon={Server} className={tile} />
   }

@@ -6,6 +6,20 @@ release, with a note in front of the answer ("addPatches was renamed to
 add_patches; use add_patches."); after that it is refused like any other
 unknown key.
 
+## A paced call's code moves to `_meta`, like every tool error's
+
+A call PCP holds back (pacing, or the call gate: a server cooling down, its
+calls at once or its bytes a day) is a tool error with the code `paced` and
+`retryAfterMs` in `_meta["gg.pcp/error"]`, as `timeout` and `browser_busy`
+are. Read it there. The old `structuredContent` `{"code": "paced",
+"retry_after_ms": N}` is still sent beside it for this release and goes in
+the next. A program's `pcp.call` is unchanged: the Error it throws has
+`code` "paced" and `retryAfterMs` (Python: `.code`, `.retry_after_ms`).
+
+A call that runs past its server's time limit is now answered with a
+`timeout` tool error naming the server and the limit, for every kind (it
+was the browser's only); what it was asked may still happen there.
+
 ## Seven tools: search, execute_read/write/destructive, run_read/write/destructive
 
 A client lists PCP's entry tools alone: `search`, `execute_read`,
@@ -71,7 +85,8 @@ tier in its annotations: `search`, `execute_read` and `run_read` only read
   `search`, `execute_<tier>` and `run_<tier>`. A token whose instructions
   you changed keeps its text, which may still name `describe` and
   `call_tool_<tier>`: accept the merge PCP offers on the token's page
-  before the next release, when those names stop answering.
+  before the release after 0.5.0, when those names stop answering (0.5.0 is
+  the first release that still answers them).
 
 For one release every old name is still answered when a client calls it,
 though no longer listed: `describe`, `call_tool_<tier>` and

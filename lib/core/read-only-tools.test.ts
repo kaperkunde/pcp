@@ -109,9 +109,9 @@ async function connect() {
     "edit_card",
     "burn_cards",
   ]) {
-    await writeToolAccess(tokenId, serverId, name, "allowed")
+    await writeToolAccess(ctx, tokenId, serverId, name, "allowed")
   }
-  await writeToolAccess(tokenId, serverId, "hidden_cards", "blocked")
+  await writeToolAccess(ctx, tokenId, serverId, "hidden_cards", "blocked")
 
   scope = {
     ...(await resolveApiToken(token))!,

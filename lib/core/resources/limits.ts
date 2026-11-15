@@ -27,6 +27,8 @@ export const RESOURCE_BOUNDS = {
   browserIdleMinutes: { min: 5, max: 480 },
   /** What PCP's own store (in its data folder) may hold, in MB. */
   storeMb: { min: 100, max: 100_000_000 },
+  /** The largest OpenAPI schema PCP reads, in MB (a registration, an upload, a download). */
+  specMb: { min: 1, max: 256 },
 } satisfies Record<string, Bound>
 
 /**
@@ -59,6 +61,21 @@ export const AUTO_STORE_DISK_SHARE = 1 / 4
 export const AUTO_STORE_MB: Bound = { min: 1024, max: 4_000_000 }
 /** When the disk cannot be read. */
 export const FALLBACK_STORE_MB = 10_240
+/**
+ * An OpenAPI schema (lib/core/openapi/) may be a sixty-fourth of the
+ * machine's memory, never under what GitHub's REST description needs (14 MB)
+ * and, by default, never over 64 MB.
+ */
+export const AUTO_SPEC_MEMORY_SHARE = 1 / 64
+export const AUTO_SPEC_MB: Bound = { min: 16, max: 64 }
+/**
+ * Memory reading a schema may take, as a multiple of its size: the parsed
+ * tree, the tools made from it and the text itself (measured at 6 to 8 times
+ * for JSON and 16 for YAML read in a worker). The owner's limit is refused
+ * when this would be more than half the machine's memory.
+ */
+export const SPEC_MEMORY_FACTOR = 16
+export const MAX_SPEC_MEMORY_SHARE = 0.5
 /**
  * How long the browser waits idle before it closes: fixed, not read off the
  * machine, since one Chromium costs about the same anywhere.

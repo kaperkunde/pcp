@@ -2,6 +2,7 @@ import type { CallToolResult } from "@modelcontextprotocol/server"
 
 import { PcpError } from "../errors"
 import { ExitAddressError, type ExitDialer } from "../exits/dial"
+import { httpSignal, type Throttle } from "../throttle-signal"
 import {
   AddressBlockedError,
   isOwnAddress,
@@ -63,6 +64,10 @@ export type FetchAnswer = {
   result: CallToolResult
   /** The site answered with its check (`cf-mitigated: challenge`). */
   challenged: boolean
+  /** The site asked PCP to slow down (lib/core/throttle-signal.ts). */
+  throttle?: Throttle | null
+  /** The bytes of the page it answered. */
+  bytes?: number
 }
 
 export type FetchOptions = Pick<SendOptions, "addressCheck"> & {
@@ -332,6 +337,8 @@ async function readAnswer(
 
   return {
     challenged,
+    throttle: httpSignal(response.status, response.headers, url.host),
+    bytes: bytes.length,
     result: presentPage(
       {
         url: url.toString(),

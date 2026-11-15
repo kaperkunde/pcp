@@ -1,3 +1,4 @@
+import { openLevelName } from "./level-names"
 import { Client, InMemoryTransport } from "@modelcontextprotocol/client"
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
 
@@ -234,16 +235,31 @@ describe("cloneServer", () => {
       where: { serverId: id },
       orderBy: { toolName: "asc" },
     })
-    expect(levels.map((row) => [row.toolName, row.access])).toEqual([
+    expect(
+      levels
+        .map((row) => [
+          openLevelName(ctx, "api_token_tool_access", `${row.tokenId}:${id}`, {
+            key: row.toolName,
+            sealed: row.sealed,
+          }),
+          row.access,
+        ])
+        .sort(),
+    ).toEqual([
       ["createApplication", "blocked"],
       ["listApplications", "allowed"],
     ])
     expect(
-      await db().vaultToolAccess.findMany({
-        where: { serverId: id },
-        select: { toolName: true, access: true },
-      }),
-    ).toEqual([{ toolName: "listServers", access: "allowed" }])
+      (await db().vaultToolAccess.findMany({ where: { serverId: id } })).map(
+        (row) => [
+          openLevelName(ctx, "vault_tool_access", id, {
+            key: row.toolName,
+            sealed: row.sealed,
+          }),
+          row.access,
+        ],
+      ),
+    ).toEqual([["listServers", "allowed"]])
 
     expect(
       (await instancesOf(ctx, clone.definitionId!)).map((each) => each.slug),

@@ -1,5 +1,6 @@
 import type { Metadata } from "next"
 
+import { loadResourceLimits } from "@/lib/core/resources/state"
 import { EMPTY_ENDPOINT, EndpointForm } from "@/components/endpoint-form"
 import { PageColumn } from "@kaperkunde/ui/page"
 import { PageHeader } from "@kaperkunde/ui/page"
@@ -29,6 +30,7 @@ export default async function NewEndpointPage() {
         initial={EMPTY_ENDPOINT}
         secrets={secrets}
         redirectUrl={oauthRedirectUrl(await publicUrlFor(ctx))}
+        maxSpecMb={Math.round((await loadResourceLimits()).specBytes / 1048576)}
       />
     </PageColumn>
   )

@@ -10,11 +10,31 @@ import type {
 } from "imapflow"
 
 import { describeFetchError } from "../openapi/http"
+import { withThrottle } from "../throttle-signal"
 import { PCP_VERSION } from "../version"
 import { replyTarget, type MailServerAddress } from "./addresses"
+import {
+  bindTrace,
+  createTraceSink,
+  scrubNotice,
+  type CallTrace,
+  type TraceSink,
+} from "./diagnostics"
 import { htmlToText } from "./html"
 import {
+  closeBounded,
+  forgetListing,
+  leaseImap,
+  readListing,
+  writeListing,
+  type Lease,
+  type SessionKey,
+} from "./imap-pool"
+import {
+  DIAGNOSTIC_NOTICES_PER_CALL,
+  IMAP_LEASE_WAIT_MS,
   MAIL_CALL_TIMEOUT_MS,
+  MAILBOX_LIST_TTL_MS,
   MAIL_CONNECT_TIMEOUT_MS,
   MAX_ATTACHMENTS_LISTED,
   MAX_MAILBOXES,
@@ -35,6 +55,7 @@ import {
   mailboxByRole,
 } from "./mailboxes"
 import { bareType, isTextType } from "../media-types"
+import { imapThrottle } from "./throttle"
 import {
   otherKeywords,
   MailAuthError,
@@ -61,8 +82,9 @@ import {
 
 /**
  * A mail account over IMAP, with sending over SMTP when the owner gave an
- * SMTP server. One connection per call: PCP connects, signs in, does the
- * one thing and logs out. Mail never travels in the clear: imaps:// and
+ * SMTP server. The calls of an account share one signed-in connection
+ * (imap-pool.ts) when the backend is given its session; without one the
+ * backend connects, signs in, and logs out when it is closed. Mail never travels in the clear: imaps:// and
  * smtps:// are TLS from the start, imap:// and smtp:// must upgrade with
  * STARTTLS, and a connection that is not encrypted is dropped.
  *
@@ -78,6 +100,8 @@ export type Login = { username: string; password: string }
 /** The part of an imapflow client PCP uses. */
 export interface ImapClientLike {
   readonly secureConnection: boolean
+  /** False once the connection has closed or cannot take a command. */
+  readonly usable?: boolean
   readonly mailbox:
     | {
         path: string
@@ -108,6 +132,11 @@ export interface ImapClientLike {
       status?: { messages?: number; unseen?: number }
     }>
   >
+  /** STATUS of one mailbox: its counts, without opening it. */
+  status(
+    path: string,
+    query: { messages?: boolean; unseen?: boolean },
+  ): Promise<{ path: string; messages?: number; unseen?: number }>
   getMailboxLock(
     path: string,
     options?: { readOnly?: boolean },
@@ -208,7 +237,16 @@ export interface SmtpTransportLike {
 
 export type ImapDeps = {
   /** A connected, signed-in client. */
-  connect(address: MailServerAddress, login: Login): Promise<ImapClientLike>
+  connect(
+    address: MailServerAddress,
+    login: Login,
+    /**
+     * How long the connection waits for the server before it gives up:
+     * at least MAIL_CALL_TIMEOUT_MS, longer when the account's time limit
+     * for a call is (lib/core/gate/).
+     */
+    options?: { socketTimeoutMs?: number },
+  ): Promise<ImapClientLike>
   smtp(address: MailServerAddress, login: Login): Promise<SmtpTransportLike>
   /** The message as it goes into the Sent mailbox, Bcc kept. */
   compose(mail: OutgoingMail): Promise<Buffer>
@@ -217,7 +255,7 @@ export type ImapDeps = {
 }
 
 export const defaultImapDeps: ImapDeps = {
-  async connect(address, login) {
+  async connect(address, login, options) {
     const { ImapFlow } = await import("imapflow")
     const client = new ImapFlow({
       host: address.host,
@@ -227,16 +265,28 @@ export const defaultImapDeps: ImapDeps = {
       ...(address.secure ? {} : { doSTARTTLS: true }),
       auth: { user: login.username, pass: login.password },
       logger: false,
+      // The server's own lines, for the owner's diagnostics (diagnostics.ts).
+      emitLogs: true,
       disableAutoIdle: true,
       connectionTimeout: MAIL_CONNECT_TIMEOUT_MS,
       greetingTimeout: MAIL_CONNECT_TIMEOUT_MS,
-      socketTimeout: MAIL_CALL_TIMEOUT_MS,
+      socketTimeout: options?.socketTimeoutMs ?? MAIL_CALL_TIMEOUT_MS,
       clientInfo: { name: "PCP", version: PCP_VERSION },
     })
     // Without a listener, an error after the call returns would be thrown
     // as an uncaught exception.
     client.on("error", () => {})
+    const sink = createTraceSink(client)
+    watchServerLines(client, sink, [login.username, login.password])
+    const started = Date.now()
     await client.connect()
+    const total = Date.now() - started
+    const login_ = loginMs(sink)
+
+    sink.opening = {
+      connect: Math.max(0, total - login_),
+      ...(login_ > 0 ? { login: login_ } : {}),
+    }
 
     return client as unknown as ImapClientLike
   },
@@ -531,13 +581,33 @@ const SUMMARY_QUERY: FetchQueryObject = {
 }
 
 /** What went wrong, in terms the account's status and the assistant use. */
-export function describeImapError(error: unknown, what: string): Error {
+export function describeImapError(
+  error: unknown,
+  what: string,
+  secrets: string[] = [],
+): Error {
   if (
     error instanceof MailAuthError ||
     error instanceof MailRequestError ||
     error instanceof MailTransportError
   ) {
     return error
+  }
+
+  const throttle = imapThrottle(error, secrets)
+
+  if (throttle) {
+    const said =
+      (error as { responseText?: string; reason?: string }).responseText ??
+      (error as { reason?: string }).reason ??
+      ""
+
+    return withThrottle(
+      new MailTransportError(
+        `The ${what} server asked PCP to slow down${said ? `: ${said.slice(0, 300)}` : "."}`,
+      ),
+      throttle,
+    )
   }
 
   const detail = error as {
@@ -614,6 +684,21 @@ export type ImapSendHooks = {
   defer?: (task: () => Promise<void>) => boolean
   /** Told what a look for the copy in Sent found out about the server. */
   learned?: (serverFilesSent: boolean) => Promise<void>
+  /**
+   * The account's pooled session (imap-pool.ts): calls share one signed-in
+   * connection, and the mailbox names, instead of each logging in and
+   * listing for itself. Without it the backend has a connection of its
+   * own, closed with it.
+   */
+  session?: SessionKey & { maxConnections?: number; waitMs?: number }
+  /**
+   * The account's time limit for a call (lib/core/gate/): a connection
+   * opened for it waits at least that long for the server, and the call
+   * waits no longer than that for a pooled one.
+   */
+  timeoutMs?: number
+  /** Collects the phases and notices of the call this backend serves. */
+  trace?: CallTrace
 }
 
 /** Signs in to the IMAP server, and the SMTP one when there is one. */
@@ -643,6 +728,69 @@ export async function checkImapAccount(
   }
 }
 
+type LogLine = { src?: unknown; msg?: unknown; t?: unknown }
+
+/** The tag of a LOGIN or AUTHENTICATE PCP sent, and when. */
+const LOGINS = new WeakMap<
+  object,
+  { tag: string; start: number; end: number | null }
+>()
+
+const SERVER_NOTICE =
+  /\[(?:ALERT|THROTTLED|LIMIT|UNAVAILABLE|OVERQUOTA|INUSE)\]|^\* BYE\b/i
+
+/**
+ * Listens to the lines imapflow logs: when the login began and ended, and
+ * what the server said on its own. Only the server's lines are read for
+ * text; nothing of what PCP sent is kept.
+ */
+function watchServerLines(
+  client: { on(event: "log", listener: (entry: LogLine) => void): unknown },
+  sink: TraceSink,
+  secrets: string[],
+): void {
+  client.on("log", (entry) => {
+    const line = typeof entry.msg === "string" ? entry.msg : ""
+    const at = typeof entry.t === "number" ? entry.t : Date.now()
+
+    if (entry.src === "c") {
+      const sent = /^(\S+) (?:LOGIN|AUTHENTICATE)\b/i.exec(line)
+
+      if (sent && !LOGINS.has(sink)) {
+        LOGINS.set(sink, { tag: sent[1]!, start: at, end: null })
+      }
+
+      return
+    }
+
+    if (entry.src !== "s") {
+      return
+    }
+
+    const login = LOGINS.get(sink)
+
+    if (login && login.end === null && line.startsWith(`${login.tag} `)) {
+      login.end = at
+    }
+
+    if (SERVER_NOTICE.test(line)) {
+      const clean = scrubNotice(line, secrets)
+
+      if (sink.trace) {
+        sink.trace.notice(clean)
+      } else if (sink.pending.length < DIAGNOSTIC_NOTICES_PER_CALL) {
+        sink.pending.push(clean)
+      }
+    }
+  })
+}
+
+function loginMs(sink: TraceSink): number {
+  const login = LOGINS.get(sink)
+
+  return login && login.end !== null ? Math.max(0, login.end - login.start) : 0
+}
+
 export function openImapBackend(
   config: ImapConfig,
   login: Login,
@@ -650,50 +798,157 @@ export function openImapBackend(
   hooks: ImapSendHooks = {},
 ): MailBackend {
   let connection: Promise<ImapClientLike> | null = null
+  let lease: Lease | null = null
+  /** A command failed on the way: the connection is not handed on. */
+  let broken = false
+  const trace = hooks.trace
+
+  /** Times a phase of the call, when the call is being traced. */
+  const timed = <T>(phase: "select" | "command", run: () => Promise<T>) =>
+    trace ? trace.time(phase, run) : run()
+
+  /** A failure as the caller is told it; one on the wire ends the connection. */
+  function fail(error: unknown): Error {
+    const described = describeImapError(error, "IMAP", [
+      login.username,
+      login.password,
+    ])
+
+    if (described instanceof MailTransportError) {
+      broken = true
+    }
+
+    return described
+  }
+
+  async function openConnection(): Promise<ImapClientLike> {
+    let connected: ImapClientLike
+
+    try {
+      connected = await deps.connect(
+        config.imap,
+        login,
+        hooks.timeoutMs === undefined
+          ? undefined
+          : {
+              socketTimeoutMs: Math.max(MAIL_CALL_TIMEOUT_MS, hooks.timeoutMs),
+            },
+      )
+    } catch (error) {
+      throw describeImapError(error, "IMAP")
+    }
+
+    if (!connected.secureConnection) {
+      connected.close()
+      throw new MailTransportError(
+        "The IMAP connection is not encrypted, so PCP will not use it.",
+      )
+    }
+
+    return connected
+  }
 
   async function client(): Promise<ImapClientLike> {
     connection ??= (async () => {
-      let connected: ImapClientLike
+      const session = hooks.session
 
-      try {
-        connected = await deps.connect(config.imap, login)
-      } catch (error) {
-        throw describeImapError(error, "IMAP")
+      if (!session) {
+        const own = await openConnection()
+        bindTrace(own, trace ?? null)
+
+        return own
       }
 
-      if (!connected.secureConnection) {
-        connected.close()
-        throw new MailTransportError(
-          "The IMAP connection is not encrypted, so PCP will not use it.",
-        )
+      lease = await leaseImap(session, openConnection, {
+        maxConnections: session.maxConnections,
+        waitMs:
+          hooks.timeoutMs === undefined
+            ? session.waitMs
+            : Math.min(session.waitMs ?? IMAP_LEASE_WAIT_MS, hooks.timeoutMs),
+      })
+
+      if (trace) {
+        trace.reused = lease.reused
       }
 
-      return connected
+      bindTrace(lease.client, trace ?? null)
+
+      return lease.client
     })()
 
     return connection
   }
 
-  /** Runs with one mailbox open, its lock released however it ends. */
+  // The mailbox names, which a call needs to find a mailbox by its role and
+  // which change rarely: kept for a short while, by the account's session
+  // when there is one, else by this backend.
+  type Names = {
+    boxes: MailboxSummary[]
+    delimiter: string | null
+    unselectable: string[]
+  }
+  let ownNames: { at: number; value: Names } | null = null
+
+  function readNames(): Names | null {
+    if (hooks.session) {
+      return readListing<Names>(hooks.session, MAILBOX_LIST_TTL_MS)
+    }
+
+    return ownNames && Date.now() - ownNames.at <= MAILBOX_LIST_TTL_MS
+      ? ownNames.value
+      : null
+  }
+
+  function writeNames(value: Names): void {
+    if (hooks.session) {
+      writeListing(hooks.session, value)
+    } else {
+      ownNames = { at: Date.now(), value }
+    }
+  }
+
+  function forgetNames(): void {
+    ownNames = null
+
+    if (hooks.session) {
+      forgetListing(hooks.session)
+    }
+  }
+
+  /**
+   * Runs with one mailbox open, its lock released however it ends. `wasOpen`
+   * says the connection already had that mailbox selected: a pooled
+   * session's, whose view of it may have gone stale.
+   */
   async function inMailbox<T>(
     path: string,
     readOnly: boolean,
-    run: (imap: ImapClientLike, uidValidity: bigint) => Promise<T>,
+    run: (
+      imap: ImapClientLike,
+      uidValidity: bigint,
+      wasOpen: boolean,
+    ) => Promise<T>,
   ): Promise<T> {
     const imap = await client()
+    const wasOpen = !!imap.mailbox && imap.mailbox.path === path
     let lock: { release(): void }
 
     try {
-      lock = await imap.getMailboxLock(path, { readOnly })
+      lock = await timed("select", () =>
+        imap.getMailboxLock(path, { readOnly }),
+      )
     } catch (error) {
-      throw describeImapError(error, "IMAP")
+      throw fail(error)
     }
 
     try {
       const opened = imap.mailbox
-      return await run(imap, opened ? opened.uidValidity : 0n)
+
+      return await timed("command", () =>
+        run(imap, opened ? opened.uidValidity : 0n, wasOpen),
+      )
     } catch (error) {
-      throw describeImapError(error, "IMAP")
+      throw fail(error)
     } finally {
       lock.release()
     }
@@ -758,32 +1013,35 @@ export function openImapBackend(
     unselectable: new Set(),
   }
 
-  async function mailboxes(): Promise<MailboxSummary[]> {
+  function adoptNames(names: Names): MailboxSummary[] {
+    listing = {
+      delimiter: names.delimiter,
+      unselectable: new Set(names.unselectable),
+    }
+
+    return names.boxes
+  }
+
+  /** LIST, with the counts only when asked for: STATUS costs a command a mailbox. */
+  async function listBoxes(counts: boolean): Promise<{
+    boxes: MailboxSummary[]
+    names: Names
+  }> {
     const imap = await client()
     let listed: Awaited<ReturnType<ImapClientLike["list"]>>
 
     try {
-      listed = await imap.list({
-        statusQuery: { messages: true, unseen: true },
-      })
+      listed = await timed("command", () =>
+        imap.list(
+          counts ? { statusQuery: { messages: true, unseen: true } } : {},
+        ),
+      )
     } catch (error) {
-      throw describeImapError(error, "IMAP")
+      throw fail(error)
     }
 
     const named = listed.find((box) => box.delimiter !== undefined)
-    listing = {
-      delimiter: named ? (named.delimiter ?? null) : "/",
-      unselectable: new Set(
-        listed
-          .filter(
-            (box) =>
-              box.flags.has("\\Noselect") || box.flags.has("\\NonExistent"),
-          )
-          .map((box) => box.path),
-      ),
-    }
-
-    return listed.slice(0, MAX_MAILBOXES).map((box) => ({
+    const boxes = listed.slice(0, MAX_MAILBOXES).map((box) => ({
       id: box.path,
       name: box.name,
       path: box.path,
@@ -792,6 +1050,75 @@ export function openImapBackend(
       totalEmails: box.status?.messages ?? null,
       unreadEmails: box.status?.unseen ?? null,
     }))
+    const names: Names = {
+      delimiter: named ? (named.delimiter ?? null) : "/",
+      unselectable: listed
+        .filter(
+          (box) =>
+            box.flags.has("\\Noselect") || box.flags.has("\\NonExistent"),
+        )
+        .map((box) => box.path),
+      boxes: boxes.map((box) => ({
+        ...box,
+        totalEmails: null,
+        unreadEmails: null,
+      })),
+    }
+
+    return { boxes, names }
+  }
+
+  /**
+   * A mailbox by name, role or path. One missing from the names kept is
+   * looked for again in a fresh listing, so a folder another client has
+   * just made is found at once.
+   */
+  async function findFresh(
+    ref: string,
+  ): Promise<{ boxes: MailboxSummary[]; box: MailboxSummary }> {
+    let boxes = await boxNames()
+
+    try {
+      return { boxes, box: findMailbox(boxes, ref) }
+    } catch (error) {
+      if (!(error instanceof MailRequestError)) {
+        throw error
+      }
+
+      forgetNames()
+      boxes = await boxNames()
+
+      return { boxes, box: findMailbox(boxes, ref) }
+    }
+  }
+
+  /** list_mailboxes: the mailboxes with their counts. */
+  async function mailboxes(): Promise<MailboxSummary[]> {
+    const { boxes, names } = await listBoxes(true)
+    writeNames(names)
+    adoptNames(names)
+
+    return boxes
+  }
+
+  /**
+   * The mailboxes by name and role, without counts: what every other call
+   * needs to find a mailbox, kept for a short while.
+   */
+  async function boxNames(): Promise<MailboxSummary[]> {
+    // The connection first: calls that queue for it then find the names
+    // the one ahead of them listed.
+    await client()
+    const cached = readNames()
+
+    if (cached) {
+      return adoptNames(cached)
+    }
+
+    const { names: fresh } = await listBoxes(false)
+    writeNames(fresh)
+
+    return adoptNames(fresh)
   }
 
   async function headers(imap: ImapClientLike, uid: string) {
@@ -978,7 +1305,39 @@ export function openImapBackend(
     start: number,
     end: number,
   ): Promise<{ total: number; emails: MailMessageSummary[] }> {
-    return inMailbox(box.id, true, async (imap, uidValidity) => {
+    return inMailbox(box.id, true, async (imap, uidValidity, wasOpen) => {
+      if (criteria.all) {
+        // Nothing filters: the newest page by sequence number, from the
+        // count the server gave when it opened the mailbox. UID SEARCH ALL
+        // would send every UID of a large mailbox to be sorted here.
+        if (wasOpen) {
+          // A pooled session may have missed what arrived since.
+          await imap.noop()
+        }
+
+        const count = imap.mailbox ? (imap.mailbox.exists ?? 0) : 0
+        const high = count - start
+
+        if (count === 0 || high < 1) {
+          return { total: count, emails: [] }
+        }
+
+        // An expunge between the SELECT and this FETCH can shift the page by
+        // one row: the count is the one SELECT gave. Next call is exact.
+        const low = Math.max(1, count - end + 1)
+        const messages = await imap.fetchAll(`${low}:${high}`, SUMMARY_QUERY, {
+          uid: false,
+        })
+
+        return {
+          total: count,
+          // Newest first: a higher UID arrived later.
+          emails: [...messages]
+            .sort((a, b) => b.uid - a.uid)
+            .map((message) => summary(message, box.id, uidValidity)),
+        }
+      }
+
       const found = (await imap.search(criteria, { uid: true })) || []
       // Newest first: a higher UID arrived later.
       const page = [...found].sort((a, b) => b - a).slice(start, end)
@@ -1022,12 +1381,13 @@ export function openImapBackend(
 
   /** A mailbox as list_mailboxes shows it, read again after a change. */
   async function mailboxAt(path: string): Promise<MailboxSummary> {
-    const found = (await mailboxes()).find((box) => box.id === path)
+    forgetNames()
+    const found = (await boxNames()).find((box) => box.id === path)
     const { delimiter } = listing
     const cut = delimiter ? path.lastIndexOf(delimiter) : -1
 
-    return (
-      found ?? {
+    if (!found) {
+      return {
         id: path,
         name: cut >= 0 ? path.slice(cut + delimiter!.length) : path,
         path,
@@ -1036,15 +1396,34 @@ export function openImapBackend(
         totalEmails: null,
         unreadEmails: null,
       }
-    )
+    }
+
+    return counted(found)
+  }
+
+  /** One mailbox with its counts: a STATUS of it, not of all of them. */
+  async function counted(box: MailboxSummary): Promise<MailboxSummary> {
+    try {
+      const counts = await onServer((imap) =>
+        imap.status(box.id, { messages: true, unseen: true }),
+      )
+
+      return {
+        ...box,
+        totalEmails: counts.messages ?? null,
+        unreadEmails: counts.unseen ?? null,
+      }
+    } catch {
+      return { ...box, totalEmails: null, unreadEmails: null }
+    }
   }
 
   /** A mailbox command, its failure said as the server said it. */
   async function onServer<T>(run: (imap: ImapClientLike) => Promise<T>) {
     try {
-      return await run(await client())
+      return await timed("command", async () => run(await client()))
     } catch (error) {
-      throw describeImapError(error, "IMAP")
+      throw fail(error)
     }
   }
 
@@ -1067,7 +1446,7 @@ export function openImapBackend(
       return target.id
     }
 
-    const boxes = await mailboxes()
+    const boxes = await boxNames()
     const order: MailboxSummary[] = []
 
     for (const role of REPLY_LOOKUP_ROLES) {
@@ -1162,7 +1541,7 @@ export function openImapBackend(
   // A draft needs no SMTP server: it is appended to Drafts over IMAP, with
   // the Draft flag, and goes nowhere else.
   async function createDraft(input: SendInput): Promise<DraftResult> {
-    const drafts = draftsMailbox(await mailboxes())
+    const drafts = draftsMailbox(await boxNames())
 
     if (!drafts) {
       throw new MailRequestError(
@@ -1178,7 +1557,7 @@ export function openImapBackend(
       const imap = await client()
       appended = await imap.append(drafts.id, raw, ["\\Draft", "\\Seen"])
     } catch (error) {
-      throw describeImapError(error, "IMAP")
+      throw fail(error)
     }
 
     if (appended === false) {
@@ -1209,13 +1588,13 @@ export function openImapBackend(
     createDraft,
 
     async searchEmails(query: SearchQuery): Promise<SearchResult> {
-      const boxes = await mailboxes()
+      const boxes = await boxNames()
       const criteria = criteriaOf(query)
       const end = query.offset + query.limit
 
       if (!query.allMailboxes) {
         const box = query.mailbox
-          ? findMailbox(boxes, query.mailbox)
+          ? (await findFresh(query.mailbox)).box
           : (mailboxByRole(boxes, "inbox") ?? findMailbox(boxes, "INBOX"))
         const found = await searchBox(box, criteria, query.offset, end)
 
@@ -1341,7 +1720,7 @@ export function openImapBackend(
     },
 
     async moveEmails(ids, mailbox): Promise<BulkResult<MoveResult>> {
-      return move(ids, findMailbox(await mailboxes(), mailbox))
+      return move(ids, (await findFresh(mailbox)).box)
     },
 
     async markEmails(
@@ -1389,7 +1768,7 @@ export function openImapBackend(
     },
 
     async deleteEmails(ids): Promise<BulkResult<MoveResult>> {
-      const trash = mailboxByRole(await mailboxes(), "trash")
+      const trash = mailboxByRole(await boxNames(), "trash")
 
       if (!trash) {
         throw new MailRequestError(
@@ -1404,8 +1783,8 @@ export function openImapBackend(
     },
 
     async createMailbox(name, parent): Promise<MailboxSummary> {
-      const boxes = await mailboxes()
-      const under = parent ? findMailbox(boxes, parent) : null
+      const boxes = await boxNames()
+      const under = parent ? (await findFresh(parent)).box : null
       const path = childPath(under?.id ?? null, name)
 
       if (boxes.some((box) => box.id === path)) {
@@ -1413,6 +1792,7 @@ export function openImapBackend(
       }
 
       const made = await onServer((imap) => imap.mailboxCreate(path))
+      forgetNames()
 
       if (!made.created) {
         throw new MailRequestError(`There is a mailbox ${path} already.`)
@@ -1422,8 +1802,8 @@ export function openImapBackend(
     },
 
     async renameMailbox(mailbox, change): Promise<MailboxSummary> {
-      const boxes = await mailboxes()
-      const box = findMailbox(boxes, mailbox)
+      const boxes = await boxNames()
+      const box = (await findFresh(mailbox)).box
 
       if (box.role === "inbox") {
         throw new MailRequestError("The inbox keeps its name and place.")
@@ -1432,7 +1812,9 @@ export function openImapBackend(
       let parent = box.parentId
 
       if (change.parent !== undefined) {
-        const under = change.parent ? findMailbox(boxes, change.parent) : null
+        const under = change.parent
+          ? (await findFresh(change.parent)).box
+          : null
         checkNewParent(boxes, box, under)
         parent = under?.id ?? null
       }
@@ -1448,16 +1830,20 @@ export function openImapBackend(
       }
 
       const renamed = await onServer((imap) => imap.mailboxRename(box.id, path))
+      forgetNames()
       return mailboxAt(renamed.newPath || path)
     },
 
     async deleteMailbox(mailbox): Promise<MailboxSummary> {
-      const boxes = await mailboxes()
-      const box = findMailbox(boxes, mailbox)
-      // IMAP's DELETE takes the mail inside with it, so the count the
-      // listing just gave decides: only an empty mailbox goes.
-      checkDeletable(boxes, box)
+      // Fresh: what is inside it decides, not what was listed a while ago.
+      forgetNames()
+      const boxes = await boxNames()
+      const box = (await findFresh(mailbox)).box
+      // IMAP's DELETE takes the mail inside with it, so a STATUS of this
+      // mailbox, asked now, decides: only an empty mailbox goes.
+      checkDeletable(boxes, await counted(box))
       await onServer((imap) => imap.mailboxDelete(box.id))
+      forgetNames()
 
       return box
     },
@@ -1519,11 +1905,27 @@ export function openImapBackend(
       }
 
       const opened = await connection.catch(() => null)
+      const held = lease
       connection = null
+      lease = null
 
-      if (opened) {
-        await opened.logout().catch(() => opened.close())
+      if (!opened) {
+        return
       }
+
+      bindTrace(opened, null)
+
+      if (held) {
+        // Back to the account's pool, still signed in; or closed, when a
+        // command broke it.
+        held.release({ broken })
+        broken = false
+        return
+      }
+
+      const started = Date.now()
+      await closeBounded(opened)
+      trace?.add("logout", Date.now() - started)
     },
   }
 
@@ -1571,7 +1973,7 @@ export function openImapBackend(
     mail: OutgoingMail,
     { look, within = Infinity }: { look: boolean; within?: number },
   ): Promise<SentCopy> {
-    const sentBox = mailboxByRole(await mailboxes(), "sent")
+    const sentBox = mailboxByRole(await boxNames(), "sent")
 
     if (!sentBox) {
       return { savedTo: null, id: null }

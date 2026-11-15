@@ -1,5 +1,6 @@
 import type { CallToolResult } from "@modelcontextprotocol/server"
 
+import { openArgs, sealArgs } from "./sealed-args"
 import type { PermissionRequest, Prisma } from "@/lib/generated/prisma/client"
 
 import {
@@ -29,6 +30,7 @@ import {
   type AccessAsk,
 } from "./access-requests"
 import { allowSiteFor, allowToolFor, parseAllowForMinutes } from "./allowances"
+import { openRequestTool, sealedLevelName } from "./level-names"
 import type { SyncResult } from "./catalogue"
 import type {
   PasswordRecipe,
@@ -40,6 +42,17 @@ import { asBytes, decryptString, encryptString } from "./crypto"
 import { db } from "./db"
 import { openTool, toolNameWhere } from "./tool-rows"
 import { definitionBasis } from "./definitions"
+import type { ServerLimits } from "./gate/config"
+import { gateClassOf, type GateClass } from "./gate/limits"
+import {
+  checkChosenLimits,
+  describeLimitsAsk,
+  limitsShown,
+  saveProposedLimits,
+  type LimitsChangeAsk,
+  type LimitsShown,
+} from "./gate/proposals"
+import { writeServerLimits } from "./gate/store"
 import {
   applyNoteChange,
   setPersonalNote,
@@ -242,7 +255,14 @@ import {
   type RepoShown,
 } from "./repos/assist"
 import type { SecretGrant } from "./wrappers/placeholders"
-import { decideExit, getExit, writeExitAccess } from "./exits/exits"
+import {
+  decideExit,
+  EXIT_ABOUT_SELECT,
+  exitNameWhere,
+  getExit,
+  openExit,
+  writeExitAccess,
+} from "./exits/exits"
 import { exitTitle } from "./exits/use"
 import {
   decideFetch,
@@ -336,6 +356,11 @@ export type RegisterArgs = Omit<ServerInput, "authExtraHeaders"> & {
    * Shown filled in on the page and saved only as the owner leaves them.
    */
   proposedAccess?: ProposedAccess | null
+  /**
+   * The server's own call limits the assistant proposed (lib/core/gate/):
+   * shown filled in on the page and saved only as the owner leaves them.
+   */
+  proposedLimits?: ServerLimits | null
 }
 
 export type PermissionAsk =
@@ -365,6 +390,7 @@ export type PermissionAsk =
   | { kind: "exit_use"; input: ExitUseAsk }
   | { kind: "script_use"; input: ScriptUseAsk }
   | { kind: "tab_pace"; input: TabPaceAsk }
+  | { kind: "limits_change"; input: LimitsChangeAsk }
 
 /** The requests about a secret the browser types (browser-secrets.ts). */
 function isSecretKind(kind: string): kind is "secret_use" | "secret_request" {
@@ -504,6 +530,11 @@ export type PermissionView = {
    * beside the approval; null when it proposed none, or when answered.
    */
   proposedAccess: ProposedAccessShown | null
+  /**
+   * A server's limits the assistant proposed (lib/core/gate/proposals.ts),
+   * filled in and editable beside the approval; null when none, or answered.
+   */
+  proposedLimits: LimitsShown | null
 }
 
 type Row = PermissionRequest & {
@@ -913,6 +944,11 @@ function describeAsk(ask: PermissionAsk): {
         target: `tab_pace:${ask.input.tabId}\n${JSON.stringify(ask.input.pace)}`,
         args: ask.input as Record<string, unknown>,
       }
+    case "limits_change":
+      return {
+        target: `limits:${ask.input.serverId}\n${JSON.stringify(ask.input.proposed)}`,
+        args: ask.input as Record<string, unknown>,
+      }
     case "exit_use":
       return {
         target: `exit_use:${ask.input.exitId}\n${ask.input.via} ${ask.input.fetch ? `${ask.input.fetch.method} ${ask.input.fetch.url}` : (ask.input.browse?.url ?? "")}`,
@@ -962,6 +998,8 @@ function toolNameOf(ask: PermissionAsk): string {
       return "evaluate"
     case "tab_pace":
       return "tabs"
+    case "limits_change":
+      return "propose_server_limits"
     // A skill is changed through the memory tool, as a memory is.
     case "skill_change":
     default:
@@ -970,9 +1008,7 @@ function toolNameOf(ask: PermissionAsk): string {
 }
 
 function readArgs(ctx: VaultContext, row: PermissionRequest) {
-  return JSON.parse(
-    decryptString(ctx.dek, Buffer.from(row.argsCiphertext), aad(row.id)),
-  ) as Record<string, unknown>
+  return openArgs(ctx.dek, Buffer.from(row.argsCiphertext), aad(row.id))
 }
 
 function readResult(ctx: VaultContext, row: PermissionRequest): string | null {
@@ -1001,6 +1037,8 @@ function named(ctx: VaultContext, row: LoadedRow): Row {
   const { token, server, ...rest } = row
   return {
     ...rest,
+    // The tool's name opens here, so every reader of a request has it.
+    toolName: openRequestTool(ctx, row),
     server: server ? openServer(ctx, server) : null,
     token: {
       name: tokenName(ctx, token),
@@ -1230,6 +1268,12 @@ async function summarizeRow(
 
   if (row.kind === "tab_pace") {
     const asked = describeTabPaceAsk(args as TabPaceAsk)
+
+    return { ...asked, lines: [...asked.lines, asker] }
+  }
+
+  if (row.kind === "limits_change") {
+    const asked = describeLimitsAsk(args as LimitsChangeAsk)
 
     return { ...asked, lines: [...asked.lines, asker] }
   }
@@ -1610,6 +1654,7 @@ async function toView(
       : (row.status as PermissionStatus)
   const finished = status === "executed" || status === "failed"
   const proposal = proposedAccessOf(ctx, row)
+  const limitsProposal = proposedLimitsOf(ctx, row)
 
   return {
     id: row.id,
@@ -1675,7 +1720,44 @@ async function toView(
       proposal && status === "pending"
         ? proposedAccessShown(proposal, row.token.name)
         : null,
+    proposedLimits:
+      limitsProposal && status === "pending"
+        ? limitsShown(limitsProposal.gateClass, limitsProposal.limits)
+        : null,
   }
+}
+
+/**
+ * The limits a request carries from the assistant for the owner to edit
+ * (lib/core/gate/proposals.ts): a new server's, or a limits_change.
+ */
+function proposedLimitsOf(
+  ctx: VaultContext,
+  row: Row,
+): { gateClass: GateClass; limits: ServerLimits } | null {
+  if (row.kind === "limits_change") {
+    const ask = readArgs(ctx, row) as LimitsChangeAsk
+    return { gateClass: ask.gateClass, limits: ask.proposed }
+  }
+
+  if (row.kind !== "register") {
+    return null
+  }
+
+  const asked = readArgs(ctx, row) as RegisterArgs
+  const gateClass = gateClassOf(
+    asked.endpoint
+      ? "openapi"
+      : asked.mail
+        ? asked.mail.protocol
+        : asked.calendar
+          ? "caldav"
+          : "mcp",
+  )
+
+  return asked.proposedLimits && gateClass
+    ? { gateClass, limits: asked.proposedLimits }
+    : null
 }
 
 /**
@@ -1976,9 +2058,7 @@ export async function withPermission(
         expiresAt: { gt: now },
       },
       data: {
-        argsCiphertext: asBytes(
-          encryptString(scope.ctx.dek, JSON.stringify(args), aad(foldInto)),
-        ),
+        argsCiphertext: asBytes(sealArgs(scope.ctx.dek, args, aad(foldInto))),
         argsHash,
         targetKey: key,
         expiresAt: new Date(now.getTime() + PERMISSION_TTL_MS),
@@ -1998,40 +2078,48 @@ export async function withPermission(
 
   if (!id) {
     id = newId()
+    const requestServerId =
+      ask.kind === "call"
+        ? ask.server.id
+        : ask.kind === "endpoint_change" ||
+            ask.kind === "browse" ||
+            ask.kind === "browser_handover" ||
+            ask.kind === "secret_use" ||
+            ask.kind === "secret_request" ||
+            ask.kind === "secret_sites_change" ||
+            ask.kind === "script_use" ||
+            ask.kind === "tab_pace" ||
+            ask.kind === "limits_change"
+          ? ask.input.serverId
+          : ask.kind === "exit_use"
+            ? (ask.input.browse?.serverId ?? null)
+            : ask.kind === "note_change" && ask.input.target === "server"
+              ? ask.input.id
+              : ask.kind === "service_change" && isServiceUpdate(ask.input)
+                ? ask.input.serviceId
+                : null
+    const requestTool = sealedLevelName(
+      scope.ctx,
+      "permission_request",
+      `${id}:tool`,
+      requestServerId ?? "",
+      toolNameOf(ask),
+    )
     await db().permissionRequest.create({
       data: {
         id,
         vaultId: scope.ctx.vaultId,
         tokenId: scope.tokenId,
         kind: ask.kind,
-        serverId:
-          ask.kind === "call"
-            ? ask.server.id
-            : ask.kind === "endpoint_change" ||
-                ask.kind === "browse" ||
-                ask.kind === "browser_handover" ||
-                ask.kind === "secret_use" ||
-                ask.kind === "secret_request" ||
-                ask.kind === "secret_sites_change" ||
-                ask.kind === "script_use" ||
-                ask.kind === "tab_pace"
-              ? ask.input.serverId
-              : ask.kind === "exit_use"
-                ? (ask.input.browse?.serverId ?? null)
-                : ask.kind === "note_change" && ask.input.target === "server"
-                  ? ask.input.id
-                  : ask.kind === "service_change" && isServiceUpdate(ask.input)
-                    ? ask.input.serviceId
-                    : null,
-        toolName: toolNameOf(ask),
+        serverId: requestServerId,
+        toolName: requestTool.key,
+        toolSealed: requestTool.sealed,
         fields:
           ask.kind === "call" && ask.fields ? JSON.stringify(ask.fields) : null,
         decode:
           ask.kind === "call" && ask.decode ? JSON.stringify(ask.decode) : null,
         keep: ask.kind === "call" && ask.keep ? JSON.stringify(ask.keep) : null,
-        argsCiphertext: asBytes(
-          encryptString(scope.ctx.dek, JSON.stringify(args), aad(id)),
-        ),
+        argsCiphertext: asBytes(sealArgs(scope.ctx.dek, args, aad(id))),
         argsHash,
         targetKey: key,
         expiresAt: new Date(now.getTime() + PERMISSION_TTL_MS),
@@ -2318,6 +2406,7 @@ export async function decidePermission(
     revision,
     allowPrivate,
     access,
+    limits,
   }: {
     publicUrl: string
     tokenId?: string
@@ -2358,6 +2447,12 @@ export async function decidePermission(
      * else writes them, and left out, none are written.
      */
     access?: unknown
+    /**
+     * A server's limits the owner left on the page, from the assistant's
+     * proposal (lib/core/gate/proposals.ts): register_server's `limits` or
+     * a limits_change. Checked before anything is written.
+     */
+    limits?: unknown
   },
   executor: PermissionExecutor = defaultExecutor,
 ): Promise<CallToolResult> {
@@ -2484,7 +2579,13 @@ export async function decidePermission(
     if (choice === "block" && host) {
       await writeSiteAccess(ctx, row.tokenId, host, "blocked")
     } else if (choice === "block" && row.serverId) {
-      await writeToolAccess(row.tokenId, row.serverId, row.toolName, "blocked")
+      await writeToolAccess(
+        ctx,
+        row.tokenId,
+        row.serverId,
+        row.toolName,
+        "blocked",
+      )
     }
 
     if (kind === "browser_handover") {
@@ -2600,6 +2701,22 @@ export async function decidePermission(
     }
   }
 
+  // The limits the owner left beside the approval, checked the same way.
+  const limitsProposal = proposedLimitsOf(ctx, row)
+  let chosenLimits: ServerLimits | null = null
+
+  if (limitsProposal && limits !== undefined) {
+    try {
+      chosenLimits = checkChosenLimits(limits)
+    } catch (error) {
+      if (isPcpError(error)) {
+        return text(error.message, true)
+      }
+
+      throw error
+    }
+  }
+
   // A secret's answer is about the secret, never the browser tool's level;
   // an exit's was written above.
   if (isSecretKind(kind) || kind === "exit_use" || kind === "script_use") {
@@ -2608,11 +2725,17 @@ export async function decidePermission(
   } else if (choice === "always" && host) {
     await writeSiteAccess(ctx, row.tokenId, host, "allowed")
   } else if (choice === "always" && row.serverId) {
-    await writeToolAccess(row.tokenId, row.serverId, row.toolName, "allowed")
+    await writeToolAccess(
+      ctx,
+      row.tokenId,
+      row.serverId,
+      row.toolName,
+      "allowed",
+    )
   } else if (allowFor && host) {
     await allowSiteFor(ctx, row.tokenId, host, allowFor)
   } else if (allowFor && row.serverId) {
-    await allowToolFor(row.tokenId, row.serverId, row.toolName, allowFor)
+    await allowToolFor(ctx, row.tokenId, row.serverId, row.toolName, allowFor)
   }
 
   // One winner, however many answers race for it.
@@ -2715,68 +2838,77 @@ export async function decidePermission(
                             ? await executeHandover(ctx, row)
                             : kind === "tab_pace"
                               ? executeTabPace(ctx, row)
-                              : kind === "secret_use"
-                                ? await executeSecretUse(
-                                    ctx,
-                                    row,
-                                    secretLevel(choice),
-                                    publicUrl,
-                                    executor,
+                              : kind === "limits_change"
+                                ? text(
+                                    await saveProposedLimits(
+                                      ctx,
+                                      readArgs(ctx, row) as LimitsChangeAsk,
+                                      chosenLimits,
+                                    ),
                                   )
-                                : kind === "script_use"
-                                  ? await executeScriptUse(
+                                : kind === "secret_use"
+                                  ? await executeSecretUse(
                                       ctx,
                                       row,
-                                      choice,
+                                      secretLevel(choice),
                                       publicUrl,
                                       executor,
                                     )
-                                  : kind === "exit_use"
-                                    ? await executeExitUse(
+                                  : kind === "script_use"
+                                    ? await executeScriptUse(
                                         ctx,
                                         row,
+                                        choice,
                                         publicUrl,
                                         executor,
                                       )
-                                    : kind === "secret_request"
-                                      ? text(
-                                          await applySecretRequest(
-                                            ctx,
-                                            row.tokenId,
-                                            readArgs(
-                                              ctx,
-                                              row,
-                                            ) as SecretRequestAsk,
-                                            {
-                                              value: typedValue,
-                                              origins,
-                                              level: secretLevel(choice),
-                                              loginName,
-                                              generated:
-                                                typedValue !== secretValue,
-                                            },
-                                          ),
+                                    : kind === "exit_use"
+                                      ? await executeExitUse(
+                                          ctx,
+                                          row,
+                                          publicUrl,
+                                          executor,
                                         )
-                                      : kind === "secret_sites_change"
+                                      : kind === "secret_request"
                                         ? text(
-                                            await applySecretSitesChange(
+                                            await applySecretRequest(
                                               ctx,
+                                              row.tokenId,
                                               readArgs(
                                                 ctx,
                                                 row,
-                                              ) as SecretSitesChangeAsk,
-                                              sites ?? {},
+                                              ) as SecretRequestAsk,
+                                              {
+                                                value: typedValue,
+                                                origins,
+                                                level: secretLevel(choice),
+                                                loginName,
+                                                generated:
+                                                  typedValue !== secretValue,
+                                              },
                                             ),
                                           )
-                                        : await executeRegister(
-                                            ctx,
-                                            row,
-                                            publicUrl,
-                                            executor,
-                                            secretValue,
-                                            allowPrivate === true,
-                                            chosenAccess,
-                                          )
+                                        : kind === "secret_sites_change"
+                                          ? text(
+                                              await applySecretSitesChange(
+                                                ctx,
+                                                readArgs(
+                                                  ctx,
+                                                  row,
+                                                ) as SecretSitesChangeAsk,
+                                                sites ?? {},
+                                              ),
+                                            )
+                                          : await executeRegister(
+                                              ctx,
+                                              row,
+                                              publicUrl,
+                                              executor,
+                                              secretValue,
+                                              allowPrivate === true,
+                                              chosenAccess,
+                                              chosenLimits,
+                                            )
   } catch (error) {
     if (!isPcpError(error)) {
       console.error("[permissions] running an allowed request failed", {
@@ -2951,7 +3083,7 @@ async function executeSecretUse(
   // the token since it asked stays so.
   if (
     effectiveAccess(
-      await loadToolAccess(ctx.vaultId, row.tokenId),
+      await loadToolAccess(ctx, row.tokenId),
       row.server.id,
       "type",
     ) === "blocked"
@@ -3025,7 +3157,7 @@ async function executeScriptUse(
   // An answer about a site's scripts never lifts a block on the tool.
   if (
     effectiveAccess(
-      await loadToolAccess(ctx.vaultId, row.tokenId),
+      await loadToolAccess(ctx, row.tokenId),
       row.server.id,
       "evaluate",
     ) === "blocked"
@@ -3147,12 +3279,12 @@ async function findExitLabel(
   ctx: VaultContext,
   name: string,
 ): Promise<string | undefined> {
-  const exit = await db().exit.findUnique({
-    where: { vaultId_name: { vaultId: ctx.vaultId, name } },
-    select: { label: true },
+  const exit = await db().exit.findFirst({
+    where: exitNameWhere(ctx, name),
+    select: EXIT_ABOUT_SELECT,
   })
 
-  return exit?.label || undefined
+  return (exit ? openExit(ctx, exit).label : "") || undefined
 }
 
 /**
@@ -3164,8 +3296,8 @@ async function findExitForRun(
   tokenId: string,
   name: string,
 ): Promise<Awaited<ReturnType<typeof getExit>> | string> {
-  const row = await db().exit.findUnique({
-    where: { vaultId_name: { vaultId: ctx.vaultId, name } },
+  const row = await db().exit.findFirst({
+    where: exitNameWhere(ctx, name),
     select: { id: true },
   })
 
@@ -3420,6 +3552,8 @@ async function executeRegister(
   allowPrivate = false,
   /** The levels and tiers the owner left on the page (proposed-access.ts). */
   access: AccessRule[] = [],
+  /** The limits the owner left on the page (lib/core/gate/proposals.ts). */
+  limits: ServerLimits | null = null,
 ): Promise<CallToolResult> {
   const asked = readArgs(ctx, row) as RegisterArgs
   // Public addresses only, unless the owner ticked "Allow private addresses"
@@ -3510,6 +3644,11 @@ async function executeRegister(
   // The note the owner read, as their own.
   if (asked.note) {
     await setPersonalNote(ctx, "server", id, asked.note)
+  }
+
+  // The limits as the owner left them beside the approval.
+  if (limits) {
+    await writeServerLimits(ctx, id, limits)
   }
 
   const token = await db().apiToken.findUniqueOrThrow({

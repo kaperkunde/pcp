@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import { createApiToken, resolveApiToken } from "../api-tokens"
 import type { VaultContext } from "../context"
+import { STORAGE_TOOL_NAMES } from "../storage/tools"
 import { requestClient } from "../client-hello"
 import { detectClient } from "../clients/detect"
 import type { ClientProfileId } from "../clients/profiles"
@@ -55,6 +56,8 @@ const OWN_TOOLS = [
   "check_permission",
   "withdraw_request",
   "check_server",
+  "get_server_limits",
+  "propose_server_limits",
   "read_result",
   "share_result",
   "receive_file",
@@ -116,6 +119,7 @@ function described(tool: Tool): Described {
 const PROPOSALS = [
   "register_server",
   "propose_tool_access",
+  "propose_server_limits",
   "create_wrapper",
   "update_wrapper",
   "delete_wrapper",
@@ -259,8 +263,10 @@ describe("PCP's own tools", () => {
         "delete_wrapper",
         "edit_pdf",
         "get_endpoint",
+        "get_server_limits",
         "get_wrapper",
         "list_secrets",
+        "propose_server_limits",
         "propose_tool_access",
         "read_image",
         "receive_file",
@@ -299,6 +305,7 @@ describe("PCP's own tools", () => {
       "create_upload_link",
       "check_upload",
       "propose_tool_access",
+      "propose_server_limits",
       "update_endpoint",
       "create_wrapper",
       "update_wrapper",
@@ -342,6 +349,8 @@ describe("PCP's own tools", () => {
       check_permission: /permission/,
       withdraw_request: /request/,
       check_server: /server/,
+      get_server_limits: /^Get a server's limits/,
+      propose_server_limits: /^Propose server limits/,
       check_run: /run/,
       read_result: /result/,
       share_result: /file/,
@@ -866,6 +875,133 @@ describe("execute_<tier> by name, and the names kept for one release (#113)", ()
     }
     expect((await said("execute_destructive", view)).isError).toBe(false)
     expect((await said("execute_destructive", view)).isError).toBe(false)
+  })
+
+  it("holds back no repeat of a tool that declares it is not guarded, and declares exactly the ones that were exempt", async () => {
+    // The exemptions are a property of each tool (tools/guard.ts), no list
+    // kept elsewhere: the stores' tools and the capabilities'.
+    const { buildGatewayServer, ownToolsOf } = await import("../gateway")
+    const { ownGuardOf } = await import("./guard")
+    const gateway = buildGatewayServer(
+      {
+        ctx,
+        tokenId: "",
+        tokenName: "",
+        serverIds: [],
+        skillIds: [],
+        manageEndpoints: true,
+        keepMemories: true,
+        memoryMigration: false,
+        webFetch: true,
+        runCode: true,
+        manageWrappers: true,
+        shareFiles: true,
+        instructions: null,
+        clientProfile: null,
+        oauthClientName: null,
+        clientSeen: null,
+        publicUrl: "",
+      },
+      [],
+    )
+    const declared = (kind: "never" | "reads") =>
+      ownToolsOf(gateway)
+        .filter((tool) => {
+          const guard = ownGuardOf(tool)
+          return guard !== undefined && kind in guard
+        })
+        .map((tool) => tool.name)
+        .sort()
+
+    expect(declared("never")).toEqual(
+      [
+        ...STORAGE_TOOL_NAMES,
+        "read_image",
+        "view_image",
+        "convert_document",
+        "edit_pdf",
+      ].sort(),
+    )
+    expect(declared("reads")).toEqual(["memory", "web_fetch"])
+
+    // One call of each kind of exemption, twice with the same arguments.
+    const save = {
+      tool: "save_file",
+      arguments: { path: "/repeat.txt", text: "Tea.", overwrite: true },
+    }
+    expect((await said("execute_write", save)).code).not.toBe("duplicate_call")
+    expect((await said("execute_write", save)).code).not.toBe("duplicate_call")
+
+    const convert = {
+      tool: "convert_document",
+      arguments: {
+        file: { $result: "none" },
+        from: "docx",
+        to: "pdf",
+      },
+    }
+    expect((await said("execute_write", convert)).code).not.toBe(
+      "duplicate_call",
+    )
+    expect((await said("execute_write", convert)).code).not.toBe(
+      "duplicate_call",
+    )
+
+    // web_fetch: a GET only reads, a POST changes (declared by its method).
+    const get = {
+      tool: "web_fetch",
+      arguments: { url: "https://pages.example.com/a" },
+    }
+    expect((await said("execute_destructive", get)).code).not.toBe(
+      "duplicate_call",
+    )
+    expect((await said("execute_destructive", get)).code).not.toBe(
+      "duplicate_call",
+    )
+    const post = {
+      tool: "web_fetch",
+      arguments: {
+        url: "https://pages.example.com/a",
+        method: "POST",
+        body: "x",
+      },
+    }
+    await said("execute_destructive", post)
+    expect((await said("execute_destructive", post)).code).toBe(
+      "duplicate_call",
+    )
+
+    // memory: a read is never held back.
+    const note = {
+      tool: "memory",
+      arguments: { command: "search", query: "tea" },
+    }
+    expect((await said("execute_destructive", note)).code).not.toBe(
+      "duplicate_call",
+    )
+    expect((await said("execute_destructive", note)).code).not.toBe(
+      "duplicate_call",
+    )
+  })
+
+  it("honours the owner's window for a PCP tool at call time: exempt lets a repeat run, a time of its own still holds it back", async () => {
+    const { setDuplicateCallWindow } = await import("../calls/config")
+    const register = {
+      tool: "register_server",
+      arguments: { name: "Windows", url: "https://windows.example.com/mcp" },
+    }
+
+    await setDuplicateCallWindow(ctx, "pcp", "register_server", 5)
+    await said("execute_write", register)
+    expect((await said("execute_write", register)).code).toBe("duplicate_call")
+
+    await setDuplicateCallWindow(ctx, "pcp", "register_server", "exempt")
+    expect((await said("execute_write", register)).code).not.toBe(
+      "duplicate_call",
+    )
+    expect((await said("execute_write", register)).code).not.toBe(
+      "duplicate_call",
+    )
   })
 
   it("lists every one of PCP's own tools for kind pcp with no query", async () => {

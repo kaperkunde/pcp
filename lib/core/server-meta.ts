@@ -38,6 +38,9 @@ export type ServerMeta = {
   url: string
   statusMessage: string
   authUsername: string | null
+  /** header auth: the header to send and how the secret goes into it. */
+  authHeaderName: string | null
+  authValueTemplate: string | null
   oauthClientId: string | null
   oauthScope: string | null
   oauthAuthorizeParams: string | null
@@ -57,6 +60,24 @@ export type ServerMeta = {
 
 export type ServerMetaKey = keyof ServerMeta
 
+/** A further header's name and the template its value is made from. */
+export type AuthHeaderValues = { headerName: string; valueTemplate: string }
+
+/**
+ * A further header's values, sealed (#96) as one JSON object under the
+ * vault's key as "server_auth_header:<id>:sealed". A row from before holds
+ * them in its plain columns and nothing sealed, until it is converted.
+ */
+export const AUTH_HEADER: SealedGroup<AuthHeaderValues, "sealed"> = {
+  column: "sealed",
+  idKey: "id",
+  aad: (id) => `server_auth_header:${id}:sealed`,
+  blank: { headerName: "", valueTemplate: "" },
+}
+
+/** The columns a reader selects to read a further header's values. */
+export const AUTH_HEADER_SELECT = groupSelect(AUTH_HEADER)
+
 const BLANK: ServerMeta = {
   name: "",
   slug: "",
@@ -64,6 +85,8 @@ const BLANK: ServerMeta = {
   url: "",
   statusMessage: "",
   authUsername: null,
+  authHeaderName: null,
+  authValueTemplate: null,
   oauthClientId: null,
   oauthScope: null,
   oauthAuthorizeParams: null,

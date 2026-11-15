@@ -1,3 +1,9 @@
+import {
+  openRow,
+  sealFields,
+  type Opened,
+  type SealedGroup,
+} from "../sealed-fields"
 import type { CallToolResult } from "@modelcontextprotocol/server"
 
 import type { StorageRoot } from "@/lib/generated/prisma/client"
@@ -97,7 +103,7 @@ export type LoadedStorage = {
   /** The request's: what opens the store's sealed values and writes them. */
   ctx: VaultContext
   server: OpenServer
-  root: StorageRoot
+  root: OpenStorageRoot
   /** The SSH server; null for the local store, or once it was deleted. */
   host: OpenServer | null
 }
@@ -216,8 +222,10 @@ export async function createStorageRoot(
       storageRoot: {
         create: {
           hostId: host.id,
-          path: data.path,
-          writeAs: data.writeAs,
+          ...sealedStorageAbout(ctx, id, {
+            path: data.path,
+            writeAs: data.writeAs,
+          }),
           umask: data.umask,
           mode,
           ...(mode === "encrypted"
@@ -255,7 +263,13 @@ export async function updateStorageRoot(
     description: data.description,
     readOnly: data.readOnly,
     storageRoot: {
-      update: { path: data.path, writeAs: data.writeAs, umask: data.umask },
+      update: {
+        ...sealedStorageAbout(ctx, id, {
+          path: data.path,
+          writeAs: data.writeAs,
+        }),
+        umask: data.umask,
+      },
     },
   })
   await storeTools(ctx, id, toolsOf(await loadStorageRoot(ctx, id)))
@@ -284,7 +298,12 @@ export async function loadStorageRoot(
   }
 
   const { host, ...own } = root
-  return { ctx, server, root: own, host: host ? openServer(ctx, host) : null }
+  return {
+    ctx,
+    server,
+    root: openStorageAbout(ctx, own),
+    host: host ? openServer(ctx, host) : null,
+  }
 }
 
 /** The roots on one SSH server, for its page. */
@@ -295,16 +314,55 @@ export async function listStorageRoots(
   const rows = await db().storageRoot.findMany({
     where: { hostId, server: { vaultId: ctx.vaultId } },
     include: { server: true, host: true },
-    orderBy: { path: "asc" },
   })
 
-  return rows.map((row) =>
-    viewOf(
-      openServer(ctx, row.server),
-      row,
-      row.host ? openServer(ctx, row.host) : null,
-    ),
-  )
+  return rows
+    .map((row) =>
+      viewOf(
+        openServer(ctx, row.server),
+        openStorageAbout(ctx, row),
+        row.host ? openServer(ctx, row.host) : null,
+      ),
+    )
+    .sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0))
+}
+
+/**
+ * A folder's path and the login its files are written as, sealed (#96) as
+ * one JSON under the vault's key as "storage_root:<server id>:about". A
+ * row from before holds them in plain columns, until it is converted.
+ * Nothing that runs without a vault key reads them: a public download of
+ * PCP's own store's file and the sweeps use the data folder, the backend
+ * and the mode only.
+ */
+export type StorageAbout = { path: string; writeAs: string }
+
+export const STORAGE_ABOUT: SealedGroup<StorageAbout, "sealed", "serverId"> = {
+  column: "sealed",
+  idKey: "serverId",
+  aad: (id) => `storage_root:${id}:about`,
+  blank: { path: "", writeAs: "" },
+}
+
+export type OpenStorageRoot = Opened<StorageRoot, StorageAbout, "sealed">
+
+export function openStorageAbout(
+  ctx: VaultContext,
+  row: StorageRoot,
+): OpenStorageRoot {
+  return openRow(ctx.dek, STORAGE_ABOUT, row)
+}
+
+export function sealedStorageAbout(
+  ctx: VaultContext,
+  serverId: string,
+  about: StorageAbout,
+) {
+  return sealFields(ctx.dek, STORAGE_ABOUT, serverId, about) as {
+    sealed: Uint8Array<ArrayBuffer>
+    plainPath: string
+    plainWriteAs: string
+  }
 }
 
 export type StorageRootView = {
@@ -327,7 +385,7 @@ export type StorageRootView = {
 
 function viewOf(
   server: OpenServer,
-  root: StorageRoot,
+  root: OpenStorageRoot,
   host: OpenServer | null,
 ): StorageRootView {
   const login = host?.authUsername ?? ""
@@ -984,7 +1042,7 @@ export async function ensureOwnStore(ctx: VaultContext): Promise<string> {
         status: "ok",
         storageRoot: {
           create: {
-            path: "",
+            ...sealedStorageAbout(ctx, id, { path: "", writeAs: "" }),
             backend: "local",
             mode: "encrypted",
             storeKey: newWrappedStoreKey(ctx, id),
@@ -1019,7 +1077,7 @@ export async function listStores(
     .map((row) =>
       viewOf(
         openServer(ctx, row.server),
-        row,
+        openStorageAbout(ctx, row),
         row.host ? openServer(ctx, row.host) : null,
       ),
     )

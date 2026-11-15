@@ -17,6 +17,16 @@
    **Extra sign-in parameters** takes anything else. A server that refuses
    PCP shows why on its page. PCP reads each server's tool list; you can
    rewrite any tool's description so an assistant picks it correctly.
+   Every server's page has a **Limits** section: how many calls may run at
+   once, a pause between them, calls a minute, how long PCP waits for one,
+   bytes a day and how long it lets the server cool down when it asks PCP
+   to slow down (a "too many requests" answer, or answers that suddenly
+   take far longer than usual). Empty fields follow PCP's defaults for the
+   kind of server. While a server cools down its calls are refused at once
+   with when to try again, and the section says why and until when, with
+   its calls, failures and answer times over the last minute, hour and day.
+   An assistant can propose limits; you see them beside its request and
+   save them as you leave them.
 3. **API endpoints.** Add an API by giving PCP its OpenAPI 3 schema, as a URL or
    an uploaded JSON or YAML file. PCP turns each operation into a tool, with the
    arguments the schema describes, and tells you what it left out (cookies, for
@@ -182,15 +192,17 @@ Behind them are PCP's own tools, which `search` finds and the `execute`
 tool of each one's tier runs by name, `{"tool": "check_permission",
 "arguments": {…}}`:
 
-| Tool                  | What it does                                                                                                                                                                                                                                                                                                           |
-| --------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `list_tools`          | Lists every tool on one server, with whether it runs at once or asks you first, a page of 200 at a time.                                                                                                                                                                                                               |
-| `check_permission`    | Says how a request went once you have answered it; waits a little if you are still on it. With `ids` (up to 20) and a `mode`, `any` (the default, as soon as one is answered) or `all`, it waits on several together and lists each one's status. Without an id, lists the token's own requests still waiting for you. |
-| `withdraw_request`    | Takes back one of the token's own requests while it still waits for you: it leaves your list, and nothing runs.                                                                                                                                                                                                        |
-| `check_server`        | Says whether a server is connected; waits a little if you are still signing in.                                                                                                                                                                                                                                        |
-| `read_result`         | Reads a long answer or a kept value, a slice at a time from any offset or from where a text appears; a file is described, not shown.                                                                                                                                                                                   |
-| `register_server`     | Proposes a new MCP server, an API from an OpenAPI 3 schema, a mail account (JMAP or IMAP) or a calendar account (CalDAV), with no auth, a secret by name, a user name and password, or OAuth; or another server of one it sees (`definition`), with a note for you to keep.                                            |
-| `propose_tool_access` | Proposes which tools its token may run, many at once and across servers, and hears which tools would change; you review and save it in PCP.                                                                                                                                                                            |
+| Tool                    | What it does                                                                                                                                                                                                                                                                                                           |
+| ----------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `list_tools`            | Lists every tool on one server, with whether it runs at once or asks you first, a page of 200 at a time.                                                                                                                                                                                                               |
+| `check_permission`      | Says how a request went once you have answered it; waits a little if you are still on it. With `ids` (up to 20) and a `mode`, `any` (the default, as soon as one is answered) or `all`, it waits on several together and lists each one's status. Without an id, lists the token's own requests still waiting for you. |
+| `withdraw_request`      | Takes back one of the token's own requests while it still waits for you: it leaves your list, and nothing runs.                                                                                                                                                                                                        |
+| `check_server`          | Says whether a server is connected; waits a little if you are still signing in.                                                                                                                                                                                                                                        |
+| `get_server_limits`     | Reads a server's limits (calls at once, pause, calls a minute, time per call, bytes a day, cool-downs), which are yours and which are PCP's defaults, whether it is cooling down and why, and its calls, errors and answer times over the last minute, hour and day.                                                   |
+| `propose_server_limits` | Proposes new limits for a server, with a note on why; you see them against the ones it has, may change them, and save them.                                                                                                                                                                                            |
+| `read_result`           | Reads a long answer or a kept value, a slice at a time from any offset or from where a text appears; a file is described, not shown.                                                                                                                                                                                   |
+| `register_server`       | Proposes a new MCP server, an API from an OpenAPI 3 schema, a mail account (JMAP or IMAP) or a calendar account (CalDAV), with no auth, a secret by name, a user name and password, or OAuth; or another server of one it sees (`definition`), with a note for you to keep and limits on how PCP calls it.             |
+| `propose_tool_access`   | Proposes which tools its token may run, many at once and across servers, and hears which tools would change; you review and save it in PCP.                                                                                                                                                                            |
 
 A Write or Destructive call an assistant makes again with the same
 arguments within a while (from `execute_*`, a program's `pcp.call` or a

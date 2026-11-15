@@ -54,11 +54,17 @@ import { createFakeJmap, type FakeJmap } from "./mail/fake-jmap"
 import { startTestApi, type TestApi } from "./openapi/test-api"
 import { createSecret, revealSecret } from "./secrets"
 import { createServer } from "./servers"
+import { ensureSealed, forgetSealedVaults } from "./sealing/convert"
 import { scratchDatabase } from "./test-db"
 import { OwnerNeeded } from "./browser/types"
 import { keepBytes, resultTool } from "./tool-results"
 import { callServerTool, syncServerTools } from "./upstream"
-import { copyTokenAccess, writeToolAccess } from "./tool-access"
+import {
+  copyTokenAccess,
+  effectiveAccess,
+  loadToolAccess,
+  writeToolAccess,
+} from "./tool-access"
 import { setToolTier } from "./tool-tiers"
 import { setupVault } from "./vault"
 import { createSshServer } from "./ssh/hosts"
@@ -426,6 +432,35 @@ describe("asking the owner", () => {
         })
       )?.warning,
     ).toBeNull()
+  })
+
+  it("keeps the tool's name sealed, and reads one from before", async () => {
+    const { ctx, scope, server } = await setup()
+    await withPermission(scope, call(server, "send_postcard", { to: "Ada" }))
+    const id = await onlyRequestId()
+    const raw = () =>
+      db().$queryRawUnsafe<
+        Array<{ tool_name: string; tool_sealed: Uint8Array | null }>
+      >(`SELECT "tool_name", "tool_sealed" FROM "permission_request"`)
+    const title = async () =>
+      (await getPermissionView(ctx, id, { publicUrl: PUBLIC_URL }))?.title
+
+    // A hash and the sealed name: the name is nowhere in the row.
+    const [row] = await raw()
+    expect(row!.tool_name).toMatch(/^[0-9a-f]{64}$/)
+    expect(row!.tool_sealed).not.toBeNull()
+    expect(await title()).toBe("Allow postcards/send_postcard?")
+
+    // One from before holds the name as it was, and reads the same until a
+    // request that holds the key seals it.
+    await db().$executeRawUnsafe(
+      `UPDATE "permission_request" SET "tool_name" = 'send_postcard', "tool_sealed" = NULL`,
+    )
+    expect(await title()).toBe("Allow postcards/send_postcard?")
+    forgetSealedVaults()
+    expect(await ensureSealed(ctx)).toBe(true)
+    expect((await raw())[0]!.tool_name).toMatch(/^[0-9a-f]{64}$/)
+    expect(await title()).toBe("Allow postcards/send_postcard?")
   })
 
   it("warns about a tool without hints, which counts as Destructive", async () => {
@@ -1031,9 +1066,14 @@ describe("the owner's answer", () => {
     )
     expect(textOf(ran)).toBe("ran add_numbers")
     expect(calls).toHaveLength(1)
+    expect(await db().apiTokenToolAccess.count({ where: { tokenId } })).toBe(1)
     expect(
-      await db().apiTokenToolAccess.findFirst({ where: { tokenId } }),
-    ).toMatchObject({ toolName: "add_numbers", access: "allowed" })
+      effectiveAccess(
+        await loadToolAccess(ctx, tokenId),
+        server.id,
+        "add_numbers",
+      ),
+    ).toBe("allowed")
 
     const view = await getPermissionView(ctx, id, { publicUrl: PUBLIC_URL })
     expect(view).toMatchObject({
@@ -1108,7 +1148,7 @@ describe("the owner's answer", () => {
         access: "allowed",
       },
     })
-    await writeToolAccess(tokenId, server.id, "send_postcard", "ask")
+    await writeToolAccess(ctx, tokenId, server.id, "send_postcard", "ask")
     await withPermission(scope, call(server, "send_postcard", { to: "Ada" }))
     await decidePermission(
       ctx,
@@ -1127,7 +1167,7 @@ describe("the owner's answer", () => {
     expect(await levelOf(new Date(Date.now() + 16 * 60_000))).toBe("ask")
 
     // A block the owner sets later wins over the allowance.
-    await writeToolAccess(tokenId, server.id, "send_postcard", "blocked")
+    await writeToolAccess(ctx, tokenId, server.id, "send_postcard", "blocked")
     expect(await levelOf(new Date())).toBe("blocked")
   })
 
@@ -1250,9 +1290,14 @@ describe("the owner's answer", () => {
 
     expect(textOf(blocked)).toContain("blocked postcards/send_postcard")
     expect(calls).toHaveLength(0)
+    expect(await db().apiTokenToolAccess.count({ where: { tokenId } })).toBe(1)
     expect(
-      await db().apiTokenToolAccess.findFirst({ where: { tokenId } }),
-    ).toMatchObject({ toolName: "send_postcard", access: "blocked" })
+      effectiveAccess(
+        await loadToolAccess(ctx, tokenId),
+        server.id,
+        "send_postcard",
+      ),
+    ).toBe("blocked")
     expect(textOf(await checkPermission(scope, id))).toContain(
       "blocked postcards/send_postcard",
     )

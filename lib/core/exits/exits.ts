@@ -5,7 +5,14 @@ import { TOOL_ACCESS_LEVELS, type ToolAccess } from "../constants"
 import type { VaultContext } from "../context"
 import { db } from "../db"
 import { invalid, notFound, PcpError } from "../errors"
+import { keyedHash } from "../crypto"
 import { newId } from "../ids"
+import {
+  groupSelect,
+  openRow,
+  sealFields,
+  type SealedGroup,
+} from "../sealed-fields"
 import { openServer, SERVER_META_SELECT, serverName } from "../server-meta"
 import { closeSshConnections } from "../ssh/client"
 import { forgetExitAnswers } from "./dial"
@@ -26,6 +33,61 @@ export { parseExitLabel, parseExitName }
  * go. Without a line an exit is blocked: an assistant cannot ask for one it
  * was never given, only for one the owner set to Ask you first.
  */
+
+/**
+ * An exit's name and label, sealed (#96) as one JSON under the vault's key
+ * as "exit:<id>:about"; the name is found by its keyed hash (`nameKey`,
+ * unique in the vault). A row from before holds them in its plain columns
+ * and no hash, until it is converted (lib/core/sealing/convert.ts).
+ */
+export type ExitAbout = { name: string; label: string }
+
+export const EXIT_ABOUT: SealedGroup<ExitAbout, "about"> = {
+  column: "about",
+  idKey: "id",
+  aad: (id) => `exit:${id}:about`,
+  blank: { name: "", label: "" },
+}
+
+export const EXIT_ABOUT_SELECT = groupSelect(EXIT_ABOUT)
+
+export function exitNameKey(ctx: VaultContext, name: string): string {
+  return keyedHash(ctx.dek, "pcp exit name", name)
+}
+
+/** The vault's exit with this name: by its hash, or a row from before by the name. */
+export function exitNameWhere(
+  ctx: VaultContext,
+  name: string,
+): Prisma.ExitWhereInput {
+  return {
+    vaultId: ctx.vaultId,
+    OR: [
+      { nameKey: exitNameKey(ctx, name) },
+      { nameKey: null, plainName: name },
+    ],
+  }
+}
+
+/** What an exit row stores for its name and label. */
+export function sealedExit(ctx: VaultContext, id: string, about: ExitAbout) {
+  return {
+    nameKey: exitNameKey(ctx, about.name),
+    ...(sealFields(ctx.dek, EXIT_ABOUT, id, about) as {
+      about: Uint8Array<ArrayBuffer>
+      plainName: string
+      plainLabel: string
+    }),
+  }
+}
+
+/** The exit's name and label, from a row that selected EXIT_ABOUT_SELECT. */
+export function openExit<T extends { id: string; about: Uint8Array | null }>(
+  ctx: VaultContext,
+  row: T,
+) {
+  return openRow(ctx.dek, EXIT_ABOUT, row)
+}
 
 /** The scope of a line for all tokens (web-fetch.ts ALL_TOKENS). */
 const ALL = "all"
@@ -57,11 +119,12 @@ type ExitRow = Prisma.ExitGetPayload<{ include: typeof INCLUDE }>
 
 function view(ctx: VaultContext, row: ExitRow): ExitView {
   const service = row.service ? openServer(ctx, row.service) : null
+  const about = openExit(ctx, row)
 
   return {
     id: row.id,
-    name: row.name,
-    label: row.label,
+    name: about.name,
+    label: about.label,
     kind: row.kind === "service" ? "service" : "ssh",
     serverId: row.serverId,
     serverName: serverName(ctx, row.server),
@@ -91,10 +154,11 @@ export async function listExits(
   const rows = await db().exit.findMany({
     where: { vaultId: ctx.vaultId, ...(serverId ? { serverId } : {}) },
     include: INCLUDE,
-    orderBy: { name: "asc" },
   })
 
-  return rows.map((row) => view(ctx, row))
+  return rows
+    .map((row) => view(ctx, row))
+    .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
 }
 
 /** The exit an assistant named, or null. */
@@ -102,10 +166,8 @@ export async function findExitByName(
   ctx: VaultContext,
   name: string,
 ): Promise<ExitView | null> {
-  const row = await db().exit.findUnique({
-    where: {
-      vaultId_name: { vaultId: ctx.vaultId, name: name.trim().toLowerCase() },
-    },
+  const row = await db().exit.findFirst({
+    where: exitNameWhere(ctx, name.trim().toLowerCase()),
     include: INCLUDE,
   })
 
@@ -146,7 +208,7 @@ export async function checkNewExit(
     throw invalid(`PCP keeps at most ${MAX_EXITS} exits.`)
   }
 
-  if (await db().exit.findFirst({ where: { vaultId: ctx.vaultId, name } })) {
+  if (await db().exit.findFirst({ where: exitNameWhere(ctx, name) })) {
     throw new PcpError("conflict", `There is an exit called ${name} already.`)
   }
 
@@ -179,8 +241,7 @@ export async function createServiceExit(
       data: {
         id,
         vaultId: ctx.vaultId,
-        name,
-        label,
+        ...sealedExit(ctx, id, { name, label }),
         kind: "service",
         serverId: input.serverId,
         serviceId: input.serviceId,
@@ -230,8 +291,7 @@ export async function createSshExit(
       data: {
         id,
         vaultId: ctx.vaultId,
-        name,
-        label,
+        ...sealedExit(ctx, id, { name, label }),
         kind: "ssh",
         serverId: input.serverId,
       },
@@ -257,7 +317,10 @@ export async function updateExit(
   const label = parseExitLabel(input.label)
 
   try {
-    await db().exit.update({ where: { id }, data: { name, label } })
+    await db().exit.update({
+      where: { id },
+      data: sealedExit(ctx, id, { name, label }),
+    })
   } catch (error) {
     if (isUniqueViolation(error)) {
       throw new PcpError("conflict", `There is an exit called ${name} already.`)

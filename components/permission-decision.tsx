@@ -35,6 +35,13 @@ import {
   type PermissionDecision as Decision,
 } from "@/lib/core/constants"
 import type { ProposedAccessShown } from "@/lib/core/proposed-access"
+import type { LimitsShown } from "@/lib/core/gate/proposals"
+import {
+  initialLimitInputs,
+  LimitsFields,
+  limitsFromInputs,
+  type LimitInputs,
+} from "@/components/limits-fields"
 
 /** The answers that carry out the request, rather than turn it down. */
 const AGREES: Decision[] = ["allow_once", "allow_for", "always"]
@@ -105,6 +112,7 @@ export function PermissionDecision({
   allowForFixed = false,
   revision,
   access = null,
+  limits = null,
   sites = null,
 }: {
   advance?: boolean
@@ -131,6 +139,8 @@ export function PermissionDecision({
   every?: { asked: boolean } | null
   privateAddresses?: boolean
   access?: ProposedAccessShown | null
+  /** A server's limits the assistant proposed, editable (lib/core/gate/). */
+  limits?: LimitsShown | null
   sites?: SecretSitesShown | null
 }) {
   const { submit, pending, error, setError, done } = useAnswer(
@@ -162,6 +172,9 @@ export function PermissionDecision({
   const [accessRows, setAccessRows] = useState<AccessRow[]>(() =>
     access ? initialAccessRows(access) : [],
   )
+  const [limitInputs, setLimitInputs] = useState<LimitInputs>(() =>
+    limits ? initialLimitInputs(limits.fields) : {},
+  )
 
   const credentialForm = `permission-${id}-credentials`
   const allowButton = `permission-${id}-allow`
@@ -189,6 +202,14 @@ export function PermissionDecision({
 
     if (sites && agrees && siteKeep.length === 0) {
       setError("Tick at least one change, or answer Not now.")
+      return
+    }
+
+    const chosenLimits =
+      limits && agrees ? limitsFromInputs(limits.fields, limitInputs) : null
+
+    if (chosenLimits && "error" in chosenLimits) {
+      setError(chosenLimits.error)
       return
     }
 
@@ -224,6 +245,7 @@ export function PermissionDecision({
                 : {}),
             }
           : undefined,
+        chosenLimits ? chosenLimits.limits : undefined,
       )
 
       return result.status === "ok"
@@ -542,6 +564,24 @@ export function PermissionDecision({
               ) : null}
             </div>
           ))}
+        </fieldset>
+      ) : null}
+      {limits ? (
+        <fieldset className="m-0 flex flex-col gap-3 border-0 p-0">
+          <legend className="mb-1 text-[15px] text-foreground">
+            Limits on how PCP calls it
+          </legend>
+          <p className="m-0 text-xs text-muted-foreground">
+            Filled in as the assistant proposed; change any before you save.
+            Every call to it is held to these, whatever way it comes. You can
+            change them later in the Limits section of its page.
+          </p>
+          <LimitsFields
+            fields={limits.fields}
+            inputs={limitInputs}
+            onChange={setLimitInputs}
+            disabled={pending}
+          />
         </fieldset>
       ) : null}
       {access ? (

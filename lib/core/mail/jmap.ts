@@ -5,6 +5,7 @@ import { asBytes } from "../crypto"
 import { describeFetchError, discard, readCapped } from "../openapi/http"
 import { AddressBlockedError } from "../openapi/address"
 import { send } from "../openapi/transport"
+import { httpThrottle, withThrottle } from "../throttle-signal"
 import { PCP_VERSION } from "../version"
 import {
   mailSendOptions,
@@ -21,6 +22,7 @@ import {
   mailboxByRole,
 } from "./mailboxes"
 import { htmlToText } from "./html"
+import { jmapLimitThrottle, jmapMethodThrottle } from "./throttle"
 import {
   MAIL_CALL_TIMEOUT_MS,
   MAX_ATTACHMENTS_LISTED,
@@ -86,11 +88,20 @@ export type JmapSession = {
   submission: boolean
   /** Whether it has an automatic reply (VacationResponse) to read and set. */
   vacation: boolean
+  /** What the session says PCP may ask at once (RFC 8620 2: core limits). */
+  limits?: JmapLimits
 }
 
-export type JmapConfig = Omit<JmapSession, "vacation"> & {
+export type JmapLimits = {
+  maxConcurrentRequests?: number
+  maxCallsInRequest?: number
+}
+
+export type JmapConfig = Omit<JmapSession, "vacation" | "limits"> & {
   /** The From address to prefer among the identities. */
   from: string | null
+  /** The account (server id), which the session's limits are kept under. */
+  scope?: string
 }
 
 type Json = Record<string, unknown>
@@ -147,7 +158,9 @@ async function exchange(
             init.body === undefined || typeof init.body === "string"
               ? init.body
               : asBytes(init.body),
-          signal: AbortSignal.timeout(MAIL_CALL_TIMEOUT_MS),
+          signal: AbortSignal.timeout(
+            credential.timeoutMs ?? MAIL_CALL_TIMEOUT_MS,
+          ),
         },
         // http:// only to a private address, so an account saved before
         // that was a rule never sends its credential in the clear.
@@ -159,7 +172,7 @@ async function exchange(
       }
 
       throw new MailTransportError(
-        `${where(url)} could not be reached: ${describeFetchError(error, MAIL_CALL_TIMEOUT_MS)}`,
+        `${where(url)} could not be reached: ${describeFetchError(error, credential.timeoutMs ?? MAIL_CALL_TIMEOUT_MS)}`,
       )
     }
 
@@ -181,6 +194,15 @@ async function exchange(
       continue
     }
 
+    // The server asking PCP to slow down: 429, or 503 with Retry-After.
+    const slow = httpThrottle(response.status, response.headers, where(url))
+
+    if (slow) {
+      await discard(response)
+
+      throw withThrottle(new MailTransportError(slow.reason), slow)
+    }
+
     if (response.status >= 300 && response.status < 400) {
       const location = response.headers.get("location")
       await discard(response)
@@ -197,7 +219,7 @@ async function exchange(
       body = await readCapped(response, maxBytes)
     } catch (error) {
       throw new MailTransportError(
-        `${where(url)} stopped answering: ${describeFetchError(error, MAIL_CALL_TIMEOUT_MS)}`,
+        `${where(url)} stopped answering: ${describeFetchError(error, credential.timeoutMs ?? MAIL_CALL_TIMEOUT_MS)}`,
       )
     }
 
@@ -238,6 +260,8 @@ function excerpt(bytes: Buffer): string {
 export async function fetchJmapSession(
   sessionUrl: string,
   credential: MailCredential,
+  /** The account (server id) the limits it names belong to. */
+  scope?: string,
 ): Promise<JmapSession> {
   const { status, bytes } = await exchange(
     sessionUrl,
@@ -278,11 +302,14 @@ export async function fetchJmapSession(
     )
   }
 
+  const limits = coreLimits(capabilities)
   const accounts = isObject(session.accounts) ? session.accounts : {}
   const account = isObject(accounts[accountId]) ? accounts[accountId] : {}
   const accountCapabilities = isObject(account.accountCapabilities)
     ? account.accountCapabilities
     : null
+
+  rememberJmapLimits(apiUrl, limits ?? undefined, scope)
 
   return {
     apiUrl,
@@ -301,6 +328,88 @@ export async function fetchJmapSession(
     vacation:
       VACATION in capabilities &&
       (accountCapabilities === null || VACATION in accountCapabilities),
+    ...(limits ? { limits } : {}),
+  }
+}
+
+/** What the session's core capability says about requests at once. */
+function coreLimits(capabilities: Json): JmapLimits | null {
+  const core = capabilities[CORE]
+
+  if (!isObject(core)) {
+    return null
+  }
+
+  const whole = (value: unknown) =>
+    typeof value === "number" && Number.isInteger(value) && value >= 1
+      ? value
+      : undefined
+  const limits: JmapLimits = {
+    maxConcurrentRequests: whole(core.maxConcurrentRequests),
+    maxCallsInRequest: whole(core.maxCallsInRequest),
+  }
+
+  return limits.maxConcurrentRequests || limits.maxCallsInRequest
+    ? limits
+    : null
+}
+
+/**
+ * What each JMAP API address's session said, in memory: a request waits
+ * for a turn when the server limits how many may be open at once, and a
+ * request with more calls than it takes goes in parts. Learned when the
+ * session is read; an account read before PCP restarted has none until it
+ * is read again (accounts.ts), and is asked nothing special until then.
+ */
+const KNOWN_LIMITS = new Map<string, JmapLimits>()
+const OPEN_REQUESTS = new Map<
+  string,
+  { open: number; waiting: Array<() => void> }
+>()
+
+/**
+ * Hosted providers share one API address across users, so limits are kept
+ * per account (`scope`: the server's id), not per address.
+ */
+const limitsKey = (apiUrl: string, scope?: string) =>
+  `${scope ?? ""}\n${apiUrl}`
+
+export function rememberJmapLimits(
+  apiUrl: string,
+  limits: JmapLimits | undefined,
+  scope?: string,
+): void {
+  if (limits) {
+    KNOWN_LIMITS.set(limitsKey(apiUrl, scope), limits)
+  } else {
+    KNOWN_LIMITS.delete(limitsKey(apiUrl, scope))
+  }
+}
+
+export function knownJmapLimits(
+  apiUrl: string,
+  scope?: string,
+): JmapLimits | undefined {
+  return KNOWN_LIMITS.get(limitsKey(apiUrl, scope))
+}
+
+/** Waits for a place among the requests the server lets PCP have open. */
+async function takeTurn(key: string, cap: number): Promise<() => void> {
+  // Never removed once made (one small entry per account): a waiter woken
+  // as the last request ends would otherwise count against a state the map
+  // no longer holds, and the cap would not hold.
+  const state = OPEN_REQUESTS.get(key) ?? { open: 0, waiting: [] }
+  OPEN_REQUESTS.set(key, state)
+
+  while (state.open >= cap) {
+    await new Promise<void>((resolve) => state.waiting.push(resolve))
+  }
+
+  state.open++
+
+  return () => {
+    state.open--
+    state.waiting.shift()?.()
   }
 }
 
@@ -346,6 +455,57 @@ export async function jmapRequest(
   credential: MailCredential,
   calls: MethodCall[],
   using: string[] = [CORE, MAIL],
+  scope?: string,
+): Promise<Map<string, Json>> {
+  const limits = KNOWN_LIMITS.get(limitsKey(apiUrl, scope))
+  const per = limits?.maxCallsInRequest
+
+  // More calls than the server takes in one request: in parts, when none
+  // refers to another's result (a "#" argument), which a part cannot see.
+  if (per && calls.length > per && !JSON.stringify(calls).includes('"#')) {
+    const answers = new Map<string, Json>()
+
+    for (let at = 0; at < calls.length; at += per) {
+      try {
+        const part = await jmapRequest(
+          apiUrl,
+          credential,
+          calls.slice(at, at + per),
+          using,
+          scope,
+        )
+
+        for (const [id, answer] of part) {
+          answers.set(id, answer)
+        }
+      } catch (error) {
+        if (at > 0 && error instanceof Error) {
+          error.message += ` (The server takes ${per} calls in a request, so PCP sent this in parts; the earlier parts were already applied, and a split batch is not atomic.)`
+        }
+
+        throw error
+      }
+    }
+
+    return answers
+  }
+
+  const release = limits?.maxConcurrentRequests
+    ? await takeTurn(limitsKey(apiUrl, scope), limits.maxConcurrentRequests)
+    : null
+
+  try {
+    return await jmapRequestOnce(apiUrl, credential, calls, using)
+  } finally {
+    release?.()
+  }
+}
+
+async function jmapRequestOnce(
+  apiUrl: string,
+  credential: MailCredential,
+  calls: MethodCall[],
+  using: string[],
 ): Promise<Map<string, Json>> {
   const { status, bytes } = await exchange(
     apiUrl,
@@ -361,14 +521,25 @@ export async function jmapRequest(
 
   if (status < 200 || status >= 300) {
     // A request-level problem (RFC 8620 3.6.1): this request, not the account.
-    const problem = (() => {
+    const parsed = (() => {
       try {
         const value = JSON.parse(bytes.toString("utf8")) as Json
-        return [value.type, value.detail].filter(Boolean).join(": ")
+        return isObject(value) ? value : {}
       } catch {
-        return ""
+        return {}
       }
     })()
+    const problem = [parsed.type, parsed.detail].filter(Boolean).join(": ")
+    const slow = jmapLimitThrottle(parsed)
+
+    if (slow) {
+      throw withThrottle(
+        new MailTransportError(
+          `The mail server limits the requests PCP may make at once (HTTP ${status})${problem ? `: ${String(problem).slice(0, 300)}` : "."}`,
+        ),
+        slow,
+      )
+    }
 
     throw new MailRequestError(
       `The mail server refused the request (HTTP ${status})${problem ? `: ${String(problem).slice(0, 300)}` : excerpt(bytes)}`,
@@ -404,6 +575,16 @@ export async function jmapRequest(
       const type = typeof args?.type === "string" ? args.type : "an error"
       const description =
         typeof args?.description === "string" ? `: ${args.description}` : ""
+      const slow = jmapMethodThrottle(type)
+
+      if (slow) {
+        throw withThrottle(
+          new MailTransportError(
+            `${call?.[0] ?? "A JMAP method"} failed with ${type}${description.slice(0, 300)}`,
+          ),
+          slow,
+        )
+      }
 
       throw new MailRequestError(
         `${call?.[0] ?? "A JMAP method"} failed with ${type}${description.slice(0, 300)}`,
@@ -557,7 +738,7 @@ export function openJmapBackend(
   const { apiUrl, accountId } = config
 
   const request = (calls: MethodCall[], using?: string[]) =>
-    jmapRequest(apiUrl, credential, calls, using)
+    jmapRequest(apiUrl, credential, calls, using, config.scope)
 
   async function mailboxes(): Promise<MailboxSummary[]> {
     const answers = await request([

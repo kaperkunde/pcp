@@ -322,7 +322,7 @@ export default defineConfig(
       },
       {
         // The Log page: a token's calls by tool and outcome, never what they
-        // sent.
+        // sent; a rerun and a secret the browser typed marked on their lines.
         name: "log",
         testMatch: /log\.spec\.ts/,
         dependencies: ["setup"],

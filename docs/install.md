@@ -176,7 +176,10 @@ PCP keeps for an assistant and so what a program reads of one (an eighth of a
 program's memory, 10 to 256 MB), and what one token's kept results may hold
 together (a twentieth of the free disk, 50 MB to 4 GB). It also sets how long
 the browser stays open with nothing happening (an hour, 5 minutes to 8 hours):
-an open browser holds memory. PCP refuses settings
+an open browser holds memory. The largest API schema PCP reads (an
+OpenAPI document an assistant or you add as an endpoint) is a sixty-fourth of
+the machine's memory, 16 to 64 MB: GitHub's whole REST API is 14 MB, and
+reading one takes about sixteen times its size in memory. PCP refuses settings
 that would let programs together hold more than three quarters of the
 machine's memory, or kept results more than the disk.
 

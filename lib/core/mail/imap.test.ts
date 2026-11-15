@@ -1,7 +1,7 @@
 import { Readable } from "node:stream"
 
 import type { FetchMessageObject, MessageStructureObject } from "imapflow"
-import { describe, expect, it } from "vitest"
+import { afterEach, describe, expect, it } from "vitest"
 
 import {
   checkImapAccount,
@@ -18,6 +18,9 @@ import {
   type OutgoingMail,
   sentCopyIds,
 } from "./imap"
+import { clearMailDiagnostics } from "./diagnostics"
+import { MAIL_LOGOUT_TIMEOUT_MS } from "./limits"
+import { closeMailSessions } from "./imap-pool"
 import { MailAuthError, MailRequestError, MailTransportError } from "./types"
 
 // The IMAP backend against an in-memory stand-in for imapflow and
@@ -197,7 +200,8 @@ function fakeImap(
       calls.push("close")
     },
     async noop() {},
-    async list() {
+    async list(options) {
+      calls.push(options?.statusQuery ? "list with status" : "list")
       return [...boxes.entries()].map(([path, box]) => ({
         path,
         name: path.split("/").at(-1)!,
@@ -207,11 +211,25 @@ function fakeImap(
           : "",
         flags: new Set<string>(box.noselect ? ["\\Noselect"] : []),
         specialUse: box.specialUse,
-        status: {
-          messages: box.messages.length,
-          unseen: box.messages.filter((m) => !m.flags.has("\\Seen")).length,
-        },
+        ...(options?.statusQuery
+          ? {
+              status: {
+                messages: box.messages.length,
+                unseen: box.messages.filter((m) => !m.flags.has("\\Seen"))
+                  .length,
+              },
+            }
+          : {}),
       }))
+    },
+    async status(path) {
+      calls.push(`status ${path}`)
+      const box = boxes.get(path)!
+      return {
+        path,
+        messages: box.messages.length,
+        unseen: box.messages.filter((m) => !m.flags.has("\\Seen")).length,
+      }
     },
     async getMailboxLock(path, options) {
       if (!boxes.has(path)) {
@@ -257,9 +275,11 @@ function fakeImap(
       if (!uid) {
         // Sequence numbers, "from:*": the newest from that one on.
         calls.push(`fetch ${String(range)}`)
-        const from = Number(String(range).split(":")[0])
+        const [first, last] = String(range).split(":")
+        const from = Number(first)
+        const to = last === "*" ? Infinity : Number(last)
         return current()
-          .messages.slice(from - 1)
+          .messages.slice(from - 1, to)
           .map(view)
       }
       const uids = new Set((range as number[]).map(Number))
@@ -559,7 +579,6 @@ describe("reading", () => {
       date: "2026-10-01T09:00:00.000Z",
     })
     expect(imap.calls).toContain("lock INBOX read-only")
-    expect(imap.calls).toContain('search {"all":true}')
 
     const unread = await mail.searchEmails({
       unread: true,
@@ -1688,5 +1707,232 @@ describe("failures", () => {
     await mail.close()
 
     expect(imap.calls.at(-1)).toBe("logout")
+  })
+})
+
+describe("what a call costs the server", () => {
+  const search = (calls: string[]) =>
+    calls.filter((call) => call.startsWith("search"))
+
+  it("asks for counts only when it is asked for the mailboxes", async () => {
+    const { mail, imap } = setup()
+    await mail.listMailboxes()
+    expect(imap.calls).toContain("list with status")
+
+    const quiet = setup()
+    await quiet.mail.searchEmails({ offset: 0, limit: 5 })
+    await quiet.mail.moveEmails([encodeImapId(1, 7n, "INBOX")], "Archive/2026")
+    await quiet.mail.deleteEmails([encodeImapId(2, 7n, "INBOX")])
+    expect(quiet.imap.calls).not.toContain("list with status")
+    expect(quiet.imap.calls.some((call) => call.startsWith("status"))).toBe(
+      false,
+    )
+  })
+
+  it("lists the mailboxes once for the calls of a short while", async () => {
+    const { mail, imap } = setup()
+    await mail.searchEmails({ offset: 0, limit: 5 })
+    await mail.searchEmails({ offset: 0, limit: 5, unread: true })
+    await mail.moveEmails([encodeImapId(1, 7n, "INBOX")], "Archive/2026")
+
+    expect(imap.calls.filter((call) => call === "list")).toHaveLength(1)
+  })
+
+  it("sees a mailbox made through it at once", async () => {
+    const { mail, imap } = setup()
+    await mail.searchEmails({ offset: 0, limit: 5 })
+    await mail.createMailbox("Receipts")
+    await mail.searchEmails({ offset: 0, limit: 5, mailbox: "Receipts" })
+
+    expect(imap.calls.filter((call) => call === "list").length).toBeGreaterThan(
+      1,
+    )
+  })
+
+  it("looks again when a mailbox is not among the names it kept", async () => {
+    const { mail, imap, boxes } = setup()
+    await mail.searchEmails({ offset: 0, limit: 1 })
+    // Another client makes a folder after the names were listed.
+    boxes.set("Receipts", { uidValidity: 30n, uidNext: 1, messages: [] })
+
+    const found = await mail.searchEmails({
+      offset: 0,
+      limit: 1,
+      mailbox: "Receipts",
+    })
+
+    expect(found.total).toBe(0)
+    expect(imap.calls.filter((call) => call === "list")).toHaveLength(2)
+    await expect(
+      mail.searchEmails({ offset: 0, limit: 1, mailbox: "Nowhere" }),
+    ).rejects.toThrow(/No mailbox called/)
+  })
+
+  it("fetches the newest page by sequence number when nothing filters", async () => {
+    const { mail, imap } = setup()
+    const first = await mail.searchEmails({ offset: 0, limit: 2 })
+
+    expect(search(imap.calls)).toEqual([])
+    expect(imap.calls).toContain("fetch 2:3")
+    expect(first.total).toBe(3)
+    expect(first.offset).toBe(0)
+    expect(first.emails.map((email) => decodeImapId(email.id).uid)).toEqual([
+      3, 2,
+    ])
+
+    const second = await mail.searchEmails({ offset: 2, limit: 2 })
+    expect(imap.calls).toContain("fetch 1:1")
+    expect(second.emails.map((email) => decodeImapId(email.id).uid)).toEqual([
+      1,
+    ])
+
+    const past = await mail.searchEmails({ offset: 5, limit: 2 })
+    expect(past).toMatchObject({ total: 3, emails: [] })
+  })
+
+  it("still searches when a filter is given", async () => {
+    const { mail, imap } = setup()
+    await mail.searchEmails({ offset: 0, limit: 5, unread: true })
+
+    expect(search(imap.calls)).toEqual(['search {"seen":false}'])
+  })
+
+  it("answers an empty mailbox without a fetch", async () => {
+    const { mail, imap } = setup()
+    const empty = await mail.searchEmails({
+      offset: 0,
+      limit: 5,
+      mailbox: "Sent",
+    })
+
+    expect(empty).toMatchObject({ total: 0, emails: [] })
+    expect(imap.calls.some((call) => call.startsWith("fetch"))).toBe(false)
+  })
+
+  it("lets go of a server that does not answer a logout", async () => {
+    const hung = fakeImap(world())
+    hung.logout = () => new Promise<void>(() => {})
+    const { mail } = setup({ connect: async () => hung })
+    await mail.listMailboxes()
+
+    const started = Date.now()
+    await mail.close()
+
+    expect(Date.now() - started).toBeLessThan(MAIL_LOGOUT_TIMEOUT_MS + 2_000)
+    expect(hung.calls).toContain("close")
+  })
+})
+
+describe("one session for an account", () => {
+  afterEach(async () => {
+    await closeMailSessions()
+    clearMailDiagnostics()
+  })
+
+  const session = { account: "server-1", fingerprint: "a" }
+
+  function pooled(connect: ImapDeps["connect"], maxConnections = 1) {
+    const state = setup({ connect })
+    return () =>
+      openImapBackend(state.config, LOGIN, state.deps, {
+        session: { ...session, maxConnections },
+      })
+  }
+
+  it("logs in once for calls one after another, and never logs out between", async () => {
+    let logins = 0
+    const imap = fakeImap(world())
+    const open = pooled(async () => {
+      logins++
+      return imap
+    })
+
+    for (const uid of [1, 2, 3]) {
+      const mail = open()
+      await mail.getEmail(encodeImapId(uid, 7n, "INBOX"), { bodyBytes: 100 })
+      await mail.close()
+    }
+
+    expect(logins).toBe(1)
+    expect(imap.calls).not.toContain("logout")
+  })
+
+  it("serves five calls at once over the one connection", async () => {
+    let logins = 0
+    const imap = fakeImap(world())
+    const open = pooled(async () => {
+      logins++
+      return imap
+    })
+
+    const answers = await Promise.all(
+      [1, 2, 3, 1, 2].map(async (uid) => {
+        const mail = open()
+        try {
+          return await mail.getEmail(encodeImapId(uid, 7n, "INBOX"), {
+            bodyBytes: 100,
+          })
+        } finally {
+          await mail.close()
+        }
+      }),
+    )
+
+    expect(answers).toHaveLength(5)
+    expect(logins).toBe(1)
+  })
+
+  it("opens a new connection once when the one it had is broken", async () => {
+    let logins = 0
+    const first = fakeImap(world())
+    const second = fakeImap(world())
+    const open = pooled(async () => (++logins === 1 ? first : second))
+
+    const one = open()
+    await one.listMailboxes()
+    await one.close()
+    ;(first as unknown as { usable: boolean }).usable = false
+
+    const two = open()
+    await two.listMailboxes()
+    await two.close()
+
+    expect(logins).toBe(2)
+    expect(first.calls).toContain("logout")
+  })
+
+  it("drops the connection a failed command left, so the next call is clean", async () => {
+    let logins = 0
+    const bad = fakeImap(world())
+    bad.getMailboxLock = async () => {
+      throw Object.assign(new Error("Connection not available"), {
+        code: "NoConnection",
+      })
+    }
+    const open = pooled(async () => (++logins === 1 ? bad : fakeImap(world())))
+
+    const one = open()
+    await expect(
+      one.getEmail(encodeImapId(1, 7n, "INBOX"), { bodyBytes: 10 }),
+    ).rejects.toBeInstanceOf(MailTransportError)
+    await one.close()
+
+    const two = open()
+    await two.listMailboxes()
+    await two.close()
+    expect(logins).toBe(2)
+  })
+
+  it("keeps the mailbox listing between calls for as long as the session lives", async () => {
+    const imap = fakeImap(world())
+    const open = pooled(async () => imap)
+
+    for (let n = 0; n < 3; n++) {
+      const mail = open()
+      await mail.searchEmails({ offset: 0, limit: 1 })
+      await mail.close()
+    }
+
+    expect(imap.calls.filter((call) => call === "list")).toHaveLength(1)
   })
 })

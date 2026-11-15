@@ -32,6 +32,7 @@ import {
 import {
   checkDocument,
   parseSpecText,
+  prepareSpecText,
   type OpenApiDocument,
 } from "./openapi/parse"
 import {
@@ -296,7 +297,7 @@ export function readDocument(
 ): OpenApiDocument {
   const parsed = parseSpecText(text)
   return patches.length > 0
-    ? checkDocument(applyPatches(parsed, patches))
+    ? checkDocument(applyPatches(parsed, patches, { consume: true }))
     : parsed
 }
 
@@ -488,7 +489,7 @@ async function applySpec(
 
   const message = statusNotes(
     server,
-    await authHeaderNames(server),
+    await authHeaderNames(ctx, server),
     generated,
     schemaServerUrl(generated, fetchedFrom ?? server.specUrl),
   )
@@ -573,7 +574,7 @@ async function rebuildFromCopy(
 
     const generated = generateEndpointTools(spec.text, {
       readOnly: server.readOnly,
-      authHeaderNames: await authHeaderNames(server),
+      authHeaderNames: await authHeaderNames(ctx, server),
       patches: spec.patches,
     })
 
@@ -588,7 +589,7 @@ async function rebuildFromCopy(
       "ok",
       statusNotes(
         server,
-        await authHeaderNames(server),
+        await authHeaderNames(ctx, server),
         generated,
         schemaServerUrl(generated, server.specUrl),
       ),
@@ -651,7 +652,7 @@ export async function rebuildOutdatedEndpoints(ctx: VaultContext): Promise<{
 
       const generated = generateEndpointTools(spec.text, {
         readOnly: server.readOnly,
-        authHeaderNames: await authHeaderNames(server),
+        authHeaderNames: await authHeaderNames(ctx, server),
         patches: spec.patches,
       })
 
@@ -719,7 +720,7 @@ export async function endpointMigration(
       return null
     }
 
-    const headers = await authHeaderNames(server as OpenServer)
+    const headers = await authHeaderNames(ctx, server as OpenServer)
 
     try {
       const generated = generateEndpointTools(spec.text, {
@@ -777,8 +778,15 @@ async function storedSpecRow(
     where: { serverId },
     select: SPEC_SELECT,
   })
+  const spec = row ? openSpec(ctx, row) : null
 
-  return row ? openSpec(ctx, row) : null
+  if (spec) {
+    // A stored YAML schema is read in a worker, not on this thread; what
+    // the worker refuses (the owner may have lowered the limit) is refused.
+    await prepareSpecText(spec.text)
+  }
+
+  return spec
 }
 
 /** What PCP keeps of an endpoint's schema: the text and its edits. */
@@ -947,13 +955,16 @@ export async function createEndpoint(
     ;({ text, url: fetchedFrom } = input.fetched)
   } else {
     ;({ text, url: fetchedFrom } = await fetchSpec(data.specUrl!, {
+      maxBytes: (await loadResourceLimits()).specBytes,
       publicOnly: data.publicOnly,
       ...input.reach,
     }))
   }
 
-  // Everything that can be wrong with the schema is found before a row
-  // exists, so a bad one leaves nothing behind.
+  // Read off the main thread first (YAML), then everything that can be
+  // wrong with the schema is found before a row exists, so a bad one leaves
+  // nothing behind.
+  await prepareSpecText(text)
   const generated = generateEndpointTools(text, {
     readOnly: data.readOnly,
     authHeaderNames: sentHeaders(data),
@@ -1001,7 +1012,7 @@ export async function createEndpoint(
             oauthAuthorizeParams: data.oauthAuthorizeParams,
             ...oauth,
           }),
-          authHeaders: extraAuthHeadersWrite(data.authExtraHeaders, {
+          authHeaders: extraAuthHeadersWrite(ctx, data.authExtraHeaders, {
             replace: false,
           }),
         },
@@ -1112,6 +1123,7 @@ export async function updateEndpoint(
     text = stored.text
   } else {
     ;({ text, url: fetchedFrom } = await fetchSpec(data.specUrl!, {
+      maxBytes: (await loadResourceLimits()).specBytes,
       publicOnly,
     }))
   }
@@ -1155,7 +1167,7 @@ export async function updateEndpoint(
       authHeaderName: data.authHeaderName,
       authValueTemplate: data.authValueTemplate,
       ...secretColumns(data, secretId),
-      authHeaders: extraAuthHeadersWrite(data.authExtraHeaders, {
+      authHeaders: extraAuthHeadersWrite(ctx, data.authExtraHeaders, {
         replace: true,
       }),
       oauthClientId: data.oauthClientId,
@@ -1347,7 +1359,7 @@ export async function changeEndpoint(
   const patches = changes.patches ?? stored?.patches ?? []
   const generated = generateEndpointTools(text, {
     readOnly,
-    authHeaderNames: await authHeaderNames(existing),
+    authHeaderNames: await authHeaderNames(ctx, existing),
     patches,
   })
   const server = await writeChange(
@@ -1395,6 +1407,7 @@ export async function downloadSpec(
   }
 
   return fetchSpec(server.specUrl, {
+    maxBytes: (await loadResourceLimits()).specBytes,
     publicOnly: server.publicOnly,
     ...reach,
   })
@@ -1478,7 +1491,7 @@ export async function syncEndpointTools(
     const patches = stored?.patches ?? []
     const generated = generateEndpointTools(text, {
       readOnly: server.readOnly,
-      authHeaderNames: await authHeaderNames(server),
+      authHeaderNames: await authHeaderNames(ctx, server),
       patches,
     })
 
@@ -1609,8 +1622,14 @@ export async function callEndpointTool(
     open,
     keepBytes,
     reach,
+    timeoutMs,
   }: {
     authHeaders: Record<string, string>
+    /**
+     * The server's time limit for a call (lib/core/gate/); the API's own
+     * default (openapi/limits.ts CALL_TIMEOUT_MS) when left out.
+     */
+    timeoutMs?: number
     /**
      * Keeps a file the API answers (a PDF, an image) as the token's result,
      * answered as its handle. Without it a file is only described.
@@ -1695,6 +1714,7 @@ export async function callEndpointTool(
           publicOnly: server.publicOnly,
           maxFileBytes,
           fileTypes: plan.fileAnswers ?? [],
+          ...(timeoutMs !== undefined ? { timeoutMs } : {}),
           ...(keepFile ? { keepFile } : {}),
           ...reach,
         },

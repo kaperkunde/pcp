@@ -70,6 +70,12 @@ const ROWS: Array<{
     unit: "MB",
     hint: "What the files assistants keep in PCP's own store may take of the disk where PCP keeps its data.",
   },
+  {
+    field: "specMb",
+    label: "Largest API schema (MB)",
+    unit: "MB",
+    hint: "The largest OpenAPI document PCP reads when an API endpoint is added or changed. GitHub's whole REST API is 14 MB; reading one takes about sixteen times its size in memory.",
+  },
 ]
 
 /**
@@ -141,11 +147,11 @@ export function ResourcesCard({ overview }: { overview: ResourcesOverview }) {
           {megabytes(overview.chosen.programMemoryMb)} at once, files up to{" "}
           {megabytes(overview.chosen.fileMb)}, and{" "}
           {megabytes(overview.chosen.keptMb)} of kept results per token,{" "}
-          {megabytes(overview.chosen.storeMb)} for PCP&apos;s own store; the
-          browser closes after {overview.chosen.browserIdleMinutes} minutes
-          idle. Programs together may hold at most{" "}
-          {megabytes(overview.maxProgramsMemoryMb)}, three quarters of this
-          machine&apos;s memory.
+          {megabytes(overview.chosen.storeMb)} for PCP&apos;s own store, API
+          schemas up to {megabytes(overview.chosen.specMb)}; the browser closes
+          after {overview.chosen.browserIdleMinutes} minutes idle. Programs
+          together may hold at most {megabytes(overview.maxProgramsMemoryMb)},
+          three quarters of this machine&apos;s memory.
         </p>
         <div className="flex flex-wrap items-center gap-2">
           <SubmitButton variant="secondary" pendingText="Saving…">

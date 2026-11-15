@@ -39,6 +39,8 @@ export type ToolAbout = {
    * sealed, and out of the plain annotations, which hold the hints only.
    */
   annotationsTitle?: string | null
+  /** JSON: the icons an MCP server gave the tool (MCP's Icon objects). */
+  icons?: string | null
 }
 
 export type ToolSchema = {
@@ -54,7 +56,13 @@ export const TOOL_ABOUT: SealedGroup<ToolAbout, "about"> = {
   column: "about",
   idKey: "id",
   aad: (id) => `mcp_tool:${id}:about`,
-  blank: { name: "", title: null, description: "", annotationsTitle: null },
+  blank: {
+    name: "",
+    title: null,
+    description: "",
+    annotationsTitle: null,
+    icons: null,
+  },
   sealedOnly: ["annotationsTitle"],
 }
 
@@ -256,7 +264,7 @@ export function sealedToolContent(
   | "about"
   | "schema"
   | "nameKey"
-  | PlainKey<"name" | "title" | "description" | keyof ToolSchema>
+  | PlainKey<"name" | "title" | "description" | "icons" | keyof ToolSchema>
 > {
   return {
     nameKey: toolNameKey(ctx, serverId, values.name),
@@ -265,6 +273,7 @@ export function sealedToolContent(
       title: values.title,
       description: values.description,
       annotationsTitle: values.annotationsTitle ?? null,
+      icons: values.icons ?? null,
     }) as object),
     ...(sealFields(ctx.dek, TOOL_SCHEMA, id, {
       inputSchema: values.inputSchema,
@@ -277,7 +286,7 @@ export function sealedToolContent(
     | "about"
     | "schema"
     | "nameKey"
-    | PlainKey<"name" | "title" | "description" | keyof ToolSchema>
+    | PlainKey<"name" | "title" | "description" | "icons" | keyof ToolSchema>
   >
 }
 
@@ -297,7 +306,7 @@ export function sealedToolAbout(
   about: ToolAbout,
 ): Pick<
   Prisma.McpToolUncheckedUpdateManyInput,
-  "about" | "nameKey" | PlainKey<"name" | "title" | "description">
+  "about" | "nameKey" | PlainKey<"name" | "title" | "description" | "icons">
 > {
   return {
     nameKey: toolNameKey(ctx, serverId, about.name),
@@ -306,10 +315,11 @@ export function sealedToolAbout(
       title: about.title,
       description: about.description,
       annotationsTitle: about.annotationsTitle ?? null,
+      icons: about.icons ?? null,
     }) as object),
   } as Pick<
     Prisma.McpToolUncheckedUpdateManyInput,
-    "about" | "nameKey" | PlainKey<"name" | "title" | "description">
+    "about" | "nameKey" | PlainKey<"name" | "title" | "description" | "icons">
   >
 }
 

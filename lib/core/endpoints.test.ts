@@ -29,6 +29,7 @@ import {
 } from "./secrets"
 import {
   getServer,
+  extraAuthHeaders,
   listServers,
   setToolDescription,
   updateServer,
@@ -984,8 +985,7 @@ describe("a credential in several headers", () => {
       baseUrl: `${api.origin}/api`,
     })
     const { id } = await createEndpoint(ctx, created)
-    const headers = () =>
-      db().serverAuthHeader.findMany({ where: { serverId: id } })
+    const headers = () => extraAuthHeaders(ctx, id)
 
     await updateEndpoint(ctx, id, {
       ...created,

@@ -21,7 +21,14 @@ import {
   grantSecretUse,
   listBrowserOrigins,
 } from "./browser-secrets"
-import { EXPORT_AAD, type ExportPayloadJson } from "./backup-format"
+import {
+  EXPORT_AAD,
+  ExitRow,
+  ServiceSpecRow,
+  StorageRootRow,
+  WrapperSpecRow,
+  type ExportPayloadJson,
+} from "./backup-format"
 import { storeTools } from "./catalogue"
 import {
   asBytes,
@@ -1282,6 +1289,8 @@ describe("restoring", { timeout: 60_000 }, () => {
     })
     // The companion comes after the secret that names it, in the file as in
     // the vault: the restore writes both before pointing one at the other.
+    // A tick between the two, so they are not made in the same millisecond.
+    await new Promise((resolve) => setTimeout(resolve, 5))
     const codes = await createSecret(ctx, {
       name: "Shop code",
       value: "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ",
@@ -1848,3 +1857,60 @@ function unsealed(
 function asBeforeSealing(ctx: VaultContext, row: Record<string, unknown>) {
   unsealed(ctx, row, [SERVER_META as never])
 }
+
+describe("rows of an older file", () => {
+  it("reads a service's container name and publish under their plain names, and a wrapper's untouched", () => {
+    const service = ServiceSpecRow.parse({
+      serverId: "s1",
+      definition: "{}",
+      hash: "0",
+      hostId: null,
+      engine: "docker",
+      containerName: "pcp-old",
+      publish: '{"address":"127.0.0.1","ports":[]}',
+      env: "{}",
+      registeredId: null,
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+    }) as Record<string, unknown>
+
+    expect(service).toMatchObject({
+      plainContainerName: "pcp-old",
+      plainPublish: '{"address":"127.0.0.1","ports":[]}',
+      sealedOwn: null,
+    })
+    expect(
+      WrapperSpecRow.safeParse({
+        serverId: "w1",
+        definition: "{}",
+        hash: "0",
+        updatedAt: "2026-01-01T00:00:00.000Z",
+      }).success,
+    ).toBe(true)
+  })
+
+  it("reads an exit's and a store's plain columns under their plain names", () => {
+    expect(
+      ExitRow.parse({
+        id: "e1",
+        vaultId: "v",
+        name: "old-exit",
+        label: "Old",
+        kind: "ssh",
+        serverId: "s",
+        createdAt: "2026-01-01T00:00:00.000Z",
+        updatedAt: "2026-01-01T00:00:00.000Z",
+      }),
+    ).toMatchObject({ plainName: "old-exit", plainLabel: "Old", about: null })
+    expect(
+      StorageRootRow.parse({
+        serverId: "s",
+        hostId: null,
+        path: "/srv/old",
+        writeAs: "me",
+        createdAt: "2026-01-01T00:00:00.000Z",
+        updatedAt: "2026-01-01T00:00:00.000Z",
+      }),
+    ).toMatchObject({ plainPath: "/srv/old", plainWriteAs: "me", sealed: null })
+  })
+})

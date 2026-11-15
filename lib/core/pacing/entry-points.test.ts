@@ -111,7 +111,13 @@ beforeEach(async () => {
     webFetch: true,
   })
   scope = { ...(await resolveApiToken(token))!, publicUrl: PUBLIC_URL }
-  await writeToolAccess(scope.tokenId, endpointId, "count", "allowed")
+  await writeToolAccess(
+    scope.ctx,
+    scope.tokenId,
+    endpointId,
+    "count",
+    "allowed",
+  )
   await setPacingServer(ctx, endpointId, PAUSE)
 })
 
@@ -274,7 +280,13 @@ try {
     const wrapper = await db().mcpServer.findFirstOrThrow({
       where: { kind: "wrapper" },
     })
-    await writeToolAccess(scope.tokenId, wrapper.id, "count_twice", "allowed")
+    await writeToolAccess(
+      scope.ctx,
+      scope.tokenId,
+      wrapper.id,
+      "count_twice",
+      "allowed",
+    )
 
     const result = await call("execute_destructive", {
       server: "twice",

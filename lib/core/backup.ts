@@ -217,7 +217,8 @@ async function readVault(vaultId: string): Promise<ExportPayloadJson> {
           secrets: (
             await tx.secret.findMany({
               ...byVault,
-              orderBy: { createdAt: "asc" },
+              // Two made in the same millisecond still come out in one order.
+              orderBy: [{ createdAt: "asc" }, { id: "asc" }],
             })
           ).map(rowJson),
           secretBrowserOrigins: (

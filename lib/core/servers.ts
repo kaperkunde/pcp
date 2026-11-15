@@ -16,10 +16,13 @@ import {
 } from "./definition-rows"
 import { invalid, notFound, PcpError } from "./errors"
 import { newId } from "./ids"
+import { dropMailSession } from "./mail/imap-pool"
 import { closeSshConnections } from "./ssh/client"
 import { normalizeAuthorizeParams } from "./oauth-client"
 import {
   byServerName,
+  AUTH_HEADER,
+  AUTH_HEADER_SELECT,
   findServerBySlug,
   openServer,
   openServers,
@@ -29,6 +32,7 @@ import {
   updateServerRow,
   writeServer,
 } from "./server-meta"
+import { readFields, sealFields } from "./sealed-fields"
 import {
   openTools,
   sealedToolOverride,
@@ -574,15 +578,19 @@ export type OAuthClientInput = Pick<
 
 /** A server's further secret headers, in the order they are sent. */
 export async function extraAuthHeaders(
+  ctx: VaultContext,
   serverId: string,
 ): Promise<ExtraAuthHeader[]> {
   const rows = await db().serverAuthHeader.findMany({
     where: { serverId },
     orderBy: { position: "asc" },
-    select: { secretId: true, headerName: true, valueTemplate: true },
+    select: { secretId: true, ...AUTH_HEADER_SELECT },
   })
 
-  return rows.map((row) => ({ ...row, secretId: row.secretId ?? "" }))
+  return rows.map((row) => {
+    const { headerName, valueTemplate } = readFields(ctx.dek, AUTH_HEADER, row)
+    return { secretId: row.secretId ?? "", headerName, valueTemplate }
+  })
 }
 
 /**
@@ -591,6 +599,7 @@ export async function extraAuthHeaders(
  * assistant's argument may never set one of them.
  */
 export async function authHeaderNames(
+  ctx: VaultContext,
   server: Pick<OpenServer, "id" | "authType" | "authHeaderName">,
 ): Promise<string[]> {
   // Basic authentication is the Authorization header, whatever the row says.
@@ -603,7 +612,7 @@ export async function authHeaderNames(
   }
 
   const extras =
-    server.authType === "header" ? await extraAuthHeaders(server.id) : []
+    server.authType === "header" ? await extraAuthHeaders(ctx, server.id) : []
   return [server.authHeaderName, ...extras.map((extra) => extra.headerName)]
 }
 
@@ -612,14 +621,27 @@ export async function authHeaderNames(
  * removes the ones it had first (an update; a new row has none).
  */
 export function extraAuthHeadersWrite(
+  ctx: VaultContext,
   extras: ExtraAuthHeader[],
   { replace }: { replace: boolean },
 ) {
-  const create = extras.map((extra, index) => ({
-    id: newId(),
-    position: index + 1,
-    ...extra,
-  }))
+  const create = extras.map((extra, index) => {
+    const id = newId()
+
+    return {
+      id,
+      position: index + 1,
+      secretId: extra.secretId,
+      ...(sealFields(ctx.dek, AUTH_HEADER, id, {
+        headerName: extra.headerName,
+        valueTemplate: extra.valueTemplate,
+      }) as {
+        sealed: Uint8Array<ArrayBuffer>
+        plainHeaderName: string
+        plainValueTemplate: string
+      }),
+    }
+  })
 
   return replace ? { deleteMany: {}, create } : { create }
 }
@@ -964,7 +986,7 @@ export async function createServer(
             : {}),
           ...secretColumns(data, secretId),
         }),
-        authHeaders: extraAuthHeadersWrite(authExtraHeaders, {
+        authHeaders: extraAuthHeadersWrite(ctx, authExtraHeaders, {
           replace: false,
         }),
       },
@@ -1007,7 +1029,7 @@ export async function updateServer(
   }
 
   const { data, authExtraHeaders, newSecret } = await normalizeInput(ctx, input)
-  const extrasBefore = await extraAuthHeaders(id)
+  const extrasBefore = await extraAuthHeaders(ctx, id)
   // The page's switch sets it (setServerPublicOnly); the form leaves it out.
   data.publicOnly = input.publicOnly ?? existing.publicOnly
 
@@ -1019,7 +1041,7 @@ export async function updateServer(
     Object.assign(data, secretColumns(data, secretId))
     await writeServer(ctx, id, {
       ...data,
-      authHeaders: extraAuthHeadersWrite(authExtraHeaders, {
+      authHeaders: extraAuthHeadersWrite(ctx, authExtraHeaders, {
         replace: true,
       }),
       ...(dropTokens
@@ -1086,7 +1108,8 @@ export async function setMcpHeaderCredential(
     throw invalid("That secret does not exist.")
   }
 
-  const extras = row.authType === "header" ? await extraAuthHeaders(id) : []
+  const extras =
+    row.authType === "header" ? await extraAuthHeaders(ctx, id) : []
 
   if (
     extras.some(
@@ -1262,6 +1285,11 @@ export async function setServerPublicOnly(
 
 export async function deleteServer(ctx: VaultContext, id: string) {
   const existing = await getServer(ctx, id)
+
+  // A mail account's pooled sign-in goes with it.
+  if (isMailKind(existing.kind)) {
+    await dropMailSession(id)
+  }
 
   // Its container is on the SSH server: services/services.ts removes it
   // there first.

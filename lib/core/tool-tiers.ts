@@ -13,6 +13,7 @@ import {
 import { ensureDefinition } from "./definition-rows"
 import { invalid, notFound } from "./errors"
 import { newId } from "./ids"
+import { levelNameKeys, openLevelName, sealedLevelName } from "./level-names"
 import { getSetting, setSetting } from "./settings"
 import type { ToolAnnotations } from "./tools/define"
 import { readWrapperOperation } from "./wrappers/definition"
@@ -346,17 +347,31 @@ function tierResolver(ctx: VaultContext, overrides: OverrideRow[]) {
   return { load, tierOf }
 }
 
-async function overridesOf(vaultId: string): Promise<OverrideRow[]> {
-  return db().toolTier.findMany({
-    where: { vaultId },
+/**
+ * The owner's tiers with their tools' names opened: a name is kept as a keyed
+ * hash with the name sealed beside it (#96), a row from before as it was.
+ */
+async function overridesOf(ctx: VaultContext): Promise<OverrideRow[]> {
+  const rows = await db().toolTier.findMany({
+    where: { vaultId: ctx.vaultId },
     select: {
+      id: true,
       definitionId: true,
       serverId: true,
       toolName: true,
+      sealed: true,
       tier: true,
       seenTier: true,
     },
   })
+
+  return rows.map(({ id, sealed, ...row }) => ({
+    ...row,
+    toolName: openLevelName(ctx, "tool_tier", id, {
+      key: row.toolName,
+      sealed,
+    }),
+  }))
 }
 
 /** One tool's tier and where it comes from. */
@@ -379,10 +394,7 @@ export async function toolTierInfo(
     }
   }
 
-  return tierResolver(ctx, await overridesOf(server.vaultId)).tierOf(
-    serverId,
-    toolName,
-  )
+  return tierResolver(ctx, await overridesOf(ctx)).tierOf(serverId, toolName)
 }
 
 /** One tool's effective tier. */
@@ -402,7 +414,7 @@ export async function loadToolTiers(
   ctx: VaultContext,
   servers: Array<{ id: string; tools: Array<{ name: string }> }>,
 ): Promise<Map<string, TierInfo>> {
-  const resolver = tierResolver(ctx, await overridesOf(ctx.vaultId))
+  const resolver = tierResolver(ctx, await overridesOf(ctx))
   await resolver.load(servers.map((server) => server.id))
   const found = new Map<string, TierInfo>()
 
@@ -426,7 +438,7 @@ export async function tierOfCalls(
   ctx: VaultContext,
   calls: Array<{ serverId: string; tool: string }>,
 ): Promise<ToolTier> {
-  const resolver = tierResolver(ctx, await overridesOf(ctx.vaultId))
+  const resolver = tierResolver(ctx, await overridesOf(ctx))
   await resolver.load(calls.map((call) => call.serverId))
   const tiers: ToolTier[] = []
 
@@ -472,10 +484,12 @@ export async function setToolTier(
   tier: ToolTier | null,
 ): Promise<void> {
   const place = await placeFor(ctx, serverId)
+  const scopeId = "definitionId" in place ? place.definitionId : place.serverId
+  const names = { in: levelNameKeys(ctx, scopeId, toolName) }
   const where =
     "definitionId" in place
-      ? { definitionId: place.definitionId, toolName }
-      : { serverId: place.serverId, toolName }
+      ? { definitionId: place.definitionId, toolName: names }
+      : { serverId: place.serverId, toolName: names }
 
   if (tier === null) {
     await db().toolTier.deleteMany({
@@ -500,10 +514,29 @@ export async function setToolTier(
   })
   const seenTier = server?.kind === "wrapper" ? info.derived : null
 
+  const id = newId()
+  const { key, sealed } = sealedLevelName(
+    ctx,
+    "tool_tier",
+    id,
+    scopeId,
+    toolName,
+  )
+
   await db().$transaction([
     db().toolTier.deleteMany({ where: { vaultId: ctx.vaultId, ...where } }),
     db().toolTier.create({
-      data: { id: newId(), vaultId: ctx.vaultId, ...where, tier, seenTier },
+      data: {
+        id,
+        vaultId: ctx.vaultId,
+        ...("definitionId" in place
+          ? { definitionId: place.definitionId }
+          : { serverId: place.serverId }),
+        toolName: key,
+        sealed,
+        tier,
+        seenTier,
+      },
     }),
   ])
 }
@@ -513,12 +546,12 @@ export async function setToolTier(
  * had: they are copied from the definition it shared.
  */
 export async function copyToolTiers(
-  vaultId: string,
+  ctx: VaultContext,
   fromDefinitionId: string,
   toDefinitionId: string,
 ): Promise<void> {
   const rows = await db().toolTier.findMany({
-    where: { vaultId, definitionId: fromDefinitionId },
+    where: { vaultId: ctx.vaultId, definitionId: fromDefinitionId },
   })
 
   if (rows.length === 0) {
@@ -526,14 +559,31 @@ export async function copyToolTiers(
   }
 
   await db().toolTier.createMany({
-    data: rows.map((row) => ({
-      id: newId(),
-      vaultId,
-      definitionId: toDefinitionId,
-      toolName: row.toolName,
-      tier: row.tier,
-      seenTier: row.seenTier,
-    })),
+    data: rows.map((row) => {
+      const id = newId()
+      // A name is hashed for its definition and sealed to its row: made
+      // again for the copy.
+      const { key, sealed } = sealedLevelName(
+        ctx,
+        "tool_tier",
+        id,
+        toDefinitionId,
+        openLevelName(ctx, "tool_tier", row.id, {
+          key: row.toolName,
+          sealed: row.sealed,
+        }),
+      )
+
+      return {
+        id,
+        vaultId: ctx.vaultId,
+        definitionId: toDefinitionId,
+        toolName: key,
+        sealed,
+        tier: row.tier,
+        seenTier: row.seenTier,
+      }
+    }),
   })
 }
 
@@ -542,24 +592,43 @@ export async function copyToolTiers(
  * only a merged one had a tier for takes it along.
  */
 export async function mergeToolTiers(
-  vaultId: string,
+  ctx: VaultContext,
   keepId: string,
   mergedIds: string[],
 ): Promise<void> {
-  const rows = await db().toolTier.findMany({
-    where: { vaultId, definitionId: { in: [keepId, ...mergedIds] } },
-    orderBy: { updatedAt: "desc" },
-  })
+  const rows = (
+    await db().toolTier.findMany({
+      where: {
+        vaultId: ctx.vaultId,
+        definitionId: { in: [keepId, ...mergedIds] },
+      },
+      orderBy: { updatedAt: "desc" },
+    })
+  ).map((row) => ({
+    ...row,
+    name: openLevelName(ctx, "tool_tier", row.id, {
+      key: row.toolName,
+      sealed: row.sealed,
+    }),
+  }))
   const taken = new Set(
-    rows.filter((row) => row.definitionId === keepId).map((r) => r.toolName),
+    rows.filter((row) => row.definitionId === keepId).map((r) => r.name),
   )
 
   for (const row of rows) {
-    if (row.definitionId !== keepId && !taken.has(row.toolName)) {
-      taken.add(row.toolName)
+    if (row.definitionId !== keepId && !taken.has(row.name)) {
+      taken.add(row.name)
+      // The name's hash is bound to its definition: made again for the kept one.
+      const { key, sealed } = sealedLevelName(
+        ctx,
+        "tool_tier",
+        row.id,
+        keepId,
+        row.name,
+      )
       await db().toolTier.update({
         where: { id: row.id },
-        data: { definitionId: keepId },
+        data: { definitionId: keepId, toolName: key, sealed },
       })
     }
   }
@@ -660,7 +729,7 @@ export function tierBelowCalls(info: TierInfo): boolean {
 export async function wrapperTiersBelowCalls(
   ctx: VaultContext,
 ): Promise<TierBelowCalls[]> {
-  const overrides = await overridesOf(ctx.vaultId)
+  const overrides = await overridesOf(ctx)
 
   if (overrides.length === 0) {
     return []

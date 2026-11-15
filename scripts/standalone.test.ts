@@ -2,7 +2,11 @@ import { existsSync, realpathSync } from "node:fs"
 import path from "node:path"
 import { describe, expect, it } from "vitest"
 
-import nextConfig, { patchrightBrowsersJson, sharpWasm } from "../next.config"
+import nextConfig, {
+  patchrightBrowsersJson,
+  sharpWasm,
+  yamlWorker,
+} from "../next.config"
 
 // The standalone output (the Docker image, the desktop app) holds only the
 // files Next's tracing finds. patchright-core requires its browsers.json by
@@ -35,6 +39,14 @@ describe("the standalone output", () => {
     expect(realpathSync(path.join(root, sharpWasm))).toBe(
       path.join(root, sharpWasm),
     )
+  })
+
+  it("carries the YAML schema worker and keeps js-yaml beside it", () => {
+    const included = nextConfig.outputFileTracingIncludes?.["/**"] ?? []
+
+    expect(included).toContain(yamlWorker)
+    expect(existsSync(path.join(root, yamlWorker))).toBe(true)
+    expect(nextConfig.serverExternalPackages).toContain("js-yaml")
   })
 
   it("leaves sharp's native builds out, so sharp runs as WebAssembly", async () => {
