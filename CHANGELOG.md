@@ -6,6 +6,18 @@ the pull requests merged since the release before: each one's "Changelog"
 section, or its title. The builds of develop that led to a release are in its
 section; each also has its own notes on its pre-release.
 
+## [0.5.1](https://github.com/kaperkunde/pcp/releases/tag/v0.5.1) - 2026-11-15
+
+- Mail accounts keep one signed-in connection per account instead of signing in on every call. Searches and moves no longer count every folder first, and a search with no filter reads only the newest page. A Gmail call that took about 80 seconds should now take a few. The server's page shows each rec… ([#144](https://github.com/kaperkunde/pcp/pull/144))
+- One set of limits for every kind of server: calls at once, spacing, calls per minute, a time limit per call, and bytes per day. Each kind has its own defaults, and you change them in the new Limits section of a server's page. ([#144](https://github.com/kaperkunde/pcp/pull/144))
+- When a server asks PCP to slow down, or keeps answering much slower than usual, PCP gives it a cool-down. Calls then answer at once, saying when to try again, instead of hanging. The server's page shows the cool-down with a button to end it, and counts calls, errors, slow-downs and times over the l… ([#144](https://github.com/kaperkunde/pcp/pull/144))
+- Assistants can propose limits for a new server, or changes to a server's limits, with a note on why. Nothing changes until you save it on PCP's page. ([#144](https://github.com/kaperkunde/pcp/pull/144))
+- API schemas are no longer capped at 5 MB. The largest size is a setting (Settings → Resources), sized to your machine by default. A big YAML schema is read off PCP's main thread, and stored schemas are compressed. GitHub's complete REST API (11 MB of YAML) now registers. ([#144](https://github.com/kaperkunde/pcp/pull/144))
+- Settings → Repeated calls takes a time per tool for PCP's own tools too. ([#144](https://github.com/kaperkunde/pcp/pull/144))
+- More is encrypted on disk: tool names in your levels, tiers and requests the values you type for a service header templates access waiting for a server's first read tool icons an exit's name and label a storage folder's path and login the app a token is for Old request-log files are overwritten bef… ([#144](https://github.com/kaperkunde/pcp/pull/144))
+- A mail account whose server marks its answers [THROTTLED] now cools down. The server page and `check_server` say why, and calls fail at once saying when to try again, instead of each waiting out the time limit. ([#145](https://github.com/kaperkunde/pcp/pull/145))
+- Search puts a tool first when you give its title word for word, even among an API's hundreds of similar tools. ([#145](https://github.com/kaperkunde/pcp/pull/145))
+
 ## [0.5.0](https://github.com/kaperkunde/pcp/releases/tag/v0.5.0) - 2026-11-15
 
 - Resolve open issues #27, #39–#46, a follow-up to #38, and one tool interface for the MCP layer ([#49](https://github.com/kaperkunde/pcp/pull/49))
