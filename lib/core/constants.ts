@@ -177,6 +177,7 @@ export type PermissionKind =
   | "exit_use"
   | "script_use"
   | "tab_pace"
+  | "limits_change"
   | "wrapper_change"
   | "skill_change"
   | "repo_change"

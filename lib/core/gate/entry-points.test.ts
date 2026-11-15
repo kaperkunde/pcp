@@ -11,14 +11,14 @@ import {
   type GatewayScope,
 } from "../gateway"
 import { json, startTestApi, type TestApi } from "../openapi/test-api"
-import { decidePermission } from "../permissions"
+import { decidePermission, getPermissionView } from "../permissions"
 import { scratchDatabase } from "../test-db"
 import { entryCall, withCallHandle } from "../test-handles"
 import { writeToolAccess } from "../tool-access"
 import { setupVault } from "../vault"
 import { setFetchPrivate, setFetchSite } from "../web-fetch"
 import { resetGate } from "./state"
-import { writeServerLimits } from "./store"
+import { readServerLimits, writeServerLimits } from "./store"
 
 // The gate holds whatever way a call comes in, as pacing does (it sits in
 // upstream.ts callServerTool and web fetch's request path): execute_<tier>,
@@ -283,5 +283,126 @@ describe("the call gate, whatever the way in", () => {
     expect(second.error).toMatchObject({ code: "paced" })
     expect(second.text).toMatch(/is cooling down: it answered HTTP 429/)
     expect(api.requests).toHaveLength(1)
+  })
+})
+
+describe("the limits tools", () => {
+  async function own(name: string, args: Record<string, unknown>) {
+    const connected = await connect()
+    const result = await connected.callTool(
+      entryCall(name.startsWith("get_") ? "execute_read" : "execute_write", {
+        tool: name,
+        arguments: args,
+      }),
+    )
+    return {
+      isError: result.isError === true,
+      text: (result.content as Array<{ text?: string }>)
+        .map((part) => part.text ?? "")
+        .join(""),
+      structured: result.structuredContent as Record<string, unknown>,
+    }
+  }
+
+  it("read a server's limits, which are its own, and its load", async () => {
+    await writeServerLimits(ctx, endpointId, { maxConcurrent: 3 })
+    await call("execute_read", COUNT)
+
+    const read = await own("get_server_limits", { server: "things" })
+
+    expect(read.isError).toBe(false)
+    expect(read.structured).toMatchObject({
+      server: "things",
+      own: { max_concurrent: 3 },
+      limits: {
+        max_concurrent: 3,
+        timeout_ms: 60_000,
+        calls_per_minute: "none",
+      },
+      cooling: null,
+      last_hour: { calls: 1, errors: 0 },
+    })
+    expect(read.text).toContain("calls at once 3, ")
+    expect((await own("get_server_limits", { server: "nope" })).isError).toBe(
+      true,
+    )
+  })
+
+  it("propose limits the owner sees now against proposed, edits and saves over what they saw", async () => {
+    await writeServerLimits(ctx, endpointId, { timeoutMs: 30_000 })
+    const asked = await own("propose_server_limits", {
+      server: "things",
+      limits: { max_concurrent: 1, timeout_ms: "default" },
+      note: "Its documentation allows one connection at a time.",
+    })
+    expect(asked.text).toContain("Not done yet")
+
+    const row = await db().permissionRequest.findFirstOrThrow({
+      where: { kind: "limits_change" },
+    })
+    const view = await getPermissionView(ctx, row.id, {
+      publicUrl: PUBLIC_URL,
+    })
+    expect(view!.title).toBe("Change the limits of Things?")
+    expect(view!.lines).toEqual(
+      expect.arrayContaining([
+        "Calls at once: 8 (PCP's default) → 1",
+        "Time limit per call: 30 s → 1 minute (PCP's default)",
+        "Why, in the assistant's words: Its documentation allows one connection at a time.",
+      ]),
+    )
+    expect(
+      view!.proposedLimits!.fields.find((f) => f.field === "maxConcurrent"),
+    ).toMatchObject({ value: 1 })
+
+    // The owner makes it two, and saves.
+    const answer = await decidePermission(ctx, row.id, "allow_once", {
+      publicUrl: PUBLIC_URL,
+      limits: { maxConcurrent: 2 },
+    })
+    expect(answer.isError).not.toBe(true)
+    expect(await readServerLimits(ctx, endpointId)).toEqual({
+      maxConcurrent: 2,
+    })
+  })
+
+  it("save nothing over limits that changed since the owner was asked", async () => {
+    await own("propose_server_limits", {
+      server: "things",
+      limits: { calls_per_minute: 20 },
+      note: "It allows 20 a minute.",
+    })
+    const row = await db().permissionRequest.findFirstOrThrow({
+      where: { kind: "limits_change" },
+    })
+    await writeServerLimits(ctx, endpointId, { maxConcurrent: 4 })
+
+    const answer = await decidePermission(ctx, row.id, "allow_once", {
+      publicUrl: PUBLIC_URL,
+    })
+
+    expect(answer.isError).toBe(true)
+    expect(JSON.stringify(answer.content)).toContain("have changed since")
+    expect(await readServerLimits(ctx, endpointId)).toEqual({
+      maxConcurrent: 4,
+    })
+  })
+
+  it("ask nothing when nothing changes, and want a note", async () => {
+    await writeServerLimits(ctx, endpointId, { maxConcurrent: 1 })
+    const same = await own("propose_server_limits", {
+      server: "things",
+      limits: { max_concurrent: 1 },
+      note: "Already so.",
+    })
+    expect(same.text).toContain("Nothing to propose")
+
+    const bare = await own("propose_server_limits", {
+      server: "things",
+      limits: { max_concurrent: 2 },
+      note: " ",
+    })
+    expect(bare.isError).toBe(true)
+    expect(await db().permissionRequest.count()).toBe(0)
   })
 })

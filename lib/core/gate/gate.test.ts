@@ -15,7 +15,6 @@ import {
   limitsChangeLines,
   limitsChangeOf,
   LIMITS_ARG,
-  type LimitsArg,
 } from "./config"
 import {
   gateServerCall,
@@ -117,7 +116,7 @@ describe("limits", () => {
       calls_per_minute: "none",
       bytes_per_day: "default",
     })
-    expect(limitsChangeOf(arg as LimitsArg)).toEqual({
+    expect(limitsChangeOf(arg)).toEqual({
       maxConcurrent: 1,
       timeoutMs: 30_000,
       callsPerMinute: null,

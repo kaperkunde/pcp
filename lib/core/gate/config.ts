@@ -114,7 +114,8 @@ export const LIMITS_ARG = z
     "Limits on how PCP calls this server, from its documentation or what you saw it do. The owner sees them beside the approval, may change them, and saves them with it; left out, PCP's defaults for its kind apply.",
   )
 
-export type LimitsArg = Record<string, number | "none" | "default" | undefined>
+/** `limits` as LIMITS_ARG parsed it: its values are checked there. */
+export type LimitsArg = Record<string, unknown>
 
 /** A change to a server's limits: a value, null for none, "default" to unset. */
 export type LimitsChange = Partial<
@@ -128,11 +129,11 @@ export function limitsChangeOf(arg: LimitsArg | undefined): LimitsChange {
   for (const field of LIMIT_FIELDS) {
     const value = arg?.[LIMIT_WORDS[field].arg]
 
-    if (value === undefined) {
-      continue
+    if (value === "none") {
+      change[field] = null
+    } else if (value === "default" || typeof value === "number") {
+      change[field] = value
     }
-
-    change[field] = value === "none" ? null : value
   }
 
   return change
