@@ -4765,8 +4765,17 @@ The owner's own windows are the vault's `duplicateCalls` setting
 (`calls/config.ts`), set on Settings → Repeated calls
 (`components/repeated-calls-card.tsx`, `lib/actions/repeated-calls.ts`): a
 default for every tool, and per tool (chosen from the vault's tools that
-change things, by server id and name) minutes between 1 and 24 hours, or
-`exempt` ("Never hold back").
+change things, and from PCP's own tools the guard watches, as the server
+`pcp`; by server id and name) minutes between 1 and 24 hours, or `exempt`
+("Never hold back").
+
+Whether the guard watches one of PCP's own tools is a property of the tool,
+declared where it is registered (`register`'s `guard`, `tools/guard.ts`):
+`never` (the stores' tools and the capabilities') or `reads`, a predicate
+on the arguments for a tool whose reading and changing calls differ
+(memory's command, web_fetch's method). A tool that says nothing is guarded
+when it is Write or Destructive and not idempotent. The gateway and the
+Settings page both read it from the tool.
 
 ### Call handles
 

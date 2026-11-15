@@ -101,7 +101,9 @@ describe("repeated calls on Settings", () => {
 
     // Only tools that change things are offered.
     expect(
-      (await duplicateCallsOverview(ctx)).choices.map((entry) => entry.tool),
+      (await duplicateCallsOverview(ctx)).choices
+        .filter((entry) => entry.serverId === serverId)
+        .map((entry) => entry.tool),
     ).toEqual(["send_postcard"])
 
     expect(
@@ -134,5 +136,60 @@ describe("repeated calls on Settings", () => {
 
     await removeRepeatedCallsToolAction(IDLE, form({ tool }))
     expect(await readDuplicateCalls(ctx)).toEqual({ tools: {} })
+  })
+
+  it("takes a time for PCP's own tools the guard watches, and no other", async () => {
+    const choices = (await duplicateCallsOverview(ctx)).choices
+    const own = choices.filter((entry) => entry.serverId === "pcp")
+    const names = own.map((entry) => entry.tool)
+
+    // Tools that change things and are held back; not a Read tool, one that
+    // says a repeat does nothing more, or one that declares it is not
+    // guarded (the stores', the capabilities').
+    expect(names).toContain("memory")
+    expect(names).toContain("web_fetch")
+    expect(names).toContain("register_server")
+    for (const left of [
+      "check_permission",
+      "withdraw_request",
+      "save_file",
+      "read_image",
+    ]) {
+      expect(names).not.toContain(left)
+    }
+
+    const tool = "pcp/memory"
+    expect(
+      await saveRepeatedCallsToolAction(
+        IDLE,
+        form({ tool, mode: "minutes", minutes: "7" }),
+      ),
+    ).toMatchObject({ status: "ok" })
+    expect((await readDuplicateCalls(ctx)).tools).toEqual({ [tool]: 7 })
+    expect((await duplicateCallsOverview(ctx)).tools).toMatchObject([
+      { tool: "memory", server: "PCP", value: 7 },
+    ])
+
+    // A tool the guard does not watch is refused.
+    expect(
+      await saveRepeatedCallsToolAction(
+        IDLE,
+        form({ tool: "pcp/save_file", mode: "never" }),
+      ),
+    ).toMatchObject({ status: "error" })
+
+    // PCP's tools stay when a vault server's choice is written.
+    await saveRepeatedCallsToolAction(
+      IDLE,
+      form({ tool: `${serverId}/send_postcard`, mode: "never" }),
+    )
+    expect(Object.keys((await readDuplicateCalls(ctx)).tools).sort()).toEqual(
+      [tool, `${serverId}/send_postcard`].sort(),
+    )
+
+    await removeRepeatedCallsToolAction(IDLE, form({ tool }))
+    expect(Object.keys((await readDuplicateCalls(ctx)).tools)).toEqual([
+      `${serverId}/send_postcard`,
+    ])
   })
 })

@@ -71,7 +71,8 @@ tier in its annotations: `search`, `execute_read` and `run_read` only read
   `search`, `execute_<tier>` and `run_<tier>`. A token whose instructions
   you changed keeps its text, which may still name `describe` and
   `call_tool_<tier>`: accept the merge PCP offers on the token's page
-  before the next release, when those names stop answering.
+  before the release after 0.5.0, when those names stop answering (0.5.0 is
+  the first release that still answers them).
 
 For one release every old name is still answered when a client calls it,
 though no longer listed: `describe`, `call_tool_<tier>` and

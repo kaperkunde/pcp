@@ -2,6 +2,7 @@ import type { ToolTier } from "./constants"
 import type { VaultContext } from "./context"
 import { invalid } from "./errors"
 import { buildGatewayServer, ownToolsOf } from "./gateway"
+import { ownToolGuarded } from "./tools/guard"
 import {
   readOwnToolTiers,
   setOwnToolTier,
@@ -31,9 +32,7 @@ export type OwnToolTier = {
  * it: built as a request would build them, with no servers and nothing of
  * the vault's read but the owner's choices.
  */
-export async function listOwnToolTiers(
-  ctx: VaultContext,
-): Promise<OwnToolTier[]> {
+function builtOwnTools(ctx: VaultContext) {
   const gateway = buildGatewayServer(
     {
       ctx,
@@ -56,15 +55,39 @@ export async function listOwnToolTiers(
     },
     [],
   )
-  const chosen = await readOwnToolTiers(ctx)
 
   return ownToolsOf(gateway)
+}
+
+export async function listOwnToolTiers(
+  ctx: VaultContext,
+): Promise<OwnToolTier[]> {
+  const chosen = await readOwnToolTiers(ctx)
+
+  return builtOwnTools(ctx)
     .map((tool) => ({
       name: tool.name,
       title: tool.title,
       derived: tierFromAnnotations(tool.annotations),
       override: chosen[tool.name] ?? null,
     }))
+    .sort((a, b) => a.name.localeCompare(b.name))
+}
+
+/**
+ * PCP's own tools the duplicate guard can hold a repeat of back, at the tier
+ * they advertise now (a tool that is Read, idempotent or declares `never`
+ * is left out, as tools/guard.ts decides), by name, for Settings → Repeated
+ * calls.
+ */
+export async function listGuardedOwnTools(
+  ctx: VaultContext,
+): Promise<Array<{ name: string; title: string }>> {
+  return builtOwnTools(ctx)
+    .filter((tool) =>
+      ownToolGuarded(tool, tierFromAnnotations(tool.annotations)),
+    )
+    .map((tool) => ({ name: tool.name, title: tool.title }))
     .sort((a, b) => a.name.localeCompare(b.name))
 }
 
