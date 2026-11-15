@@ -2,6 +2,7 @@ import { asBytes } from "../crypto"
 import { AddressBlockedError } from "../openapi/address"
 import { describeFetchError, discard, readCapped } from "../openapi/http"
 import { send } from "../openapi/transport"
+import { httpThrottle, withThrottle } from "../throttle-signal"
 import { PCP_VERSION } from "../version"
 import {
   acceptedAddress,
@@ -164,6 +165,15 @@ export class DavClient {
         this.credential.headers = renewed.headers
         this.credential.redact.push(...renewed.redact)
         continue
+      }
+
+      // The server asking PCP to slow down: 429, or 503 with Retry-After.
+      const slow = httpThrottle(response.status, response.headers, where(url))
+
+      if (slow) {
+        await discard(response)
+
+        throw withThrottle(new DavTransportError(slow.reason), slow)
       }
 
       let body: { bytes: Buffer; truncated: boolean }

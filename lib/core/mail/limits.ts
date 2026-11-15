@@ -2,6 +2,41 @@
 
 export const MAIL_CONNECT_TIMEOUT_MS = 20_000
 export const MAIL_CALL_TIMEOUT_MS = 60_000
+/**
+ * How long a LOGOUT may take before the socket is closed instead. The call
+ * has what it needs by then; a server that stalls on LOGOUT never holds
+ * the answer.
+ */
+export const MAIL_LOGOUT_TIMEOUT_MS = 3_000
+
+/*
+ * IMAP sessions (imap-pool.ts): one signed-in connection per mail account,
+ * kept for the calls that follow. Opened only by a call that hands in the
+ * login, closed when idle too long or too old, never reopened on a timer.
+ */
+/** Connections one account may have open at once. */
+export const IMAP_MAX_CONNECTIONS = 2
+/** An idle connection is closed after this long unused. */
+export const IMAP_IDLE_MS = 2 * 60_000
+/** A connection is closed once this old, however busy. */
+export const IMAP_MAX_AGE_MS = 10 * 60_000
+/** A connection idle this long is checked with a NOOP before it is used. */
+export const IMAP_REVALIDATE_AFTER_MS = 30_000
+/** How long that check may take before the connection is dropped. */
+export const IMAP_REVALIDATE_TIMEOUT_MS = 5_000
+/** How long a call waits for a connection that others are using. */
+export const IMAP_LEASE_WAIT_MS = MAIL_CALL_TIMEOUT_MS
+/** The mailbox names an account's calls share, before LIST is asked again. */
+export const MAILBOX_LIST_TTL_MS = 30_000
+
+/*
+ * What PCP remembers, in memory only, of how an account's last calls went
+ * (diagnostics.ts), for the owner's server page.
+ */
+export const DIAGNOSTIC_CALLS_PER_ACCOUNT = 20
+export const DIAGNOSTIC_ACCOUNTS = 100
+export const DIAGNOSTIC_NOTICES_PER_CALL = 10
+export const DIAGNOSTIC_NOTICE_CHARS = 200
 
 /** The most PCP reads of one JMAP answer. */
 export const MAX_JMAP_RESPONSE_BYTES = 4 * 1024 * 1024

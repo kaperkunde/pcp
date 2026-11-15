@@ -824,8 +824,34 @@ into Drafts with no EmailSubmission after it, and marks nothing.
 **IMAP** (`mail/imap.ts`, on imapflow and nodemailer): `url` is
 `imaps://host:port`, or `imap://` for STARTTLS; `smtp_url` the same for
 SMTP. A connection that is not encrypted after it is made is dropped, and
-STARTTLS is required, never optional. Each call connects, signs in, works
-and logs out. An email's id is `<uid>.<uidvalidity>.<mailbox path>`, so an id
+STARTTLS is required, never optional. An account keeps one signed-in
+session for its calls (`mail/imap-pool.ts`, after the SSH pool; deleting or changing the account drops it, and PCP has no shutdown hook that closes the pools, as the SSH pool has none): a call leases
+a connection, works and hands it back without a LOGOUT, so a call costs a
+command, not a TCP and TLS connect, a login and a logout (against a server
+that takes seconds for each, a call took over a minute). Opened only by a
+call that brings the login in its request, never in the background; at most
+`IMAP_MAX_CONNECTIONS` per account (2), the others queue for one within the
+call's own time and share it; closed when idle two minutes (a timer only
+closes) or ten minutes old, when a command broke it, when the server closed
+it, or when a NOOP asked of one that sat 30 seconds goes unanswered; keyed by
+the account and a hash of its address and login, so a changed password,
+address or secret starts over. Anything else that asks the server for less:
+the mailbox names every call needs to find a mailbox by role come from a LIST
+without STATUS, kept 30 seconds per account (only `list_mailboxes` asks for
+counts, and a delete of a mailbox asks STATUS of that one); a search with no
+filter fetches the newest page by sequence number from the count SELECT gave
+instead of UID SEARCH ALL (an expunge between the SELECT and the FETCH can shift that page by one row); a LOGOUT never waits more than 3 seconds before the
+socket is closed. The time each phase took (connect, login, select, command,
+logout) and what the server said by itself ([ALERT], [THROTTLED], BYE,
+scrubbed of the login, addresses and links, cut short) are kept in memory
+only, a small ring per account (`mail/diagnostics.ts`, `mailDiagnostics(serverId)`),
+never on disk. A server's own "slow down" (IMAP `[THROTTLED]`, a BYE or
+`[LIMIT]`/`[UNAVAILABLE]` that is about rate, JMAP HTTP 429 or the
+`maxConcurrentRequests` limit error, CalDAV 429 or 503 with Retry-After)
+comes out as an Error carrying `pcpThrottle` (`lib/core/throttle-signal.ts`)
+for the call gate to read; JMAP also keeps to the session's
+`maxConcurrentRequests` and `maxCallsInRequest` once it has read them. An
+email's id is `<uid>.<uidvalidity>.<mailbox path>`, so an id
 from before a mailbox was rebuilt is refused rather than naming another
 email. Sending goes over SMTP, attachments included, written by nodemailer.
 The copy in Sent (Bcc kept) is the account's setting, `mailSaveSent`:
@@ -842,8 +868,8 @@ nothing deletes either. The look runs once the call has answered (`savedTo`
 is `"pending"`), inside the same request: the call hands it to
 `lib/core/after-answer.ts`, whose scope the gateway's route and the owner's
 answer to a request open and drain through Next's `after()`, on a connection
-of its own with the login the call already holds; nothing is stored or timed
-past the request. Where no scope is open, the look runs in the call, for 10
+with the login the call already holds, leasing a session of the account's
+pool; nothing is stored or timed past the request. Where no scope is open, the look runs in the call, for 10
 seconds at most. A draft is the same message,
 appended to Drafts with `\Draft` and `\Seen` and sent nowhere; its id comes
 from APPENDUID, and is null without UIDPLUS.

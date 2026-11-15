@@ -16,6 +16,7 @@ import {
 } from "./definition-rows"
 import { invalid, notFound, PcpError } from "./errors"
 import { newId } from "./ids"
+import { dropMailSession } from "./mail/imap-pool"
 import { closeSshConnections } from "./ssh/client"
 import { normalizeAuthorizeParams } from "./oauth-client"
 import {
@@ -1262,6 +1263,11 @@ export async function setServerPublicOnly(
 
 export async function deleteServer(ctx: VaultContext, id: string) {
   const existing = await getServer(ctx, id)
+
+  // A mail account's pooled sign-in goes with it.
+  if (isMailKind(existing.kind)) {
+    await dropMailSession(id)
+  }
 
   // Its container is on the SSH server: services/services.ts removes it
   // there first.
