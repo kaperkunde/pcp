@@ -1,46 +1,62 @@
+import type { Throttle } from "../throttle-signal"
 import {
   BACKOFF_MEMORY_MS,
   BASELINE_MIN,
   BASELINE_SAMPLES,
   COUNTER_BUCKET_MS,
   COUNTER_DAY_MS,
+  COUNTER_HOUR_MS,
   MAX_GATED_PLACES,
-  MAX_RETRY_AFTER_MS,
+  MAX_TOOLS_TRACKED,
   SAMPLES_PER_BUCKET,
+  SAMPLES_PER_HOUR,
   SLOW_FACTOR,
   SLOW_FLOOR_MS,
   SLOW_RUN,
   type GateLimits,
 } from "./limits"
-import type { Throttle } from "./signals"
 
 /**
  * The gate's state, in this process's memory (lib/core/gate/): per vault
- * and place, the calls running and waiting, whether it is cooling down,
- * and its counters. Like pacing's it is not shared between replicas and
- * starts afresh on a restart: a cool-down a restart forgets is found again
- * by the next throttle, and the counters say since when they count. Nothing
- * of a call is kept but its outcome, time and size, by place id.
+ * and place, the calls running and waiting, whether it is cooling down or
+ * held until a rate limit resets, each tool's usual time, and its
+ * counters. Like pacing's it is not shared between replicas and starts
+ * afresh on a restart: a cool-down a restart forgets is found again by the
+ * next throttle, and the counters say since when they count. Nothing of a
+ * call is kept but its outcome, time and size, by place id and tool name.
  */
 
 /** Time and chance, replaced in tests. */
-export type GateClock = { now: () => number }
+export type GateClock = { now: () => number; random?: () => number }
 
 type Bucket = {
-  /** Its start, a whole number of COUNTER_BUCKET_MS. */
+  /** Its start: a whole minute, or a whole hour once merged. */
   at: number
+  /** COUNTER_BUCKET_MS, or COUNTER_HOUR_MS once merged. */
+  span: number
   calls: number
   errors: number
   throttles: number
   bytes: number
-  /** Latencies in milliseconds, at most SAMPLES_PER_BUCKET. */
+  /**
+   * A sample of its answer times, each standing for `weight` calls: every
+   * call had the same chance of being kept (reservoir sampling).
+   */
   ms: number[]
+  weight: number
 }
 
 export type Cooling = {
   reason: string
   since: number
   until: number
+}
+
+type ToolTimes = {
+  /** Its latest successes' times, oldest first, for its usual time. */
+  recent: number[]
+  /** Its slow answers in a row. */
+  slow: number
 }
 
 type PlaceState = {
@@ -50,12 +66,14 @@ type PlaceState = {
   max: number
   waiting: Array<() => void>
   cooling: Cooling | null
+  /** Calls wait until then: a rate limit with nothing left till it resets. */
+  holdUntil: number
   /** How many cool-downs in a row (each one twice the last); -1 none. */
   level: number
-  /** The latest successes' times, oldest first, for the usual time. */
-  recent: number[]
-  /** Slow answers in a row. */
-  slow: number
+  /** Per tool, least recently used first. */
+  tools: Map<string, ToolTimes>
+  /** Calls past their time limit in a row, whatever the tool. */
+  timeouts: number
   buckets: Bucket[]
   /** When this process started counting for it. */
   since: number
@@ -64,25 +82,35 @@ type PlaceState = {
 type Store = { clock: GateClock; places: Map<string, PlaceState> }
 
 const STORE = Symbol.for("pcp.gate")
+const REAL_CLOCK: GateClock = { now: () => Date.now() }
 
 function store(): Store {
   const holder = globalThis as unknown as { [STORE]?: Store }
-  holder[STORE] ??= { clock: { now: () => Date.now() }, places: new Map() }
+  holder[STORE] ??= { clock: REAL_CLOCK, places: new Map() }
   return holder[STORE]
 }
 
 /** Tests: a clock of their own, or the real one again with null. */
 export function setGateClock(clock: GateClock | null): void {
-  store().clock = clock ?? { now: () => Date.now() }
+  store().clock = clock ?? REAL_CLOCK
 }
 
 export function gateNow(): number {
   return store().clock.now()
 }
 
+function random(): number {
+  return (store().clock.random ?? Math.random)()
+}
+
 /** Tests: forget every place. */
 export function resetGate(): void {
   store().places.clear()
+}
+
+/** Tests: how many places are held. */
+export function placeCount(): number {
+  return store().places.size
 }
 
 export function serverPlace(vaultId: string, serverId: string): string {
@@ -93,8 +121,19 @@ export function sitePlace(vaultId: string, host: string): string {
   return `${vaultId}\nsite:${host}`
 }
 
+/** A place that may be dropped: idle, nothing waiting, not cooling down. */
+function droppable(state: PlaceState, now: number): boolean {
+  return (
+    state.active === 0 &&
+    state.waiting.length === 0 &&
+    !(state.cooling && state.cooling.until > now) &&
+    state.holdUntil <= now
+  )
+}
+
 function placeFor(key: string, label: string): PlaceState {
-  const { places, clock } = store()
+  const { places } = store()
+  const now = gateNow()
   let state = places.get(key)
 
   if (state) {
@@ -105,8 +144,10 @@ function placeFor(key: string, label: string): PlaceState {
   }
 
   if (places.size >= MAX_GATED_PLACES) {
+    // The least recently used that may go; none goes while all are busy or
+    // cooling down (limits.ts MAX_GATED_PLACES).
     for (const [old, value] of places) {
-      if (value.active === 0 && value.waiting.length === 0) {
+      if (droppable(value, now)) {
         places.delete(old)
         break
       }
@@ -119,11 +160,12 @@ function placeFor(key: string, label: string): PlaceState {
     max: 1,
     waiting: [],
     cooling: null,
+    holdUntil: 0,
     level: -1,
-    recent: [],
-    slow: 0,
+    tools: new Map(),
+    timeouts: 0,
     buckets: [],
-    since: clock.now(),
+    since: now,
   }
   places.set(key, state)
   return state
@@ -139,35 +181,40 @@ function median(values: number[]): number | null {
   return sorted[Math.floor((sorted.length - 1) / 2)]!
 }
 
-function percentile(values: number[], p: number): number | null {
-  if (values.length === 0) return null
-  const sorted = [...values].sort((a, b) => a - b)
-  const index = Math.min(
-    sorted.length - 1,
-    Math.max(0, Math.ceil((p / 100) * sorted.length) - 1),
-  )
-  return sorted[index]!
+/** A tool's usual time: the median of its latest successes, once known. */
+function usual(times: ToolTimes): number | null {
+  return times.recent.length >= BASELINE_MIN ? median(times.recent) : null
 }
 
-/** The place's usual time: the median of its latest successes. */
-function usual(state: PlaceState): number | null {
-  return state.recent.length >= BASELINE_MIN ? median(state.recent) : null
+function toolTimes(state: PlaceState, tool: string): ToolTimes {
+  let times = state.tools.get(tool)
+
+  if (times) {
+    state.tools.delete(tool)
+  } else {
+    times = { recent: [], slow: 0 }
+
+    if (state.tools.size >= MAX_TOOLS_TRACKED) {
+      const oldest = state.tools.keys().next().value
+      if (oldest !== undefined) state.tools.delete(oldest)
+    }
+  }
+
+  state.tools.set(tool, times)
+  return times
 }
 
 /** A cool-down at the place now, or null; one that ended is dropped. */
 export function coolingAt(key: string): Cooling | null {
-  const state = peek(key)
-  const cooling = state?.cooling
+  const cooling = peek(key)?.cooling
 
-  if (!cooling) {
-    return null
-  }
+  return cooling && cooling.until > gateNow() ? cooling : null
+}
 
-  if (cooling.until <= gateNow()) {
-    return null
-  }
-
-  return cooling
+/** Until when calls to the place wait for a rate limit's reset, or 0. */
+export function holdAt(key: string): number {
+  const until = peek(key)?.holdUntil ?? 0
+  return until > gateNow() ? until : 0
 }
 
 /** Starts (or lengthens) a cool-down at the place. */
@@ -178,11 +225,17 @@ function coolDown(
   now: number,
 ): void {
   const current = state.cooling
+  // The place's own word is followed, but no further than its longest
+  // cool-down.
+  const asked =
+    throttle.retryAfterMs === undefined
+      ? undefined
+      : Math.min(throttle.retryAfterMs, limits.backoffMaxMs)
 
   if (current && current.until > now) {
     // Already cooling: the place's own word may lengthen it, nothing more.
-    if (throttle.retryAfterMs !== undefined) {
-      current.until = Math.max(current.until, now + throttle.retryAfterMs)
+    if (asked !== undefined) {
+      current.until = Math.max(current.until, now + asked)
     }
     return
   }
@@ -193,36 +246,115 @@ function coolDown(
     limits.backoffMaxMs,
     limits.backoffBaseMs * 2 ** Math.min(state.level, 30),
   )
-  const wait = Math.min(throttle.retryAfterMs ?? backoff, MAX_RETRY_AFTER_MS)
 
-  state.cooling = { reason: throttle.reason, since: now, until: now + wait }
+  state.cooling = {
+    reason: throttle.reason.replace(/[.\s]+$/, ""),
+    since: now,
+    until: now + (asked ?? backoff),
+  }
+}
+
+/** Keeps one answer time in a bucket's sample, each call as likely. */
+function sample(bucket: Bucket, ms: number): void {
+  if (bucket.ms.length < SAMPLES_PER_BUCKET) {
+    bucket.ms.push(ms)
+    return
+  }
+
+  const slot = Math.floor(random() * bucket.calls)
+
+  if (slot < SAMPLES_PER_BUCKET) {
+    bucket.ms[slot] = ms
+  }
+
+  bucket.weight = bucket.calls / bucket.ms.length
+}
+
+/**
+ * Minute buckets past the last hour, merged into one per hour: counts
+ * added, and a sample of their times drawn by weight (each kept time
+ * standing for as many calls as before).
+ */
+function merge(minutes: Bucket[], at: number): Bucket {
+  const keyed = minutes.flatMap((bucket) =>
+    bucket.ms.map((ms) => ({
+      ms,
+      // Weighted sampling without replacement (Efraimidis–Spirakis).
+      key: random() ** (1 / Math.max(bucket.weight, 1)),
+    })),
+  )
+  keyed.sort((a, b) => b.key - a.key)
+  const calls = minutes.reduce((sum, bucket) => sum + bucket.calls, 0)
+  const kept = keyed.slice(0, SAMPLES_PER_HOUR).map((entry) => entry.ms)
+
+  return {
+    at,
+    span: COUNTER_HOUR_MS,
+    calls,
+    errors: minutes.reduce((sum, bucket) => sum + bucket.errors, 0),
+    throttles: minutes.reduce((sum, bucket) => sum + bucket.throttles, 0),
+    bytes: minutes.reduce((sum, bucket) => sum + bucket.bytes, 0),
+    ms: kept,
+    weight: kept.length > 0 ? calls / kept.length : 1,
+  }
+}
+
+/** Drops what is past a day and merges what is past an hour. */
+function tidy(state: PlaceState, now: number): void {
+  const dayAgo = now - COUNTER_DAY_MS
+  const hourStart = now - (now % COUNTER_HOUR_MS) - COUNTER_HOUR_MS
+  const kept: Bucket[] = []
+  let pending: Bucket[] = []
+  let pendingHour = -1
+
+  const flush = () => {
+    if (pending.length > 0) {
+      kept.push(merge(pending, pendingHour))
+      pending = []
+    }
+  }
+
+  for (const bucket of state.buckets) {
+    if (bucket.at + bucket.span <= dayAgo) {
+      continue
+    }
+
+    if (bucket.span === COUNTER_BUCKET_MS && bucket.at < hourStart) {
+      const hour = bucket.at - (bucket.at % COUNTER_HOUR_MS)
+      if (hour !== pendingHour) flush()
+      pendingHour = hour
+      pending.push(bucket)
+      continue
+    }
+
+    flush()
+    kept.push(bucket)
+  }
+
+  flush()
+  state.buckets = kept
 }
 
 function bucketFor(state: PlaceState, now: number): Bucket {
   const at = now - (now % COUNTER_BUCKET_MS)
   const last = state.buckets.at(-1)
 
-  if (last && last.at === at) {
+  if (last && last.at === at && last.span === COUNTER_BUCKET_MS) {
     return last
   }
 
   const bucket: Bucket = {
     at,
+    span: COUNTER_BUCKET_MS,
     calls: 0,
     errors: 0,
     throttles: 0,
     bytes: 0,
     ms: [],
+    weight: 1,
   }
   state.buckets.push(bucket)
-
-  const horizon = now - COUNTER_DAY_MS
-  let drop = 0
-  while (drop < state.buckets.length && state.buckets[drop]!.at <= horizon) {
-    drop++
-  }
-  if (drop > 0) state.buckets.splice(0, drop)
-
+  tidy(state, now)
   return bucket
 }
 
@@ -230,23 +362,27 @@ function bucketFor(state: PlaceState, now: number): Bucket {
 export type CallEnd = {
   ok: boolean
   ms: number
+  /** The tool called: its usual time is its own. */
+  tool?: string
   bytes?: number
-  /** The place asked PCP to slow down. */
+  /** The place asked PCP to slow down (or to wait for a reset: `hold`). */
   throttle?: Throttle | null
   /** It ran past its time limit. */
   timedOut?: boolean
   /**
-   * Whether a run of slow answers counts as a request to slow down; off
-   * for sites, whose pages take as long as they take.
+   * What counts as slowing down here (limits.ts SLOW_DETECTION); "latency"
+   * when left out.
    */
-  detectSlow?: boolean
+  detect?: "latency" | "timeouts" | "none"
 }
 
 /**
- * Counts a call and reads it for throttling: a throttle the place sent, or
- * a run of answers far slower than its usual time (or past their time
- * limit), starts a cool-down. A success at its usual pace once a cool-down
- * is over ends the run of them. Answers the cool-down it started, if any.
+ * Counts a call and reads it for throttling: a throttle the place sent, a
+ * run of calls past their time limit, or (where latency counts) a run of
+ * one tool's answers far slower than its usual time, starts a cool-down;
+ * a hold makes the next calls wait for the reset. A success at its usual
+ * pace once a cool-down is over ends the run of them. Answers the
+ * cool-down it started, if any.
  */
 export function recordEnd(
   key: string,
@@ -257,40 +393,49 @@ export function recordEnd(
   const state = placeFor(key, label)
   const now = gateNow()
   const bucket = bucketFor(state, now)
+  const detect = end.detect ?? "latency"
 
   bucket.calls++
   if (!end.ok) bucket.errors++
   if (end.bytes) bucket.bytes += end.bytes
-  if (bucket.ms.length < SAMPLES_PER_BUCKET) {
-    bucket.ms.push(end.ms)
-  } else {
-    // Sampled: each later one replaces one at random, so a busy minute
-    // still counts its slow calls.
-    bucket.ms[Math.floor(Math.random() * SAMPLES_PER_BUCKET)] = end.ms
-  }
+  sample(bucket, end.ms)
 
-  const base = usual(state)
-  const slow =
-    end.detectSlow !== false &&
-    (end.timedOut === true ||
-      (base !== null && end.ms >= Math.max(SLOW_FLOOR_MS, base * SLOW_FACTOR)))
+  const times = toolTimes(state, end.tool ?? "")
+  const base = usual(times)
+  const slowAnswer =
+    detect === "latency" &&
+    !end.timedOut &&
+    base !== null &&
+    end.ms >= Math.max(SLOW_FLOOR_MS, base * SLOW_FACTOR)
 
-  state.slow = slow ? state.slow + 1 : 0
+  times.slow = slowAnswer ? times.slow + 1 : 0
+  state.timeouts =
+    detect !== "none" && end.timedOut === true ? state.timeouts + 1 : 0
 
   if (end.ok) {
-    state.recent.push(end.ms)
-    if (state.recent.length > BASELINE_SAMPLES) state.recent.shift()
+    times.recent.push(end.ms)
+    if (times.recent.length > BASELINE_SAMPLES) times.recent.shift()
   }
 
   let throttle = end.throttle ?? null
 
-  if (!throttle && state.slow >= SLOW_RUN) {
+  if (throttle?.hold) {
+    // Wait for the reset; nothing cools down.
+    const wait = Math.min(throttle.retryAfterMs ?? 0, limits.backoffMaxMs)
+    state.holdUntil = Math.max(state.holdUntil, now + wait)
+    throttle = null
+  }
+
+  if (!throttle && state.timeouts >= SLOW_RUN) {
     throttle = {
-      reason: end.timedOut
-        ? `${state.slow} calls in a row ran past its time limit`
-        : `its answers are taking much longer than usual (${state.slow} in a row, about ${Math.round(end.ms / 1000)} s each${base !== null ? ` against ${Math.max(1, Math.round(base / 1000))} s` : ""})`,
+      reason: `${state.timeouts} calls in a row ran past its time limit`,
     }
-    state.slow = 0
+    state.timeouts = 0
+  } else if (!throttle && times.slow >= SLOW_RUN) {
+    throttle = {
+      reason: `its answers${end.tool ? ` to ${end.tool}` : ""} are taking much longer than usual (${times.slow} in a row, about ${Math.round(end.ms / 1000)} s each against ${Math.max(1, Math.round(base! / 1000))} s)`,
+    }
+    times.slow = 0
   }
 
   if (throttle) {
@@ -300,7 +445,7 @@ export function recordEnd(
   }
 
   // Back to normal: a success at its usual pace after the cool-down.
-  if (end.ok && !slow && state.cooling && state.cooling.until <= now) {
+  if (end.ok && !slowAnswer && state.cooling && state.cooling.until <= now) {
     state.cooling = null
     state.level = -1
   }
@@ -308,21 +453,13 @@ export function recordEnd(
   return null
 }
 
-/** Bytes the place answered over the last day, and when the oldest leave. */
-export function bytesToday(key: string): { bytes: number; oldest: number } {
-  const state = peek(key)
+/** Bytes the place answered over the last day. */
+export function bytesToday(key: string): number {
   const now = gateNow()
-  let bytes = 0
-  let oldest = now
 
-  for (const bucket of state?.buckets ?? []) {
-    if (bucket.at > now - COUNTER_DAY_MS && bucket.bytes > 0) {
-      if (bytes === 0) oldest = bucket.at
-      bytes += bucket.bytes
-    }
-  }
-
-  return { bytes, oldest }
+  return (peek(key)?.buckets ?? [])
+    .filter((bucket) => bucket.at + bucket.span > now - COUNTER_DAY_MS)
+    .reduce((sum, bucket) => sum + bucket.bytes, 0)
 }
 
 /**
@@ -330,25 +467,35 @@ export function bytesToday(key: string): { bytes: number; oldest: number } {
  * `limit`: the time from now until enough of the oldest leave the day.
  */
 export function bytesFreeIn(key: string, limit: number): number {
-  const state = peek(key)
   const now = gateNow()
-  let total = bytesToday(key).bytes
+  let total = bytesToday(key)
 
-  for (const bucket of state?.buckets ?? []) {
-    if (bucket.at <= now - COUNTER_DAY_MS || bucket.bytes === 0) continue
+  for (const bucket of peek(key)?.buckets ?? []) {
+    if (bucket.at + bucket.span <= now - COUNTER_DAY_MS || bucket.bytes === 0) {
+      continue
+    }
+
     total -= bucket.bytes
+
     if (total < limit) {
-      return Math.max(1_000, bucket.at + COUNTER_DAY_MS - now)
+      return Math.max(1_000, bucket.at + bucket.span + COUNTER_DAY_MS - now)
     }
   }
 
   return COUNTER_DAY_MS
 }
 
-/** The usual time of a call at the place, or a second when not known. */
-export function usualMs(key: string): number {
-  const state = peek(key)
-  return Math.max(1_000, (state && usual(state)) ?? 1_000)
+/** A tool's usual time at the place, or a second when not known. */
+export function usualMs(key: string, tool = ""): number {
+  const times = peek(key)?.tools.get(tool)
+  return Math.max(1_000, (times && usual(times)) ?? 1_000)
+}
+
+function pump(state: PlaceState): void {
+  while (state.active < state.max && state.waiting.length > 0) {
+    state.active++
+    state.waiting.shift()!()
+  }
 }
 
 /** Settles true when a turn came, false when `budget` ran out first. */
@@ -363,6 +510,8 @@ export async function acquire(
 
   const state = placeFor(key, label)
   state.max = max
+  // A limit raised since lets those waiting in first.
+  pump(state)
 
   if (state.active < max && state.waiting.length === 0) {
     state.active++
@@ -389,7 +538,6 @@ export async function acquire(
       leave()
       reject(signal!.reason)
     }
-
     const timer = setTimeout(() => {
       signal?.removeEventListener("abort", onAbort)
       leave()
@@ -398,13 +546,6 @@ export async function acquire(
     signal?.addEventListener("abort", onAbort, { once: true })
     state.waiting.push(wake)
   })
-}
-
-function pump(state: PlaceState): void {
-  while (state.active < state.max && state.waiting.length > 0) {
-    state.active++
-    state.waiting.shift()!()
-  }
 }
 
 /** Gives a turn back; the next one waiting gets it. */
@@ -439,17 +580,38 @@ export type PlaceView = {
   day: WindowCounts
 }
 
+/** A weighted percentile of the sampled answer times. */
+function percentile(
+  samples: Array<{ ms: number; weight: number }>,
+  p: number,
+): number | null {
+  if (samples.length === 0) return null
+  const sorted = [...samples].sort((a, b) => a.ms - b.ms)
+  const total = sorted.reduce((sum, entry) => sum + entry.weight, 0)
+  const target = (p / 100) * total
+  let seen = 0
+
+  for (const entry of sorted) {
+    seen += entry.weight
+    if (seen >= target) return entry.ms
+  }
+
+  return sorted.at(-1)!.ms
+}
+
 function counts(buckets: Bucket[], from: number): WindowCounts {
   const inside = buckets.filter((bucket) => bucket.at >= from)
-  const ms = inside.flatMap((bucket) => bucket.ms)
+  const samples = inside.flatMap((bucket) =>
+    bucket.ms.map((ms) => ({ ms, weight: bucket.weight })),
+  )
 
   return {
     calls: inside.reduce((sum, bucket) => sum + bucket.calls, 0),
     errors: inside.reduce((sum, bucket) => sum + bucket.errors, 0),
     throttles: inside.reduce((sum, bucket) => sum + bucket.throttles, 0),
     bytes: inside.reduce((sum, bucket) => sum + bucket.bytes, 0),
-    p50Ms: percentile(ms, 50),
-    p95Ms: percentile(ms, 95),
+    p50Ms: percentile(samples, 50),
+    p95Ms: percentile(samples, 95),
   }
 }
 
@@ -457,9 +619,16 @@ function counts(buckets: Bucket[], from: number): WindowCounts {
 export function placeView(key: string): PlaceView {
   const state = peek(key)
   const now = gateNow()
+
+  if (state) {
+    tidy(state, now)
+  }
+
   const buckets = state?.buckets ?? []
   // This minute and the one before, so it is never a few seconds' worth.
   const minuteStart = now - (now % COUNTER_BUCKET_MS) - COUNTER_BUCKET_MS
+  // Whole buckets: the last hour is the merged hours' edge.
+  const hourStart = now - COUNTER_HOUR_MS
 
   return {
     running: state?.active ?? 0,
@@ -467,18 +636,20 @@ export function placeView(key: string): PlaceView {
     cooling: coolingAt(key),
     since: state?.since ?? now,
     minute: counts(buckets, minuteStart),
-    hour: counts(buckets, now - 60 * 60_000),
+    hour: counts(buckets, hourStart),
     day: counts(buckets, now - COUNTER_DAY_MS),
   }
 }
 
-/** Ends a place's cool-down now (the owner's button). */
+/** Ends a place's cool-down and hold now (the owner's button). */
 export function endCooling(key: string): void {
   const state = peek(key)
 
   if (state) {
     state.cooling = null
+    state.holdUntil = 0
     state.level = -1
-    state.slow = 0
+    state.timeouts = 0
+    for (const times of state.tools.values()) times.slow = 0
   }
 }

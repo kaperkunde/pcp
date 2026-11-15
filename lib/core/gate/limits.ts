@@ -182,11 +182,11 @@ export const GATE_BOUNDS = {
 } as const satisfies Record<keyof GateLimits, { min: number; max: number }>
 
 /**
- * Throttle detection by latency: a place whose answers take this many
- * times its own usual time (the median of its last successes) and at least
- * SLOW_FLOOR_MS, SLOW_RUN times in a row, is treated as asking PCP to slow
- * down. A call that runs past its time limit counts as slow whatever the
- * usual is.
+ * Throttle detection by latency, per server and tool: a tool whose answers
+ * take this many times its own usual time (the median of its last
+ * successes) and at least SLOW_FLOOR_MS, SLOW_RUN times in a row, is taken
+ * as its server asking PCP to slow down. Calls past their time limit
+ * SLOW_RUN times in a row, whatever the tools, count the same.
  */
 export const SLOW_FACTOR = 5
 export const SLOW_FLOOR_MS = 10 * SECOND
@@ -195,16 +195,38 @@ export const SLOW_RUN = 3
 export const BASELINE_SAMPLES = 20
 /** Fewer successes than this: no usual time yet. */
 export const BASELINE_MIN = 5
+/** Tools whose usual time is kept per server; the least used is dropped. */
+export const MAX_TOOLS_TRACKED = 100
+
+/**
+ * What counts as a server slowing down, per class: "latency" (a tool's
+ * answers far slower than its usual, or calls past their time limit),
+ * "timeouts" (only calls past their time limit: a command, a file or a
+ * container takes as long as its work does), or "none" (a site's pages
+ * take as long as they take; only its own "slow down" counts).
+ */
+export const SLOW_DETECTION: Record<
+  GateClass,
+  "latency" | "timeouts" | "none"
+> = {
+  mcp: "latency",
+  endpoint: "latency",
+  mail: "latency",
+  calendar: "latency",
+  ssh: "timeouts",
+  service: "timeouts",
+  storage: "timeouts",
+  browser_site: "none",
+  web_fetch_site: "none",
+}
 
 /**
  * A cool-down that starts within this long after the last one ended is
  * longer than that one (twice, up to the place's backoffMaxMs); later, it
- * starts again from backoffBaseMs.
+ * starts again from backoffBaseMs. A place's own Retry-After (or rate
+ * limit's reset) is followed up to the place's backoffMaxMs too.
  */
 export const BACKOFF_MEMORY_MS = 30 * MINUTE
-
-/** The longest a place's own Retry-After is followed. */
-export const MAX_RETRY_AFTER_MS = 24 * HOUR
 
 /**
  * After its time limit a call is answered, but its turn at the place is
@@ -213,14 +235,26 @@ export const MAX_RETRY_AFTER_MS = 24 * HOUR
  */
 export const LINGER_MS = MINUTE
 
-/** The counters' windows, and how fine they are kept. */
+/**
+ * The counters' windows and how fine they are kept: by the minute for the
+ * last hour, by the hour for the rest of the day, each with a sample of
+ * its answer times for the percentiles.
+ */
 export const COUNTER_BUCKET_MS = MINUTE
+export const COUNTER_HOUR_MS = HOUR
 export const COUNTER_DAY_MS = 24 * HOUR
-/** Latencies kept per minute for the percentiles; more are sampled. */
-export const SAMPLES_PER_BUCKET = 32
+/** Answer times kept per minute; more are sampled evenly. */
+export const SAMPLES_PER_BUCKET = 16
+/** Answer times kept per hour once its minutes are merged. */
+export const SAMPLES_PER_HOUR = 32
 
 /**
  * Places whose state is held in memory, for every vault together. Past it
- * one that is idle is dropped, which only gives it a fresh start.
+ * one that is idle and not cooling down is dropped, which only gives it a
+ * fresh start; a place that is busy or cooling down is never dropped, so
+ * the bound is passed only while more places than this are. Each place
+ * holds at most 61 minute buckets of SAMPLES_PER_BUCKET times, 24 hour
+ * buckets of SAMPLES_PER_HOUR and MAX_TOOLS_TRACKED tools of
+ * BASELINE_SAMPLES: some 3,800 numbers, so about 30 MB at the bound.
  */
-export const MAX_GATED_PLACES = 10_000
+export const MAX_GATED_PLACES = 1_000

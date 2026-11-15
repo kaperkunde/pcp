@@ -1622,8 +1622,14 @@ export async function callEndpointTool(
     open,
     keepBytes,
     reach,
+    timeoutMs,
   }: {
     authHeaders: Record<string, string>
+    /**
+     * The server's time limit for a call (lib/core/gate/); the API's own
+     * default (openapi/limits.ts CALL_TIMEOUT_MS) when left out.
+     */
+    timeoutMs?: number
     /**
      * Keeps a file the API answers (a PDF, an image) as the token's result,
      * answered as its handle. Without it a file is only described.
@@ -1708,6 +1714,7 @@ export async function callEndpointTool(
           publicOnly: server.publicOnly,
           maxFileBytes,
           fileTypes: plan.fileAnswers ?? [],
+          ...(timeoutMs !== undefined ? { timeoutMs } : {}),
           ...(keepFile ? { keepFile } : {}),
           ...reach,
         },

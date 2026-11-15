@@ -174,7 +174,7 @@ describe("the call gate, whatever the way in", () => {
 
     expect(second.isError).toBe(true)
     expect(second.text).toMatch(
-      /^Things is cooling down: it answered HTTP 429 \(too many requests\)\. Nothing was sent; try again in \d+ s\./,
+      /^Things is cooling down: The API answered HTTP 429: it asks PCP to slow down\. Nothing was sent; try again in \d+ s\./,
     )
     expect(second.error).toMatchObject({ code: "paced" })
     expect(second.error!.retryAfterMs).toBeGreaterThan(55_000)
@@ -281,7 +281,9 @@ describe("the call gate, whatever the way in", () => {
     const second = await call("web_fetch", { url: `${api.origin}/page` })
 
     expect(second.error).toMatchObject({ code: "paced" })
-    expect(second.text).toMatch(/is cooling down: it answered HTTP 429/)
+    expect(second.text).toMatch(
+      /is cooling down: .* answered HTTP 429: it asks PCP to slow down/,
+    )
     expect(api.requests).toHaveLength(1)
   })
 })

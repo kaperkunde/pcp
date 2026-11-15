@@ -113,7 +113,7 @@ import {
 } from "./openapi/address"
 import { makeRedactor } from "./openapi/redact"
 import { gateServerCall } from "./gate"
-import { httpThrottle, withThrottle, type Throttle } from "./gate/signals"
+import { httpThrottle, withThrottle, type Throttle } from "./throttle-signal"
 import { paceEmbeddings } from "./pacing"
 import { PACING_DEADLINE_MARGIN_MS, type PaceRange } from "./pacing/limits"
 import { pacingNow } from "./pacing/pace"
@@ -1382,7 +1382,11 @@ export async function openUpstream(
         refusal = {
           status: response.status,
           challenge: response.headers.get("www-authenticate"),
-          throttle: httpThrottle(response.status, response.headers),
+          throttle: httpThrottle(
+            response.status,
+            response.headers,
+            server.name,
+          ),
         }
       }
 
@@ -2096,6 +2100,7 @@ async function callEndpoint(
     open,
     keepBytes,
     placed = [],
+    timeoutMs,
   }: {
     publicUrl: string
     open?: ResultOpener
@@ -2103,6 +2108,8 @@ async function callEndpoint(
     keepBytes?: BytesKeeper
     /** Secrets a wrapper's call carries in its arguments (placeSecrets). */
     placed?: string[]
+    /** The server's time limit for a call (lib/core/gate/). */
+    timeoutMs?: number
   },
 ): Promise<CallToolResult> {
   try {
@@ -2113,6 +2120,7 @@ async function callEndpoint(
       authHeaders: headers,
       redact: [...redact, ...placed],
       open,
+      ...(timeoutMs !== undefined ? { timeoutMs } : {}),
       ...(keepBytes ? { keepBytes } : {}),
       ...(reach ? { reach } : {}),
       ...(server.authType === "oauth"
@@ -2632,6 +2640,7 @@ async function dispatchKind(
       open,
       ...(keepBytes ? { keepBytes } : {}),
       placed,
+      timeoutMs,
     })
   }
 
@@ -2663,12 +2672,22 @@ async function dispatchKind(
         server,
         toolName,
         open ? await resolveHandles(args, open) : args,
-        { credential: { ...signIn, redact: [...signIn.redact, ...placed] } },
+        {
+          credential: {
+            ...signIn,
+            redact: [...signIn.redact, ...placed],
+            timeoutMs,
+          },
+        },
       )
     }
 
     return callMailTool(ctx, server, toolName, args, {
-      credential: { ...signIn, redact: [...signIn.redact, ...placed] },
+      credential: {
+        ...signIn,
+        redact: [...signIn.redact, ...placed],
+        timeoutMs,
+      },
       keep,
       keepBytes,
       open,

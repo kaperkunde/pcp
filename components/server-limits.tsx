@@ -121,7 +121,7 @@ export function ServerLimits({
               : own
                   .map(
                     (field) =>
-                      `${field.label}: ${field.value === null ? "no cap" : (inputs[field.field] ?? "")}${field.unit === "ms" ? " s" : field.unit === "bytes" ? " MiB" : ""}`,
+                      `${field.label}: ${field.value === null ? "no cap" : (inputs[field.field] ?? "")}${field.unit === "ms" ? " s" : field.unit === "bytes" ? " KiB" : ""}`,
                   )
                   .join("; ")
           }

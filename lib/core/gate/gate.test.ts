@@ -23,10 +23,17 @@ import {
   serverGateView,
   siteCooling,
 } from "./index"
-import { GATE_DEFAULTS } from "./limits"
-import { httpThrottle, throttleOf, withThrottle } from "./signals"
+import { GATE_DEFAULTS, MAX_GATED_PLACES } from "./limits"
+import {
+  httpSignal,
+  httpThrottle,
+  throttleOf,
+  withThrottle,
+} from "../throttle-signal"
 import {
   acquire,
+  holdAt,
+  placeCount,
   placeView,
   recordEnd,
   release,
@@ -40,62 +47,72 @@ const NOW = Date.parse("2026-11-15T12:00:00Z")
 
 describe("a place asking PCP to slow down", () => {
   it("is a 429, with its Retry-After in seconds or as a date", () => {
-    expect(httpThrottle(429, headers({ "retry-after": "30" }), NOW)).toEqual({
-      reason: "it answered HTTP 429 (too many requests)",
+    expect(
+      httpThrottle(429, headers({ "retry-after": "30" }), "Docs", NOW),
+    ).toEqual({
+      reason: "Docs answered HTTP 429: it asks PCP to slow down",
       retryAfterMs: 30_000,
     })
     expect(
       httpThrottle(
         429,
         headers({ "retry-after": "Sun, 15 Nov 2026 12:02:00 GMT" }),
+        "Docs",
         NOW,
       ),
     ).toMatchObject({ retryAfterMs: 120_000 })
-    expect(httpThrottle(429, headers({}), NOW)).toEqual({
-      reason: "it answered HTTP 429 (too many requests)",
+    expect(httpThrottle(429, headers({}), "Docs", NOW)).toEqual({
+      reason: "Docs answered HTTP 429: it asks PCP to slow down",
     })
+    // A 429 that says when its rate limit resets, rather than Retry-After.
+    expect(
+      httpThrottle(429, headers({ "ratelimit-reset": "20" }), "Docs", NOW),
+    ).toMatchObject({ retryAfterMs: 20_000 })
   })
 
-  it("is a 503 only with a Retry-After, and a rate limit with nothing left", () => {
-    expect(httpThrottle(503, headers({}), NOW)).toBeNull()
-    expect(httpThrottle(503, headers({ "retry-after": "5" }), NOW)).toEqual({
-      reason: "it answered HTTP 503 and asked to be called again later",
-      retryAfterMs: 5_000,
-    })
+  it("is a 503 only with a Retry-After; a rate limit with nothing left only holds the next call", () => {
+    expect(httpThrottle(503, headers({}), "Docs", NOW)).toBeNull()
     expect(
-      httpThrottle(
-        200,
-        headers({ "x-ratelimit-remaining": "0", "x-ratelimit-reset": "60" }),
-        NOW,
-      ),
-    ).toEqual({
+      httpThrottle(503, headers({ "retry-after": "5" }), "Docs", NOW),
+    ).toMatchObject({ retryAfterMs: 5_000 })
+
+    const spent = headers({
+      "x-ratelimit-remaining": "0",
+      "x-ratelimit-reset": "60",
+    })
+    // Not a refusal: the call went through, perhaps on one bucket of many.
+    expect(httpThrottle(200, spent, "Docs", NOW)).toBeNull()
+    expect(httpSignal(200, spent, "Docs", NOW)).toEqual({
       reason: "its rate limit has no calls left until it resets",
       retryAfterMs: 60_000,
+      hold: true,
     })
     // A reset as a Unix time, as some APIs send it.
     expect(
-      httpThrottle(
+      httpSignal(
         200,
         headers({
           "x-ratelimit-remaining": "0",
           "x-ratelimit-reset": String((NOW + 90_000) / 1000),
         }),
+        "Docs",
         NOW,
       ),
-    ).toMatchObject({ retryAfterMs: 90_000 })
+    ).toMatchObject({ retryAfterMs: 90_000, hold: true })
     expect(
-      httpThrottle(200, headers({ "ratelimit-remaining": "3" }), NOW),
+      httpSignal(200, headers({ "ratelimit-remaining": "3" }), "Docs", NOW),
     ).toBeNull()
   })
 
   it("is read off an error's causes and off an answer (the contract with mail and calendar code)", () => {
-    const inner = Object.assign(new Error("BYE"), {
-      pcpThrottle: { reason: "the server said it is busy", retryAfterMs: 1e12 },
+    const inner = withThrottle(new Error("BYE"), {
+      reason: "the server said it is busy",
+      retryAfterMs: 1e12,
     })
     expect(throttleOf(new Error("outer", { cause: inner }))).toEqual({
       reason: "the server said it is busy",
-      // Bounded: a day at most.
-      retryAfterMs: 24 * 60 * 60_000,
+      // Bounded: an hour at most.
+      retryAfterMs: 60 * 60_000,
     })
     expect(throttleOf(new Error("plain"))).toBeNull()
 
@@ -215,19 +232,99 @@ describe("the gate's state", () => {
     expect(fresh.until - fresh.since).toBe(10_000)
   })
 
-  it("takes a run of answers far slower than usual as a request to slow down", () => {
+  it("takes a run of one tool's answers far slower than its usual as a request to slow down", () => {
     for (let i = 0; i < 10; i++) {
-      recordEnd("k", "Mail", limits, { ok: true, ms: 400 })
+      recordEnd("k", "Mail", limits, {
+        ok: true,
+        ms: 400,
+        tool: "search_emails",
+      })
     }
 
-    expect(recordEnd("k", "Mail", limits, { ok: true, ms: 80_000 })).toBeNull()
-    expect(recordEnd("k", "Mail", limits, { ok: true, ms: 81_000 })).toBeNull()
-    const cooled = recordEnd("k", "Mail", limits, { ok: true, ms: 85_000 })
+    const slow = (ms: number) =>
+      recordEnd("k", "Mail", limits, { ok: true, ms, tool: "search_emails" })
 
-    expect(cooled?.reason).toBe(
-      "its answers are taking much longer than usual (3 in a row, about 85 s each against 1 s)",
+    expect(slow(80_000)).toBeNull()
+    expect(slow(81_000)).toBeNull()
+    expect(slow(85_000)?.reason).toBe(
+      "its answers to search_emails are taking much longer than usual (3 in a row, about 85 s each against 1 s)",
     )
     expect(placeView("k").minute.throttles).toBe(1)
+  })
+
+  it("never takes a slow tool for a slow server: fast commands, then long builds", () => {
+    const ssh = GATE_DEFAULTS.ssh
+
+    for (const detect of ["latency", "timeouts"] as const) {
+      resetGate()
+
+      for (let i = 0; i < 10; i++) {
+        recordEnd("s", "Box", ssh, { ok: true, ms: 80, tool: "ls", detect })
+      }
+
+      for (let i = 0; i < 3; i++) {
+        expect(
+          recordEnd("s", "Box", ssh, {
+            ok: true,
+            ms: 60_000,
+            tool: "build",
+            detect,
+          }),
+        ).toBeNull()
+      }
+
+      expect(placeView("s").cooling).toBeNull()
+    }
+
+    // Where only time limits count, even a tool's own slow run does not.
+    resetGate()
+    for (let i = 0; i < 10; i++) {
+      recordEnd("s", "Box", ssh, {
+        ok: true,
+        ms: 80,
+        tool: "run_command",
+        detect: "timeouts",
+      })
+    }
+    for (let i = 0; i < 4; i++) {
+      recordEnd("s", "Box", ssh, {
+        ok: true,
+        ms: 60_000,
+        tool: "run_command",
+        detect: "timeouts",
+      })
+    }
+    expect(placeView("s").cooling).toBeNull()
+  })
+
+  it("follows a server's Retry-After no further than its longest cool-down", () => {
+    const cooled = recordEnd("k", "Mail", limits, {
+      ok: false,
+      ms: 50,
+      throttle: { reason: "Busy.", retryAfterMs: 60 * 60_000 },
+    })!
+
+    expect(cooled.until - cooled.since).toBe(limits.backoffMaxMs)
+    // Its words, without their full stop, go into a sentence of PCP's.
+    expect(cooled.reason).toBe("Busy")
+  })
+
+  it("holds the next calls until a spent rate limit resets, and cools nothing", () => {
+    recordEnd("k", "Mail", limits, {
+      ok: true,
+      ms: 50,
+      throttle: {
+        reason: "its rate limit has no calls left until it resets",
+        retryAfterMs: 20_000,
+        hold: true,
+      },
+    })
+
+    expect(placeView("k").cooling).toBeNull()
+    expect(placeView("k").minute.throttles).toBe(0)
+    expect(holdAt("k")).toBe(NOW + 20_000)
+    now += 20_001
+    expect(holdAt("k")).toBe(0)
   })
 
   it("takes calls past their time limit in a row as one, with no usual time yet", () => {
@@ -266,6 +363,57 @@ describe("the gate's state", () => {
       p50Ms: 200,
       p95Ms: 1_000,
     })
+  })
+
+  it("samples a busy minute's answer times evenly, not its last ones", () => {
+    for (let i = 0; i < 900; i++) {
+      recordEnd("k", "Mail", limits, { ok: true, ms: 10 })
+    }
+    for (let i = 0; i < 100; i++) {
+      recordEnd("k", "Mail", limits, { ok: true, ms: 1_000 })
+    }
+
+    const { minute } = placeView("k")
+    expect(minute.calls).toBe(1_000)
+    expect(minute.p50Ms).toBe(10)
+  })
+
+  it("keeps a day by the hour past the last one, and never drops a place cooling down", () => {
+    for (let minute = 0; minute < 6 * 60; minute++) {
+      recordEnd("k", "Mail", limits, { ok: true, ms: 100 + minute })
+      now += 60_000
+    }
+
+    const view = placeView("k")
+    expect(view.day.calls).toBe(6 * 60)
+    expect(view.hour.calls).toBe(60)
+    expect(view.day.p95Ms).toBeGreaterThan(view.day.p50Ms!)
+
+    resetGate()
+    recordEnd("cooling", "Mail", limits, {
+      ok: false,
+      ms: 1,
+      throttle: { reason: "busy" },
+    })
+    for (let i = 0; i < MAX_GATED_PLACES + 10; i++) {
+      recordEnd(`p${i}`, "Other", limits, { ok: true, ms: 1 })
+    }
+
+    expect(placeCount()).toBe(MAX_GATED_PLACES)
+    expect(placeView("cooling").cooling).not.toBeNull()
+  })
+
+  it("lets those waiting in when calls at once is raised", async () => {
+    expect(await acquire("k", "Mail", 1, 0)).toBe(true)
+    const second = acquire("k", "Mail", 1, 5_000)
+    expect(placeView("k").waiting).toBe(1)
+
+    // A later call with the owner's new limit of two.
+    expect(await acquire("k", "Mail", 2, 0)).toBe(false)
+    expect(await second).toBe(true)
+    expect(placeView("k")).toMatchObject({ running: 2, waiting: 0 })
+    release("k")
+    release("k")
   })
 
   it("lets so many run at once and the next in when one ends", async () => {

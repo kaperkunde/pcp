@@ -92,6 +92,11 @@ export class DavClient {
     private readonly credential: DavCredential,
   ) {}
 
+  /** One request's time: the account's limit, or DAV_CALL_TIMEOUT_MS. */
+  private timeoutMs(): number {
+    return this.credential.timeoutMs ?? DAV_CALL_TIMEOUT_MS
+  }
+
   /** One request with the credential, renewing an OAuth token once on 401. */
   async request(
     url: string,
@@ -131,7 +136,7 @@ export class DavClient {
               init.body === undefined
                 ? undefined
                 : asBytes(Buffer.from(init.body, "utf8")),
-            signal: AbortSignal.timeout(DAV_CALL_TIMEOUT_MS),
+            signal: AbortSignal.timeout(this.timeoutMs()),
           },
           davSendOptions(url, { elsewhere: isElsewhere(url, this.typed) }),
         )
@@ -145,7 +150,7 @@ export class DavClient {
         }
 
         throw new DavTransportError(
-          `${where(url)} could not be reached: ${describeFetchError(error, DAV_CALL_TIMEOUT_MS)}`,
+          `${where(url)} could not be reached: ${describeFetchError(error, this.timeoutMs())}`,
         )
       }
 
@@ -182,7 +187,7 @@ export class DavClient {
         body = await readCapped(response, maxBytes)
       } catch (error) {
         throw new DavTransportError(
-          `${where(url)} stopped answering: ${describeFetchError(error, DAV_CALL_TIMEOUT_MS)}`,
+          `${where(url)} stopped answering: ${describeFetchError(error, this.timeoutMs())}`,
         )
       }
 

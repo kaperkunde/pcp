@@ -1,7 +1,6 @@
 import type { CallToolResult } from "@modelcontextprotocol/server"
 
 import type { VaultContext } from "../context"
-import { isPcpError, PcpError } from "../errors"
 import { paceServerCall, pacedResult, type PacedRefusal } from "../pacing"
 import { pacingOff } from "../pacing/limits"
 import { waitBudget } from "../pacing/pace"
@@ -11,21 +10,24 @@ import {
   gateClassOf,
   GATE_DEFAULTS,
   LINGER_MS,
+  SLOW_DETECTION,
   type GateLimits,
 } from "./limits"
-import { stripThrottle, throttleOf, type Throttle } from "./signals"
+import { stripThrottle, throttleOf, type Throttle } from "../throttle-signal"
 import {
   acquire,
   bytesFreeIn,
   bytesToday,
   coolingAt,
   gateNow,
+  holdAt,
   placeView,
   recordEnd,
   release,
   serverPlace,
   sitePlace,
   usualMs,
+  type CallEnd,
   type Cooling,
   type PlaceView,
 } from "./state"
@@ -148,7 +150,7 @@ export async function gateServerCall(
   }
 
   if (limits.bytesPerDay !== null) {
-    const { bytes } = bytesToday(key)
+    const bytes = bytesToday(key)
 
     if (bytes >= limits.bytesPerDay) {
       const retryAfterMs = bytesFreeIn(key, limits.bytesPerDay)
@@ -160,6 +162,26 @@ export async function gateServerCall(
   }
 
   const asked = gateNow()
+  // A rate limit with nothing left: wait for its reset, within this call's
+  // own time, or say when.
+  const hold = holdAt(key)
+
+  if (hold) {
+    const wait = hold - asked
+    const room = pacingOff()
+      ? Math.max(waitBudget(deadline, asked), 30_000)
+      : waitBudget(deadline, asked)
+
+    if (wait > room) {
+      return pacedResult({
+        message: `${label}'s rate limit has no calls left until it resets. Nothing was sent; try again in ${seconds(wait)} s.`,
+        retryAfterMs: wait,
+      })
+    }
+
+    await sleep(wait, signal)
+  }
+
   const paced = await paceServerCall(ctx, server, toolName, {
     signal,
     deadline,
@@ -186,15 +208,49 @@ export async function gateServerCall(
     signal,
   )
 
+  // A cool-down that started while this one waited its turn: refused now.
+  const since = turned ? coolingAt(key) : null
+
+  if (since) {
+    release(key)
+    return pacedResult(coolingRefusal(label, since))
+  }
+
   if (!turned) {
-    const retryAfterMs = usualMs(key)
+    const retryAfterMs = usualMs(key, toolName)
     return pacedResult({
       message: `${label} is already answering ${limits.maxConcurrent} call${limits.maxConcurrent === 1 ? "" : "s"}, as many as it takes at once, for longer than this call can wait. Nothing was sent; try again in ${seconds(retryAfterMs)} s.`,
       retryAfterMs,
     })
   }
 
-  return runTimed(key, label, limits, () => run(limits.timeoutMs))
+  return runTimed(
+    key,
+    label,
+    limits,
+    { tool: toolName, detect: SLOW_DETECTION[gateClassOf(server.kind)!] },
+    () => run(limits.timeoutMs),
+  )
+}
+
+/** Waits `ms`, or rejects with the signal's reason when it aborts. */
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(signal.reason)
+      return
+    }
+
+    const onAbort = () => {
+      clearTimeout(timer)
+      reject(signal!.reason)
+    }
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort)
+      resolve()
+    }, ms)
+    signal?.addEventListener("abort", onAbort, { once: true })
+  })
 }
 
 /**
@@ -205,6 +261,7 @@ async function runTimed(
   key: string,
   label: string,
   limits: GateLimits,
+  how: Pick<CallEnd, "tool" | "detect">,
   run: () => Promise<CallToolResult>,
 ): Promise<CallToolResult> {
   const started = gateNow()
@@ -230,6 +287,7 @@ async function runTimed(
 
   if (outcome === "late") {
     recordEnd(key, label, limits, {
+      ...how,
       ok: false,
       ms: limits.timeoutMs,
       timedOut: true,
@@ -257,13 +315,17 @@ async function runTimed(
 
   if ("error" in outcome) {
     const throttle = throttleOf(outcome.error)
-    const cooled = recordEnd(key, label, limits, { ok: false, ms, throttle })
+    const cooled = recordEnd(key, label, limits, {
+      ...how,
+      ok: false,
+      ms,
+      throttle,
+    })
 
-    if (cooled && throttle && isPcpError(outcome.error)) {
-      throw new PcpError(
-        outcome.error.code,
-        `${outcome.error.message} ${coolingNote(label, cooled)}`,
-      )
+    // Said on the error itself, which keeps its class (a PcpError's code,
+    // a public-only refusal) for whoever handles it.
+    if (cooled && throttle && outcome.error instanceof Error) {
+      outcome.error.message = `${outcome.error.message} ${coolingNote(label, cooled)}`
     }
 
     throw outcome.error
@@ -273,6 +335,7 @@ async function runTimed(
   const throttle: Throttle | null = throttleOf(result)
   stripThrottle(result)
   const cooled = recordEnd(key, label, limits, {
+    ...how,
     ok: result.isError !== true,
     ms,
     bytes: resultBytes(result),
@@ -326,7 +389,7 @@ export function recordSite(
     sitePlace(ctx.vaultId, host),
     host,
     GATE_DEFAULTS[gateClass],
-    { ...end, detectSlow: false },
+    { ...end, detect: SLOW_DETECTION[gateClass] },
   )
 }
 

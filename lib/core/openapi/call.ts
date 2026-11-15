@@ -3,7 +3,7 @@ import { STATUS_CODES } from "node:http"
 import type { CallToolResult } from "@modelcontextprotocol/client"
 
 import { isPcpError, PcpError } from "../errors"
-import { httpThrottle, withThrottle, type Throttle } from "../gate/signals"
+import { httpSignal, withThrottle, type Throttle } from "../throttle-signal"
 import { PublicOnlyRefusal } from "../public-only"
 import { AddressBlockedError } from "./address"
 import { describeFetchError, discard, readCapped } from "./http"
@@ -156,7 +156,7 @@ function holdsSecret(bytes: Buffer, values: string[]): boolean {
 /**
  * A call, and whether its answer asks PCP to slow down (429, a 503 with
  * Retry-After, rate-limit headers with nothing left): marked on the result
- * for the call gate (lib/core/gate/signals.ts), which reads it off.
+ * for the call gate (lib/core/throttle-signal.ts), which reads it off.
  */
 export async function executeCall(
   request: BuiltRequest,
@@ -166,7 +166,7 @@ export async function executeCall(
   const outcome = await sendCall(request, {
     ...options,
     seen: (response) => {
-      throttle = httpThrottle(response.status, response.headers)
+      throttle = httpSignal(response.status, response.headers, "The API")
     },
   })
 

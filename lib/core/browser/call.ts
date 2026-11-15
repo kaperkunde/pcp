@@ -10,7 +10,8 @@ import type { VaultContext } from "../context"
 import { db } from "../db"
 import { invalid, PcpError } from "../errors"
 import { CHALLENGE_LINE } from "../fetch/challenge"
-import { siteCooling } from "../gate"
+import { recordSite, siteCooling } from "../gate"
+import { httpThrottle, type Throttle } from "../throttle-signal"
 import { isPcpSite } from "../fetch/fetch"
 import { sliceText } from "../fetch/html"
 import { resolvePrivateAccess, siteKey } from "../fetch/rules"
@@ -1261,9 +1262,16 @@ function addressSite(raw: string): string | null {
 }
 
 /** A turn that holds nothing back: an action with no site to pace. */
-const NO_TURN: Turn = { release: () => {} }
+const NO_TURN: SiteTurn = { release: () => {}, ok: true, throttle: null }
 
-function isTurn(value: Turn | CallToolResult): value is Turn {
+/**
+ * A turn at a site, counted for the call gate when it is released
+ * (lib/core/gate/): whether the action went through, and a "slow down" the
+ * site's main page answered with.
+ */
+type SiteTurn = Turn & { ok: boolean; throttle: Throttle | null }
+
+function isTurn(value: SiteTurn | CallToolResult): value is SiteTurn {
   return "release" in value
 }
 
@@ -1282,7 +1290,7 @@ async function pacedTurn(
   tab: Tab,
   site: string | null,
   pacingClass: BrowserPacingClass | null,
-): Promise<Turn | CallToolResult> {
+): Promise<SiteTurn | CallToolResult> {
   if (!site || !pacingClass) {
     return NO_TURN
   }
@@ -1315,7 +1323,28 @@ async function pacedTurn(
     deadline: browserTurnDeadline(scope.deadline),
   })
 
-  return "release" in turn ? turn : pacedResult(turn)
+  if (!("release" in turn)) {
+    return pacedResult(turn)
+  }
+
+  const started = Date.now()
+  let released = false
+  const counted: SiteTurn = {
+    ok: true,
+    throttle: null,
+    release: () => {
+      turn.release()
+      if (released) return
+      released = true
+      recordSite(scope.ctx, site, "browser_site", {
+        ok: counted.ok,
+        ms: Date.now() - started,
+        throttle: counted.throttle,
+      })
+    },
+  }
+
+  return counted
 }
 
 /**
@@ -1418,6 +1447,8 @@ export async function performNavigate(
 
   const current = tab
 
+  // What the page answered, for the site's turn.
+  const seen: { throttle: Throttle | null } = { throttle: null }
   const answer = onLane(
     scope,
     vault,
@@ -1442,7 +1473,13 @@ export async function performNavigate(
       }
 
       try {
-        return await openIn(current)
+        const opened = await openIn(current)
+        turn.ok = opened.isError !== true
+        turn.throttle = seen.throttle
+        return opened
+      } catch (error) {
+        turn.ok = false
+        throw error
       } finally {
         turn.release()
       }
@@ -1460,10 +1497,22 @@ export async function performNavigate(
     const since = Date.now()
     atStep(scope.clock, `loading ${siteKey(url)} in tab ${current.id}`, true)
     const go = () =>
-      current.page.goto(url.href, {
-        waitUntil: "domcontentloaded",
-        timeout: NAVIGATION_TIMEOUT_MS,
-      })
+      current.page
+        .goto(url.href, {
+          waitUntil: "domcontentloaded",
+          timeout: NAVIGATION_TIMEOUT_MS,
+        })
+        .then((response) => {
+          // The site's own "slow down" on the page itself, for the gate.
+          seen.throttle = response
+            ? httpThrottle(
+                response.status(),
+                new Headers(response.headers()),
+                siteKey(url),
+              )
+            : null
+          return response
+        })
 
     try {
       await go().catch(async (error) => {
@@ -1910,7 +1959,12 @@ async function onTab(
       }
 
       try {
-        return await acting(picked, turn)
+        const done = await acting(picked, turn)
+        turn.ok = done.isError !== true
+        return done
+      } catch (error) {
+        turn.ok = false
+        throw error
       } finally {
         turn.release()
       }
