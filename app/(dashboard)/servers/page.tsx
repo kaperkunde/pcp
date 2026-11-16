@@ -54,6 +54,10 @@ export default async function ServersPage() {
             name: server.name,
             message: server.statusMessage,
             seenAt: server.statusAt,
+            // Signing in again is the owner's, on the server's page.
+            clearable: !(
+              server.status === "auth_required" && server.authType === "oauth"
+            ),
           }))}
       />
 

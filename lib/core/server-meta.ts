@@ -434,13 +434,16 @@ async function clearStatus(ctx: VaultContext, id: string): Promise<void> {
 const STALE_AFTER_SUCCESS: string[] = ["auth_required", "refused", "error"]
 
 /**
- * A call that went well: an alert about this server is over. Writes only
- * while the status it was opened with is an alert, so a server that is fine
- * costs no write.
+ * A call that went well: an alert about this server is over, unless a
+ * newer one landed while the call ran (another call failed meanwhile), which
+ * the call's success says nothing about. Writes only while the status the
+ * server was opened with is an alert, so a server that is fine costs no
+ * write; the re-read and the write are one transaction.
  */
 export async function clearAlertAfterSuccess(
   ctx: VaultContext,
   server: { id: string; status: string; authType?: string },
+  startedAt: Date,
 ): Promise<void> {
   if (
     !STALE_AFTER_SUCCESS.includes(server.status) ||
@@ -450,7 +453,33 @@ export async function clearAlertAfterSuccess(
     return
   }
 
-  await clearStatus(ctx, server.id)
+  try {
+    await db().$transaction(async (tx) => {
+      const row = await tx.mcpServer.findUnique({
+        where: { id: server.id },
+        select: { status: true, statusAt: true },
+      })
+
+      if (
+        !row ||
+        !STALE_AFTER_SUCCESS.includes(row.status) ||
+        (row.statusAt && row.statusAt > startedAt)
+      ) {
+        return
+      }
+
+      await writeServer(
+        ctx,
+        server.id,
+        { status: "ok", statusMessage: "", statusAt: null },
+        tx,
+      )
+    })
+  } catch {
+    console.error("[servers] could not clear a server's alert", {
+      server: server.id,
+    })
+  }
 }
 
 /**
@@ -462,11 +491,13 @@ export async function clearAlertAfterSuccess(
 export async function clearAlerts(
   ctx: VaultContext,
   ids?: readonly string[],
+  /** Only alerts in these statuses (a changed secret: auth_required). */
+  statuses: readonly string[] = STALE_AFTER_SUCCESS,
 ): Promise<number> {
   const rows = await db().mcpServer.findMany({
     where: {
       vaultId: ctx.vaultId,
-      status: { in: STALE_AFTER_SUCCESS },
+      status: { in: [...statuses] },
       ...(ids ? { id: { in: [...ids] } } : {}),
     },
     select: { id: true, status: true, authType: true },

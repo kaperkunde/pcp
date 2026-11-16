@@ -18,6 +18,8 @@ export type ServerAlert = {
   message: string
   /** When it last happened. */
   seenAt: Date | null
+  /** False when only you can mend it (sign in again): Clear all leaves it. */
+  clearable: boolean
 }
 
 /**
@@ -51,6 +53,17 @@ export function ServerAlerts({ alerts }: { alerts: ServerAlert[] }) {
               {alert.name}
             </Link>{" "}
             <span className="text-muted-foreground">{alert.message}</span>
+            {alert.clearable ? null : (
+              <>
+                {" "}
+                <Link
+                  href={`/servers/${alert.id}`}
+                  className="font-medium text-warning hover:underline"
+                >
+                  Connect it again
+                </Link>
+              </>
+            )}
             {alert.seenAt ? (
               <span className="block text-xs text-muted-foreground">
                 Last seen <RelativeDate value={alert.seenAt} />
@@ -59,14 +72,16 @@ export function ServerAlerts({ alerts }: { alerts: ServerAlert[] }) {
           </li>
         ))}
       </ul>
-      <form action={action} className="flex flex-col gap-2">
-        <FormError error={state.status === "error" ? state.error : null} />
-        <div>
-          <SubmitButton size="sm" variant="outline" pendingText="Clearing…">
-            Clear all
-          </SubmitButton>
-        </div>
-      </form>
+      {alerts.some((alert) => alert.clearable) ? (
+        <form action={action} className="flex flex-col gap-2">
+          <FormError error={state.status === "error" ? state.error : null} />
+          <div>
+            <SubmitButton size="sm" variant="outline" pendingText="Clearing…">
+              Clear all
+            </SubmitButton>
+          </div>
+        </form>
+      ) : null}
     </section>
   )
 }

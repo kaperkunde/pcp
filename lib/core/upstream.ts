@@ -2495,6 +2495,8 @@ async function dispatchCall(
   options: CallOptions,
   placed: string[],
 ): Promise<CallToolResult> {
+  const startedAt = new Date()
+
   try {
     const result = await dispatchKind(
       ctx,
@@ -2508,7 +2510,7 @@ async function dispatchCall(
     // It went well: an alert about the server (its credentials were
     // rejected, it could not be reached) is over.
     if (!result.isError) {
-      await clearAlertAfterSuccess(ctx, server)
+      await clearAlertAfterSuccess(ctx, server, startedAt)
     }
 
     return result
