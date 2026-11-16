@@ -145,6 +145,7 @@ import {
   writeManagedSecret,
 } from "./secrets"
 import {
+  clearAlertAfterSuccess,
   extraAuthHeaders,
   isCalendarKind,
   isMailKind,
@@ -2494,8 +2495,25 @@ async function dispatchCall(
   options: CallOptions,
   placed: string[],
 ): Promise<CallToolResult> {
+  const startedAt = new Date()
+
   try {
-    return await dispatchKind(ctx, server, toolName, args, options, placed)
+    const result = await dispatchKind(
+      ctx,
+      server,
+      toolName,
+      args,
+      options,
+      placed,
+    )
+
+    // It went well: an alert about the server (its credentials were
+    // rejected, it could not be reached) is over.
+    if (!result.isError) {
+      await clearAlertAfterSuccess(ctx, server, startedAt)
+    }
+
+    return result
   } catch (error) {
     if (!isPcpError(error) || error.code !== "upstream") {
       throw error
