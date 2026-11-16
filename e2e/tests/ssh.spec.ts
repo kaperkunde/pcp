@@ -142,8 +142,10 @@ test("a server with another host key is refused until the owner forgets the old 
   expect(toolText(refused)).toMatch(/not the one PCP pinned/)
   expect(fake.logins).toEqual([])
 
+  // The refusal is an alert above the list, which leads to the server.
   await page.goto("/servers")
-  await page.getByRole("link").filter({ hasText: NAME }).click()
+  const alerts = page.getByRole("region", { name: "Alerts" })
+  await alerts.getByRole("link", { name: NAME, exact: true }).click()
   await expect(page.getByTestId("ssh-host-key")).toContainText(
     fingerprint(before),
   )
@@ -158,4 +160,11 @@ test("a server with another host key is refused until the owner forgets the old 
   )
 
   expect(JSON.parse(toolText(await call()))).toMatchObject({ exit_code: 0 })
+
+  // A call that went well clears the server's alert.
+  await page.goto("/servers")
+  await expect(page.getByRole("link", { name: NAME, exact: true })).toHaveCount(
+    0,
+  )
+  await expect(alerts).toHaveCount(0)
 })
