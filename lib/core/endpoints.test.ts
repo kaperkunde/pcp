@@ -26,11 +26,14 @@ import {
   deleteSecret,
   listSecrets,
   revealSecret,
+  updateSecret,
 } from "./secrets"
 import {
+  clearAlerts,
   getServer,
   extraAuthHeaders,
   listServers,
+  setServerStatus,
   setToolDescription,
   updateServer,
 } from "./servers"
@@ -1336,6 +1339,85 @@ describe("calling an endpoint tool", () => {
     const after = await getServer(ctx, server.id)
     expect(after.status).toBe("auth_required")
     expect(after.statusMessage).toMatch(/rejected the credentials/)
+  })
+
+  it("clears a credentials alert after the next successful call", async () => {
+    const server = await endpoint()
+    await setServerStatus(
+      ctx,
+      server.id,
+      "auth_required",
+      "Pets rejected the credentials PCP sent (HTTP 401).",
+    )
+    const result = await callServerTool(
+      ctx,
+      await getServer(ctx, server.id),
+      "getPet",
+      { petId: 1 },
+      PUBLIC,
+    )
+    expect(result.isError).toBeFalsy()
+    const after = await getServer(ctx, server.id)
+    expect(after.status).toBe("ok")
+    expect(after.statusMessage).toBe("")
+    expect(after.statusAt).toBeNull()
+  })
+
+  it("keeps the alert when the call failed", async () => {
+    const server = await endpoint()
+    await callServerTool(ctx, server, "getPet", { petId: 401 }, PUBLIC)
+    const failed = await getServer(ctx, server.id)
+    await callServerTool(ctx, failed, "getPet", { petId: 404 }, PUBLIC)
+    expect((await getServer(ctx, server.id)).status).toBe("auth_required")
+  })
+
+  it("clears the alerts of the servers that use a secret once its value changes", async () => {
+    const server = await endpoint()
+    const other = await getServer(
+      ctx,
+      (
+        await createEndpoint(
+          ctx,
+          input({ name: "Other pets", baseUrl: `${api.origin}/api` }),
+        )
+      ).id,
+    )
+    await setServerStatus(ctx, server.id, "auth_required", "rejected")
+    await setServerStatus(ctx, other.id, "error", "unrelated")
+    const secret = (await listSecrets(ctx)).find((s) =>
+      s.usedBy.some((u) => u.id === server.id),
+    )!
+    await updateSecret(ctx, secret.id, { description: "only words" })
+    expect((await getServer(ctx, server.id)).status).toBe("auth_required")
+    await updateSecret(ctx, secret.id, { value: "sk-live-new-value-123" })
+    expect((await getServer(ctx, server.id)).status).toBe("ok")
+    expect((await getServer(ctx, server.id)).statusMessage).toBe("")
+  })
+
+  it("notes when an alert last happened, and clears every alert at once", async () => {
+    const a = await endpoint()
+    const b = await getServer(
+      ctx,
+      (
+        await createEndpoint(
+          ctx,
+          input({ name: "Second", baseUrl: `${api.origin}/api` }),
+        )
+      ).id,
+    )
+    const before = Date.now()
+    await setServerStatus(ctx, a.id, "auth_required", "rejected")
+    await setServerStatus(ctx, b.id, "error", "down")
+    const seen = (await getServer(ctx, a.id)).statusAt
+    expect(seen!.getTime()).toBeGreaterThanOrEqual(before)
+    expect(await clearAlerts(ctx)).toBe(2)
+    for (const id of [a.id, b.id]) {
+      const server = await getServer(ctx, id)
+      expect(server.status).toBe("ok")
+      expect(server.statusMessage).toBe("")
+      expect(server.statusAt).toBeNull()
+    }
+    expect(await clearAlerts(ctx)).toBe(0)
   })
 
   it("will not send a secret a header cannot carry, and never quotes it", async () => {

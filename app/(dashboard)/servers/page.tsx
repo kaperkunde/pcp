@@ -3,6 +3,7 @@ import type { Metadata } from "next"
 import { GetStarted } from "@/components/get-started"
 import { PageHeader } from "@kaperkunde/ui/page"
 import { ServerAddMenu } from "@/components/server-add-menu"
+import { ServerAlerts } from "@/components/server-alerts"
 import { ServerList } from "@/components/server-list"
 import { ListSection } from "@kaperkunde/ui/list"
 import { listApiTokens } from "@/lib/core/api-tokens"
@@ -37,6 +38,23 @@ export default async function ServersPage() {
             hasBrowser={servers.some((server) => server.kind === "browser")}
           />
         }
+      />
+
+      <ServerAlerts
+        alerts={servers
+          .filter(
+            (server) =>
+              server.statusMessage &&
+              (server.status === "auth_required" ||
+                server.status === "refused" ||
+                server.status === "error"),
+          )
+          .map((server) => ({
+            id: server.id,
+            name: server.name,
+            message: server.statusMessage,
+            seenAt: server.statusAt,
+          }))}
       />
 
       {servers.length === 0 ? (

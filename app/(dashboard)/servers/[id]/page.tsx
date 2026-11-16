@@ -409,6 +409,7 @@ export default async function ServerPage({
           authType: server.authType as AuthType,
           status: server.status as ServerStatus,
           statusMessage: server.statusMessage,
+          statusAt: server.statusAt,
           connected:
             server.authType !== "oauth" || server.oauthConnectedAt !== null,
           lastSyncedAt: server.lastSyncedAt,

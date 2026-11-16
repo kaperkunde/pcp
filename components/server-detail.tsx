@@ -65,6 +65,8 @@ export type ServerDetailProps = {
     authType: AuthType
     status: ServerStatus
     statusMessage: string
+    /** When the alert last happened. */
+    statusAt: Date | null
     connected: boolean
     lastSyncedAt: Date | null
     /** OAuth: whether PCP can renew its access, and until when it lasts. */
@@ -272,6 +274,11 @@ export function ServerDetail({
       {statusTrouble ? (
         <Attention>
           <p>{server.statusMessage}</p>
+          {server.statusAt ? (
+            <p className="text-xs opacity-80">
+              Last seen <RelativeDate value={server.statusAt} />
+            </p>
+          ) : null}
         </Attention>
       ) : null}
       {server.oauthConnection && !server.oauthConnection.renewable ? (
