@@ -22,9 +22,18 @@ import {
   recordSite,
   serverCooling,
   serverGateView,
+  serverSlowing,
   siteCooling,
 } from "./index"
-import { GATE_DEFAULTS, MAX_GATED_PLACES } from "./limits"
+import {
+  GATE_BOUNDS,
+  GATE_DEFAULTS,
+  MAX_GATED_PLACES,
+  SLOWDOWN_EASE_AFTER,
+  SLOWDOWN_MAX_LEVEL,
+  SLOWDOWN_MEMORY_MS,
+  slowedLimits,
+} from "./limits"
 import {
   httpSignal,
   httpThrottle,
@@ -33,6 +42,7 @@ import {
 } from "../throttle-signal"
 import {
   acquire,
+  endCooling,
   holdAt,
   placeCount,
   placeView,
@@ -40,6 +50,9 @@ import {
   release,
   resetGate,
   setGateClock,
+  type Cooling,
+  type GateEffect,
+  type Slowing,
 } from "./state"
 import { readServerLimits, writeServerLimits } from "./store"
 
@@ -171,7 +184,41 @@ describe("limits", () => {
       "Time limit per call: 20 s → 45 s (PCP's default)",
     ])
   })
+
+  it("while a place goes slower: one call at a time, further apart at each level, a longer time limit", () => {
+    const mail = GATE_DEFAULTS.mail
+
+    expect(slowedLimits(mail, 1)).toEqual({
+      ...mail,
+      maxConcurrent: 1,
+      minIntervalMs: 1_000,
+      timeoutMs: 135_000,
+    })
+    expect(slowedLimits(mail, 2).minIntervalMs).toBe(2_000)
+    expect(slowedLimits(mail, 4).minIntervalMs).toBe(8_000)
+    // The time limit is the same at every level (a pooled mail session
+    // is not opened again at each step), within the machine's bound.
+    expect(slowedLimits(mail, 4).timeoutMs).toBe(135_000)
+    expect(
+      slowedLimits({ ...mail, timeoutMs: GATE_BOUNDS.timeoutMs.max }, 1)
+        .timeoutMs,
+    ).toBe(GATE_BOUNDS.timeoutMs.max)
+    // A spacing of the owner's that is longer stays.
+    expect(
+      slowedLimits({ ...mail, minIntervalMs: 30_000 }, 1).minIntervalMs,
+    ).toBe(30_000)
+  })
 })
+
+/** The cool-down a call's end started, or null. */
+function cooledBy(effect: GateEffect | null): Cooling | null {
+  return effect?.kind === "cooling" ? effect.cooling : null
+}
+
+/** The slowdown a call's end started, or null. */
+function slowedBy(effect: GateEffect | null): Slowing | null {
+  return effect?.kind === "slowing" ? effect.slowing : null
+}
 
 describe("the gate's state", () => {
   let now = NOW
@@ -189,11 +236,13 @@ describe("the gate's state", () => {
   })
 
   it("cools a place down for as long as it asked, then lets calls through", () => {
-    const cooled = recordEnd("k", "Mail", limits, {
-      ok: false,
-      ms: 200,
-      throttle: { reason: "too many logins", retryAfterMs: 60_000 },
-    })
+    const cooled = cooledBy(
+      recordEnd("k", "Mail", limits, {
+        ok: false,
+        ms: 200,
+        throttle: { reason: "too many logins", retryAfterMs: 60_000 },
+      }),
+    )
     expect(cooled).toEqual({
       reason: "too many logins",
       since: NOW,
@@ -210,11 +259,13 @@ describe("the gate's state", () => {
     const lengths: number[] = []
 
     for (let round = 0; round < 8; round++) {
-      const cooled = recordEnd("k", "Mail", limits, {
-        ok: false,
-        ms: 100,
-        throttle,
-      })!
+      const cooled = cooledBy(
+        recordEnd("k", "Mail", limits, {
+          ok: false,
+          ms: 100,
+          throttle,
+        }),
+      )!
       lengths.push(cooled.until - cooled.since)
       now = cooled.until + 1_000
     }
@@ -225,15 +276,17 @@ describe("the gate's state", () => {
 
     // A success at its usual pace ends the run; the next one starts over.
     recordEnd("k", "Mail", limits, { ok: true, ms: 100 })
-    const fresh = recordEnd("k", "Mail", limits, {
-      ok: false,
-      ms: 100,
-      throttle,
-    })!
+    const fresh = cooledBy(
+      recordEnd("k", "Mail", limits, {
+        ok: false,
+        ms: 100,
+        throttle,
+      }),
+    )!
     expect(fresh.until - fresh.since).toBe(10_000)
   })
 
-  it("takes a run of one tool's answers far slower than its usual as a request to slow down", () => {
+  it("takes a run of one tool's answers far slower than its usual as a reason to go slower, never to refuse", () => {
     for (let i = 0; i < 10; i++) {
       recordEnd("k", "Mail", limits, {
         ok: true,
@@ -247,10 +300,12 @@ describe("the gate's state", () => {
 
     expect(slow(80_000)).toBeNull()
     expect(slow(81_000)).toBeNull()
-    expect(slow(85_000)?.reason).toBe(
+    expect(slowedBy(slow(85_000))?.reason).toBe(
       "its answers to search_emails are taking much longer than usual (3 in a row, about 85 s each against 1 s)",
     )
     expect(placeView("k").minute.throttles).toBe(1)
+    expect(placeView("k").cooling).toBeNull()
+    expect(placeView("k").slowing?.level).toBe(1)
   })
 
   it("never takes a slow tool for a slow server: fast commands, then long builds", () => {
@@ -298,12 +353,77 @@ describe("the gate's state", () => {
     expect(placeView("s").cooling).toBeNull()
   })
 
-  it("follows a server's Retry-After no further than its longest cool-down", () => {
-    const cooled = recordEnd("k", "Mail", limits, {
+  it("goes slower, never refusing, when a place answers but asks for it, and eases off as answers come back clean", () => {
+    const slow = { reason: "it marks its answers [THROTTLED]", slow: true }
+    const started = recordEnd("k", "Mail", limits, {
+      ok: true,
+      ms: 10_000,
+      throttle: slow,
+    })
+
+    expect(slowedBy(started)).toEqual({
+      level: 1,
+      reason: "it marks its answers [THROTTLED]",
+      since: NOW,
+    })
+    expect(placeView("k").cooling).toBeNull()
+    expect(placeView("k").minute.throttles).toBe(1)
+
+    // Each answer marked again steps it up, said only when it started.
+    for (let i = 0; i < 10; i++) {
+      expect(
+        recordEnd("k", "Mail", limits, {
+          ok: true,
+          ms: 10_000,
+          throttle: slow,
+        }),
+      ).toBeNull()
+    }
+    expect(placeView("k").slowing?.level).toBe(SLOWDOWN_MAX_LEVEL)
+    expect(placeView("k").cooling).toBeNull()
+
+    // Clean answers step it down, a few at a time, then it is over.
+    for (let level = SLOWDOWN_MAX_LEVEL; level > 0; level--) {
+      for (let i = 0; i < SLOWDOWN_EASE_AFTER; i++) {
+        expect(placeView("k").slowing?.level).toBe(level)
+        recordEnd("k", "Mail", limits, { ok: true, ms: 300 })
+      }
+    }
+    expect(placeView("k").slowing).toBeNull()
+  })
+
+  it("forgets a slowdown with no signal for a while, and the owner's button ends it", () => {
+    const slow = { reason: "throttled", slow: true }
+    recordEnd("k", "Mail", limits, { ok: true, ms: 100, throttle: slow })
+    expect(placeView("k").slowing).not.toBeNull()
+    now += SLOWDOWN_MEMORY_MS
+    expect(placeView("k").slowing).toBeNull()
+
+    recordEnd("k", "Mail", limits, { ok: true, ms: 100, throttle: slow })
+    endCooling("k")
+    expect(placeView("k").slowing).toBeNull()
+  })
+
+  it("goes slower after a refusal's cool-down too", () => {
+    recordEnd("k", "Mail", limits, {
       ok: false,
-      ms: 50,
-      throttle: { reason: "Busy.", retryAfterMs: 60 * 60_000 },
-    })!
+      ms: 100,
+      throttle: { reason: "too many connections", retryAfterMs: 5_000 },
+    })
+    expect(placeView("k").cooling).not.toBeNull()
+    now += 5_001
+    expect(placeView("k").cooling).toBeNull()
+    expect(placeView("k").slowing?.reason).toBe("too many connections")
+  })
+
+  it("follows a server's Retry-After no further than its longest cool-down", () => {
+    const cooled = cooledBy(
+      recordEnd("k", "Mail", limits, {
+        ok: false,
+        ms: 50,
+        throttle: { reason: "Busy.", retryAfterMs: 60 * 60_000 },
+      }),
+    )!
 
     expect(cooled.until - cooled.since).toBe(limits.backoffMaxMs)
     // Its words, without their full stop, go into a sentence of PCP's.
@@ -340,9 +460,15 @@ describe("the gate's state", () => {
     }
 
     expect(
-      recordEnd("k", "Mail", limits, { ok: false, ms: 45_000, timedOut: true })
-        ?.reason,
+      slowedBy(
+        recordEnd("k", "Mail", limits, {
+          ok: false,
+          ms: 45_000,
+          timedOut: true,
+        }),
+      )?.reason,
     ).toBe("3 calls in a row ran past its time limit")
+    expect(placeView("k").cooling).toBeNull()
   })
 
   it("counts calls, errors, bytes and percentiles over a minute, an hour and a day", () => {
@@ -514,28 +640,84 @@ describe("a call through the gate", () => {
     expect(serverGateView(ctx, server.id).running).toBe(0)
   })
 
-  it("cools a server down when a call past its time limit comes back throttled", async () => {
-    await writeServerLimits(ctx, server.id, { timeoutMs: 1_000 })
-    let finish!: () => void
-    const slow = new Promise<CallToolResult>((resolve) => {
-      finish = () =>
-        resolve(
-          Object.assign(answer("late"), {
-            pcpThrottle: { reason: "it marks its answers [THROTTLED]" },
-          }),
-        )
+  it.each([
+    {
+      said: "an answer marked throttled slows it down",
+      throttle: { reason: "it marks its answers [THROTTLED]", slow: true },
+      cools: false,
+    },
+    {
+      said: "a refusal cools it down",
+      throttle: { reason: "too many connections" },
+      cools: true,
+    },
+  ])(
+    "reads a call that came back past its time limit: $said",
+    async ({ throttle, cools }) => {
+      await writeServerLimits(ctx, server.id, { timeoutMs: 1_000 })
+      let finish!: () => void
+      const slow = new Promise<CallToolResult>((resolve) => {
+        finish = () =>
+          resolve(Object.assign(answer("late"), { pcpThrottle: throttle }))
+      })
+
+      const result = await gateServerCall(ctx, server, "search", {}, () => slow)
+
+      expect(errorCodeOf(result)).toBe("timeout")
+      expect(serverCooling(ctx, server.id)).toBeNull()
+      finish()
+      await slow
+      await new Promise((resolve) => setImmediate(resolve))
+      expect(await serverSlowing(ctx, server)).toMatchObject({
+        reason: throttle.reason,
+      })
+      expect(serverCooling(ctx, server.id) !== null).toBe(cools)
+    },
+  )
+
+  it("keeps an answer marked throttled, says so once, and sends the next calls one at a time with a longer limit", async () => {
+    await writeServerLimits(ctx, server.id, {
+      timeoutMs: 2_000,
+      maxConcurrent: 4,
     })
+    const throttled = () =>
+      Object.assign(answer("found"), {
+        pcpThrottle: {
+          reason: "The IMAP server marks its answers [THROTTLED]",
+          slow: true,
+        },
+      })
 
-    const result = await gateServerCall(ctx, server, "search", {}, () => slow)
+    const first = await gateServerCall(ctx, server, "search", {}, async () =>
+      throttled(),
+    )
 
-    expect(errorCodeOf(result)).toBe("timeout")
+    expect(first.isError).toBeUndefined()
+    expect(first.content).toEqual([
+      { type: "text", text: "found" },
+      {
+        type: "text",
+        text: "PCP sends Docs one call at a time from now, at least 1 s apart, and waits up to 6 s for each: The IMAP server marks its answers [THROTTLED].",
+      },
+    ])
     expect(serverCooling(ctx, server.id)).toBeNull()
-    finish()
-    await slow
-    await new Promise((resolve) => setImmediate(resolve))
-    expect(serverCooling(ctx, server.id)).toMatchObject({
-      reason: "it marks its answers [THROTTLED]",
+    expect(await serverSlowing(ctx, server)).toMatchObject({
+      reason: "The IMAP server marks its answers [THROTTLED]",
+      min_interval_ms: 1_000,
+      timeout_ms: 6_000,
     })
+
+    // The next call is let through, with the longer limit, and its answer
+    // marked again says nothing more.
+    let given: number | undefined
+    const next = await gateServerCall(ctx, server, "search", {}, async (ms) => {
+      given = ms
+      return throttled()
+    })
+
+    expect(errorCodeOf(next)).toBeUndefined()
+    expect(next.content).toEqual([{ type: "text", text: "found" }])
+    expect(given).toBe(6_000)
   })
 
   it("cools a server down on its throttle, refuses calls fast with paced, and says so in its state", async () => {

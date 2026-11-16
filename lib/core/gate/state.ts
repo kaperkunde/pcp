@@ -13,6 +13,9 @@ import {
   SLOW_FACTOR,
   SLOW_FLOOR_MS,
   SLOW_RUN,
+  SLOWDOWN_EASE_AFTER,
+  SLOWDOWN_MAX_LEVEL,
+  SLOWDOWN_MEMORY_MS,
   type GateLimits,
 } from "./limits"
 
@@ -52,6 +55,31 @@ export type Cooling = {
   until: number
 }
 
+/**
+ * A place that answers, but asked PCP to go slower (an answer marked
+ * throttled) or answers far slower than usual: its calls still go, one at
+ * a time, further apart and with a longer time limit (limits.ts
+ * slowedLimits). Each such signal steps it up, to SLOWDOWN_MAX_LEVEL;
+ * SLOWDOWN_EASE_AFTER clean answers in a row step it down.
+ */
+export type Slowing = {
+  /** 1 to SLOWDOWN_MAX_LEVEL. */
+  level: number
+  reason: string
+  since: number
+}
+
+type Slowdown = Slowing & {
+  /** The last signal: past SLOWDOWN_MEMORY_MS it is over. */
+  last: number
+  /** Clean answers in a row since. */
+  clean: number
+}
+
+/** What a call's end started at its place, for its answer to say. */
+export type GateEffect =
+  { kind: "cooling"; cooling: Cooling } | { kind: "slowing"; slowing: Slowing }
+
 type ToolTimes = {
   /** Its latest successes' times, oldest first, for its usual time. */
   recent: number[]
@@ -70,6 +98,8 @@ type PlaceState = {
   holdUntil: number
   /** How many cool-downs in a row (each one twice the last); -1 none. */
   level: number
+  /** Going slower at the place's request: null when it is not. */
+  slowdown: Slowdown | null
   /** Per tool, least recently used first. */
   tools: Map<string, ToolTimes>
   /** Calls past their time limit in a row, whatever the tool. */
@@ -121,12 +151,16 @@ export function sitePlace(vaultId: string, host: string): string {
   return `${vaultId}\nsite:${host}`
 }
 
-/** A place that may be dropped: idle, nothing waiting, not cooling down. */
+/**
+ * A place that may be dropped: idle, nothing waiting, not cooling down or
+ * going slower.
+ */
 function droppable(state: PlaceState, now: number): boolean {
   return (
     state.active === 0 &&
     state.waiting.length === 0 &&
     !(state.cooling && state.cooling.until > now) &&
+    !(state.slowdown && now - state.slowdown.last < SLOWDOWN_MEMORY_MS) &&
     state.holdUntil <= now
   )
 }
@@ -162,6 +196,7 @@ function placeFor(key: string, label: string): PlaceState {
     cooling: null,
     holdUntil: 0,
     level: -1,
+    slowdown: null,
     tools: new Map(),
     timeouts: 0,
     buckets: [],
@@ -209,6 +244,70 @@ export function coolingAt(key: string): Cooling | null {
   const cooling = peek(key)?.cooling
 
   return cooling && cooling.until > gateNow() ? cooling : null
+}
+
+/**
+ * How much slower the place's calls go now, or null; one whose last
+ * signal is past SLOWDOWN_MEMORY_MS is over.
+ */
+export function slowingAt(key: string): Slowing | null {
+  const state = peek(key)
+  const slowdown = state?.slowdown
+
+  if (!slowdown) {
+    return null
+  }
+
+  if (gateNow() - slowdown.last >= SLOWDOWN_MEMORY_MS) {
+    state.slowdown = null
+    return null
+  }
+
+  return {
+    level: slowdown.level,
+    reason: slowdown.reason,
+    since: slowdown.since,
+  }
+}
+
+/**
+ * Steps the place's slowdown up (or starts it). Answers whether it just
+ * started, for the call's answer to say so once.
+ */
+function slowDown(state: PlaceState, reason: string, now: number): boolean {
+  const current = state.slowdown
+  const said = reason.replace(/[.\s]+$/, "")
+
+  if (current && now - current.last < SLOWDOWN_MEMORY_MS) {
+    current.level = Math.min(SLOWDOWN_MAX_LEVEL, current.level + 1)
+    current.reason = said
+    current.last = now
+    current.clean = 0
+    return false
+  }
+
+  state.slowdown = { level: 1, reason: said, since: now, last: now, clean: 0 }
+  return true
+}
+
+/** A clean answer: SLOWDOWN_EASE_AFTER in a row step the slowdown down. */
+function easeOff(state: PlaceState): void {
+  const current = state.slowdown
+
+  if (!current) {
+    return
+  }
+
+  current.clean++
+
+  if (current.clean >= SLOWDOWN_EASE_AFTER) {
+    current.level--
+    current.clean = 0
+
+    if (current.level <= 0) {
+      state.slowdown = null
+    }
+  }
 }
 
 /** Until when calls to the place wait for a rate limit's reset, or 0. */
@@ -377,24 +476,16 @@ export type CallEnd = {
 }
 
 /**
- * Counts a call and reads it for throttling: a throttle the place sent, a
- * run of calls past their time limit, or (where latency counts) a run of
- * one tool's answers far slower than its usual time, starts a cool-down;
- * a hold makes the next calls wait for the reset. A success at its usual
- * pace once a cool-down is over ends the run of them. Answers the
- * cool-down it started, if any.
- */
-/**
  * A place's "slow down" that came after its call ran past its time limit
- * (counted then): it still cools the place down, so the next calls do not
- * wait out the limit too.
+ * (counted then): it still counts, so the next calls go slower (or, for a
+ * refusal, wait out a cool-down) rather than run into the limit too.
  */
 export function recordLateThrottle(
   key: string,
   label: string,
   limits: GateLimits,
   throttle: Throttle,
-): Cooling | null {
+): GateEffect | null {
   if (throttle.hold) {
     return null
   }
@@ -402,16 +493,56 @@ export function recordLateThrottle(
   const state = placeFor(key, label)
   const now = gateNow()
   bucketFor(state, now).throttles++
-  coolDown(state, limits, throttle, now)
-  return state.cooling
+  return signal(state, limits, throttle, now)
 }
 
+/**
+ * A place's signal: "go slower" (an answer it marked throttled, or its
+ * answers far slower than usual) steps its slowdown up and lets its calls
+ * through; a refusal cools it down, and its calls go slower after.
+ */
+function signal(
+  state: PlaceState,
+  limits: GateLimits,
+  throttle: Throttle,
+  now: number,
+): GateEffect | null {
+  const started = slowDown(state, throttle.reason, now)
+
+  if (throttle.slow) {
+    return started
+      ? { kind: "slowing", slowing: slowingOf(state.slowdown!) }
+      : null
+  }
+
+  coolDown(state, limits, throttle, now)
+  return state.cooling ? { kind: "cooling", cooling: state.cooling } : null
+}
+
+function slowingOf(slowdown: Slowdown): Slowing {
+  return {
+    level: slowdown.level,
+    reason: slowdown.reason,
+    since: slowdown.since,
+  }
+}
+
+/**
+ * Counts a call and reads it for throttling. A refusal the place sent
+ * starts a cool-down (and its calls go slower after); its "go slower" (an
+ * answer marked throttled), a run of calls past their time limit, or
+ * (where latency counts) a run of one tool's answers far slower than its
+ * usual time, makes its calls go slower without refusing any; a hold makes
+ * the next calls wait for the reset. Clean answers ease the slowdown off,
+ * and a success at its usual pace once a cool-down is over ends the run of
+ * them. Answers what it started, if anything.
+ */
 export function recordEnd(
   key: string,
   label: string,
   limits: GateLimits,
   end: CallEnd,
-): Cooling | null {
+): GateEffect | null {
   const state = placeFor(key, label)
   const now = gateNow()
   const bucket = bucketFor(state, now)
@@ -451,25 +582,30 @@ export function recordEnd(
   if (!throttle && state.timeouts >= SLOW_RUN) {
     throttle = {
       reason: `${state.timeouts} calls in a row ran past its time limit`,
+      slow: true,
     }
     state.timeouts = 0
   } else if (!throttle && times.slow >= SLOW_RUN) {
     throttle = {
       reason: `its answers${end.tool ? ` to ${end.tool}` : ""} are taking much longer than usual (${times.slow} in a row, about ${Math.round(end.ms / 1000)} s each against ${Math.max(1, Math.round(base! / 1000))} s)`,
+      slow: true,
     }
     times.slow = 0
   }
 
   if (throttle) {
     bucket.throttles++
-    coolDown(state, limits, throttle, now)
-    return state.cooling
+    return signal(state, limits, throttle, now)
   }
 
-  // Back to normal: a success at its usual pace after the cool-down.
-  if (end.ok && !slowAnswer && state.cooling && state.cooling.until <= now) {
-    state.cooling = null
-    state.level = -1
+  if (end.ok && !slowAnswer && !end.timedOut) {
+    easeOff(state)
+
+    // Back to normal: a success at its usual pace after the cool-down.
+    if (state.cooling && state.cooling.until <= now) {
+      state.cooling = null
+      state.level = -1
+    }
   }
 
   return null
@@ -595,6 +731,7 @@ export type PlaceView = {
   running: number
   waiting: number
   cooling: Cooling | null
+  slowing: Slowing | null
   /** Since when this process counts for the place. */
   since: number
   minute: WindowCounts
@@ -656,6 +793,7 @@ export function placeView(key: string): PlaceView {
     running: state?.active ?? 0,
     waiting: state?.waiting.length ?? 0,
     cooling: coolingAt(key),
+    slowing: slowingAt(key),
     since: state?.since ?? now,
     minute: counts(buckets, minuteStart),
     hour: counts(buckets, hourStart),
@@ -663,12 +801,13 @@ export function placeView(key: string): PlaceView {
   }
 }
 
-/** Ends a place's cool-down and hold now (the owner's button). */
+/** Ends a place's cool-down, slowdown and hold now (the owner's button). */
 export function endCooling(key: string): void {
   const state = peek(key)
 
   if (state) {
     state.cooling = null
+    state.slowdown = null
     state.holdUntil = 0
     state.level = -1
     state.timeouts = 0

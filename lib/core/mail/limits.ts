@@ -16,14 +16,23 @@ export const MAIL_LOGOUT_TIMEOUT_MS = 3_000
  */
 /** Connections one account may have open at once. */
 export const IMAP_MAX_CONNECTIONS = 2
-/** An idle connection is closed after this long unused. */
-export const IMAP_IDLE_MS = 2 * 60_000
+/**
+ * An idle connection is closed after this long unused: well inside the
+ * 30 minutes a server must wait before it logs an idle client out (RFC
+ * 9051), so an account whose sign-in is slow (a throttled one takes half a
+ * minute) stays signed in between an assistant's calls (#143).
+ */
+export const IMAP_IDLE_MS = 10 * 60_000
 /** A connection is closed once this old, however busy. */
-export const IMAP_MAX_AGE_MS = 10 * 60_000
+export const IMAP_MAX_AGE_MS = 30 * 60_000
 /** A connection idle this long is checked with a NOOP before it is used. */
 export const IMAP_REVALIDATE_AFTER_MS = 30_000
-/** How long that check may take before the connection is dropped. */
-export const IMAP_REVALIDATE_TIMEOUT_MS = 5_000
+/**
+ * How long that check may take before the connection is dropped: a
+ * throttled server takes seconds over every answer, a NOOP's too, and one
+ * that answers slowly is still signed in.
+ */
+export const IMAP_REVALIDATE_TIMEOUT_MS = 20_000
 /** How long a call waits for a connection that others are using. */
 export const IMAP_LEASE_WAIT_MS = MAIL_CALL_TIMEOUT_MS
 /** The mailbox names an account's calls share, before LIST is asked again. */

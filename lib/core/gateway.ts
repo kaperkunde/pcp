@@ -313,7 +313,7 @@ import {
   withWrapperNote,
 } from "./wrappers/admin"
 import { TOOL_ACCESS_ARG, type ToolAccessArg } from "./proposed-access"
-import { serverCooling, serverGateView } from "./gate"
+import { serverCooling, serverGateView, serverSlowing } from "./gate"
 import {
   applyLimitsChange,
   effectiveLimits,
@@ -4273,9 +4273,11 @@ export function buildGatewayServer(
         )
       }
 
-      // Cooling down (lib/core/gate/): asked to slow down, or far slower
-      // than usual, so its calls are refused until then.
+      // Cooling down (lib/core/gate/): it refused a call as too many or too
+      // fast, so its calls are refused until then. Going slower: it asked
+      // for it, or answers far slower than usual; its calls still go.
       const cooling = serverCooling(scope.ctx, row.id)
+      const pacing = await serverSlowing(scope.ctx, row)
       const state: ServerState = {
         id: row.id,
         name: row.name,
@@ -4284,6 +4286,7 @@ export function buildGatewayServer(
         status: row.status,
         toolCount: row._count.tools,
         cooling,
+        pacing,
       }
 
       if (!state.connected) {
@@ -4300,7 +4303,9 @@ export function buildGatewayServer(
       const service = await serviceStateLine(scope.ctx, row, scope.publicUrl)
       const coolingLine = cooling
         ? ` It is cooling down: ${cooling.reason}; PCP refuses calls to it for ${Math.max(1, Math.ceil(cooling.retryAfterMs / 1000))} s more.`
-        : ""
+        : pacing
+          ? ` It is throttled, so PCP paces its calls: one at a time, at least ${Math.max(1, Math.round(pacing.min_interval_ms / 1000))} s apart, each waited for up to ${Math.round(pacing.timeout_ms / 1000)} s (${pacing.reason}).`
+          : ""
       const said = `${row.name} is connected, with ${state.toolCount} tool${state.toolCount === 1 ? "" : "s"}.${row.enabled ? "" : " The owner has switched it off in PCP."}${coolingLine}${service ? ` ${service}` : (row.status === "error" || row.status === "refused") && row.statusMessage ? ` Last contact failed: ${row.statusMessage}` : ""}${note ? ` ${ownerNoteLine(note)}` : ""}`
 
       return ok({ kind: "done", server: state, message: said }, { text: said })
@@ -4365,6 +4370,15 @@ export function buildGatewayServer(
           retry_after_ms: z.number(),
         })
         .nullable(),
+      /** Set while its calls go slower, as it asked; they still go. */
+      pacing: z
+        .object({
+          reason: z.string(),
+          since: z.string(),
+          min_interval_ms: z.number(),
+          timeout_ms: z.number(),
+        })
+        .nullable(),
       running: z.number(),
       waiting: z.number(),
       counting_since: z.string(),
@@ -4398,6 +4412,7 @@ export function buildGatewayServer(
       const own = await readServerLimits(scope.ctx, server.id)
       const view = serverGateView(scope.ctx, server.id)
       const cooling = serverCooling(scope.ctx, server.id)
+      const pacing = await serverSlowing(scope.ctx, server)
       const value = {
         server: server.slug,
         limits: limitsArgOf(effectiveLimits(gateClass, own)),
@@ -4409,6 +4424,7 @@ export function buildGatewayServer(
               retry_after_ms: cooling.retryAfterMs,
             }
           : null,
+        pacing,
         running: view.running,
         waiting: view.waiting,
         counting_since: new Date(view.since).toISOString(),
@@ -4432,7 +4448,7 @@ export function buildGatewayServer(
       }
 
       return ok(value, {
-        text: `${server.name}: ${limitsLine(gateClass, own)}.${cooling ? ` Cooling down: ${cooling.reason}, until ${cooling.until}.` : ""} Last hour: ${view.hour.calls} call${view.hour.calls === 1 ? "" : "s"}, ${view.hour.errors} failed, ${view.hour.throttles} slow-down${view.hour.throttles === 1 ? "" : "s"}${view.hour.p50Ms !== null ? `, answers in ${view.hour.p50Ms} ms (p50) and ${view.hour.p95Ms} ms (p95)` : ""}.\n${JSON.stringify(value)}`,
+        text: `${server.name}: ${limitsLine(gateClass, own)}.${cooling ? ` Cooling down: ${cooling.reason}, until ${cooling.until}.` : pacing ? ` Throttled, pacing: ${pacing.reason}.` : ""} Last hour: ${view.hour.calls} call${view.hour.calls === 1 ? "" : "s"}, ${view.hour.errors} failed, ${view.hour.throttles} slow-down${view.hour.throttles === 1 ? "" : "s"}${view.hour.p50Ms !== null ? `, answers in ${view.hour.p50Ms} ms (p50) and ${view.hour.p95Ms} ms (p95)` : ""}.\n${JSON.stringify(value)}`,
       })
     },
   })

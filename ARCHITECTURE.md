@@ -914,7 +914,11 @@ comes out as an Error carrying `pcpThrottle` (`lib/core/throttle-signal.ts`)
 for the call gate to read, and so does an answer that went through with its
 lines marked `[THROTTLED]` (Gmail, throttling an account, answers OK but
 seconds late each time; `noticeThrottle`), even one that came back after the
-call's time limit; JMAP also keeps to the session's
+call's time limit, as `slow`: a request to go slower, which keeps the answer
+and never refuses the account's calls (the call gate below). Idle sessions
+are kept 10 minutes and checked with a NOOP that may take 20 seconds, so a
+throttled account, whose every answer is late, keeps its session rather than
+signing in again (half a minute) for each call; JMAP also keeps to the session's
 `maxConcurrentRequests` and `maxCallsInRequest` once it has read them. An
 email's id is `<uid>.<uidvalidity>.<mailbox path>`, so an id
 from before a mailbox was rebuilt is refused rather than naming another
@@ -3859,7 +3863,7 @@ another run or from none, is answered with one line first: "A running
 program (run <id>) is acting on this tab right now; what you see may change
 under it." It still runs.
 
-## The call gate: limits, cool-downs and timeouts
+## The call gate: limits, cool-downs, slowdowns and timeouts
 
 Pacing spaces calls out; the gate (`lib/core/gate/`, #143) decides whether
 one may go at all, how long PCP waits for it, and what a place's own
@@ -3915,14 +3919,16 @@ limits or cool-downs is in `search`, a tool's description or the
 instructions, and a call hears of one only when it cannot go.
 
 **Slowing down** (`lib/core/throttle-signal.ts`, the one module both sides
-use; `state.ts recordEnd`). A place asks PCP to slow down with a 429 or a
-503 with Retry-After (`httpThrottle`, read by JMAP and CalDAV requests, an
+use; `state.ts recordEnd`). A place refuses a call as too many or too fast
+with a 429 or a 503 with Retry-After (`httpThrottle`, read by JMAP and CalDAV requests, an
 API endpoint's answer in `openapi/call.ts`, an MCP server's refusal in
 `upstream.ts`, web fetch, and a browser tab's page), or with its protocol's
 own words (IMAP's [THROTTLED], a BYE about limits, JMAP's limit errors:
 `mail/throttle.ts`), each an Error (or an answer) carrying `pcpThrottle:
 {reason, retryAfterMs?}`, which the gate reads off the cause chain and
-takes off an answer before it is passed on. Rate-limit headers with nothing
+takes off an answer before it is passed on. An answer that went through
+but asks PCP to go slower (`slow`: IMAP lines marked [THROTTLED]) is not a
+refusal, and neither is slowness. Rate-limit headers with nothing
 left on an answer that went through (`rateLimitHold`) are only a hold
 until the reset: the limit may be one bucket of many, so nothing cools
 down. What counts as slowness depends on the class (`SLOW_DETECTION`): for
@@ -3932,10 +3938,23 @@ median of its last successes, at least `SLOW_FLOOR_MS`), so fast and slow
 tools of one server never mix; for SSH servers, services and storage
 folders, whose work takes as long as it does, only `SLOW_RUN` calls in a
 row past their time limit; for sites, nothing but their own "slow down".
-The place then cools down: for as long as it asked (no longer than its
-longest cool-down), else the first cool-down, doubling for each one that
-starts within `BACKOFF_MEMORY_MS` of the last, up to the longest; a success
-at its usual pace after it ends starts over. While it
+A "go slower" or slowness slows the place down (#143, reopened: Gmail kept
+answering, each answer marked [THROTTLED] and ten seconds late, and an hour's
+cool-down locked the account out instead): its calls still go, one at a time,
+at least `SLOWDOWN_SPACING_MS` apart, doubling with each level up to
+`SLOWDOWN_MAX_SPACING_MS`, and waited for `SLOWDOWN_TIMEOUT_FACTOR` times as
+long (one factor at every level, so a mail account's pooled session is not
+opened again at each step; an owner's own limit passed to the kind raised the
+same way), `limits.ts slowedLimits`. Each signal steps it up, to
+`SLOWDOWN_MAX_LEVEL`; `SLOWDOWN_EASE_AFTER` clean answers in a row step it
+down, and with no signal for `SLOWDOWN_MEMORY_MS` it is over. The answer that
+started it is kept and says so; `check_server` and `get_server_limits` name it
+(`pacing`), and the server's page shows "Throttled, pacing" with a button back
+to normal. A refusal cools the place down: for as long as it asked (no longer
+than its longest cool-down), else the first cool-down, doubling for each one
+that starts within `BACKOFF_MEMORY_MS` of the last, up to the longest; a
+success at its usual pace after it ends starts over, and its calls go slower
+after it as for a "go slower". While it
 cools, its calls are refused at once ("<server> is cooling down: <reason>.
 Nothing was sent; try again in N s."), the first throttled answer says the
 cool-down began, `check_server` names it (`cooling` on the server's state),
@@ -3950,8 +3969,8 @@ has them, and answer times for the 50th and 95th percentile (a reservoir
 sample per minute, each call as likely to be kept; minutes older than an
 hour merged into hours by weight), over this minute and the one before,
 the last hour and the last day. At most `MAX_GATED_PLACES` places are held,
-the least recently used idle one dropped first and none that is busy or
-cooling down; the comment there gives the memory this comes to. A mail
+the least recently used idle one dropped first and none that is busy,
+cooling down or going slower; the comment there gives the memory this comes to. A mail
 account's last calls (`mail/diagnostics.ts`: each phase's time, whether it
 reused a connection, how it went and the server's own notices) are shown
 beside the counters on its page and in `get_server_limits`'s answer. They are not stored: a restart starts them again and says since when

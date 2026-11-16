@@ -238,12 +238,17 @@ so in the summary; the bump itself waits for the request.
   there (`upstream.ts callServerTool` for every server kind but the
   browser and a wrapper, the browser per site in `browser/call.ts`, web
   fetch per site in `web-fetch.ts runFetch`), so every way in meets it: a
-  server cooling down (it asked to slow down: 429, a 503 with Retry-After,
-  or its protocol's own words, each `pcpThrottle: {reason, retryAfterMs?}`
-  on an error or answer, `lib/core/throttle-signal.ts` the one module; or a
-  run of one tool's answers far slower than its usual, or of calls past
-  their time limit, as `SLOW_DETECTION` says per class) is refused at once,
-  a spent rate limit holds the next call until its reset, then bytes a day, pacing (the server's pause and
+  server cooling down (it refused a call as too many or too fast: 429, a
+  503 with Retry-After, or its protocol's own refusal, each
+  `pcpThrottle: {reason, retryAfterMs?}` on an error or answer,
+  `lib/core/throttle-signal.ts` the one module) is refused at once, and
+  goes slower after; a server that answers but asks PCP to go slower
+  (`slow` on the signal: an IMAP answer marked `[THROTTLED]`) or answers
+  far slower than usual (a run of one tool's answers, or of calls past
+  their time limit, as `SLOW_DETECTION` says per class) is never refused
+  for it: its calls go one at a time, further apart and with a longer time
+  limit (`slowedLimits`), easing off as answers come back clean. A spent
+  rate limit holds the next call until its reset, then bytes a day, pacing (the server's pause and
   calls a minute as a floor, one spacing), calls at once, and the time
   limit, past which the answer is a `timeout` tool error naming the server
   and the limit; a limit the owner set reaches each kind's own requests. Every refusal is `paced` with `retryAfterMs` in
@@ -254,8 +259,8 @@ so in the summary; the bump itself waits for the request.
   assistant only proposes them (`register_server`'s `limits`, stored on the
   request and editable beside the approval; `propose_server_limits`, a
   `limits_change` with its note, written over the limits shown, `basis`)
-  and reads them on demand (`get_server_limits`); limits and cool-downs
-  never go in search, tool descriptions or the instructions. Its state and
+  and reads them on demand (`get_server_limits`); limits, cool-downs and
+  slowdowns never go in search, tool descriptions or the instructions. Its state and
   counters are in memory, never stored. Add a test for each new field or
   signal (`gate/gate.test.ts`, `gate/entry-points.test.ts`).
 - Linked repositories (`lib/core/repos/`) share items, never secrets, and
@@ -341,10 +346,12 @@ so in the summary; the bump itself waits for the request.
   (counts only for `list_mailboxes`), logs out for at most 3 seconds, and
   keeps its call timings and the server's own [ALERT]/BYE lines in memory
   only (`mail/diagnostics.ts`, scrubbed, never on disk or in the request
-  log). A server's "slow down" is an Error with `pcpThrottle`
-  (`lib/core/throttle-signal.ts`), or an answer whose IMAP lines were
-  marked `[THROTTLED]` (`noticeThrottle`); one that comes back after its
-  time limit still cools the server down. Nothing deletes mail for good: delete moves to the Trash. An
+  log). A server's refusal about rate is an Error with `pcpThrottle`
+  (`lib/core/throttle-signal.ts`); an answer whose IMAP lines were marked
+  `[THROTTLED]` (`noticeThrottle`) is kept and only slows the account's
+  calls down (`slow`), also one that comes back after its time limit. A
+  pooled session survives a throttled account's slow NOOP and idle gaps
+  (`mail/limits.ts`), so its slow sign-in is not paid on every call. Nothing deletes mail for good: delete moves to the Trash. An
   assistant adds one only through `register_server` (kind `jmap` or `imap`),
   a permission request like any new server: the owner types the password or
   token in on PCP's page or connects it, the assistant never sees a value, and
