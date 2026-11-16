@@ -13,7 +13,12 @@ import {
   secretName,
   secretNameWhere,
 } from "./secret-meta"
-import { SERVER_META_SELECT, serverName, writeServer } from "./server-meta"
+import {
+  clearAlerts,
+  SERVER_META_SELECT,
+  serverName,
+  writeServer,
+} from "./server-meta"
 import { readEnvBindings } from "./services/definition"
 import { parseTotpSeed, totpCode, totpSeedProblem } from "./totp"
 
@@ -544,7 +549,37 @@ export async function updateSecret(
     )
   }
 
+  // Whether the value is a different one: only that mends a rejected
+  // credential.
+  const valueChanged =
+    input.value !== undefined &&
+    decryptString(ctx.dek, Buffer.from(row.ciphertext), aad(id)) !==
+      (row.kind === "totp" ? input.value.trim() : input.value)
+
   await db().secret.update({ where: { id }, data })
+
+  // A new value is the fix for "rejected the credentials": those alerts of
+  // the servers that send it are over until a call says otherwise. Other
+  // alerts (unreachable, refused) say nothing about the credential.
+  if (valueChanged) {
+    const users = await db().mcpServer.findMany({
+      where: {
+        vaultId: ctx.vaultId,
+        OR: [
+          { authSecretId: id },
+          { authHeaders: { some: { secretId: id } } },
+          { oauthClientSecretId: id },
+        ],
+      },
+      select: { id: true },
+    })
+
+    await clearAlerts(
+      ctx,
+      users.map((user) => user.id),
+      ["auth_required"],
+    )
+  }
 }
 
 export async function deleteSecret(ctx: VaultContext, id: string) {

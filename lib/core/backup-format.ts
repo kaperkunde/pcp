@@ -412,6 +412,8 @@ const McpServerRow = renamedFrom(
     plainOauthTokenUrl: str.nullable(),
     status: str,
     plainStatusMessage: str,
+    // Added after 0.5: when the status was last written with something to say.
+    statusAt: dateOrNull.default(null),
     lastSyncedAt: dateOrNull,
     createdAt: date,
     updatedAt: date,

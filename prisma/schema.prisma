@@ -740,6 +740,9 @@ model McpServer {
   /// credentials PCP sent) | error.
   status             String    @default("unknown")
   plainStatusMessage String    @default("") @map("status_message")
+  /// When the status was last written with something to say (an alert's
+  /// "last seen"); null while it is fine.
+  statusAt           DateTime? @map("status_at")
   lastSyncedAt       DateTime? @map("last_synced_at")
   createdAt          DateTime  @default(now()) @map("created_at")
   updatedAt          DateTime  @updatedAt @map("updated_at")

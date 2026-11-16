@@ -32,6 +32,8 @@ import {
   updateServerRow,
   writeServer,
 } from "./server-meta"
+
+export { clearAlertAfterSuccess, clearAlerts } from "./server-meta"
 import { readFields, sealFields } from "./sealed-fields"
 import {
   openTools,
@@ -261,6 +263,8 @@ export type ServerSummary = {
   status: ServerStatus
   statusMessage: string
   lastSyncedAt: Date | null
+  /** When an alert last happened; null while the server is fine. */
+  statusAt: Date | null
   toolCount: number
   connected: boolean
 }
@@ -899,6 +903,7 @@ function summarize(row: {
   status: string
   statusMessage: string
   lastSyncedAt: Date | null
+  statusAt: Date | null
   oauthConnectedAt: Date | null
   _count: { tools: number }
 }): ServerSummary {
@@ -920,6 +925,7 @@ function summarize(row: {
     status: row.status as ServerStatus,
     statusMessage: row.statusMessage,
     lastSyncedAt: row.lastSyncedAt,
+    statusAt: row.statusAt,
     toolCount: row._count.tools,
     connected: row.authType !== "oauth" || row.oauthConnectedAt !== null,
   }
@@ -1394,6 +1400,8 @@ export async function setServerStatus(
     await writeServer(ctx, serverId, {
       status,
       statusMessage: message.slice(0, 500),
+      // The time an alert last happened; nothing to date while all is well.
+      statusAt: status === "ok" && !message ? null : new Date(),
       ...extra,
     })
   } catch {

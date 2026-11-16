@@ -9,6 +9,7 @@ import { canRereadTools } from "@/lib/core/catalogue"
 import { scrubFreedPages } from "@/lib/core/cleanup/runtime"
 import { disconnectOAuth } from "@/lib/core/oauth"
 import {
+  clearAlerts,
   createServer,
   deleteServer,
   getServer,
@@ -334,4 +335,25 @@ export async function deleteServerAction(id: string): Promise<void> {
 
   revalidatePath("/servers")
   redirect("/servers")
+}
+
+/** The servers page's "Clear all": every alert of the vault at once. */
+export async function clearAlertsAction(
+  _previous: ServerActionResult,
+  _formData: FormData,
+): Promise<ServerActionResult> {
+  const ctx = await requireContext()
+  const result = await guarded(async () => {
+    const cleared = await clearAlerts(ctx)
+
+    return {
+      message:
+        cleared === 1 ? "Cleared 1 alert." : `Cleared ${cleared} alerts.`,
+    }
+  })
+
+  revalidatePath("/servers")
+  revalidatePath("/servers/[id]", "page")
+
+  return result
 }
