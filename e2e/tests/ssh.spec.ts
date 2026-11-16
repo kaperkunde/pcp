@@ -161,10 +161,9 @@ test("a server with another host key is refused until the owner forgets the old 
 
   expect(JSON.parse(toolText(await call()))).toMatchObject({ exit_code: 0 })
 
-  // A call that went well clears the server's alert.
+  // A call that went well clears the server's alert (other projects'
+  // servers may still have theirs).
   await page.goto("/servers")
-  await expect(page.getByRole("link", { name: NAME, exact: true })).toHaveCount(
-    0,
-  )
-  await expect(alerts).toHaveCount(0)
+  await expect(page.getByRole("link").filter({ hasText: NAME })).toHaveCount(1)
+  await expect(alerts.getByText(NAME)).toHaveCount(0)
 })
