@@ -34,12 +34,13 @@ describe("Retry-After", () => {
 describe("IMAP answers that went through but say [THROTTLED]", () => {
   // Gmail, throttling an account, still answers OK but marks each answer
   // and takes seconds over each (seen live on 15 Nov 2026).
-  it("are a request to slow down", () => {
+  it("are a request to go slower, not a refusal", () => {
     expect(
       noticeThrottle(["4 OK Success [THROTTLED]", "5 OK Success [THROTTLED]"]),
     ).toEqual({
       reason:
         "The IMAP server marks its answers [THROTTLED]: it is slowing PCP down",
+      slow: true,
     })
   })
 

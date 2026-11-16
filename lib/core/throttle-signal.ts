@@ -1,7 +1,8 @@
 /**
  * A place's own "slow down" (#143), carried beside an Error or an answer so
- * the call gate (lib/core/gate/) can cool it down without knowing the
- * protocol: IMAP's [THROTTLED] and BYE texts and JMAP's limit errors
+ * the call gate (lib/core/gate/) can cool it down (a refusal) or make its
+ * calls go slower (`slow`: an answer it marked throttled) without knowing
+ * the protocol: IMAP's [THROTTLED] and BYE texts and JMAP's limit errors
  * (mail/throttle.ts), HTTP 429, and 503 with Retry-After (httpThrottle,
  * read by mail, CalDAV, API endpoints, MCP servers and web fetch). The
  * error keeps its own message for the assistant; the signal rides beside it
@@ -23,6 +24,12 @@ export type PcpThrottle = {
    * left): no cool-down, no slow-down counted.
    */
   hold?: boolean
+  /**
+   * Go slower, not stop: the place answered, but marked it throttled. Its
+   * calls still go, one at a time and further apart (lib/core/gate/); only
+   * a refusal (no `slow`) cools it down.
+   */
+  slow?: boolean
 }
 
 /** The same, by the name the gate uses. */
@@ -38,7 +45,7 @@ function asThrottle(value: unknown): PcpThrottle | null {
     return null
   }
 
-  const { reason, retryAfterMs, hold } = value as Record<string, unknown>
+  const { reason, retryAfterMs, hold, slow } = value as Record<string, unknown>
 
   if (typeof reason !== "string" || reason.trim() === "") {
     return null
@@ -57,6 +64,7 @@ function asThrottle(value: unknown): PcpThrottle | null {
         }
       : {}),
     ...(hold === true ? { hold: true } : {}),
+    ...(slow === true ? { slow: true } : {}),
   }
 }
 

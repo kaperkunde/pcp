@@ -117,6 +117,21 @@ export const SERVER_STATE = z.object({
     })
     .nullable()
     .optional(),
+  /**
+   * Set while PCP sends the server its calls slower, as it asked (an
+   * answer marked throttled) or as its answers came slower than usual:
+   * why, since when, and the spacing and time limit now. Its calls still
+   * go, one at a time.
+   */
+  pacing: z
+    .object({
+      reason: z.string(),
+      since: z.string(),
+      min_interval_ms: z.number(),
+      timeout_ms: z.number(),
+    })
+    .nullable()
+    .optional(),
 })
 
 export type ServerState = z.infer<typeof SERVER_STATE>

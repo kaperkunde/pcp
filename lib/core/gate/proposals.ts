@@ -17,7 +17,12 @@ import {
   type ServerLimits,
 } from "./config"
 import { mailDiagnostics, type MailDiagnostic } from "../mail/diagnostics"
-import { gateClassOf, GATE_DEFAULTS, type GateClass } from "./limits"
+import {
+  gateClassOf,
+  GATE_DEFAULTS,
+  slowedLimits,
+  type GateClass,
+} from "./limits"
 import { endCooling, placeView, serverPlace } from "./state"
 import { limitsBasis, readServerLimits, writeServerLimits } from "./store"
 
@@ -237,6 +242,16 @@ export type ServerLimitsView = {
    */
   mailCalls: MailDiagnostic[]
   cooling: { reason: string; since: Date; until: Date } | null
+  /**
+   * Set while its calls go slower, as it asked: why, since when, and the
+   * spacing and time limit now. Its calls still go, one at a time.
+   */
+  pacing: {
+    reason: string
+    since: Date
+    minIntervalMs: number
+    timeoutMs: number
+  } | null
   running: number
   waiting: number
   since: Date
@@ -273,6 +288,15 @@ export async function serverLimitsView(
           reason: view.cooling.reason,
           since: new Date(view.cooling.since),
           until: new Date(view.cooling.until),
+        }
+      : null,
+    pacing: view.slowing
+      ? {
+          reason: view.slowing.reason,
+          since: new Date(view.slowing.since),
+          ...(({ minIntervalMs, timeoutMs }) => ({ minIntervalMs, timeoutMs }))(
+            slowedLimits(effectiveLimits(gateClass, own), view.slowing.level),
+          ),
         }
       : null,
     running: view.running,

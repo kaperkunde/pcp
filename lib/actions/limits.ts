@@ -44,7 +44,7 @@ export async function endCoolingAction(
   const ctx = await requireContext()
   const result = await guarded(async () => {
     await endServerCooling(ctx, serverId)
-    return { message: "Calls to it go through again." }
+    return { message: "Calls to it go through at its usual pace again." }
   })
 
   revalidatePath(`/servers/${serverId}`)

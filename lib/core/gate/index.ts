@@ -11,6 +11,7 @@ import {
   GATE_DEFAULTS,
   LINGER_MS,
   SLOW_DETECTION,
+  slowedLimits,
   type GateLimits,
 } from "./limits"
 import { stripThrottle, throttleOf, type Throttle } from "../throttle-signal"
@@ -27,10 +28,13 @@ import {
   release,
   serverPlace,
   sitePlace,
+  slowingAt,
   usualMs,
   type CallEnd,
   type Cooling,
+  type GateEffect,
   type PlaceView,
+  type Slowing,
 } from "./state"
 import { readServerLimits } from "./store"
 
@@ -44,8 +48,12 @@ import { readServerLimits } from "./store"
  * site (browser/call.ts) and web fetch per site (web-fetch.ts runFetch).
  *
  * A call to a server, in order:
- * 1. Cooling down (the server asked PCP to slow down, or answered far
- *    slower than usual): refused at once, `paced` with retryAfterMs.
+ * 1. Cooling down (the server refused a call as too many or too fast):
+ *    refused at once, `paced` with retryAfterMs. A server that answers
+ *    but asked PCP to go slower (an answer marked throttled), or answers
+ *    far slower than usual, is not refused: its calls go one at a time,
+ *    further apart and with a longer time limit (limits.ts slowedLimits)
+ *    until clean answers ease it off.
  * 2. Its bytes for the day spent: refused the same way.
  * 3. Its pace (pacing's, with the server's own pause and calls a minute as
  *    a floor): waits its turn within its own time, or `paced`.
@@ -63,7 +71,7 @@ import { readServerLimits } from "./store"
  */
 
 export { gateClassOf, type GateClass, type GateLimits } from "./limits"
-export type { Cooling, PlaceView } from "./state"
+export type { Cooling, PlaceView, Slowing } from "./state"
 
 function seconds(ms: number): number {
   return Math.max(1, Math.ceil(ms / 1000))
@@ -105,9 +113,19 @@ export function resultBytes(result: CallToolResult): number {
   return bytes
 }
 
-/** What the first throttled call adds to its own answer. */
-function coolingNote(label: string, cooling: Cooling): string {
-  return `PCP lets ${label} cool down for ${seconds(cooling.until - cooling.since)} s: ${cooling.reason}.`
+/** What the call that started a cool-down or a slowdown adds to its answer. */
+function effectNote(
+  label: string,
+  limits: GateLimits,
+  effect: GateEffect,
+): string {
+  if (effect.kind === "cooling") {
+    const { cooling } = effect
+    return `PCP lets ${label} cool down for ${seconds(cooling.until - cooling.since)} s: ${cooling.reason}.`
+  }
+
+  const slowed = slowedLimits(limits, effect.slowing.level)
+  return `PCP sends ${label} one call at a time from now, at least ${showDuration(slowed.minIntervalMs)} apart, and waits up to ${showDuration(slowed.timeoutMs)} for each: ${effect.slowing.reason}.`
 }
 
 type GatedServer = { id: string; name: string; kind: string }
@@ -145,9 +163,13 @@ export async function gateServerCall(
   }
 
   const own = await readServerLimits(ctx, server.id)
-  const limits = effectiveLimits(gateClass, own)
-
   const key = serverPlace(ctx.vaultId, server.id)
+  // Going slower at the server's request: one at a time, further apart,
+  // a longer time limit.
+  const base = effectiveLimits(gateClass, own)
+  const slowing = slowingAt(key)
+  const limits = slowing ? slowedLimits(base, slowing.level) : base
+
   const label = server.name
   const cooling = coolingAt(key)
 
@@ -235,7 +257,16 @@ export async function gateServerCall(
     label,
     limits,
     { tool: toolName, detect: SLOW_DETECTION[gateClassOf(server.kind)!] },
-    () => run(own.timeoutMs),
+    // The owner's own limit, raised while the server goes slower; with
+    // none, each kind keeps its own (a mail account's pooled session
+    // stays as it is).
+    () =>
+      run(
+        own.timeoutMs === undefined
+          ? undefined
+          : Math.max(own.timeoutMs, limits.timeoutMs),
+      ),
+    base,
   )
 }
 
@@ -269,6 +300,8 @@ async function runTimed(
   limits: GateLimits,
   how: Pick<CallEnd, "tool" | "detect">,
   run: () => Promise<CallToolResult>,
+  /** The place's limits when it is not going slower, for what is said. */
+  base: GateLimits = limits,
 ): Promise<CallToolResult> {
   const started = gateNow()
   const call = run()
@@ -335,7 +368,7 @@ async function runTimed(
 
   if ("error" in outcome) {
     const throttle = throttleOf(outcome.error)
-    const cooled = recordEnd(key, label, limits, {
+    const effect = recordEnd(key, label, limits, {
       ...how,
       ok: false,
       ms,
@@ -344,8 +377,8 @@ async function runTimed(
 
     // Said on the error itself, which keeps its class (a PcpError's code,
     // a public-only refusal) for whoever handles it.
-    if (cooled && throttle && outcome.error instanceof Error) {
-      outcome.error.message = `${outcome.error.message} ${coolingNote(label, cooled)}`
+    if (effect && throttle && outcome.error instanceof Error) {
+      outcome.error.message = `${outcome.error.message} ${effectNote(label, base, effect)}`
     }
 
     throw outcome.error
@@ -354,7 +387,7 @@ async function runTimed(
   const result = outcome.result
   const throttle: Throttle | null = throttleOf(result)
   stripThrottle(result)
-  const cooled = recordEnd(key, label, limits, {
+  const effect = recordEnd(key, label, limits, {
     ...how,
     ok: result.isError !== true,
     ms,
@@ -362,12 +395,14 @@ async function runTimed(
     throttle,
   })
 
-  return cooled && throttle
+  // The answer is kept whatever came of it; the call that started a
+  // cool-down or a slowdown says so.
+  return effect
     ? {
         ...result,
         content: [
           ...(result.content ?? []),
-          { type: "text", text: coolingNote(label, cooled) },
+          { type: "text", text: effectNote(label, base, effect) },
         ],
       }
     : result
@@ -405,12 +440,14 @@ export function recordSite(
     throttle?: Throttle | null
   },
 ): Cooling | null {
-  return recordEnd(
+  const effect = recordEnd(
     sitePlace(ctx.vaultId, host),
     host,
     GATE_DEFAULTS[gateClass],
     { ...end, detect: SLOW_DETECTION[gateClass] },
   )
+
+  return effect?.kind === "cooling" ? effect.cooling : null
 }
 
 /** A server's gate now: cooling down, running, waiting and its counters. */
@@ -438,6 +475,40 @@ export function serverCooling(
         retryAfterMs: Math.max(0, cooling.until - gateNow()),
       }
     : null
+}
+
+/**
+ * How a server's calls go slower now, as check_server and
+ * get_server_limits tell it; null when they do not.
+ */
+export async function serverSlowing(
+  ctx: VaultContext,
+  server: { id: string; kind: string },
+): Promise<{
+  reason: string
+  since: string
+  min_interval_ms: number
+  timeout_ms: number
+} | null> {
+  const slowing = slowingAt(serverPlace(ctx.vaultId, server.id))
+  const limits = slowing ? await serverLimits(ctx, server) : null
+
+  return slowing && limits
+    ? {
+        reason: slowing.reason,
+        since: new Date(slowing.since).toISOString(),
+        ...slowedArgs(limits, slowing),
+      }
+    : null
+}
+
+/** A slowed server's spacing and time limit now. */
+export function slowedArgs(
+  limits: GateLimits,
+  slowing: Slowing,
+): { min_interval_ms: number; timeout_ms: number } {
+  const slowed = slowedLimits(limits, slowing.level)
+  return { min_interval_ms: slowed.minIntervalMs, timeout_ms: slowed.timeoutMs }
 }
 
 export { endCooling, serverPlace } from "./state"

@@ -90,14 +90,16 @@ export function imapThrottle(
 /**
  * A call that went through, but whose answers the server marked
  * [THROTTLED]: it is slowing PCP down on purpose (Gmail does this to an
- * account, taking seconds over each answer), so the call gate cools the
- * server down rather than let every call wait out its time limit.
+ * account, taking seconds over each answer). A "go slower", not a refusal:
+ * the call gate keeps the answer and sends the next calls one at a time,
+ * further apart and with a longer time limit (#143).
  */
 export function noticeThrottle(notices: string[]): PcpThrottle | null {
   return notices.some((notice) => /\[THROTTLED\]/i.test(notice))
     ? {
         reason:
           "The IMAP server marks its answers [THROTTLED]: it is slowing PCP down",
+        slow: true,
       }
     : null
 }

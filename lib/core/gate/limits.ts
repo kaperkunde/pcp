@@ -221,6 +221,44 @@ export const SLOW_DETECTION: Record<
 }
 
 /**
+ * Going slower (#143): a place that answers but asks PCP to go slower (an
+ * answer it marked throttled) or answers far slower than usual is not
+ * refused. Its calls go one at a time, at least SLOWDOWN_SPACING_MS
+ * apart at level 1, twice that at each level after (to
+ * SLOWDOWN_MAX_SPACING_MS), and wait SLOWDOWN_TIMEOUT_FACTOR times as long
+ * for an answer (one factor at every level, so a mail account's pooled
+ * session is not opened again at each step). Each signal steps the level
+ * up, to SLOWDOWN_MAX_LEVEL; SLOWDOWN_EASE_AFTER clean answers in a row
+ * step it down, and with no signal for SLOWDOWN_MEMORY_MS it is over.
+ * Only a refusal (429, 503 with Retry-After, an IMAP NO or BYE about rate,
+ * a JMAP limit) cools a place down.
+ */
+export const SLOWDOWN_SPACING_MS = SECOND
+export const SLOWDOWN_MAX_SPACING_MS = 8 * SECOND
+export const SLOWDOWN_TIMEOUT_FACTOR = 3
+export const SLOWDOWN_MAX_LEVEL = 4
+export const SLOWDOWN_EASE_AFTER = 3
+export const SLOWDOWN_MEMORY_MS = 30 * MINUTE
+
+/** A place's limits while it goes slower at `level` (1 and up). */
+export function slowedLimits(limits: GateLimits, level: number): GateLimits {
+  const spacing = Math.min(
+    SLOWDOWN_MAX_SPACING_MS,
+    SLOWDOWN_SPACING_MS * 2 ** Math.max(0, level - 1),
+  )
+
+  return {
+    ...limits,
+    maxConcurrent: 1,
+    minIntervalMs: Math.max(limits.minIntervalMs, spacing),
+    timeoutMs: Math.min(
+      GATE_BOUNDS.timeoutMs.max,
+      Math.max(limits.timeoutMs, limits.timeoutMs * SLOWDOWN_TIMEOUT_FACTOR),
+    ),
+  }
+}
+
+/**
  * A cool-down that starts within this long after the last one ended is
  * longer than that one (twice, up to the place's backoffMaxMs); later, it
  * starts again from backoffBaseMs. A place's own Retry-After (or rate

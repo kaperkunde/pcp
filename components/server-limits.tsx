@@ -121,6 +121,36 @@ export function ServerLimits({
               </Button>
             }
           />
+        ) : view.pacing ? (
+          <ListRow
+            title={
+              <span className="text-amber-700 dark:text-amber-400">
+                Throttled, pacing
+              </span>
+            }
+            description={
+              <>
+                {view.pacing.reason}. Its calls still go, one at a time, at
+                least {ms(view.pacing.minIntervalMs)} apart, each waited for up
+                to {ms(view.pacing.timeoutMs)}; PCP eases off as its answers
+                come back clean. Since <LocalDate value={view.pacing.since} />.
+              </>
+            }
+            trailing={
+              <Button
+                variant="secondary"
+                size="sm"
+                disabled={ending}
+                onClick={() =>
+                  startEnding(async () => {
+                    setEnded(await endCoolingAction(serverId))
+                  })
+                }
+              >
+                Back to normal
+              </Button>
+            }
+          />
         ) : null}
         {view.windows.map((window) => (
           <ListRow
