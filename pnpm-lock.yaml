@@ -15,8 +15,8 @@ importers:
         specifier: 0.32.0
         version: 0.32.0
       '@kaperkunde/backoff':
-        specifier: file:../backoff
-        version: file:../backoff
+        specifier: ^0.1.0
+        version: 0.1.0
       '@kaperkunde/mcp':
         specifier: 0.2.1
         version: 0.2.1(@modelcontextprotocol/server@2.2.0)(zod@4.6.5)
@@ -492,8 +492,8 @@ packages:
   '@jridgewell/trace-mapping@0.3.31':
     resolution: {integrity: sha512-zzNR+SdQSDJzc8joaeP8QQoCQr8NuYx2dIIytl1QeBEZHJ9uW6hebsrYgbz8hJwUQao3TWCMtmfV8Nu1twOLAw==}
 
-  '@kaperkunde/backoff@file:../backoff':
-    resolution: {directory: ../backoff, type: directory}
+  '@kaperkunde/backoff@0.1.0':
+    resolution: {integrity: sha512-q8xHuoQLCzkWM+T/Ijlb8QZV7YHOLVhTrI4kNLLTtW4q3eiOLViIHCXgxe0tmtgSIJM74HhXpebWtdNVvFwtEw==}
     engines: {node: '>=22'}
 
   '@kaperkunde/config@0.1.3':
@@ -4656,7 +4656,7 @@ snapshots:
       '@jridgewell/resolve-uri': 3.1.2
       '@jridgewell/sourcemap-codec': 1.6.0
 
-  '@kaperkunde/backoff@file:../backoff':
+  '@kaperkunde/backoff@0.1.0':
     dependencies:
       cockatiel: 4.0.0
       p-queue: 10.0.0

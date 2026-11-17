@@ -33,7 +33,7 @@
   "dependencies": {
     "@img/sharp-wasm32": "0.35.5",
     "@jitl/quickjs-singlefile-cjs-release-sync": "0.32.0",
-    "@kaperkunde/backoff": "file:../backoff",
+    "@kaperkunde/backoff": "^0.1.0",
     "@kaperkunde/mcp": "0.2.1",
     "@kaperkunde/next-kit": "0.1.2",
     "@kaperkunde/pcpgg-protocol": "0.1.2",
