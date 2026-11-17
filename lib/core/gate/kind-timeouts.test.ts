@@ -17,7 +17,7 @@ import { errorCodeOf } from "../tools/outcome"
 import { callServerTool, syncServerTools } from "../upstream"
 import { setupVault } from "../vault"
 import { gateServerCall, serverCooling } from "./index"
-import { resetGate } from "./state"
+import { resetGate } from "./places"
 import { writeServerLimits } from "./store"
 
 // A server's own time limit reaches each kind's own requests (#143): an API

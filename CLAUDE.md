@@ -234,20 +234,31 @@ so in the summary; the bump itself waits for the request.
   (the setting's `assistant`) or as the owner allowed it (a `tab_pace`
   request for that tab alone; the `wrapper_change` page), never below the
   owner's own pace for the site, and never written into the setting.
-- The call gate (`lib/core/gate/`) applies where pacing does and only
+- The call gate (`lib/core/gate/`) is PCP's layer over
+  `@kaperkunde/backoff` (kaperkunde/backoff: p-queue's turns and calls a
+  minute, cockatiel's circuit breaker as the cool-down, its own slowdown,
+  spacing, holds, byte budgets and counters, one `Place` per server or site
+  in `gate/places.ts`); a new mechanism goes there, PCP's rules (classes,
+  the owner's limits, what a signal is, the words) stay here. It applies
+  where pacing does and only
   there (`upstream.ts callServerTool` for every server kind but the
   browser and a wrapper, the browser per site in `browser/call.ts`, web
   fetch per site in `web-fetch.ts runFetch`), so every way in meets it: a
   server cooling down (it refused a call as too many or too fast: 429, a
   503 with Retry-After, or its protocol's own refusal, each
   `pcpThrottle: {reason, retryAfterMs?}` on an error or answer,
-  `lib/core/throttle-signal.ts` the one module) is refused at once, and
-  goes slower after; a server that answers but asks PCP to go slower
+  `lib/core/throttle-signal.ts` the one module) is refused at once, then
+  one call probes it while the others are refused, and it goes slower
+  after; a server that answers but asks PCP to go slower
   (`slow` on the signal: an IMAP answer marked `[THROTTLED]`) or answers
   far slower than usual (a run of one tool's answers, or of calls past
   their time limit, as `SLOW_DETECTION` says per class) is never refused
   for it: its calls go one at a time, further apart and with a longer time
-  limit (`slowedLimits`), easing off as answers come back clean. A spent
+  limit (`slowedLimits`), easing off as answers come back clean. Where the
+  owner set no time limit for a server, each tool's is learned from its
+  answers (RFC 6298, `learnTimeout`): only raised, at most
+  `LEARNED_TIMEOUT_FACTOR` times its class's, and handed to the kind in
+  whole minutes (not while it goes slower). A spent
   rate limit holds the next call until its reset, then bytes a day, pacing (the server's pause and
   calls a minute as a floor, one spacing), calls at once, and the time
   limit, past which the answer is a `timeout` tool error naming the server

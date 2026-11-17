@@ -15,6 +15,11 @@
  * is one spacing, not two.
  */
 
+import {
+  slowedLimits as librarySlowedLimits,
+  type SlowdownOptions,
+} from "@kaperkunde/backoff"
+
 const SECOND = 1_000
 const MINUTE = 60 * SECOND
 const HOUR = 60 * MINUTE
@@ -240,31 +245,28 @@ export const SLOWDOWN_MAX_LEVEL = 4
 export const SLOWDOWN_EASE_AFTER = 3
 export const SLOWDOWN_MEMORY_MS = 30 * MINUTE
 
+/** The slowdown's options, as @kaperkunde/backoff takes them. */
+export const SLOWDOWN_OPTIONS: SlowdownOptions = {
+  spacingMs: SLOWDOWN_SPACING_MS,
+  maxSpacingMs: SLOWDOWN_MAX_SPACING_MS,
+  timeoutFactor: SLOWDOWN_TIMEOUT_FACTOR,
+  maxTimeoutMs: 30 * MINUTE,
+  maxLevel: SLOWDOWN_MAX_LEVEL,
+  easeAfter: SLOWDOWN_EASE_AFTER,
+  memoryMs: SLOWDOWN_MEMORY_MS,
+}
+
 /** A place's limits while it goes slower at `level` (1 and up). */
 export function slowedLimits(limits: GateLimits, level: number): GateLimits {
-  const spacing = Math.min(
-    SLOWDOWN_MAX_SPACING_MS,
-    SLOWDOWN_SPACING_MS * 2 ** Math.max(0, level - 1),
-  )
-
-  return {
-    ...limits,
-    maxConcurrent: 1,
-    minIntervalMs: Math.max(limits.minIntervalMs, spacing),
-    timeoutMs: Math.min(
-      GATE_BOUNDS.timeoutMs.max,
-      Math.max(limits.timeoutMs, limits.timeoutMs * SLOWDOWN_TIMEOUT_FACTOR),
-    ),
-  }
+  return librarySlowedLimits(limits, level, SLOWDOWN_OPTIONS)
 }
 
 /**
- * A cool-down that starts within this long after the last one ended is
- * longer than that one (twice, up to the place's backoffMaxMs); later, it
- * starts again from backoffBaseMs. A place's own Retry-After (or rate
- * limit's reset) is followed up to the place's backoffMaxMs too.
+ * A tool's time limit learned from its answers (gate/places.ts) goes at most
+ * this many times over its class's, and never below it; a time limit the
+ * owner set is never learned over.
  */
-export const BACKOFF_MEMORY_MS = 30 * MINUTE
+export const LEARNED_TIMEOUT_FACTOR = 3
 
 /**
  * After its time limit a call is answered, but its turn at the place is
@@ -274,25 +276,12 @@ export const BACKOFF_MEMORY_MS = 30 * MINUTE
 export const LINGER_MS = MINUTE
 
 /**
- * The counters' windows and how fine they are kept: by the minute for the
- * last hour, by the hour for the rest of the day, each with a sample of
- * its answer times for the percentiles.
- */
-export const COUNTER_BUCKET_MS = MINUTE
-export const COUNTER_HOUR_MS = HOUR
-export const COUNTER_DAY_MS = 24 * HOUR
-/** Answer times kept per minute; more are sampled evenly. */
-export const SAMPLES_PER_BUCKET = 16
-/** Answer times kept per hour once its minutes are merged. */
-export const SAMPLES_PER_HOUR = 32
-
-/**
  * Places whose state is held in memory, for every vault together. Past it
- * one that is idle and not cooling down is dropped, which only gives it a
- * fresh start; a place that is busy or cooling down is never dropped, so
- * the bound is passed only while more places than this are. Each place
- * holds at most 61 minute buckets of SAMPLES_PER_BUCKET times, 24 hour
- * buckets of SAMPLES_PER_HOUR and MAX_TOOLS_TRACKED tools of
- * BASELINE_SAMPLES: some 3,800 numbers, so about 30 MB at the bound.
+ * one that is idle (not busy, cooling down, going slower or held) is
+ * dropped, which only gives it a fresh start; one that is not idle is never
+ * dropped, so the bound is passed only while more places than this are.
+ * Each place holds at most 61 minute buckets of 16 answer times, 24 hour
+ * buckets of 32 and MAX_TOOLS_TRACKED tools of BASELINE_SAMPLES: some 3,800
+ * numbers, so about 30 MB at the bound.
  */
 export const MAX_GATED_PLACES = 1_000

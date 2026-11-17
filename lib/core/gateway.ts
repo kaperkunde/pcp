@@ -325,7 +325,7 @@ import {
 } from "./gate/config"
 import { gateClassOf } from "./gate/limits"
 import { limitsLine, MAX_LIMITS_NOTE, proposeLimits } from "./gate/proposals"
-import type { WindowCounts } from "./gate/state"
+import type { WindowCounts } from "./gate/places"
 import { readServerLimits } from "./gate/store"
 import { mailDiagnostics } from "./mail/diagnostics"
 import { withRegisterAccess } from "./register-access"

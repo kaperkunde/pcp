@@ -441,7 +441,7 @@ export async function runFetch(
       }
     }
   } catch (error) {
-    recordSite(ctx, host, "web_fetch_site", {
+    await recordSite(ctx, host, "web_fetch_site", {
       ok: false,
       ms: Date.now() - started,
     })
@@ -451,7 +451,7 @@ export async function runFetch(
   // Counted and read for throttling, unless the gate or pacing refused it.
   const cooled =
     pacedRetryAfter(answer.result) === null
-      ? recordSite(ctx, host, "web_fetch_site", {
+      ? await recordSite(ctx, host, "web_fetch_site", {
           ok: answer.result.isError !== true,
           ms: Date.now() - started,
           ...(answer.bytes !== undefined ? { bytes: answer.bytes } : {}),

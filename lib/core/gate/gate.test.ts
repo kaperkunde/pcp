@@ -25,35 +25,14 @@ import {
   serverSlowing,
   siteCooling,
 } from "./index"
-import {
-  GATE_BOUNDS,
-  GATE_DEFAULTS,
-  MAX_GATED_PLACES,
-  SLOWDOWN_EASE_AFTER,
-  SLOWDOWN_MAX_LEVEL,
-  SLOWDOWN_MEMORY_MS,
-  slowedLimits,
-} from "./limits"
+import { GATE_BOUNDS, GATE_DEFAULTS, slowedLimits } from "./limits"
 import {
   httpSignal,
   httpThrottle,
   throttleOf,
   withThrottle,
 } from "../throttle-signal"
-import {
-  acquire,
-  endCooling,
-  holdAt,
-  placeCount,
-  placeView,
-  recordEnd,
-  release,
-  resetGate,
-  setGateClock,
-  type Cooling,
-  type GateEffect,
-  type Slowing,
-} from "./state"
+import { placeAt, resetGate, serverPlace } from "./places"
 import { readServerLimits, writeServerLimits } from "./store"
 
 const headers = (values: Record<string, string>) => new Headers(values)
@@ -207,359 +186,6 @@ describe("limits", () => {
     expect(
       slowedLimits({ ...mail, minIntervalMs: 30_000 }, 1).minIntervalMs,
     ).toBe(30_000)
-  })
-})
-
-/** The cool-down a call's end started, or null. */
-function cooledBy(effect: GateEffect | null): Cooling | null {
-  return effect?.kind === "cooling" ? effect.cooling : null
-}
-
-/** The slowdown a call's end started, or null. */
-function slowedBy(effect: GateEffect | null): Slowing | null {
-  return effect?.kind === "slowing" ? effect.slowing : null
-}
-
-describe("the gate's state", () => {
-  let now = NOW
-  const limits = { ...GATE_DEFAULTS.mail, backoffBaseMs: 10_000 }
-
-  beforeEach(() => {
-    now = NOW
-    resetGate()
-    setGateClock({ now: () => now })
-  })
-
-  afterEach(() => {
-    setGateClock(null)
-    resetGate()
-  })
-
-  it("cools a place down for as long as it asked, then lets calls through", () => {
-    const cooled = cooledBy(
-      recordEnd("k", "Mail", limits, {
-        ok: false,
-        ms: 200,
-        throttle: { reason: "too many logins", retryAfterMs: 60_000 },
-      }),
-    )
-    expect(cooled).toEqual({
-      reason: "too many logins",
-      since: NOW,
-      until: NOW + 60_000,
-    })
-    expect(placeView("k").cooling).not.toBeNull()
-
-    now += 60_001
-    expect(placeView("k").cooling).toBeNull()
-  })
-
-  it("doubles the cool-down when it is asked again soon after, up to the longest", () => {
-    const throttle = { reason: "busy" }
-    const lengths: number[] = []
-
-    for (let round = 0; round < 8; round++) {
-      const cooled = cooledBy(
-        recordEnd("k", "Mail", limits, {
-          ok: false,
-          ms: 100,
-          throttle,
-        }),
-      )!
-      lengths.push(cooled.until - cooled.since)
-      now = cooled.until + 1_000
-    }
-
-    expect(lengths).toEqual([
-      10_000, 20_000, 40_000, 80_000, 160_000, 320_000, 640_000, 900_000,
-    ])
-
-    // A success at its usual pace ends the run; the next one starts over.
-    recordEnd("k", "Mail", limits, { ok: true, ms: 100 })
-    const fresh = cooledBy(
-      recordEnd("k", "Mail", limits, {
-        ok: false,
-        ms: 100,
-        throttle,
-      }),
-    )!
-    expect(fresh.until - fresh.since).toBe(10_000)
-  })
-
-  it("takes a run of one tool's answers far slower than its usual as a reason to go slower, never to refuse", () => {
-    for (let i = 0; i < 10; i++) {
-      recordEnd("k", "Mail", limits, {
-        ok: true,
-        ms: 400,
-        tool: "search_emails",
-      })
-    }
-
-    const slow = (ms: number) =>
-      recordEnd("k", "Mail", limits, { ok: true, ms, tool: "search_emails" })
-
-    expect(slow(80_000)).toBeNull()
-    expect(slow(81_000)).toBeNull()
-    expect(slowedBy(slow(85_000))?.reason).toBe(
-      "its answers to search_emails are taking much longer than usual (3 in a row, about 85 s each against 1 s)",
-    )
-    expect(placeView("k").minute.throttles).toBe(1)
-    expect(placeView("k").cooling).toBeNull()
-    expect(placeView("k").slowing?.level).toBe(1)
-  })
-
-  it("never takes a slow tool for a slow server: fast commands, then long builds", () => {
-    const ssh = GATE_DEFAULTS.ssh
-
-    for (const detect of ["latency", "timeouts"] as const) {
-      resetGate()
-
-      for (let i = 0; i < 10; i++) {
-        recordEnd("s", "Box", ssh, { ok: true, ms: 80, tool: "ls", detect })
-      }
-
-      for (let i = 0; i < 3; i++) {
-        expect(
-          recordEnd("s", "Box", ssh, {
-            ok: true,
-            ms: 60_000,
-            tool: "build",
-            detect,
-          }),
-        ).toBeNull()
-      }
-
-      expect(placeView("s").cooling).toBeNull()
-    }
-
-    // Where only time limits count, even a tool's own slow run does not.
-    resetGate()
-    for (let i = 0; i < 10; i++) {
-      recordEnd("s", "Box", ssh, {
-        ok: true,
-        ms: 80,
-        tool: "run_command",
-        detect: "timeouts",
-      })
-    }
-    for (let i = 0; i < 4; i++) {
-      recordEnd("s", "Box", ssh, {
-        ok: true,
-        ms: 60_000,
-        tool: "run_command",
-        detect: "timeouts",
-      })
-    }
-    expect(placeView("s").cooling).toBeNull()
-  })
-
-  it("goes slower, never refusing, when a place answers but asks for it, and eases off as answers come back clean", () => {
-    const slow = { reason: "it marks its answers [THROTTLED]", slow: true }
-    const started = recordEnd("k", "Mail", limits, {
-      ok: true,
-      ms: 10_000,
-      throttle: slow,
-    })
-
-    expect(slowedBy(started)).toEqual({
-      level: 1,
-      reason: "it marks its answers [THROTTLED]",
-      since: NOW,
-    })
-    expect(placeView("k").cooling).toBeNull()
-    expect(placeView("k").minute.throttles).toBe(1)
-
-    // Each answer marked again steps it up, said only when it started.
-    for (let i = 0; i < 10; i++) {
-      expect(
-        recordEnd("k", "Mail", limits, {
-          ok: true,
-          ms: 10_000,
-          throttle: slow,
-        }),
-      ).toBeNull()
-    }
-    expect(placeView("k").slowing?.level).toBe(SLOWDOWN_MAX_LEVEL)
-    expect(placeView("k").cooling).toBeNull()
-
-    // Clean answers step it down, a few at a time, then it is over.
-    for (let level = SLOWDOWN_MAX_LEVEL; level > 0; level--) {
-      for (let i = 0; i < SLOWDOWN_EASE_AFTER; i++) {
-        expect(placeView("k").slowing?.level).toBe(level)
-        recordEnd("k", "Mail", limits, { ok: true, ms: 300 })
-      }
-    }
-    expect(placeView("k").slowing).toBeNull()
-  })
-
-  it("forgets a slowdown with no signal for a while, and the owner's button ends it", () => {
-    const slow = { reason: "throttled", slow: true }
-    recordEnd("k", "Mail", limits, { ok: true, ms: 100, throttle: slow })
-    expect(placeView("k").slowing).not.toBeNull()
-    now += SLOWDOWN_MEMORY_MS
-    expect(placeView("k").slowing).toBeNull()
-
-    recordEnd("k", "Mail", limits, { ok: true, ms: 100, throttle: slow })
-    endCooling("k")
-    expect(placeView("k").slowing).toBeNull()
-  })
-
-  it("goes slower after a refusal's cool-down too", () => {
-    recordEnd("k", "Mail", limits, {
-      ok: false,
-      ms: 100,
-      throttle: { reason: "too many connections", retryAfterMs: 5_000 },
-    })
-    expect(placeView("k").cooling).not.toBeNull()
-    now += 5_001
-    expect(placeView("k").cooling).toBeNull()
-    expect(placeView("k").slowing?.reason).toBe("too many connections")
-  })
-
-  it("follows a server's Retry-After no further than its longest cool-down", () => {
-    const cooled = cooledBy(
-      recordEnd("k", "Mail", limits, {
-        ok: false,
-        ms: 50,
-        throttle: { reason: "Busy.", retryAfterMs: 60 * 60_000 },
-      }),
-    )!
-
-    expect(cooled.until - cooled.since).toBe(limits.backoffMaxMs)
-    // Its words, without their full stop, go into a sentence of PCP's.
-    expect(cooled.reason).toBe("Busy")
-  })
-
-  it("holds the next calls until a spent rate limit resets, and cools nothing", () => {
-    recordEnd("k", "Mail", limits, {
-      ok: true,
-      ms: 50,
-      throttle: {
-        reason: "its rate limit has no calls left until it resets",
-        retryAfterMs: 20_000,
-        hold: true,
-      },
-    })
-
-    expect(placeView("k").cooling).toBeNull()
-    expect(placeView("k").minute.throttles).toBe(0)
-    expect(holdAt("k")).toBe(NOW + 20_000)
-    now += 20_001
-    expect(holdAt("k")).toBe(0)
-  })
-
-  it("takes calls past their time limit in a row as one, with no usual time yet", () => {
-    for (let i = 0; i < 2; i++) {
-      expect(
-        recordEnd("k", "Mail", limits, {
-          ok: false,
-          ms: 45_000,
-          timedOut: true,
-        }),
-      ).toBeNull()
-    }
-
-    expect(
-      slowedBy(
-        recordEnd("k", "Mail", limits, {
-          ok: false,
-          ms: 45_000,
-          timedOut: true,
-        }),
-      )?.reason,
-    ).toBe("3 calls in a row ran past its time limit")
-    expect(placeView("k").cooling).toBeNull()
-  })
-
-  it("counts calls, errors, bytes and percentiles over a minute, an hour and a day", () => {
-    for (const ms of [100, 200, 300, 400, 1_000]) {
-      recordEnd("k", "Mail", limits, { ok: true, ms, bytes: 1_000 })
-    }
-    now += 30 * 60_000
-    recordEnd("k", "Mail", limits, { ok: false, ms: 50 })
-    now += 2 * 60 * 60_000
-    recordEnd("k", "Mail", limits, { ok: true, ms: 70, bytes: 10 })
-
-    const view = placeView("k")
-    expect(view.minute).toMatchObject({ calls: 1, errors: 0, bytes: 10 })
-    expect(view.hour).toMatchObject({ calls: 1 })
-    expect(view.day).toMatchObject({
-      calls: 7,
-      errors: 1,
-      bytes: 5_010,
-      p50Ms: 200,
-      p95Ms: 1_000,
-    })
-  })
-
-  it("samples a busy minute's answer times evenly, not its last ones", () => {
-    for (let i = 0; i < 900; i++) {
-      recordEnd("k", "Mail", limits, { ok: true, ms: 10 })
-    }
-    for (let i = 0; i < 100; i++) {
-      recordEnd("k", "Mail", limits, { ok: true, ms: 1_000 })
-    }
-
-    const { minute } = placeView("k")
-    expect(minute.calls).toBe(1_000)
-    expect(minute.p50Ms).toBe(10)
-  })
-
-  it("keeps a day by the hour past the last one, and never drops a place cooling down", () => {
-    for (let minute = 0; minute < 6 * 60; minute++) {
-      recordEnd("k", "Mail", limits, { ok: true, ms: 100 + minute })
-      now += 60_000
-    }
-
-    const view = placeView("k")
-    expect(view.day.calls).toBe(6 * 60)
-    expect(view.hour.calls).toBe(60)
-    expect(view.day.p95Ms).toBeGreaterThan(view.day.p50Ms!)
-
-    resetGate()
-    recordEnd("cooling", "Mail", limits, {
-      ok: false,
-      ms: 1,
-      throttle: { reason: "busy" },
-    })
-    for (let i = 0; i < MAX_GATED_PLACES + 10; i++) {
-      recordEnd(`p${i}`, "Other", limits, { ok: true, ms: 1 })
-    }
-
-    expect(placeCount()).toBe(MAX_GATED_PLACES)
-    expect(placeView("cooling").cooling).not.toBeNull()
-  })
-
-  it("lets those waiting in when calls at once is raised", async () => {
-    expect(await acquire("k", "Mail", 1, 0)).toBe(true)
-    const second = acquire("k", "Mail", 1, 5_000)
-    expect(placeView("k").waiting).toBe(1)
-
-    // A later call with the owner's new limit of two.
-    expect(await acquire("k", "Mail", 2, 0)).toBe(false)
-    expect(await second).toBe(true)
-    expect(placeView("k")).toMatchObject({ running: 2, waiting: 0 })
-    release("k")
-    release("k")
-  })
-
-  it("lets so many run at once and the next in when one ends", async () => {
-    expect(await acquire("k", "Mail", 2, 0)).toBe(true)
-    expect(await acquire("k", "Mail", 2, 0)).toBe(true)
-    // None free and no time to wait.
-    expect(await acquire("k", "Mail", 2, 0)).toBe(false)
-
-    const third = acquire("k", "Mail", 2, 5_000)
-    expect(placeView("k")).toMatchObject({ running: 2, waiting: 1 })
-    release("k")
-    expect(await third).toBe(true)
-    expect(placeView("k")).toMatchObject({ running: 2, waiting: 0 })
-
-    // One that waits past its time is not let in later.
-    expect(await acquire("k", "Mail", 2, 20)).toBe(false)
-    release("k")
-    release("k")
-    expect(placeView("k").running).toBe(0)
   })
 })
 
@@ -829,6 +455,39 @@ describe("a call through the gate", () => {
     })
   })
 
+  it("learns a longer time limit for a tool that always takes long, passed on in whole minutes, never over the owner's", async () => {
+    const place = placeAt(
+      serverPlace(ctx.vaultId, server.id),
+      "Docs",
+      "mcp",
+      GATE_DEFAULTS.mcp,
+      { learn: true },
+    )
+    for (let i = 0; i < 6; i++) {
+      await place.observe({ ok: true, ms: 150_000, tool: "report" })
+    }
+
+    let given: number | undefined
+    const call = (tool: string) =>
+      gateServerCall(ctx, server, tool, {}, async (ms) => {
+        given = ms
+        return answer("ok")
+      })
+
+    // Over its class's 2 minutes, in whole minutes, at most three times it.
+    await call("report")
+    expect(given! % 60_000).toBe(0)
+    expect(given).toBeGreaterThan(120_000)
+    expect(given).toBeLessThanOrEqual(360_000)
+    // Another tool keeps the kind's own.
+    await call("ping")
+    expect(given).toBeUndefined()
+    // A limit the owner set is never learned over.
+    await writeServerLimits(ctx, server.id, { timeoutMs: 5_000 })
+    await call("report")
+    expect(given).toBe(5_000)
+  })
+
   it("leaves a wrapper alone and counts sites apart", async () => {
     const result = await gateServerCall(
       ctx,
@@ -840,7 +499,7 @@ describe("a call through the gate", () => {
     expect(result).toEqual(answer("ran"))
 
     expect(siteCooling(ctx, "shop.example")).toBeNull()
-    recordSite(ctx, "shop.example", "web_fetch_site", {
+    await recordSite(ctx, "shop.example", "web_fetch_site", {
       ok: false,
       ms: 50,
       throttle: { reason: "it answered HTTP 429 (too many requests)" },
@@ -850,10 +509,13 @@ describe("a call through the gate", () => {
     )
     // A slow page is not a request to slow down.
     for (let i = 0; i < 10; i++) {
-      recordSite(ctx, "slow.example", "web_fetch_site", { ok: true, ms: 10 })
+      await recordSite(ctx, "slow.example", "web_fetch_site", {
+        ok: true,
+        ms: 10,
+      })
     }
     for (let i = 0; i < 5; i++) {
-      recordSite(ctx, "slow.example", "web_fetch_site", {
+      await recordSite(ctx, "slow.example", "web_fetch_site", {
         ok: true,
         ms: 60_000,
       })
