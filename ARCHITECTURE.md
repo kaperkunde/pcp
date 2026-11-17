@@ -3867,7 +3867,17 @@ under it." It still runs.
 
 Pacing spaces calls out; the gate (`lib/core/gate/`, #143) decides whether
 one may go at all, how long PCP waits for it, and what a place's own
-"slow down" means. One module, applied where pacing is and nowhere else:
+"slow down" means. Its mechanics are `@kaperkunde/backoff`'s
+(kaperkunde/backoff, a package of its own so PCP stops reinventing them):
+one `Place` per vault and server or site (`gate/places.ts`), whose turns
+and calls a minute are p-queue's, whose cool-down is cockatiel's circuit
+breaker (opened by a refusal only, with one probe call once it ends while
+the others are refused), and whose slowdown, spacing, holds, byte budget,
+usual times and counters are the package's own. PCP keeps its classes'
+defaults and bounds, the owner's limits, what a signal is
+(`throttle-signal.ts`, turned into the package's `refuse`, `slow` or `hold`
+by `signalOfThrottle`), pacing's class pause before a call, and every word
+an assistant or the owner reads. One module, applied where pacing is and nowhere else:
 `upstream.ts callServerTool` for every server kind but the browser and a
 wrapper (MCP servers, API endpoints, mail and calendar accounts, SSH
 servers, services, storage folders), so execute_<tier>, run_<tier>'s
@@ -3877,10 +3887,10 @@ pacedTurn` per site; and `web-fetch.ts runFetch` per site.
 
 **A server's call** (`gate/index.ts gateServerCall`), in order: refused at
 once while the server cools down; refused once its answers today reach its
-bytes a day; its pace (pacing's `paceServerCall`, with the server's own
-pause and calls a minute as a floor under the class's pace, `withFloor`, so
-there is one spacing); a turn among its calls at once (`state.ts acquire`),
-waited for within what the caller's deadline leaves (`waitBudget`); then
+bytes a day; pacing's pause for its class (`paceServerCall`); then the
+place's own (`Place.run`): its calls a minute, its pause and a turn among
+its calls at once, each waited for within what the caller's deadline leaves
+(`waitBudget`), so the server's own spacing is kept once, by the place; then
 the call within its time limit. Before the pace, a server whose rate limit
 said it has nothing left until a reset holds the call until then (within
 its time, else `paced`), and after its turn a call is refused if a
@@ -3919,7 +3929,7 @@ limits or cool-downs is in `search`, a tool's description or the
 instructions, and a call hears of one only when it cannot go.
 
 **Slowing down** (`lib/core/throttle-signal.ts`, the one module both sides
-use; `state.ts recordEnd`). A place refuses a call as too many or too fast
+use; `Place.run` reads each answer). A place refuses a call as too many or too fast
 with a 429 or a 503 with Retry-After (`httpThrottle`, read by JMAP and CalDAV requests, an
 API endpoint's answer in `openapi/call.ts`, an MCP server's refusal in
 `upstream.ts`, web fetch, and a browser tab's page), or with its protocol's
@@ -3952,9 +3962,9 @@ started it is kept and says so; `check_server` and `get_server_limits` name it
 (`pacing`), and the server's page shows "Throttled, pacing" with a button back
 to normal. A refusal cools the place down: for as long as it asked (no longer
 than its longest cool-down), else the first cool-down, doubling for each one
-that starts within `BACKOFF_MEMORY_MS` of the last, up to the longest; a
-success at its usual pace after it ends starts over, and its calls go slower
-after it as for a "go slower". While it
+while the probe after it is refused again, up to the longest; a probe that
+is not refused closes it and the next cool-down starts over, and its calls
+go slower after it as for a "go slower". While it
 cools, its calls are refused at once ("<server> is cooling down: <reason>.
 Nothing was sent; try again in N s."), the first throttled answer says the
 cool-down began, `check_server` names it (`cooling` on the server's state),
@@ -3963,7 +3973,7 @@ web fetch share a site's cool-down and counters: each browser turn at a
 site is counted when it ends (`browser/call.ts pacedTurn`), with a 429 on
 the page a navigation opened.
 
-**Counters and state** are in this process's memory (`state.ts`), per vault
+**Counters and state** are in this process's memory (each `Place`), per vault
 and place, like pacing's: calls, errors, slow-downs, bytes where an answer
 has them, and answer times for the 50th and 95th percentile (a reservoir
 sample per minute, each call as likely to be kept; minutes older than an

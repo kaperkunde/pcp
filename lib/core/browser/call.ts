@@ -1336,11 +1336,12 @@ async function pacedTurn(
       turn.release()
       if (released) return
       released = true
-      recordSite(scope.ctx, site, "browser_site", {
+      // Read in the background: the turn is given back at once.
+      void recordSite(scope.ctx, site, "browser_site", {
         ok: counted.ok,
         ms: Date.now() - started,
         throttle: counted.throttle,
-      })
+      }).catch(() => {})
     },
   }
 
