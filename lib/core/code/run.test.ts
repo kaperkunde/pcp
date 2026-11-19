@@ -287,6 +287,14 @@ describe("a program's calls", () => {
     expect(text).not.toContain("card.pdf")
   })
 
+  it("refuses a keep path with a list index (review 3)", async () => {
+    const { text } = await run(`
+      try { await pcp.call("postcards", "scan_card", {}, { keep: ["cards[0].name"] }) } catch (error) { return error.message }
+    `)
+
+    expect(text).toMatch(/any depth/)
+  })
+
   it("filters a large answer without handing it back, and says what it did", async () => {
     const { isError, text } = await run(`
       const cards = await pcp.call("postcards", "list_cards")

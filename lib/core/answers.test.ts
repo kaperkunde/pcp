@@ -508,6 +508,131 @@ describe("keep", () => {
     })
   })
 
+  it("keeps the whole of an answer that is not JSON when keep is asked (review 1)", async () => {
+    const answer: CallToolResult = {
+      content: [{ type: "text", text: "Your token: tok_plain_123456" }],
+    }
+    const { kept, shown, whole } = await keeping(answer, { keep: ["token"] })
+
+    expect(kept).toEqual([
+      {
+        kind: "text",
+        text: "Your token: tok_plain_123456",
+        mediaType: "text/plain",
+      },
+    ])
+    for (const result of [shown, whole()]) {
+      expect(JSON.stringify(result)).not.toContain("tok_plain")
+      expect(JSON.stringify(result)).not.toContain("preview")
+    }
+    expect(texts(shown).join("\n")).toContain("(the answer) → r0")
+    expect(texts(shown).join("\n")).toContain("not JSON")
+
+    const fake = fakeKeepers()
+    const outcome = await answerValue(
+      answer,
+      { keep: ["token"] },
+      fake.keepers,
+      {
+        max: 100_000,
+      },
+    )
+    expect(JSON.stringify(outcome)).not.toContain("tok_plain")
+    expect(outcome).toMatchObject({
+      ok: true,
+      value: { $result: "r0", type: "text/plain" },
+      notes: [expect.stringContaining("not JSON")],
+    })
+  })
+
+  it("keeps a part at any depth that fields leaves out (review 2)", async () => {
+    const { kept, shown } = await keeping(
+      json({ data: { token: "tok_nested_1", expires_at: "soon", n: 1 } }),
+      { fields: ["data.expires_at"], keep: ["token"] },
+    )
+
+    expect(kept).toEqual([
+      { kind: "text", text: "tok_nested_1", mediaType: "text/plain" },
+    ])
+    expect(lastJson(shown)).toEqual({
+      data: {
+        expires_at: "soon",
+        token: expect.objectContaining({ $result: "r0" }),
+      },
+    })
+    expect(texts(shown).join("\n")).not.toContain("Nothing to keep")
+  })
+
+  it("refuses a keep path with a list index (review 3)", () => {
+    expect(() => readFields(["items[0].token"], "keep")).toThrow(/any depth/)
+    expect(readFields(["items.token"], "keep")).toEqual(["items.token"])
+  })
+
+  it("links no resource for a part to keep, and says it is for passing on (review 4)", async () => {
+    const fake = fakeKeepers()
+    const { shown } = await shapeAnswerKeeping(
+      json({ token: "tok_link_1", file: PNG.toString("base64") }),
+      { keep: ["token"] },
+      fake.keepers,
+      { wholeMax: 4_000_000, links: true },
+    )
+    const links = shown.content.filter(
+      (block) => block.type === "resource_link",
+    )
+
+    expect(links).toHaveLength(1)
+    expect(JSON.stringify(links)).not.toContain('"r0"')
+    expect(texts(shown)[0]).toMatch(/token → r0[^;]*; file → r1/)
+    expect(texts(shown).join("\n")).toMatch(
+      /token: pass (it|them) on as (it is|they are); do not read/i,
+    )
+  })
+
+  it("withholds what keep names in an error's JSON (review 5)", async () => {
+    for (const text of [
+      JSON.stringify({ message: "already made", token: "tok_err_1" }),
+      `HTTP 422 Unprocessable\n${JSON.stringify({ token: "tok_err_1" })}`,
+    ]) {
+      const error: CallToolResult = {
+        content: [{ type: "text", text }],
+        isError: true,
+      }
+      const { shown } = await keeping(error, { keep: ["token"] })
+      expect(JSON.stringify(shown)).not.toContain("tok_err_1")
+      expect(JSON.stringify(shown)).toContain("[left out")
+
+      const outcome = await answerValue(
+        error,
+        { keep: ["token"] },
+        fakeKeepers().keepers,
+        { max: 100_000 },
+      )
+      expect(JSON.stringify(outcome)).not.toContain("tok_err_1")
+    }
+  })
+
+  it("withholds a part to keep nested deeper than PCP looks (review 8)", async () => {
+    let deep: Record<string, unknown> = { token: "tok_deep_1" }
+    for (let i = 0; i < 70; i++) deep = { d: deep }
+    const { shown } = await keeping(json(deep), { keep: ["token"] })
+
+    expect(JSON.stringify(shown)).not.toContain("tok_deep_1")
+  })
+
+  it("tells a program what keep could not do (review 8)", async () => {
+    const outcome = await answerValue(
+      json({ expires_at: "soon" }),
+      { keep: ["token"] },
+      fakeKeepers().keepers,
+      { max: 100_000 },
+    )
+
+    expect(outcome).toMatchObject({
+      ok: true,
+      notes: ["Nothing to keep at token: the answer has no such part."],
+    })
+  })
+
   it("keeps a short word at a path as text, not as bytes", async () => {
     const { kept } = await keeping(json({ code: "word" }), { keep: ["code"] })
 
@@ -780,15 +905,18 @@ describe("what keeping leaves as it was", () => {
     expect(texts(shown).at(-1)).toContain('"$result":"r0"')
   })
 
-  it("says keep was not applied to an answer that is not JSON", async () => {
+  it("keeps an answer that is not JSON whole when keep is asked, rather than show it", async () => {
     const { kept, shown } = await keeping(
       { content: [{ type: "text", text: "just words" }] },
       { keep: ["a"] },
     )
 
-    expect(kept).toEqual([])
-    expect(texts(shown)[0]).toBe(
-      "keep was not applied: the answer is not JSON.",
+    expect(kept).toEqual([
+      { kind: "text", text: "just words", mediaType: "text/plain" },
+    ])
+    expect(texts(shown).join("\n")).not.toContain("just words")
+    expect(texts(shown).join("\n")).toContain(
+      "The answer is not JSON, so there are no parts to keep",
     )
   })
 })
