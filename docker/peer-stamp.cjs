@@ -5,9 +5,13 @@
 // x-pcp-forwarded for a client that sent forwarded headers at all. Any of
 // either that the client sent is removed first.
 //
-// Inlined, not imported from @kaperkunde/security, because this file runs before Next, outside the traced bundle, and the desktop wrapper
-// takes nothing from the root workspace. Used by docker/start.cjs and, staged
-// beside the server, by desktop/server-entry.cjs.
+// stampPeer is @kaperkunde/security's. This file runs before Next, outside
+// the bundle, so the package is one of next.config.ts's
+// serverExternalPackages: traced into the standalone server's node_modules,
+// beside this file in the image and in the desktop app's staged server.
+// Used by docker/start.cjs and, staged beside the server, by
+// desktop/server-entry.cjs.
+const { stampPeer: stamp } = require("@kaperkunde/security")
 
 const HEADER = "x-pcp-peer"
 // Set only when the client itself sent X-Forwarded-For or X-Real-IP. Next
@@ -15,17 +19,8 @@ const HEADER = "x-pcp-peer"
 // (base-server.js, `??=`), so the header's presence alone says nothing.
 const FORWARDED = "x-pcp-forwarded"
 
-// Mirrors stampPeer in @kaperkunde/security, with two differences: a socket
-// with no address is stamped "unknown" (which resolves to one untrusted key,
-// never to trusting the headers), and the marker above.
 function stampPeer(req, name) {
-  delete req.headers[name]
-  delete req.headers[FORWARDED]
-  if (req.headers["x-forwarded-for"] || req.headers["x-real-ip"]) {
-    req.headers[FORWARDED] = "1"
-  }
-  const address = req.socket && req.socket.remoteAddress
-  req.headers[name] = address || "unknown"
+  stamp(req, name, { forwardedHeader: FORWARDED })
 }
 
 let installed = false

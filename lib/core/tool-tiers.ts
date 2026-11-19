@@ -105,31 +105,27 @@ export function runEntryFor(tier: ToolTier): string {
   return `run_${tier}`
 }
 
+/**
+ * The entry names before #113, retired: only so a tier saved for one is
+ * still dropped. A call by one is refused as an unknown tool.
+ */
+const RETIRED_ENTRY_NAMES: ReadonlySet<string> = new Set([
+  "describe",
+  ...["read", "write", "destructive"].flatMap((tier) => [
+    `call_tool_${tier}`,
+    `run_code_${tier}`,
+  ]),
+])
+
 /** search and the execute and run entries, whose tiers are their names. */
 export function isEntryName(name: string): boolean {
   return (
     name === "search" ||
-    name in RETIRED_ENTRIES ||
+    RETIRED_ENTRY_NAMES.has(name) ||
     TOOL_TIERS.some(
       (tier) => name === callEntryFor(tier) || name === runEntryFor(tier),
     )
   )
-}
-
-/**
- * The entry tools' names before PCP's tools were collapsed into search,
- * execute_<tier> and run_<tier> (#113), each with the one that took over:
- * still answered for one release, unlisted, with a line saying so
- * (docs/breaking-changes.md), then refused.
- */
-export const RETIRED_ENTRIES: Readonly<Record<string, string>> = {
-  describe: "search",
-  call_tool_read: "execute_read",
-  call_tool_write: "execute_write",
-  call_tool_destructive: "execute_destructive",
-  run_code_read: "run_read",
-  run_code_write: "run_write",
-  run_code_destructive: "run_destructive",
 }
 
 /** Annotations as stored (JSON text), read; anything else as none. */

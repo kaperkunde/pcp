@@ -20,6 +20,17 @@ A call that runs past its server's time limit is now answered with a
 `timeout` tool error naming the server and the limit, for every kind (it
 was the browser's only); what it was asked may still happen there.
 
+## The old entry names are retired
+
+The release after 0.5.1 retires what 0.5.0 and 0.5.1 still answered: a call
+to `describe`, `call_tool_<tier>` or `run_code_<tier>`, or to one of PCP's
+own tools by its own name (`memory`, `check_permission`, …), is refused as
+an unknown tool. Use `search` (with `ref`), `execute_<tier>` and
+`run_<tier>`; PCP's own tools run only through `execute_<tier>` with
+`{"tool": "<name>", "arguments": {…}}`. An assistant whose instructions
+still name the old entries should take the merge PCP offers on the token's
+page (instructions version 7).
+
 ## Seven tools: search, execute_read/write/destructive, run_read/write/destructive
 
 A client lists PCP's entry tools alone: `search`, `execute_read`,
@@ -85,17 +96,11 @@ tier in its annotations: `search`, `execute_read` and `run_read` only read
   `search`, `execute_<tier>` and `run_<tier>`. A token whose instructions
   you changed keeps its text, which may still name `describe` and
   `call_tool_<tier>`: accept the merge PCP offers on the token's page
-  before the release after 0.5.0, when those names stop answering (0.5.0 is
-  the first release that still answers them).
+  before the release after 0.5.1, when those names stop answering.
 
-For one release every old name is still answered when a client calls it,
-though no longer listed: `describe`, `call_tool_<tier>` and
-`run_code_<tier>` as the entry that took over, and each of PCP's own tools
-as itself, with one line in front of the answer naming what to call now
-("PCP's tools changed: memory is now run through execute_destructive, as
-{"tool": "memory", "arguments": {…}}. …"). In the release after, the old
-entry names are refused as unknown tools, and PCP's own tools answer only
-through `execute_<tier>`.
+For 0.5.0 and 0.5.1 every old name was still answered when a client called
+it, with one line in front of the answer naming what to call now. The
+release after 0.5.1 refuses them as unknown tools (above).
 
 ## The same Write or Destructive call twice is answered, not run
 

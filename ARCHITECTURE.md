@@ -4885,12 +4885,10 @@ minute, one message each (`app/mcp/route.ts`). The tools:
   Every tier's entry takes the same handle; a tool above the entry's tier
   is refused, naming the entry that runs it, before anything else.
 - `search_tools` and `describe_tool`, the old names, are gone after their
-  release (docs/breaking-changes.md). For one release from #113, `describe`,
-  `call_tool_<tier>` and `run_code_<tier>` are still registered under their
-  old names, unlisted, and answer as the entry that took over
-  (`RETIRED_ENTRIES` in `tool-tiers.ts`), and each of PCP's own tools still
-  answers by its own name; every such answer opens with a line naming what
-  to call now (`retiredNote`, `ownNameNote`).
+  release (docs/breaking-changes.md). `describe`, `call_tool_<tier>` and
+  `run_code_<tier>`, which #113 kept for a release, are refused as unknown
+  tools too, and each of PCP's own tools answers only through
+  `execute_<tier>`, never by its own name.
 - `check_permission(id? | ids?, mode?)` (several ids wait together, `any` or `all`, `checkPermissions`), `withdraw_request(id)`, `check_server(server)`,
   `register_server(...)` and `propose_tool_access(changes)` belong to the
   permission flow below.

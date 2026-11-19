@@ -27,11 +27,11 @@ importers:
         specifier: 0.1.2
         version: 0.1.2
       '@kaperkunde/security':
-        specifier: 0.4.0
-        version: 0.4.0
+        specifier: 0.5.0
+        version: 0.5.0
       '@kaperkunde/ui':
-        specifier: 0.2.1
-        version: 0.2.1(@types/react@19.2.18)(next@16.3.6(@babel/core@7.29.7)(@playwright/test@1.63.0)(@types/node@24.19.1)(react-dom@19.2.8(react@19.2.8))(react@19.2.8))(react-dom@19.2.8(react@19.2.8))(react@19.2.8)(tailwindcss@4.3.3)
+        specifier: 0.2.2
+        version: 0.2.2(@types/react@19.2.18)(next@16.3.6(@babel/core@7.29.7)(@playwright/test@1.63.0)(@types/node@24.19.1)(react-dom@19.2.8(react@19.2.8))(react@19.2.8))(react-dom@19.2.8(react@19.2.8))(react@19.2.8)(tailwindcss@4.3.3)
       '@mixmark-io/domino':
         specifier: ^2.2.0
         version: 2.2.0
@@ -538,12 +538,12 @@ packages:
     resolution: {integrity: sha512-V82L0xw6rzBE09F0DBKs5ln27TvD5ZXeH6CMPkw44VHVv/HjAScKHMtmu5ADyoqiq/XHrwVz4pdpchOYVhZgmg==}
     engines: {node: '>=24'}
 
-  '@kaperkunde/security@0.4.0':
-    resolution: {integrity: sha512-bY5EBMyD1rLy60ZL/KEtvdmDmmrEq0jwG9s5y3XFLxqFNTRft0NnDaVr78wZh+/jpFF+g7/zvz78HWpTkm66lw==}
+  '@kaperkunde/security@0.5.0':
+    resolution: {integrity: sha512-+1yOFQJbej7XTsPNnYjab1haujd5ElcVdCHYEjRt+wxOocmgZinKczEGwdaBIr41EEcFZs1zJj/9lSypHjLR3A==}
     engines: {node: '>=22'}
 
-  '@kaperkunde/ui@0.2.1':
-    resolution: {integrity: sha512-/ZWQjBHpKO4J7vqKwadGPOOqbjxevqGJAN5+lkGtwl6ipF+fpICeUfQ5us+GpacTYtJHzfE74h/NCmtjBZi4Dw==}
+  '@kaperkunde/ui@0.2.2':
+    resolution: {integrity: sha512-Cp1Jj+PWZ1RnCo7lauCjgxo/icw6PRCwzq1B6VuO46q2CS+6uWPaz9oJS+JckI0Clxvtrf/rpA1h5OT3U0vcbQ==}
     peerDependencies:
       next: '>=15.0.0'
       react: ^19.0.0
@@ -4686,11 +4686,11 @@ snapshots:
       - bufferutil
       - utf-8-validate
 
-  '@kaperkunde/security@0.4.0':
+  '@kaperkunde/security@0.5.0':
     dependencies:
       undici: 7.30.0
 
-  '@kaperkunde/ui@0.2.1(@types/react@19.2.18)(next@16.3.6(@babel/core@7.29.7)(@playwright/test@1.63.0)(@types/node@24.19.1)(react-dom@19.2.8(react@19.2.8))(react@19.2.8))(react-dom@19.2.8(react@19.2.8))(react@19.2.8)(tailwindcss@4.3.3)':
+  '@kaperkunde/ui@0.2.2(@types/react@19.2.18)(next@16.3.6(@babel/core@7.29.7)(@playwright/test@1.63.0)(@types/node@24.19.1)(react-dom@19.2.8(react@19.2.8))(react@19.2.8))(react-dom@19.2.8(react@19.2.8))(react@19.2.8)(tailwindcss@4.3.3)':
     dependencies:
       '@base-ui/react': 1.8.0(@types/react@19.2.18)(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
       class-variance-authority: 0.7.1

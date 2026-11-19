@@ -75,7 +75,9 @@ const nextConfig: NextConfig = {
   // looks for optional native parts at runtime and runs without them; sharp
   // (run_code's pcp.image, lib/core/code/media.ts) finds its WebAssembly
   // build (@img/sharp-wasm32) at runtime, which loads its .wasm by path;
-  // js-yaml is required by the YAML schema worker's own file (yamlWorker).
+  // js-yaml is required by the YAML schema worker's own file (yamlWorker);
+  // @kaperkunde/security's stampPeer is required by docker/peer-stamp.cjs,
+  // which runs outside the bundle.
   serverExternalPackages: [
     "better-sqlite3",
     "@prisma/adapter-better-sqlite3",
@@ -90,6 +92,7 @@ const nextConfig: NextConfig = {
     "sharp",
     "@img/sharp-wasm32",
     "js-yaml",
+    "@kaperkunde/security",
   ],
   // patchright-core reads its list of browser builds with a path it works
   // out at runtime, which the file tracing cannot follow; without the file,
