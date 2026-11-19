@@ -2480,12 +2480,21 @@ export function buildGatewayServer(
         'Decode base64 (or base64url) text in a JSON answer back into the text it encodes, at these paths. A path matches wherever the answer\'s keys end with it, so ["body.data"] decodes the body of every part of a Gmail message, however deeply the parts nest. What is not text (an attachment) is left encoded. search\'s "returns" for a ref marks such text "string (base64)"; leave it out of fields when you do not need it, since encoded text is long.',
       ),
     keep: z
-      .array(z.string().min(1).max(200))
+      .array(
+        z
+          .string()
+          .min(1)
+          .max(200)
+          .regex(
+            /^[^[\]]+$/,
+            "A keep path has no list indexes: it matches at any depth, in every item of a list.",
+          ),
+      )
       .min(1)
       .max(MAX_FIELDS)
       .optional()
       .describe(
-        'Keep these parts of a JSON answer as results instead of reading them, as paths like decode\'s: ["attachments.data", "body"]. Each comes back as a handle, {"$result": "<id>", "type", "size" or "length", …}, that you pass as it is in any later call\'s arguments where the value belongs, so a file or a long text moves between tools without passing through you. Files sent as base64 are kept this way without asking.',
+        'Keep these parts of a JSON answer as results instead of reading them, as paths of keys like decode\'s, matched at any depth and in every item of a list, never with an index: ["attachments.data", "token"]. Each comes back as a handle and nothing else, {"$result": "<id>", "type", "size" or "length", …}, with no preview of its value, even where fields leaves it out: pass it as it is in any later call\'s arguments where the value belongs. It is the way to move a credential one tool makes (a token, a password) into another without it passing through you; do not read it with read_result. An answer that is not JSON is kept whole as one handle; a part that cannot be kept is left out, never shown. Files sent as base64 are kept this way without asking.',
       ),
   })
 
@@ -2956,7 +2965,13 @@ export function buildGatewayServer(
     ]
     const noted = <T extends object>(outcome: T) =>
       notes.length > 0 && "ok" in outcome && outcome.ok
-        ? { ...outcome, notes }
+        ? {
+            ...outcome,
+            notes: [
+              ...notes,
+              ...((outcome as { notes?: string[] }).notes ?? []),
+            ],
+          }
         : outcome
     const before = noteBefore()
 
@@ -7099,7 +7114,7 @@ export function buildGatewayServer(
       "It has the JavaScript language, with atob, btoa, TextEncoder, TextDecoder (UTF-8), crypto.getRandomValues and crypto.randomUUID, and nothing else: no network, no files, no timers (no setTimeout), no require or import.",
       `await pcp.call(server, tool, args, { fields, decode, keep }) calls a tool as execute_* does, but by its server and name as search gives them (no call_handle), with the arguments its inputSchema asks for (pcp.describe gives it), and returns its answer as a value: the parsed JSON, or the text. The options are execute_*'s, and nothing is cut to a preview: the program gets the whole answer, up to ${limits.answerChars.toLocaleString("en")} characters of JSON. A tool's error, a refusal, arguments that do not fit its inputSchema and a blocked tool throw an Error the program may catch. A call that PCP's pacing holds waits, within the run; past the run's end, pcp.call throws an Error with code "paced" and retryAfterMs. A tool error with a code of its own carries it as error.code ("timeout", "browser_busy", …), with error.retryAfterMs where it says when to try again. A Write or Destructive call the token made with the same arguments within ${DUPLICATE_WINDOW_WORDS} is not made again: it throws an Error with code "duplicate_call" that says how the first one went; { rerun: true, reason: "why" } in the options makes it again on purpose.`,
       `Waiting: await pcp.sleep(ms) waits on PCP's clock, ${MAX_SLEEP_MS / 1000} seconds at most at once, counted in the run's time (a wait past the run's end is refused). await pcp.withTimeout(ms, () => pcp.call(…)) returns what the function returns, or throws an Error with code "timeout" when it has none in time; what the function started may still finish (a call under way is not taken back and may have gone through), so check before you try it again.`,
-      'Files in an answer (attachments, images) come back as handles, {"$result": id, "type", "size", …}: pass a handle as it is where a tool wants the file, and PCP puts the file there (as base64 where the tool wants a string). keep works as in execute_*: pcp.call(…, { keep: ["password"] }) hands the program a handle in place of that value, so a secret one tool makes goes into another tool\'s arguments without the program or you ever reading it. A handle stands for a whole string; to put a file inside a text you build (a MIME message), read its bytes.',
+      'Files in an answer (attachments, images) come back as handles, {"$result": id, "type", "size", …}: pass a handle as it is where a tool wants the file, and PCP puts the file there (as base64 where the tool wants a string). keep works as in execute_*: pcp.call(…, { keep: ["password"] }) hands the program a handle in place of that value, with no preview of it, so a secret one tool makes goes into another tool\'s arguments without the program or you ever reading it (do not pcp.read it); an answer that is not JSON comes back whole as one handle, and what keep could not do is printed as a [PCP] line. A handle stands for a whole string; to put a file inside a text you build (a MIME message), read its bytes.',
       'await pcp.read(handle) reads a kept text, and pcp.read(handle, { as: "base64" }) a file\'s bytes as base64 ({ as: "bytes" } as a Uint8Array); { offset, length } reads a part (bytes of a file, characters of a text). await pcp.keep(text, { name, type }) keeps a text and returns its handle; pcp.keep(base64, { encoding: "base64", name, type }), or a Uint8Array, keeps a file. await pcp.tools() lists the servers, and pcp.tools(server) every tool on one, as list_tools does. await pcp.describe(server, tool) gives one tool as search with its ref does, without a call_handle: its inputSchema (the arguments pcp.call takes), what it returns, its access and annotations; read it before calling a tool whose arguments you have not seen. await pcp.step("name", async () => { … }) runs a part under a name: its calls are listed under it, and an error from it reads "failed at step \'name\'" (error.step names it).',
       `Images and videos: await pcp.image.compress(handle, { maxWidth, maxHeight, crop: { x, y, width, height }, grayscale, format: "jpeg" | "webp" | "png", quality }) makes a smaller copy of a kept PNG, JPEG, WebP or GIF and returns { handle, width, height, bytes, type }; await pcp.video.frames(handle, { at: [seconds] | every: seconds | count, maxWidth }) returns { duration, width, height, frames: [{ t, handle }] }${shells.length > 0 ? "." : ", and needs PCP's sandbox, which is not running."} Compress an image before you read it or return it: to read text or a screen, crop to the part you need, grayscale, about 1200 pixels wide; to judge a layout or a design, keep the colour at a lower quality; to pass an image to another tool (OCR, an upload), send the original handle. From a video, take a few frames and compress those.`,
     ].join("\n\n")

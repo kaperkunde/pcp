@@ -625,7 +625,9 @@ embeddingProvider`, which hands `embeddings/provider.ts` the header;
   never the content. A part `keep` names (`answers.ts` `Handles`) comes
   back as a handle only, on every path (execute_<tier>, `pcp.call`, a call
   the owner allowed once and its `check_permission`): no `preview`, never
-  its value, left out with a note when it cannot be kept. File links (`lib/core/file-links.ts`, only for a token
+  its value or a `resource_link`, left out with a note when it cannot be
+  kept, an answer with no JSON kept whole, and out of sight in an error's
+  JSON. File links (`lib/core/file-links.ts`, only for a token
   with `shareFiles`) move one kept file to or from the assistant's own
   computer: the link's secret is the credential for that file alone, stored
   only as its hash, the file encrypted under a key derived from it (an

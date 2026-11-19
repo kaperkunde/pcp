@@ -5100,16 +5100,24 @@ is `{"$result": id, type, size or length, name?, preview?, readableUntil}`;
 only a text kept because the answer was too long carries a `preview` (its
 start). A part `keep` names is the assistant saying it must not read it (a
 token one tool mints for another), so it comes back as a handle and nothing
-else (#149): no preview, never the name of a file beside it, any JSON value
-(an object, a number) kept whole, and one PCP could not keep (past the 50, or
-too large) is left out as `[left out: …]` with a note, never passed on as its
-value. A path `keep` names is picked even where `fields` leaves it out, and
-one that matches nothing is said in the note. With `keep`, the answer's
-`structuredContent`, which has those parts as values, is not passed on. The
-same rules hold for a program's `pcp.call` (`answerValue`) and for a call the
-owner allowed once: its stored outcome is the shaped answer with its handles,
-which `check_permission` gives the token that asked, and the note of answered
-requests names each handle (`path → id`).
+else (#149): no preview, no `resource_link` (a client may read one into the
+conversation), never the name of a file beside it, any JSON value (an object,
+a number) kept whole, and one PCP could not keep (past the 50, too large, or
+deeper than it looks) is left out as `[left out: …]` with a note, never
+passed on as its value. `keep` matches a path of keys at any depth, in every
+item of a list, so a path with a list index is refused; where `fields` leaves
+a part `keep` names out, it is picked all the same, and a path that matches
+nothing is said in the note. An answer with no JSON is kept whole as one
+handle (`(the answer)`); an error is never shaped, but where its text (or
+what follows its first line) is JSON, what `keep` names is put out of sight.
+With `keep`, the answer's `structuredContent`, which has those parts as
+values, is not passed on. The same rules hold for a program's `pcp.call`
+(`answerValue`, whose notes the run prints as `[PCP]` lines) and for a call
+the owner allowed once: its stored outcome is the shaped answer with its
+handles, which `check_permission` gives the token that asked; the handles the
+shaping made are sealed with that outcome under their own label
+(`permission_request:<id>:result_handles`), and the note of answered requests
+names each (`path → id`) from there, never from the answer's text.
 Each answer also carries a `resource_link` per handle (`pcp://results/<id>`),
 the mail tools' own included; the gateway's resource template of that name
 gives the text or the file's bytes to the token that kept it, and lists
