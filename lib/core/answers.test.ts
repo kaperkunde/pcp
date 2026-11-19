@@ -356,7 +356,6 @@ describe("keep", () => {
             $result: "r0",
             type: "text/plain",
             length: 5000,
-            preview: "x".repeat(200),
             readableUntil: UNTIL.toISOString(),
           },
           lines: [{ cost: 1 }],
@@ -402,6 +401,110 @@ describe("keep", () => {
     expect((kept[0] as { bytes: Buffer }).bytes.equals(PNG)).toBe(true)
     expect(lastJson(shown)).toMatchObject({
       data: { $result: "r0", type: "image/png", size: PNG.length },
+    })
+  })
+
+  it("never shows a kept part's value: no preview, only its type and length (#149)", async () => {
+    const secret = "tok_live_9f8e7d6c5b4a39281706"
+    const answer = {
+      content: [
+        {
+          type: "text" as const,
+          text: JSON.stringify({ token: secret, expires_at: "soon" }),
+        },
+      ],
+      structuredContent: { token: secret, expires_at: "soon" },
+    }
+    const { shown, whole } = await keeping(answer, { keep: ["token"] })
+
+    for (const result of [shown, whole()]) {
+      expect(JSON.stringify(result)).not.toContain(secret.slice(0, 6))
+      expect(JSON.stringify(result)).not.toContain("preview")
+    }
+    expect(lastJson(shown)).toEqual({
+      token: {
+        $result: "r0",
+        type: "text/plain",
+        length: secret.length,
+        readableUntil: UNTIL.toISOString(),
+      },
+      expires_at: "soon",
+    })
+  })
+
+  it("keeps a whole object at a path without a preview of it (#149)", async () => {
+    const { shown } = await keeping(
+      json({ credentials: { password: "hunter2-and-more" } }),
+      { keep: ["credentials"] },
+    )
+
+    expect(JSON.stringify(shown)).not.toContain("hunter2")
+    expect(JSON.stringify(shown)).not.toContain("preview")
+  })
+
+  it("keeps a part fields leaves out, rather than dropping it (#149)", async () => {
+    const { kept, shown } = await keeping(
+      json({ token: "tok_123456", expires_at: "soon", other: 1 }),
+      { fields: ["expires_at"], keep: ["token"] },
+    )
+
+    expect(kept).toEqual([
+      { kind: "text", text: "tok_123456", mediaType: "text/plain" },
+    ])
+    expect(lastJson(shown)).toEqual({
+      expires_at: "soon",
+      token: expect.objectContaining({ $result: "r0" }),
+    })
+    expect(texts(shown).join("\n")).not.toContain("Not in the answer")
+  })
+
+  it("says so when a part to keep is not in the answer", async () => {
+    const { kept, shown } = await keeping(json({ expires_at: "soon" }), {
+      keep: ["token"],
+    })
+
+    expect(kept).toEqual([])
+    expect(texts(shown).join("\n")).toContain(
+      "Nothing to keep at token: the answer has no such part.",
+    )
+  })
+
+  it("leaves out, never shows, a part to keep that PCP could not keep (#149)", async () => {
+    const value = {
+      items: Array.from({ length: MAX_HANDLES_PER_ANSWER + 3 }, (_, i) => ({
+        token: `secret-value-${i}`,
+      })),
+    }
+    const { kept, shown } = await keeping(json(value), {
+      keep: ["items.token"],
+    })
+
+    expect(kept).toHaveLength(MAX_HANDLES_PER_ANSWER)
+    const text = texts(shown).join("\n")
+    expect(text).not.toContain(`secret-value-${MAX_HANDLES_PER_ANSWER}`)
+    expect(text).toContain("left out")
+  })
+
+  it("hands a program a handle with no preview for a part to keep (#149)", async () => {
+    const fake = fakeKeepers()
+    const outcome = await answerValue(
+      json({ token: "tok_live_abcdef", n: 1 }),
+      { keep: ["token"] },
+      fake.keepers,
+      { max: 100_000 },
+    )
+
+    expect(outcome).toEqual({
+      ok: true,
+      value: {
+        token: {
+          $result: "r0",
+          type: "text/plain",
+          length: 15,
+          readableUntil: UNTIL.toISOString(),
+        },
+        n: 1,
+      },
     })
   })
 

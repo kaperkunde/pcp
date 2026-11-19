@@ -266,6 +266,27 @@ describe("a program's calls", () => {
     await connect()
   })
 
+  it("hands the program a handle for a part to keep, never its value or a preview of it (#149)", async () => {
+    const { isError, text } = await run(`
+      return await pcp.call("postcards", "scan_card", {}, { keep: ["name"] })
+    `)
+
+    expect(isError).toBe(false)
+    const value = returned(text) as {
+      name: Record<string, unknown>
+      data: Record<string, unknown>
+    }
+    expect(Object.keys(value.name).sort()).toEqual([
+      "$result",
+      "length",
+      "readableUntil",
+      "type",
+    ])
+    expect(value.data).toMatchObject({ type: "application/pdf" })
+    // Not as a preview, nor as the name of the file beside it.
+    expect(text).not.toContain("card.pdf")
+  })
+
   it("filters a large answer without handing it back, and says what it did", async () => {
     const { isError, text } = await run(`
       const cards = await pcp.call("postcards", "list_cards")

@@ -57,7 +57,7 @@ import { createServer } from "./servers"
 import { ensureSealed, forgetSealedVaults } from "./sealing/convert"
 import { scratchDatabase } from "./test-db"
 import { OwnerNeeded } from "./browser/types"
-import { keepBytes, resultTool } from "./tool-results"
+import { keepBytes, openResult, resultTool } from "./tool-results"
 import { callServerTool, syncServerTools } from "./upstream"
 import {
   copyTokenAccess,
@@ -367,6 +367,224 @@ describe("asking the owner", () => {
     expect(textOf(result)).toContain(`report → ${kept.id} (text/plain`)
     expect(textOf(result)).toContain(`"report":{"$result":"${kept.id}"`)
     expect(textOf(result)).not.toContain("THE END")
+  })
+
+  it("hands the asking token a handle for each kept part of a call allowed once, never the value (#149)", async () => {
+    const { ctx, scope, server, tokenId } = await setup()
+    const secret = "tok_live_9f8e7d6c5b4a39281706"
+    const answer = { token: secret, expires_at: "2026-12-01T00:00:00Z" }
+    const executor: PermissionExecutor = {
+      ...stub().executor,
+      callTool: async () => ({
+        content: [{ type: "text", text: JSON.stringify(answer) }],
+        structuredContent: answer,
+      }),
+    }
+    // fields naming only the rest: the part to keep still comes back, as
+    // its handle (the issue's answer had expires_at and nothing else).
+    const asked = {
+      ...call(server, "add_numbers", { a: 1 }),
+      fields: ["expires_at"],
+      keep: ["token"],
+    }
+
+    const waiting = await withPermission(scope, asked)
+    expect(textOf(waiting)).toContain("Not done yet")
+    const row = await db().permissionRequest.findFirstOrThrow()
+
+    await decidePermission(
+      ctx,
+      row.id,
+      "allow_once",
+      { publicUrl: PUBLIC_URL },
+      executor,
+    )
+
+    // check_permission: the same shaped answer the call would have given,
+    // the kept part as its handle only.
+    const checked = textOf(await checkPermission(scope, row.id))
+    const id = checked.match(/"token":\{"\$result":"([^"]+)"/)?.[1]
+    expect(checked).toContain("The owner allowed it and it ran.")
+    expect(id).toBeDefined()
+    expect(checked).toContain(`token → ${id}`)
+    expect(checked).toContain('"expires_at":"2026-12-01T00:00:00Z"')
+    expect(checked).not.toContain(secret)
+    expect(checked).not.toContain(secret.slice(0, 8))
+    expect(checked).not.toContain('"preview"')
+    // A handle the token can pass on: its own result, holding the value.
+    expect((await openResult(ctx, { tokenId, id: id! }))?.text()).toBe(secret)
+
+    // The note on the session's next answer names the handle too.
+    const { answered } = await listAnsweredRequests(scope, {
+      since: new Date(Date.now() - 60_000),
+    })
+    const note = answeredNote(answered, 0)!
+    expect(note).toContain(`token → ${id}`)
+    expect(note).not.toContain(secret.slice(0, 8))
+
+    // What the request row keeps holds the handle, never the value.
+    const stored = await db().permissionRequest.findUniqueOrThrow({
+      where: { id: row.id },
+    })
+    for (const [column, label] of [
+      [stored.resultCiphertext, "result"],
+      [stored.resultJsonCiphertext, "result_json"],
+    ] as const) {
+      if (column) {
+        expect(
+          decryptString(
+            ctx.dek,
+            Buffer.from(column),
+            `permission_request:${row.id}:${label}`,
+          ),
+        ).not.toContain(secret)
+      }
+    }
+
+    // Another token reads neither the request nor the result.
+    const other = await createApiToken(ctx, {
+      name: "Other",
+      allowAllServers: true,
+      serverIds: [],
+    })
+    const otherScope = {
+      ...(await resolveApiToken(other.token))!,
+      publicUrl: PUBLIC_URL,
+    }
+    expect(textOf(await checkPermission(otherScope, row.id))).not.toContain(id!)
+    expect(await openResult(ctx, { tokenId: other.id, id: id! })).toBeNull()
+  })
+
+  it("answers a call it runs itself with a kept part as its handle alone, no preview (#149)", async () => {
+    const { ctx, tokenId } = await setup()
+    const secret = "tok_live_0a1b2c3d4e5f60718293"
+    const executor: PermissionExecutor = {
+      ...stub().executor,
+      callTool: async () => ({
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({ token: secret, expires_at: "soon" }),
+          },
+        ],
+        structuredContent: { token: secret, expires_at: "soon" },
+      }),
+    }
+
+    // What execute_* (and a call an allowance lets through) runs.
+    const answer = await runCall(
+      ctx,
+      await firstServer(ctx),
+      "add_numbers",
+      {},
+      {
+        publicUrl: PUBLIC_URL,
+        tokenId,
+        keep: ["token"],
+        executor,
+      },
+    )
+
+    expect(JSON.stringify(answer)).not.toContain(secret.slice(0, 8))
+    expect(JSON.stringify(answer)).not.toContain("preview")
+    expect(textOf(answer)).toMatch(
+      /"token":\{"\$result":"[^"]+","type":"text\/plain","length":29,/,
+    )
+  })
+
+  it("hands back a handle for a kept part of an API endpoint's answer allowed once (#149)", async () => {
+    const minted = "AABBCCDDEEFFGGHHIIJJKKLLMMNN1"
+    const api = await startTestApi((_, res) => {
+      res.statusCode = 201
+      res.setHeader("content-type", "application/json; charset=utf-8")
+      res.end(
+        JSON.stringify({
+          token: minted,
+          expires_at: "2026-11-16T10:34:18.413+01:00",
+        }),
+      )
+    })
+
+    try {
+      const { ctx, scope } = await setup()
+      const key = await createSecret(ctx, { name: "GitHub key", value: "k" })
+      await createEndpoint(ctx, {
+        name: "GitHub REST",
+        specSource: "upload",
+        specText: JSON.stringify({
+          openapi: "3.0.0",
+          info: { title: "GitHub", version: "1" },
+          servers: [{ url: api.origin }],
+          paths: {
+            "/orgs/{org}/actions/runners/registration-token": {
+              post: {
+                operationId: "actions/create-registration-token-for-org",
+                parameters: [
+                  {
+                    name: "org",
+                    in: "path",
+                    required: true,
+                    schema: { type: "string" },
+                  },
+                ],
+                responses: {
+                  "201": {
+                    description: "A token",
+                    content: {
+                      "application/json": {
+                        schema: {
+                          type: "object",
+                          properties: {
+                            token: { type: "string" },
+                            expires_at: { type: "string" },
+                          },
+                        },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          },
+        }),
+        baseUrl: api.origin,
+        readOnly: false,
+        authType: "header",
+        authSecretId: key.id,
+        authHeaderName: "Authorization",
+        authValueTemplate: "Bearer {{secret}}",
+      })
+      const servers = await loadGatewayServers(scope)
+      const github = servers.find((entry) => entry.name === "GitHub REST")!
+      const tool = github.tools[0]!
+
+      await withPermission(scope, {
+        kind: "call",
+        server: github,
+        tool,
+        args: { org: "acme" },
+        keep: ["token"],
+      })
+      const row = await db().permissionRequest.findFirstOrThrow()
+      await decidePermission(
+        ctx,
+        row.id,
+        "allow_once",
+        { publicUrl: PUBLIC_URL },
+        { callTool: callServerTool, syncTools: syncServerTools },
+      )
+      const checked = textOf(await checkPermission(scope, row.id))
+      const id = checked.match(/"token":\{"\$result":"([^"]+)"/)?.[1]
+
+      expect(id).toBeDefined()
+      expect(checked).toContain("expires_at")
+      expect(checked).not.toContain(minted.slice(0, 8))
+      expect(
+        (await openResult(ctx, { tokenId: scope.tokenId, id: id! }))?.text(),
+      ).toBe(minted)
+    } finally {
+      await api.close()
+    }
   })
 
   it("decodes what the assistant asked to once the owner allows the call", async () => {
