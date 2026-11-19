@@ -165,6 +165,22 @@ describe("a download link", () => {
     expect(short.expiresAt).toEqual(text.expiresAt)
   })
 
+  it("makes no link for a result that holds a part keep named (final 3)", async () => {
+    const text = await keepResult(ctx, {
+      tokenId,
+      serverId: null,
+      toolName: "mint",
+      text: "tok_link_only",
+      mediaType: "text/plain",
+      passOnly: true,
+    })
+
+    await expect(
+      shareResult(ctx, { tokenId, id: text.id, publicUrl: PUBLIC_URL }),
+    ).rejects.toThrow(/never reads it out/)
+    expect(await db().fileLink.count()).toBe(0)
+  })
+
   it("is refused for another token's result, a wrong secret, and once its token cannot use links", async () => {
     const { id: other } = await createApiToken(ctx, {
       name: "Other",

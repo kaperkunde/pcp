@@ -621,7 +621,18 @@ embeddingProvider`, which hands `embeddings/provider.ts` the header;
   `browser/call.ts`
   (`lib/core/result-handles.ts`), with the token's own
   results, before anything is sent; a waiting request stores the handle,
-  never the content. File links (`lib/core/file-links.ts`, only for a token
+  never the content. A part `keep` names (`answers.ts` `Handles`) comes
+  back as a handle only, on every path (execute_<tier>, `pcp.call`, a call
+  the owner allowed once and its `check_permission`): no `preview`, never
+  its value or a `resource_link`, left out with a note when it cannot be
+  kept, an answer with no JSON kept whole, `[kept: <path>]` in the text
+  beside the JSON, and out of sight in an error's JSON (one that is not
+  JSON shows as it came). Its result is `pass_only`: only a tool's arguments
+  (`resultOpener`) and the owner's page open it; every reader (read_result,
+  the resource, `pcp.read`/`image`/`frames`, view_image, links, a
+  capability's input) refuses it with code `pass_only`, and a new reader
+  calls `refusePassOnly`. A tool that echoes its input can still hand the
+  value back, out of PCP's control. File links (`lib/core/file-links.ts`, only for a token
   with `shareFiles`) move one kept file to or from the assistant's own
   computer: the link's secret is the credential for that file alone, stored
   only as its hash, the file encrypted under a key derived from it (an

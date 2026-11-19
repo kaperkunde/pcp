@@ -31,6 +31,7 @@ import { EMPTY_CONFIG, saveResourceConfig } from "../resources/state"
 import {
   keepBytes,
   keepResult,
+  resultOpener,
   openResult,
   resultName,
   resultTool,
@@ -264,6 +265,96 @@ describe("the token right", () => {
 describe("a program's calls", () => {
   beforeEach(async () => {
     await connect()
+  })
+
+  it("hands the program a handle for a part to keep, never its value or a preview of it (#149)", async () => {
+    const { isError, text } = await run(`
+      return await pcp.call("postcards", "scan_card", {}, { keep: ["name"] })
+    `)
+
+    expect(isError).toBe(false)
+    const value = returned(text) as {
+      name: Record<string, unknown>
+      data: Record<string, unknown>
+    }
+    expect(Object.keys(value.name).sort()).toEqual([
+      "$result",
+      "length",
+      "readableUntil",
+      "type",
+    ])
+    expect(value.data).toMatchObject({ type: "application/pdf" })
+    // Not as a preview, nor as the name of the file beside it.
+    expect(text).not.toContain("card.pdf")
+  })
+
+  it("refuses a keep path with a list index (review 3)", async () => {
+    const { text } = await run(`
+      try { await pcp.call("postcards", "scan_card", {}, { keep: ["cards[0].name"] }) } catch (error) { return error.message }
+    `)
+
+    expect(text).toMatch(/any depth/)
+  })
+
+  it("never reads out a result that holds a part keep named, but passes it on (final 3)", async () => {
+    const PNG_BYTES = await sharp({
+      create: { width: 4, height: 4, channels: 3, background: "#fff" },
+    })
+      .png()
+      .toBuffer()
+    const secret = await keepResult(ctx, {
+      tokenId: scope.tokenId,
+      serverId: null,
+      toolName: "mint",
+      text: "tok_pass_only_5566",
+      mediaType: "text/plain",
+      passOnly: true,
+    })
+    const picture = await keepBytes(ctx, {
+      tokenId: scope.tokenId,
+      serverId: null,
+      toolName: "mint",
+      bytes: PNG_BYTES,
+      mediaType: "image/png",
+      name: null,
+      passOnly: true,
+    })
+
+    const { text } = await run(`
+      const said = []
+      for (const ask of [
+        () => pcp.read(${JSON.stringify({ $result: secret.id })}),
+        () => pcp.image.compress(${JSON.stringify({ $result: picture.id })}, { maxWidth: 2 }),
+        () => pcp.video.frames(${JSON.stringify({ $result: picture.id })}, { count: 1 }),
+      ]) {
+        try { await ask(); said.push("read") } catch (error) { said.push(error.code + ": " + error.message) }
+      }
+      return said
+    `)
+
+    expect(text).not.toContain("tok_pass_only")
+    const said = returned(text) as string[]
+    expect(said).toHaveLength(3)
+    for (const line of said) {
+      expect(line).toMatch(/^pass_only: .*never reads it out/)
+    }
+
+    // read_result and the resource template refuse it too.
+    const read = await client.callTool(
+      entryCall("read_result", { id: secret.id }),
+    )
+    expect(read.isError).toBe(true)
+    expect(JSON.stringify(read)).not.toContain("tok_pass_only")
+    expect(
+      (read._meta as Record<string, { code?: string }>)["gg.pcp/error"]?.code,
+    ).toBe("pass_only")
+    await expect(
+      client.readResource({ uri: `pcp://results/${secret.id}` }),
+    ).rejects.toThrow(/never reads it out/)
+
+    // What puts a handle into a tool's arguments still opens it.
+    const opened = await resultOpener(ctx, scope.tokenId)(secret.id)
+    expect(opened?.text()).toBe("tok_pass_only_5566")
   })
 
   it("filters a large answer without handing it back, and says what it did", async () => {

@@ -600,12 +600,19 @@ export async function runCall(
     ownerAllowed = false,
     executor = defaultExecutor,
     deadline = callDeadline(),
+    handles,
   }: {
     publicUrl: string
     /** The token the call is made for: the one that may read a kept answer. */
     tokenId: string
     /** The owner allowed this very call, its arguments shown to them. */
     ownerAllowed?: boolean
+    /**
+     * Where to note the handles the answer made (path and id), for a call
+     * the owner allowed to name them later: from the shaping itself, never
+     * read back out of the answer's text, which the upstream wrote.
+     */
+    handles?: Array<{ path: string; id: string }>
     executor?: PermissionExecutor
     /**
      * The latest the call may still go, under pacing: by default the budget
@@ -629,7 +636,11 @@ export async function runCall(
       open: resultOpener(ctx, tokenId),
       deadline,
     })
-    const { shown, whole } = await shapeAnswerKeeping(
+    const {
+      shown,
+      whole,
+      handles: made,
+    } = await shapeAnswerKeeping(
       answer,
       { fields, decode, keep },
       {
@@ -638,6 +649,7 @@ export async function runCall(
       },
       { wholeMax: resourceLimits().textChars, links: true },
     )
+    handles?.push(...made)
 
     return await keepWholeAnswer(
       { raw: answer, shown, whole },
@@ -1012,13 +1024,37 @@ function readArgs(ctx: VaultContext, row: PermissionRequest) {
 }
 
 function readResult(ctx: VaultContext, row: PermissionRequest): string | null {
-  return row.resultCiphertext
-    ? decryptString(
-        ctx.dek,
-        Buffer.from(row.resultCiphertext),
-        `${aad(row.id)}:result`,
-      )
-    : null
+  return readOutcome(ctx, row)?.text ?? null
+}
+
+/**
+ * A request's stored outcome: its text and, for a call the owner allowed,
+ * the handles its answer made. Those are sealed with the text under their
+ * own label (`:result_handles`), so only PCP's own record of them reads as
+ * handles; a text under `:result` has none, whatever it says.
+ */
+function readOutcome(
+  ctx: VaultContext,
+  row: PermissionRequest,
+): { text: string; handles: Array<{ path: string; id: string }> } | null {
+  if (!row.resultCiphertext) {
+    return null
+  }
+
+  const sealed = Buffer.from(row.resultCiphertext)
+
+  try {
+    return {
+      text: decryptString(ctx.dek, sealed, `${aad(row.id)}:result`),
+      handles: [],
+    }
+  } catch {
+    const opened = JSON.parse(
+      decryptString(ctx.dek, sealed, `${aad(row.id)}:result_handles`),
+    ) as { text: string; handles: Array<{ path: string; id: string }> }
+
+    return { text: opened.text, handles: opened.handles }
+  }
 }
 
 function tokenIsLive(token: Row["token"], now = new Date()): boolean {
@@ -2746,8 +2782,12 @@ export async function decidePermission(
   }
 
   let result: CallToolResult
-  // A call's own answer, for an identical call to be handed (programAnswer).
-  const answered: { answer?: CallToolResult } = {}
+  // A call's own answer, for an identical call to be handed (programAnswer),
+  // and the handles its shaping made, for the token to be told.
+  const answered: {
+    answer?: CallToolResult
+    handles: Array<{ path: string; id: string }>
+  } = { handles: [] }
 
   try {
     result =
@@ -2941,8 +2981,17 @@ export async function decidePermission(
     data: {
       status: failed ? "failed" : "executed",
       resultIsError: failed,
+      // With the handles the call made, the outcome is sealed as one with
+      // them, under a label of its own: what names them is PCP's, never
+      // the answer's text (#149).
       resultCiphertext: asBytes(
-        encryptString(ctx.dek, stored, `${aad(row.id)}:result`),
+        kind === "call" && !failed && answered.handles.length > 0
+          ? encryptString(
+              ctx.dek,
+              JSON.stringify({ text: stored, handles: answered.handles }),
+              `${aad(row.id)}:result_handles`,
+            )
+          : encryptString(ctx.dek, stored, `${aad(row.id)}:result`),
       ),
       ...(reusable
         ? {
@@ -2965,7 +3014,10 @@ async function executeCall(
   row: Row,
   publicUrl: string,
   executor: PermissionExecutor,
-  answered: { answer?: CallToolResult } = {},
+  answered: {
+    answer?: CallToolResult
+    handles: Array<{ path: string; id: string }>
+  } = { handles: [] },
 ): Promise<CallToolResult> {
   if (!row.server) {
     return text(
@@ -3004,6 +3056,7 @@ async function executeCall(
     keep: readStoredFields(row.keep),
     ownerAllowed: true,
     executor: noting(wrapped, answered),
+    handles: answered.handles,
   })
 }
 
@@ -4317,21 +4370,42 @@ export async function listAnsweredRequests(
             ?.trim() ?? "")
         : ""
 
+    const clipped =
+      line.length > ANSWERED_OUTCOME_CHARS
+        ? `${line.slice(0, ANSWERED_OUTCOME_CHARS - 1).trimEnd()}…`
+        : line
+    // A call that ran names what it kept for the token, so the handles reach
+    // it with the line (#149); the values stay in the results.
+    const made =
+      view.kind === "call" ? (readOutcome(scope.ctx, row)?.handles ?? []) : []
+    const kept = made.length > 0 ? keptLine(made) : null
+
     answered.push({
       id,
       kind: view.kind,
       title: view.title,
       status: view.status,
       decidedAt,
-      outcome:
-        line.length > ANSWERED_OUTCOME_CHARS
-          ? `${line.slice(0, ANSWERED_OUTCOME_CHARS - 1).trimEnd()}…`
-          : line,
+      outcome: kept ? `${clipped} ${kept}` : clipped,
     })
   }
 
   return { seen, answered, more: fresh.length - picked.length }
 }
+
+/** The handles a call made, as a short sentence for its answered line. */
+function keptLine(handles: Array<{ path: string; id: string }>): string {
+  const shown = handles.slice(0, MAX_KEPT_NAMED)
+  const more =
+    handles.length > shown.length
+      ? `; and ${handles.length - shown.length} more`
+      : ""
+
+  return `Kept as results, each passed on as {"$result": "<id>"}: ${shown.map(({ path, id }) => `${path} → ${id}`).join("; ")}${more}.`
+}
+
+/** Handles an answered line names before "and N more". */
+const MAX_KEPT_NAMED = 10
 
 /** One answered request's line, as check_permission and the note say it. */
 export function answeredLine(

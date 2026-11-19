@@ -28,6 +28,7 @@ function text(id: string, value: string): OpenedResult {
     mediaType: "text/plain",
     name: null,
     length: value.length,
+    passOnly: false,
     text: () => value,
     bytes: () => Buffer.from(value, "utf8"),
   }
@@ -40,6 +41,7 @@ function file(id: string, bytes: Buffer, mediaType: string): OpenedResult {
     mediaType,
     name: "f",
     length: bytes.length,
+    passOnly: false,
     text: () => {
       if (!mediaType.startsWith("text/")) {
         throw new Error(`Result ${id} is ${mediaType}, not text`)
