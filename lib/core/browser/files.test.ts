@@ -876,7 +876,7 @@ describe.skipIf(!executable)(
           ref: refOf(form, /button "Statement"/),
           files: [{ $result: secretFile.id }],
         }),
-      ).rejects.toThrow(/pass.only|only passed on/i)
+      ).rejects.toThrow(/never reads it out/)
 
       const intoField = await viaGateway("upload_file", {
         tab,
