@@ -285,6 +285,51 @@ describe.skipIf(!executable)("typing a secret", { timeout: 90_000 }, () => {
     })
   })
 
+  it("finds the field again by what it was when the page was drawn anew while the owner decided", async () => {
+    const { tab, opened } = await open("/login")
+    const password = refOf(opened, /textbox "Password"/)
+    const args = { tab, ref: password, text: { $secret: "Shop password" } }
+
+    await owner(call("type", args))
+    // A new document while the request waits: the old ref names nothing.
+    await call("navigate", { tab, url: `${site.origin}/login?again=1` })
+    await grantSecretUse(ctx, {
+      tokenId,
+      secretId,
+      origin: site.origin,
+      level: "once",
+    })
+
+    const typed = await call("type", args)
+
+    expect(typed.isError, textOf(typed)).toBeUndefined()
+    expect(textOf(typed)).not.toContain(VALUE)
+    expect(await fieldValue(tab, "#pw")).toBe(VALUE)
+  })
+
+  it("says what the tab did lately when the field is not there any more", async () => {
+    const { tab, opened } = await open("/login")
+    const password = refOf(opened, /textbox "Password"/)
+    const args = { tab, ref: password, text: { $secret: "Shop password" } }
+
+    await owner(call("type", args))
+    await call("navigate", { tab, url: `${site.origin}/other` })
+    await grantSecretUse(ctx, {
+      tokenId,
+      secretId,
+      origin: site.origin,
+      level: "once",
+    })
+
+    const refused = await call("type", args)
+
+    expect(refused.isError).toBe(true)
+    expect(textOf(refused)).toContain("when the owner was asked")
+    expect(textOf(refused)).toMatch(/navigated 127\.0\.0\.1:\d+/)
+    expect(textOf(refused)).not.toContain("/other")
+    expect(textOf(refused)).not.toContain(VALUE)
+  })
+
   it("logs a use the owner's answer made with the secret's name and site, never its value", async () => {
     const { tab, opened } = await open("/login")
     await always()

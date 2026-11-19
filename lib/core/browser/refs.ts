@@ -7,7 +7,9 @@ import {
   MAX_ELEMENT_NAME_CHARS,
   MAX_GONE_REFS,
   MAX_PAGE_REFS,
+  MAX_REMEMBERED_REFS,
 } from "./limits"
+import { noteTrail } from "./trail"
 import { bounded } from "./queue"
 import {
   allNodes,
@@ -53,6 +55,9 @@ import {
 
 type Entry = {
   ref: string
+  /** Its role and name, for remember. */
+  role: string
+  name: string
   /** Playwright's ref for it in the snapshot it was last in. */
   playwright: string
   /** Its role and name. */
@@ -65,6 +70,9 @@ type Entry = {
   /** The snapshot it was last in. */
   seen: number
 }
+
+/** What an element is, as a target names it: never a value. */
+export type Recalled = { role: string; name: string }
 
 type Seen = {
   node: SnapshotNode
@@ -103,6 +111,8 @@ export class TabRefs {
   private live = new Map<string, Entry>()
   /** Elements out of the latest snapshot for now, oldest first. */
   private gone = new Map<string, Entry>()
+  /** Elements an approved call is waiting on, by what they are. */
+  private remembered = new Map<string, Recalled>()
 
   /**
    * A snapshot with Playwright's refs, written with PCP's; the map is the
@@ -178,6 +188,8 @@ export class TabRefs {
       byOld.set(element.playwright, ref)
       live.set(ref, {
         ref,
+        role: element.node.role,
+        name: (element.node.name ?? "").slice(0, MAX_ELEMENT_NAME_CHARS),
         playwright: element.playwright,
         identity: element.identity,
         group: element.group,
@@ -233,6 +245,38 @@ export class TabRefs {
     return this.live.get(ref)?.playwright ?? null
   }
 
+  /** The document the latest snapshot was of; null before the first. */
+  get currentDocument(): string | null {
+    return this.document
+  }
+
+  /**
+   * Keeps a live ref's role and name, for a call that waits on the owner
+   * (a secret's use): the page may be a new document by the time they
+   * answer, and the call is then made again with this ref. Never a value;
+   * the latest MAX_REMEMBERED_REFS.
+   */
+  remember(ref: string): void {
+    const entry = this.live.get(ref)
+
+    if (!entry || entry.name === "") {
+      return
+    }
+
+    this.remembered.delete(ref)
+    this.remembered.set(ref, { role: entry.role, name: entry.name })
+
+    for (const old of this.remembered.keys()) {
+      if (this.remembered.size <= MAX_REMEMBERED_REFS) break
+      this.remembered.delete(old)
+    }
+  }
+
+  /** What a remembered ref was; null for one never remembered. */
+  recalled(ref: string): Recalled | null {
+    return this.remembered.get(ref) ?? null
+  }
+
   /** Whether the tab gave the ref (whether or not its element is there now). */
   gave(ref: string): boolean {
     const number = refNumber(ref)
@@ -243,14 +287,29 @@ export class TabRefs {
 /** What a tab's refs belong to: the tab itself, which outlives its page. */
 export type RefHolder = { page: Page }
 
-const MAPS = new WeakMap<RefHolder, TabRefs>()
+const MAPS_KEY = Symbol.for("pcp.browser.tabRefs")
+
+/**
+ * On globalThis, as the browser's runtime is: the gateway's route and the
+ * Server Actions that replay an approved call are bundled apart, and each
+ * bundle's own map would have given the replay a tab that had never given
+ * any ref ("There is no element e33").
+ */
+function maps(): WeakMap<RefHolder, TabRefs> {
+  const holder = globalThis as unknown as {
+    [MAPS_KEY]?: WeakMap<RefHolder, TabRefs>
+  }
+
+  return (holder[MAPS_KEY] ??= new WeakMap())
+}
 
 export function refsOf(holder: RefHolder): TabRefs {
-  let refs = MAPS.get(holder)
+  const all = maps()
+  let refs = all.get(holder)
 
   if (!refs) {
     refs = new TabRefs()
-    MAPS.set(holder, refs)
+    all.set(holder, refs)
   }
 
   return refs
@@ -281,7 +340,16 @@ async function documentKey(page: Page): Promise<string | null> {
  */
 export async function tabSnapshot(holder: RefHolder): Promise<string> {
   const tree = await snapshotTree(holder.page)
-  return refsOf(holder).adopt(tree, await documentKey(holder.page))
+  const refs = refsOf(holder)
+  const before = refs.currentDocument
+  const document = await documentKey(holder.page)
+  const adopted = refs.adopt(tree, document)
+
+  if (before !== null && document !== null && document !== before) {
+    noteTrail(holder, "refs reset", holder.page.url())
+  }
+
+  return adopted
 }
 
 /**
