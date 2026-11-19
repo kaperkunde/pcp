@@ -1348,6 +1348,10 @@ model ToolResult {
   /// The text or the bytes, AES-256-GCM under the vault's data key with
   /// "tool_result:<id>" as associated data.
   ciphertext Bytes
+  /// A part an assistant named in keep (#149): PCP puts it in a tool's
+  /// arguments as a handle and never reads it out (read_result, pcp.read,
+  /// view_image, links, capabilities). Only the owner's page shows it.
+  passOnly   Boolean    @default(false) @map("pass_only")
   createdAt  DateTime   @default(now()) @map("created_at")
   expiresAt  DateTime   @map("expires_at")
 

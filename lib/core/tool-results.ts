@@ -9,7 +9,7 @@ import {
   encryptString,
 } from "./crypto"
 import { db } from "./db"
-import { invalid, notFound } from "./errors"
+import { invalid, notFound, PassOnlyError } from "./errors"
 import { newId } from "./ids"
 import { bareType, charsetOf, decodeText, isTextType } from "./media-types"
 import { loadResourceLimits, resourceLimits } from "./resources/state"
@@ -77,6 +77,8 @@ export type ResultKeeper = (input: {
   name?: string | null
   serverId: string | null
   toolName: string
+  /** A part keep named: put in arguments only, never read out (#149). */
+  passOnly?: boolean
 }) => Promise<KeptResult>
 
 /** Keeps one file's bytes for the token a call was made with. */
@@ -86,6 +88,7 @@ export type BytesKeeper = (input: {
   name: string | null
   serverId: string | null
   toolName: string
+  passOnly?: boolean
 }) => Promise<KeptResult>
 
 export type Keepers = { text: ResultKeeper; bytes: BytesKeeper }
@@ -185,6 +188,7 @@ async function store(
     ciphertext: (id: string) => Buffer
     /** The id a handle already names (an upload by link); a new one otherwise. */
     id?: string
+    passOnly?: boolean
   },
   now: Date,
 ): Promise<{ id: string; expiresAt: Date }> {
@@ -203,6 +207,7 @@ async function store(
       mediaType: input.mediaType.slice(0, MAX_MEDIA_TYPE_CHARS),
       length: input.length,
       ciphertext: asBytes(input.ciphertext(id)),
+      passOnly: input.passOnly === true,
       createdAt: now,
       expiresAt,
     },
@@ -222,6 +227,7 @@ export async function keepResult(
     text: string
     mediaType: ResultMediaType
     name?: string | null
+    passOnly?: boolean
   },
   now = new Date(),
 ): Promise<KeptResult> {
@@ -241,6 +247,7 @@ export async function keepResult(
       name,
       length: text.length,
       ciphertext: (id) => encryptString(ctx.dek, text, aad(id)),
+      passOnly: input.passOnly,
     },
     now,
   )
@@ -269,6 +276,7 @@ export async function keepBytes(
     bytes: Buffer
     mediaType: ResultMediaType
     name: string | null
+    passOnly?: boolean
   },
   now = new Date(),
 ): Promise<KeptResult> {
@@ -293,6 +301,7 @@ export async function keepBytes(
       name,
       length: input.bytes.length,
       ciphertext: (id) => encrypt(ctx.dek, input.bytes, aad(id)),
+      passOnly: input.passOnly,
     },
     now,
   )
@@ -482,6 +491,12 @@ export type OpenedResult = {
   name: string | null
   /** Characters of a text, bytes of a file. */
   length: number
+  /**
+   * A part keep named (#149): only what puts it in a tool's arguments
+   * (resultOpener) and the owner's page open it; every reader refuses it
+   * (`refusePassOnly`).
+   */
+  passOnly: boolean
   /** The text; a file that is not a text type refuses. */
   text(): string
   /** The bytes; a text as UTF-8. */
@@ -530,6 +545,7 @@ export async function openResult(
     mediaType: row.mediaType,
     name: resultName(ctx, row),
     length: row.length,
+    passOnly: row.passOnly,
   }
 
   if (row.kind === "bytes") {
@@ -555,6 +571,18 @@ export async function openResult(
   return { ...base, text: () => text, bytes: () => Buffer.from(text, "utf8") }
 }
 
+/**
+ * Refuses to read out a result that holds a part keep named (#149): every
+ * reader calls it (read_result, the pcp://results resource, pcp.read and
+ * its kin, view_image, links, a capability's input); only what puts a
+ * handle in a tool's arguments and the owner's page do not.
+ */
+export function refusePassOnly(result: { id: string; passOnly: boolean }) {
+  if (result.passOnly) {
+    throw new PassOnlyError(result.id)
+  }
+}
+
 export function resultOpener(ctx: VaultContext, tokenId: string): ResultOpener {
   return (id) => openResult(ctx, { tokenId, id })
 }
@@ -572,6 +600,8 @@ export type ResultInfo =
       toolName: string
       createdAt: Date
       expiresAt: Date
+      /** A part keep named: never read out (`refusePassOnly`). */
+      passOnly: boolean
     }
 
 /** What is known of each id for the token, in the order given; no content. */
@@ -604,6 +634,7 @@ export async function describeResults(
         toolName: true,
         createdAt: true,
         expiresAt: true,
+        passOnly: true,
       },
     })
   let rows = await query()
@@ -676,6 +707,8 @@ export async function readResult(
   if (!opened) {
     throw notFound("That result")
   }
+
+  refusePassOnly(opened)
 
   const row = await db().toolResult.findFirst({
     where: { id: opened.id },

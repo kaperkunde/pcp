@@ -5117,7 +5117,25 @@ the owner allowed once: its stored outcome is the shaped answer with its
 handles, which `check_permission` gives the token that asked; the handles the
 shaping made are sealed with that outcome under their own label
 (`permission_request:<id>:result_handles`), and the note of answered requests
-names each (`path → id`) from there, never from the answer's text.
+names each (`path → id`) from there, never from the answer's text. Where
+the same value stands in the answer's other text (a text block beside the
+JSON, an embedded text resource: "Created tok_…"), it reads `[kept: <path>]`
+there; an error that is not JSON is shown as it came.
+
+What `keep` made is **pass-only** (`tool_result.pass_only`, set through the
+keepers when the handle is made, the whole answer's included): PCP puts it in
+a tool's arguments (`resultOpener`, `lib/core/result-handles.ts`) and shows it
+to the owner on a waiting request's page, and nothing else reads it out.
+read_result, the `pcp://results` resource, `pcp.read`, `pcp.image` and
+`pcp.video.frames` (an error with code `pass_only` the program may catch),
+view_image, a file link (`share_result`) and a capability's input (read_image,
+edit_pdf, convert_document, whose provider would read it out) refuse it with
+the tool error code `pass_only` (`refusePassOnly`, `PassOnlyError`). This
+keeps PCP from reading the value out, not every tool: one that echoes its
+input (an API that returns what it was sent, a store's `save_file` then
+`get_file`) can still hand it back as an ordinary answer, which is out of
+PCP's control. Like every kept result, it is not exported and `wipeVault`
+removes it.
 Each answer also carries a `resource_link` per handle (`pcp://results/<id>`),
 the mail tools' own included; the gateway's resource template of that name
 gives the text or the file's bytes to the token that kept it, and lists

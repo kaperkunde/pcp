@@ -519,6 +519,54 @@ describe("asking the owner", () => {
     expect(answered[0]!.outcome).not.toContain("forged-id-123")
   })
 
+  it("keeps a run-once call's kept part pass-only, and the owner's page still opens it (final 3)", async () => {
+    const { ctx, scope, server, tokenId } = await setup()
+    const executor: PermissionExecutor = {
+      ...stub().executor,
+      callTool: async () => ({
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({ token: "tok_page_1", n: 1 }),
+          },
+        ],
+      }),
+    }
+
+    await withPermission(scope, {
+      ...call(server, "add_numbers", { a: 5 }),
+      keep: ["token"],
+    })
+    const row = await db().permissionRequest.findFirstOrThrow()
+    await decidePermission(
+      ctx,
+      row.id,
+      "allow_once",
+      { publicUrl: PUBLIC_URL },
+      executor,
+    )
+    const id = textOf(await checkPermission(scope, row.id)).match(
+      /"token":\{"\$result":"([^"]+)"/,
+    )?.[1]
+    const kept = await db().toolResult.findUniqueOrThrow({ where: { id } })
+    expect(kept.passOnly).toBe(true)
+    expect(kept.tokenId).toBe(tokenId)
+
+    // A call that names it waits for the owner, whose page shows it.
+    await withPermission(
+      scope,
+      call(server, "send_postcard", { to: { $result: id } }),
+    )
+    const waiting = await db().permissionRequest.findFirstOrThrow({
+      where: { status: "pending" },
+    })
+    expect(
+      (
+        await openRequestFile(ctx, { permissionId: waiting.id, resultId: id! })
+      )?.text(),
+    ).toBe("tok_page_1")
+  })
+
   it("hands back a file kept on sight in a call allowed once as its handle (#149)", async () => {
     const { ctx, scope, server, tokenId } = await setup()
     const png = Buffer.concat([

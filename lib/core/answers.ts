@@ -698,21 +698,27 @@ function prepareAnswer(
 
   // keep with no JSON to look into: the text is kept whole, as one handle,
   // never passed on as it is (#149).
+  // An embedded text resource is text as much as a text block is.
+  const textOfBlock = (part: Part): string | null =>
+    part.kind !== "block"
+      ? null
+      : part.block.type === "text"
+        ? part.block.text
+        : part.block.type === "resource" && "text" in part.block.resource
+          ? part.block.resource.text
+          : null
   const wholeText =
     keep && !sawJson && !fromStructured
       ? parts
-          .flatMap((part) =>
-            part.kind === "block" && part.block.type === "text"
-              ? [part.block.text]
-              : [],
-          )
+          .flatMap((part) => {
+            const text = textOfBlock(part)
+            return text === null ? [] : [text]
+          })
           .join("\n\n")
       : ""
   const kept: Part[] = wholeText
     ? [
-        ...parts.filter(
-          (part) => !(part.kind === "block" && part.block.type === "text"),
-        ),
+        ...parts.filter((part) => textOfBlock(part) === null),
         { kind: "whole", text: wholeText },
       ]
     : parts
@@ -826,6 +832,8 @@ const MAX_NOTED_HANDLES = 10
  * its value (#149).
  */
 export const WITHHELD = "[left out: not kept, see the note]"
+/** Shorter values keep named are not looked for in the text beside. */
+const MIN_MASKED_CHARS = 8
 /** Where a handle for a whole answer kept for keep says it came from. */
 const WHOLE_PATH = "(the answer)"
 
@@ -835,11 +843,14 @@ export type AnswerKeepers = {
     text: string
     mediaType: string
     name?: string | null
+    /** A part keep named: put in arguments only, never read out (#149). */
+    passOnly?: boolean
   }): Promise<KeptResult>
   bytes(input: {
     bytes: Buffer
     mediaType: string
     name: string | null
+    passOnly?: boolean
   }): Promise<KeptResult>
 }
 
@@ -963,6 +974,47 @@ class Handles {
   wholeKept = false
   /** A number or true/false was kept, which goes on as text. */
   keptScalar = false
+  /**
+   * The texts of what keep named, at least MIN_MASKED_CHARS long, by path:
+   * put out of sight wherever else the answer's text has them.
+   */
+  private secrets: Array<{ path: string; text: string }> = []
+
+  /** Notes what keep named, to mask it in the text beside (`mask`). */
+  private remember(path: string, value: unknown, depth = 0): void {
+    if (typeof value === "string" || typeof value === "number") {
+      const text = String(value)
+
+      if (text.length >= MIN_MASKED_CHARS) {
+        this.secrets.push({ path: path || WHOLE_PATH, text })
+      }
+    } else if (value !== null && typeof value === "object") {
+      if (depth < MAX_DECODE_DEPTH) {
+        for (const item of Object.values(value)) {
+          this.remember(path, item, depth + 1)
+        }
+      }
+    }
+  }
+
+  /**
+   * A text of the answer outside its JSON with every value keep named put
+   * out of sight as [kept: <path>]: a tool that says "Created tok_…" beside
+   * the JSON that holds it (#149).
+   */
+  mask(text: string): string {
+    let masked = text
+
+    for (const { path, text: secret } of [...this.secrets].sort(
+      (a, b) => b.text.length - a.text.length,
+    )) {
+      if (masked.includes(secret)) {
+        masked = masked.split(secret).join(`[kept: ${path}]`)
+      }
+    }
+
+    return masked
+  }
   capped = false
 
   constructor(
@@ -1010,10 +1062,13 @@ class Handles {
     mediaType: string,
     { asked }: { asked: boolean },
   ) {
-    return this.kept(path, () => this.keepers.text({ text, mediaType }), {
-      preview: text.slice(0, HANDLE_PREVIEW_CHARS),
-      asked,
-    })
+    const passOnly = asked ? { passOnly: true } : {}
+
+    return this.kept(
+      path,
+      () => this.keepers.text({ text, mediaType, ...passOnly }),
+      { preview: text.slice(0, HANDLE_PREVIEW_CHARS), asked },
+    )
   }
 
   /**
@@ -1060,6 +1115,7 @@ class Handles {
             file.type ??
             (declared?.includes("/") ? declared : "application/octet-stream"),
           name: siblingString(siblings, NAME_KEYS),
+          ...(asked ? { passOnly: true } : {}),
         }),
       { asked },
     )
@@ -1082,6 +1138,10 @@ class Handles {
 
     for (const { path: named } of askedBy) {
       this.matched.add(named)
+    }
+
+    if (asked) {
+      this.remember(path, value)
     }
 
     // A part named in keep comes back as a handle, or not at all: never as
@@ -1347,7 +1407,7 @@ class Handles {
 
     if (this.wholeKept) {
       said.push(
-        `The answer is not JSON, so there are no parts to keep: PCP kept all of it as one result (${WHOLE_PATH}), as keep asks.`,
+        `The answer is not JSON, so there are no parts to keep: PCP kept all of it as one result, at ${WHOLE_PATH}, as keep asks.`,
       )
     } else if (unmatched.length > 0) {
       said.push(
@@ -1401,6 +1461,22 @@ class Handles {
 
     return `PCP kept ${made.length} value${made.length === 1 ? "" : "s"} of this answer as results, each shown as {"$result": …}: ${named}${more}. Pass a handle as it is in any tool's arguments, where it stands for the value (a file as base64, or as text with "as": "text").${passOn}${reads}${capped}`
   }
+}
+
+/** A text or embedded text block with what keep named put out of sight. */
+function maskedBlock(block: Block, handles: Handles): Block {
+  if (block.type === "text") {
+    return { ...block, text: handles.mask(block.text) }
+  }
+
+  if (block.type === "resource" && "text" in block.resource) {
+    return {
+      ...block,
+      resource: { ...block.resource, text: handles.mask(block.resource.text) },
+    }
+  }
+
+  return block
 }
 
 /** A handle PCP wrote into an answer itself (a mail tool's). */
@@ -1498,6 +1574,16 @@ export async function shapeAnswerKeeping(
         value,
         notes: note ? [...part.notes, note] : part.notes,
       })
+    }
+
+    // The text beside the JSON never shows what keep named in it.
+    for (const [index, part] of parts.entries()) {
+      if (part.kind === "block") {
+        parts[index] = {
+          kind: "block",
+          block: maskedBlock(part.block, handles),
+        }
+      }
     }
 
     // Once, before the first JSON: where keep fell short.
@@ -1644,15 +1730,27 @@ export async function answerValue(
       await asValue(applyShape(result.structuredContent, shape).value),
     )
   } else {
-    for (const part of prepared.parts) {
+    // JSON first, so what keep named is known before the text beside it.
+    const shaped = new Map<number, unknown>()
+
+    for (const [index, part] of prepared.parts.entries()) {
       if (part.kind === "json") {
-        values.push(await asValue(part.value))
+        shaped.set(index, await asValue(part.value))
+      }
+    }
+
+    for (const [index, part] of prepared.parts.entries()) {
+      if (part.kind === "json") {
+        values.push(shaped.get(index))
       } else if (part.kind === "whole") {
         values.push(await handles.keepWhole(part.text))
       } else if (part.block.type === "text") {
-        values.push(part.block.text)
+        values.push(handles.mask(part.block.text))
       } else {
-        values.push((await handles.keptFile(part.block))?.handle ?? part.block)
+        values.push(
+          (await handles.keptFile(part.block))?.handle ??
+            maskedBlock(part.block, handles),
+        )
       }
     }
   }

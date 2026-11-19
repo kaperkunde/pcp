@@ -300,20 +300,24 @@ function fakeKeepers() {
     expiresAt: UNTIL,
     dropped: 0,
   })
+  /** The ids kept as pass-only: parts keep named. */
+  const passOnly: string[] = []
   const keepers: AnswerKeepers = {
-    text: async ({ text, mediaType }) => {
+    text: async ({ text, mediaType, passOnly: only }) => {
       const kept_ = result("text", mediaType, text.length)
+      if (only) passOnly.push(kept_.id)
       kept.push({ kind: "text", text, mediaType })
       return kept_
     },
-    bytes: async ({ bytes, mediaType, name }) => {
+    bytes: async ({ bytes, mediaType, name, passOnly: only }) => {
       const kept_ = result("bytes", mediaType, bytes.length, name)
+      if (only) passOnly.push(kept_.id)
       kept.push({ kind: "bytes", bytes, mediaType, name })
       return kept_
     },
   }
 
-  return { kept, keepers }
+  return { kept, keepers, passOnly }
 }
 
 /** A PNG's header and enough bytes after it to be worth keeping. */
@@ -631,6 +635,72 @@ describe("keep", () => {
       ok: true,
       notes: ["Nothing to keep at token: the answer has no such part."],
     })
+  })
+
+  it("keeps an embedded text resource whole when the answer has no JSON (final 1, 2)", async () => {
+    const { kept, shown } = await keeping(
+      {
+        content: [
+          {
+            type: "resource",
+            resource: {
+              uri: "file:///token.txt",
+              mimeType: "text/plain",
+              text: "tok_resource_998877",
+            },
+          },
+        ],
+      },
+      { keep: ["token"] },
+    )
+
+    expect(kept).toEqual([
+      { kind: "text", text: "tok_resource_998877", mediaType: "text/plain" },
+    ])
+    const said = texts(shown).join("\n")
+    expect(JSON.stringify(shown)).not.toContain("tok_resource")
+    expect(said).not.toContain("((the answer))")
+    expect(said).not.toContain("keep was not applied")
+  })
+
+  it("marks what keep named pass-only, and nothing kept on sight (final 3)", async () => {
+    const fake = fakeKeepers()
+    await shapeAnswerKeeping(
+      json({ token: "tok_only_1", file: PNG.toString("base64") }),
+      { keep: ["token"] },
+      fake.keepers,
+      { wholeMax: 4_000_000 },
+    )
+    expect(fake.passOnly).toEqual(["r0"])
+
+    const whole = fakeKeepers()
+    await answerValue(
+      { content: [{ type: "text", text: "tok_only_2" }] },
+      { keep: ["token"] },
+      whole.keepers,
+      { max: 100_000 },
+    )
+    expect(whole.passOnly).toEqual(["r0"])
+  })
+
+  it("puts a kept value out of sight in the text beside the JSON (final 4)", async () => {
+    const { shown } = await keeping(
+      {
+        content: [
+          { type: "text", text: "Created tok_beside_445566 for you." },
+          {
+            type: "text",
+            text: JSON.stringify({ token: "tok_beside_445566", n: 1 }),
+          },
+          { type: "text", text: "short: 1" },
+        ],
+      },
+      { keep: ["token"] },
+    )
+
+    const said = texts(shown).join("\n")
+    expect(said).not.toContain("tok_beside")
+    expect(said).toContain("Created [kept: token] for you.")
   })
 
   it("keeps a short word at a path as text, not as bytes", async () => {
