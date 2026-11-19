@@ -2430,7 +2430,7 @@ export function buildGatewayServer(
   }
 
   /**
-   * call_tool_write's and call_tool_destructive's: the same, and how to
+   * execute_write's and execute_destructive's: the same, and how to
    * repeat on purpose a call the duplicate guard (calls/guard.ts) holds back.
    */
   const changeCallInput = callInput
@@ -2547,7 +2547,7 @@ export function buildGatewayServer(
   }
 
   /**
-   * call_tool_read, call_tool_write and call_tool_destructive: the same
+   * execute_read, execute_write and execute_destructive: the same
    * call, at the token's level, on the tool its call_handle stands for.
    * Each runs only tools at or below its own tier (tool-tiers.ts), so a
    * client that lets Read (or Write) tools through on their own can do so
@@ -2619,7 +2619,7 @@ export function buildGatewayServer(
   /**
    * A call of a server's tool, by name, once the way in has named it: at
    * the token's level, refused above the entry's tier, its arguments
-   * checked, the owner asked where the level says so. What call_tool_<tier>
+   * checked, the owner asked where the level says so. What execute_<tier>
    * runs for a call_handle, and PCP's own store tools for a store.
    */
   async function callResolved(
@@ -2642,7 +2642,7 @@ export function buildGatewayServer(
       keep: ReturnType<typeof readFields>
       fix: string
       /**
-       * The duplicate guard (calls/guard.ts), for call_tool_*; PCP's own
+       * The duplicate guard (calls/guard.ts), for execute_<tier>; PCP's own
        * store tools leave it out (stores are not guarded).
        */
       guard?: { rerun: boolean }
@@ -3955,7 +3955,7 @@ export function buildGatewayServer(
         status: z.string(),
         /**
          * What it came to, in words, as the text says it: for a call that
-         * ran, its answer as call_tool_* would have given it.
+         * ran, its answer as execute_<tier> would have given it.
          */
         result: z.string(),
         /** A server it added, as it is now. */
