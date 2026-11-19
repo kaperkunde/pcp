@@ -378,7 +378,6 @@ import {
 } from "./tools/define"
 import {
   callEntryFor,
-  RETIRED_ENTRIES,
   runEntryFor,
   tierAllows,
   tierAnnotations,
@@ -988,26 +987,6 @@ export function tierRefusal(
 }
 
 /**
- * The line in front of an answer to one of PCP's own tools called by its
- * own name, which clients no longer list (#113): how to run it now. The
- * name keeps working for one release (docs/breaking-changes.md).
- */
-export function ownNameNote(name: string, entry: string): string {
-  return `PCP's tools changed: ${name} is now run through ${entry}, as {"tool": "${name}", "arguments": {…}}. Calling it by its own name stops working in the next release.`
-}
-
-/**
- * The line in front of an answer to an entry tool's old name (describe,
- * call_tool_<tier>, run_code_<tier>): the one that took over, with the same
- * arguments. It keeps working for one release (docs/breaking-changes.md).
- */
-export function retiredNote(name: string, entry: string): string {
-  return name === "describe"
-    ? `PCP's tools changed: describe is now search with ref (the same ref). The old name stops working in the next release.`
-    : `PCP's tools changed: ${name} is now ${entry}, with the same arguments. The old name stops working in the next release.`
-}
-
-/**
  * What read_result says of a file it cannot show that a capability tool
  * reads (capabilities/): a picture or a scan, or a document.
  */
@@ -1407,32 +1386,27 @@ export function buildGatewayServer(
 
   /**
    * The tools a client lists (#113): search, execute_<tier> and
-   * run_<tier>. Everything else of PCP's is reached through them, and
-   * still answers a call by its own name for one release, unlisted, with a
-   * line naming the entry (docs/breaking-changes.md).
+   * run_<tier>. Everything else of PCP's is reached through them, and a
+   * call by its own name, or by an old entry's name, is refused as an
+   * unknown tool (docs/breaking-changes.md).
    */
   const entries: Tool[] = []
 
   /**
    * One of PCP's own tools, on the common interface (lib/core/tools/).
-   * An entry is listed, and keeps the tier its name says; a retired name
-   * (RETIRED_ENTRIES) answers as the entry that took over, unlisted; any
+   * An entry is listed, and keeps the tier its name says; any
    * other is one of PCP's own tools, run through execute_<tier> by its
-   * name, and found by search (kind pcp).
+   * name, and found by search (kind pcp), never registered under its name.
    */
   const register = <
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     I extends z.ZodObject<any>,
   >(
     spec: ToolSpec<I> & { guard?: OwnGuard },
-    {
-      entry = false,
-      retired,
-      dispatch,
-    }: { entry?: boolean; retired?: string; dispatch?: Dispatch } = {},
+    { entry = false, dispatch }: { entry?: boolean; dispatch?: Dispatch } = {},
   ) => {
     // The owner's tier for it, when they chose one, is what it advertises.
-    const chosen = entry || retired ? undefined : ownTiers[spec.name]
+    const chosen = entry ? undefined : ownTiers[spec.name]
     const { guard, ...own } = spec
     const tool = defineTool(
       chosen
@@ -1443,23 +1417,14 @@ export function buildGatewayServer(
 
     if (entry) {
       entries.push(tool)
-    } else if (!retired) {
+      registerTool(server, tool, hooks, {
+        ...(dispatch ? { dispatch } : {}),
+      })
+    } else {
+      // Not registered on the server: only execute_<tier> reaches it, by
+      // name; a call by its own name is refused as an unknown tool.
       ownTools.push(tool)
     }
-
-    registerTool(server, tool, hooks, {
-      ...(dispatch ? { dispatch } : {}),
-      ...(entry
-        ? {}
-        : {
-            note: retired
-              ? retiredNote(spec.name, retired)
-              : ownNameNote(
-                  spec.name,
-                  callEntryFor(tierFromAnnotations(tool.annotations)),
-                ),
-          }),
-    })
   }
 
   /**
@@ -2182,41 +2147,6 @@ export function buildGatewayServer(
         : `Nothing is called "${ref}". search finds tools, skills and memories by a few words; search takes a ref as it gave it, as ref.`,
     )
   }
-
-  register(
-    {
-      name: "describe",
-      title: "Describe",
-      description: `Get a tool's call_handle and schema, or ${scope.keepMemories ? "a skill's or memory's" : "a skill's"} text, by a ref search gave. A tool (ref server/tool, or server and tool): its full description and the JSON Schema of its arguments, whether it runs at once ("allowed") or asks the owner first ("ask"), for an API the shape of what it answers ("returns"), its tier (read, write or destructive) and the entry tool that runs it ("run_with": execute_read, execute_write or execute_destructive), and the call_handle it takes; call this before calling a tool, and again when its call_handle stops working. One of PCP's own tools (kind pcp, ref its name): its description, schemas and tier, run with execute_<tier> by its name. A skill (ref ${SKILL_REF}<name>): its ${SKILL_FILE}, a procedure the owner approved, to follow when the task matches, with its files (${SKILL_REF}<name>/<file>) and the call_handle of each tool it uses.${scope.keepMemories ? ` A memory (its path, ${MEMORY_ROOT}/…): its text.` : ""}`,
-      input: z.object({
-        ref: z
-          .string()
-          .max(500)
-          .optional()
-          .describe(
-            `As search gives it: server/tool, the name of one of PCP's own tools, ${SKILL_REF}<name> (or ${SKILL_REF}<name>/<file>)${scope.keepMemories ? ", or a memory's path" : ""}.`,
-          ),
-        server: z
-          .string()
-          .optional()
-          .describe("With tool, in place of ref: the tool's server."),
-        tool: z
-          .string()
-          .optional()
-          .describe("With server, in place of ref: the tool's name."),
-      }),
-      annotations: READS,
-      // A skill's name and a memory's path stay out of the log, refusals too.
-      log: (args): LogNames => {
-        const tool = namedTool(args as DescribeArgs)
-        return tool ? { server: tool.server, upstreamTool: tool.tool } : {}
-      },
-      quiet: true,
-      run: async (args: DescribeArgs) =>
-        withSessionLines(await describeRef(args)),
-    },
-    { retired: RETIRED_ENTRIES.describe! },
-  )
 
   /** A tool's catalogue row, with what describing and calling it need. */
   function toolRow(serverId: string, name: string): Promise<ToolRow | null> {
@@ -3038,14 +2968,12 @@ export function buildGatewayServer(
   /**
    * One of PCP's own tools that execute_<tier> names (`tool`): by its bare
    * name as search gives it, "pcp/<name>" or with an app's prefix. Never an
-   * entry or a retired entry's name.
+   * entry's name.
    */
   const executable = (given: string) => {
     const bare = given.trim().replace(/^pcp\//, "")
 
-    return ENTRY_NAMES.has(bare) || bare in RETIRED_ENTRIES
-      ? null
-      : ownTool(bare)
+    return ENTRY_NAMES.has(bare) ? null : ownTool(bare)
   }
 
   /** The tier one of PCP's own tools runs at: what it advertises. */
@@ -3198,11 +3126,9 @@ export function buildGatewayServer(
   const executeRefusal = (given: string, tier: ToolTier): Outcome => {
     const bare = given.trim().replace(/^pcp\//, "")
 
-    if (ENTRY_NAMES.has(bare) || bare in RETIRED_ENTRIES) {
-      const entry = RETIRED_ENTRIES[bare] ?? bare
-
+    if (ENTRY_NAMES.has(bare)) {
       return failure(
-        `${entry} is one of PCP's entry tools: call it directly, not through ${callEntryFor(tier)}. Nothing was run or asked.`,
+        `${bare} is one of PCP's entry tools: call it directly, not through ${callEntryFor(tier)}. Nothing was run or asked.`,
         "invalid_arguments",
       )
     }
@@ -3291,24 +3217,6 @@ export function buildGatewayServer(
               ),
       },
       { entry: true, dispatch: executeDispatch(tier) },
-    )
-
-    // Its old name, for one release.
-    register(
-      {
-        name: `call_tool_${tier}`,
-        title: `Call a ${TOOL_TIER_LABELS[tier]} tool`,
-        description: `${CALL_LEADS[tier]} Takes only the call_handle search gives for the tool. Now ${callEntryFor(tier)}.`,
-        input: call,
-        annotations: ENTRY_HINTS[tier],
-        run: (args: CallArgs, ctx) =>
-          callUpstream(args, {
-            tier,
-            signal: ctx.signal,
-            logAs: ctx.logAs,
-          }),
-      },
-      { retired: callEntryFor(tier) },
     )
   }
 
@@ -7113,14 +7021,10 @@ export function buildGatewayServer(
         "Run code that may delete for good over the owner's tools: its pcp.call reaches every tier, Destructive included. Prefer run_read or run_write when the program needs no more.",
     }
 
-    // Each entry, and its old name for one release (run_code_<tier>).
-    for (const [tier, retired] of TOOL_TIERS.flatMap((each) => [
-      [each, false] as const,
-      [each, true] as const,
-    ])) {
+    for (const tier of TOOL_TIERS) {
       register(
         {
-          name: retired ? `run_code_${tier}` : runEntryFor(tier),
+          name: runEntryFor(tier),
           title: `Run code that calls ${TOOL_TIER_LABELS[tier]} tools`,
           description: [
             `${RUN_LEADS[tier]} A JavaScript program on PCP that calls tools and works on their answers, so that a large answer is filtered, counted, joined or moved from one tool to another without passing through you. Use it when a task needs many calls, or answers bigger than you need to read; the code argument says what a program has.`,
@@ -7216,7 +7120,7 @@ export function buildGatewayServer(
             )
           },
         },
-        retired ? { retired: runEntryFor(tier) } : { entry: true },
+        { entry: true },
       )
     }
 

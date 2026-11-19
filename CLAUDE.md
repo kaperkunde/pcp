@@ -182,16 +182,15 @@ so in the summary; the bump itself waits for the request.
   `search` (a query; a `ref`, which is what `describe` was; neither, the
   owner's standing rules), `execute_read`, `execute_write`,
   `execute_destructive` and, for a token that runs code, `run_read`,
-  `run_write`, `run_destructive`. Every other tool of PCP's is registered
-  unlisted, found by `search` (kind `pcp`) and run by name through the
+  `run_write`, `run_destructive`. Every other tool of PCP's is not registered
+  under its name, found by `search` (kind `pcp`) and run by name through the
   `execute_<tier>` of its own tier (`tool`, with only `arguments` beside
   it), served as its own call (its validator, its log line, the lead); an
   entry's tier is its name, never the owner's choice. A new tool of PCP's
   is one of those behind them, not a new entry. The old names (`describe`,
   `call_tool_<tier>`, `run_code_<tier>`, and each of PCP's own tools by
-  its name) still answer for one release with a line naming the new entry
-  (`RETIRED_ENTRIES`, `retiredNote`, `ownNameNote`), then are `retired`:
-  refused as unknown, and its own tools answer only through execute.
+  its name) are retired: refused as unknown tools, and PCP's own tools
+  answer only through execute (docs/breaking-changes.md).
 - `execute_read`, `execute_write` and `execute_destructive` take one of
   the owner's tools only as a `call_handle` from `search`'s ref
   (`lib/core/call-handles.ts`: an HMAC under the vault key over the token,

@@ -11,9 +11,7 @@ import {
   buildGatewayServer,
   MEMORY_REMINDER,
   MIRRORED_LEAD,
-  ownNameNote,
   ownToolsOf,
-  retiredNote,
   STANDING_LEAD,
   type GatewayScope,
 } from "../gateway"
@@ -760,7 +758,7 @@ describe("execute_<tier> by name, and the names kept for one release (#113)", ()
       "PCP has no tool of its own called send_email",
     )
 
-    for (const tool of ["search", "run_read", "describe", "call_tool_read"]) {
+    for (const tool of ["search", "run_read"]) {
       const entry = await said("execute_destructive", { tool })
       expect(entry.code, tool).toBe("invalid_arguments")
       expect(entry.texts.join(""), tool).toContain(
@@ -784,27 +782,20 @@ describe("execute_<tier> by name, and the names kept for one release (#113)", ()
     expect(shaped.texts.join("")).toContain("With tool, execute takes only")
   })
 
-  it("answers PCP's own tools and the old entries by their old names, unlisted, with a line naming the new entry", async () => {
-    const own = await said("check_permission", {})
-    expect(own.isError).toBe(false)
-    expect(own.texts[0]).toBe(ownNameNote("check_permission", "execute_read"))
-    expect(own.structured).toMatchObject({ kind: "requests" })
-
-    const described = await said("describe", { ref: "check_permission" })
-    expect(described.texts[0]).toBe(retiredNote("describe", "search"))
-    expect(JSON.parse(described.texts[1]!)).toMatchObject({
-      tool: "check_permission",
-    })
-
-    const old = await said("call_tool_read", {
-      call_handle: "check_permission",
-    })
-    expect(old.texts[0]).toBe(retiredNote("call_tool_read", "execute_read"))
-    expect(old.texts.join("\n")).toContain("pass it as tool, not call_handle")
-
-    const program = await said("run_code_read", { code: "return 1 + 1" })
-    expect(program.texts[0]).toBe(retiredNote("run_code_read", "run_read"))
-    expect(program.texts.join("\n")).toContain("2")
+  it("refuses PCP's own tools and the old entries by their old names as unknown tools (retired)", async () => {
+    for (const [name, args] of [
+      ["check_permission", {}],
+      ["describe", { ref: "check_permission" }],
+      ["call_tool_read", { call_handle: "check_permission" }],
+      ["run_code_read", { code: "return 1 + 1" }],
+    ] as const) {
+      const refused = await said(name, args).then(
+        (answer) => answer,
+        (error: unknown) => ({ isError: true, texts: [String(error)] }),
+      )
+      expect(refused.isError, name).toBe(true)
+      expect(refused.texts.join(" "), name).toMatch(/not found|unknown/i)
+    }
 
     const { tools } = await client.listTools()
     for (const name of [
@@ -815,6 +806,11 @@ describe("execute_<tier> by name, and the names kept for one release (#113)", ()
     ]) {
       expect(tools.map((tool) => tool.name)).not.toContain(name)
     }
+
+    // Through execute_<tier> an old entry's name is not one of PCP's own.
+    expect((await said("execute_read", { tool: "describe" })).code).toBe(
+      "not_found",
+    )
   })
 
   it("does not make the same Write call of PCP's own twice, unless asked to again with a reason", async () => {
