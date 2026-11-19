@@ -50,7 +50,7 @@ import {
   updateEndpointDetails,
 } from "./endpoint-admin"
 import { MAX_FIELDS, readFields, type AnswerShape } from "./answers"
-import { isPcpError } from "./errors"
+import { isPcpError, passOnlyMessage } from "./errors"
 import { instructionsBlock } from "./instructions-block"
 import { receiveFile, shareResult } from "./file-links"
 import {
@@ -378,7 +378,6 @@ import {
 } from "./tools/define"
 import {
   callEntryFor,
-  RETIRED_ENTRIES,
   runEntryFor,
   tierAllows,
   tierAnnotations,
@@ -482,9 +481,9 @@ const MAX_ALWAYS_MEMORY_TEXT = 8_000
 const WRAPPER_CHANGES = { max: 20, windowMs: 10 * 60_000 }
 /** web_fetch requests per token, asked about or not. */
 const WEB_FETCHES = { max: 120, windowMs: 10 * 60_000 }
-/** run_code runs per token; each may make many calls (code/limits.ts). */
+/** run_<tier> runs per token; each may make many calls (code/limits.ts). */
 const CODE_RUNS = { max: 60, windowMs: 10 * 60_000 }
-/** How much of a tool's description describe and its kin answer with. */
+/** How much of a tool's description search's ref and its kin answer with. */
 const MAX_DESCRIBED_CHARS = 60_000
 
 /** What describing a tool and checking its handle read of its row. */
@@ -988,26 +987,6 @@ export function tierRefusal(
 }
 
 /**
- * The line in front of an answer to one of PCP's own tools called by its
- * own name, which clients no longer list (#113): how to run it now. The
- * name keeps working for one release (docs/breaking-changes.md).
- */
-export function ownNameNote(name: string, entry: string): string {
-  return `PCP's tools changed: ${name} is now run through ${entry}, as {"tool": "${name}", "arguments": {…}}. Calling it by its own name stops working in the next release.`
-}
-
-/**
- * The line in front of an answer to an entry tool's old name (describe,
- * call_tool_<tier>, run_code_<tier>): the one that took over, with the same
- * arguments. It keeps working for one release (docs/breaking-changes.md).
- */
-export function retiredNote(name: string, entry: string): string {
-  return name === "describe"
-    ? `PCP's tools changed: describe is now search with ref (the same ref). The old name stops working in the next release.`
-    : `PCP's tools changed: ${name} is now ${entry}, with the same arguments. The old name stops working in the next release.`
-}
-
-/**
  * What read_result says of a file it cannot show that a capability tool
  * reads (capabilities/): a picture or a scan, or a document.
  */
@@ -1145,10 +1124,10 @@ export function buildGatewayServer(
     lookupHost?: HostLookup
     /** What runs a call upstream; replaced in tests. */
     executor?: PermissionExecutor
-    /** What runs run_code's programs; replaced in tests. */
+    /** What runs run_<tier>'s programs; replaced in tests. */
     codeExecutor?: Executor
     /**
-     * How long run_code and check_run hold a call, and how often they send
+     * How long run_<tier> and check_run hold a call, and how often they send
      * progress while they do; shorter in tests.
      */
     runTiming?: { answerMs?: number; waitMs?: number; progressMs?: number }
@@ -1222,7 +1201,7 @@ export function buildGatewayServer(
 
   /**
    * The tool a call names, among the token's own, when it may run or ask:
-   * what call_tool and run_code's calls go through first. A blocked tool is
+   * what execute_<tier> and run_<tier>'s calls go through first. A blocked tool is
    * refused, and so is a handle the token has no kept result for, by name,
    * so the owner is never asked about a call that cannot run.
    */
@@ -1328,7 +1307,7 @@ export function buildGatewayServer(
 
   /**
    * PCP's own tools this token has, as registered: search finds them (kind
-   * pcp) and describe reads them, by their bare names.
+   * pcp) and search's ref reads them, by their bare names.
    */
   const ownTools: Tool[] = []
 
@@ -1361,7 +1340,7 @@ export function buildGatewayServer(
     ]
   }
   /**
-   * search's and describe's answer with sessionLines after it, each a text
+   * search's answer (a ref's too) with sessionLines after it, each a text
    * of its own, so an answer that is JSON stays JSON. Only a plain answer:
    * a refusal says nothing more.
    */
@@ -1407,32 +1386,27 @@ export function buildGatewayServer(
 
   /**
    * The tools a client lists (#113): search, execute_<tier> and
-   * run_<tier>. Everything else of PCP's is reached through them, and
-   * still answers a call by its own name for one release, unlisted, with a
-   * line naming the entry (docs/breaking-changes.md).
+   * run_<tier>. Everything else of PCP's is reached through them, and a
+   * call by its own name, or by an old entry's name, is refused as an
+   * unknown tool (docs/breaking-changes.md).
    */
   const entries: Tool[] = []
 
   /**
    * One of PCP's own tools, on the common interface (lib/core/tools/).
-   * An entry is listed, and keeps the tier its name says; a retired name
-   * (RETIRED_ENTRIES) answers as the entry that took over, unlisted; any
+   * An entry is listed, and keeps the tier its name says; any
    * other is one of PCP's own tools, run through execute_<tier> by its
-   * name, and found by search (kind pcp).
+   * name, and found by search (kind pcp), never registered under its name.
    */
   const register = <
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     I extends z.ZodObject<any>,
   >(
     spec: ToolSpec<I> & { guard?: OwnGuard },
-    {
-      entry = false,
-      retired,
-      dispatch,
-    }: { entry?: boolean; retired?: string; dispatch?: Dispatch } = {},
+    { entry = false, dispatch }: { entry?: boolean; dispatch?: Dispatch } = {},
   ) => {
     // The owner's tier for it, when they chose one, is what it advertises.
-    const chosen = entry || retired ? undefined : ownTiers[spec.name]
+    const chosen = entry ? undefined : ownTiers[spec.name]
     const { guard, ...own } = spec
     const tool = defineTool(
       chosen
@@ -1443,28 +1417,19 @@ export function buildGatewayServer(
 
     if (entry) {
       entries.push(tool)
-    } else if (!retired) {
+      registerTool(server, tool, hooks, {
+        ...(dispatch ? { dispatch } : {}),
+      })
+    } else {
+      // Not registered on the server: only execute_<tier> reaches it, by
+      // name; a call by its own name is refused as an unknown tool.
       ownTools.push(tool)
     }
-
-    registerTool(server, tool, hooks, {
-      ...(dispatch ? { dispatch } : {}),
-      ...(entry
-        ? {}
-        : {
-            note: retired
-              ? retiredNote(spec.name, retired)
-              : ownNameNote(
-                  spec.name,
-                  callEntryFor(tierFromAnnotations(tool.annotations)),
-                ),
-          }),
-    })
   }
 
   /**
    * One of PCP's own tools by the name an assistant gave: as it is, or with
-   * its app's prefix (mcp__<server>__run_code), which the note explains.
+   * its app's prefix (mcp__<server>__run_<tier>), which the note explains.
    */
   const ownTool = (
     given: string,
@@ -1485,7 +1450,7 @@ export function buildGatewayServer(
     return tool ? { tool, note: clientPrefixNote(prefixed) } : null
   }
 
-  /** describe's answer for one of PCP's own tools. */
+  /** search's ref answer for one of PCP's own tools. */
   const describeOwn = async ({
     tool,
     note,
@@ -1951,7 +1916,7 @@ export function buildGatewayServer(
     },
   })
 
-  /** One tool, described: what describe answers for it. */
+  /** One tool, described: what search's ref answers for it. */
   async function describeTool(slug: string, name: string): Promise<Outcome> {
     const found = await lookup(slug, name)
 
@@ -2056,7 +2021,7 @@ export function buildGatewayServer(
 
   type DescribeArgs = { ref?: string; server?: string; tool?: string }
 
-  /** The server and tool a describe names, when it names a tool by them. */
+  /** The server and tool a search ref names, when it names a tool by them. */
   function namedTool(
     args: DescribeArgs,
   ): { server: string; tool: string } | null {
@@ -2074,7 +2039,7 @@ export function buildGatewayServer(
       : null
   }
 
-  /** describe: a tool, a skill or a memory, by the ref search gave. */
+  /** search's ref: a tool, a skill or a memory, by the ref search gave. */
   async function describeRef(args: DescribeArgs): Promise<Outcome> {
     const tool = namedTool(args)
     // pcp/<name>, when no server is called pcp: one of PCP's own tools.
@@ -2183,41 +2148,6 @@ export function buildGatewayServer(
     )
   }
 
-  register(
-    {
-      name: "describe",
-      title: "Describe",
-      description: `Get a tool's call_handle and schema, or ${scope.keepMemories ? "a skill's or memory's" : "a skill's"} text, by a ref search gave. A tool (ref server/tool, or server and tool): its full description and the JSON Schema of its arguments, whether it runs at once ("allowed") or asks the owner first ("ask"), for an API the shape of what it answers ("returns"), its tier (read, write or destructive) and the entry tool that runs it ("run_with": execute_read, execute_write or execute_destructive), and the call_handle it takes; call this before calling a tool, and again when its call_handle stops working. One of PCP's own tools (kind pcp, ref its name): its description, schemas and tier, run with execute_<tier> by its name. A skill (ref ${SKILL_REF}<name>): its ${SKILL_FILE}, a procedure the owner approved, to follow when the task matches, with its files (${SKILL_REF}<name>/<file>) and the call_handle of each tool it uses.${scope.keepMemories ? ` A memory (its path, ${MEMORY_ROOT}/…): its text.` : ""}`,
-      input: z.object({
-        ref: z
-          .string()
-          .max(500)
-          .optional()
-          .describe(
-            `As search gives it: server/tool, the name of one of PCP's own tools, ${SKILL_REF}<name> (or ${SKILL_REF}<name>/<file>)${scope.keepMemories ? ", or a memory's path" : ""}.`,
-          ),
-        server: z
-          .string()
-          .optional()
-          .describe("With tool, in place of ref: the tool's server."),
-        tool: z
-          .string()
-          .optional()
-          .describe("With server, in place of ref: the tool's name."),
-      }),
-      annotations: READS,
-      // A skill's name and a memory's path stay out of the log, refusals too.
-      log: (args): LogNames => {
-        const tool = namedTool(args as DescribeArgs)
-        return tool ? { server: tool.server, upstreamTool: tool.tool } : {}
-      },
-      quiet: true,
-      run: async (args: DescribeArgs) =>
-        withSessionLines(await describeRef(args)),
-    },
-    { retired: RETIRED_ENTRIES.describe! },
-  )
-
   /** A tool's catalogue row, with what describing and calling it need. */
   function toolRow(serverId: string, name: string): Promise<ToolRow | null> {
     // The schema is not carried with the catalogue: fetch this tool's.
@@ -2253,8 +2183,8 @@ export function buildGatewayServer(
   }
 
   /**
-   * describe's answer for a tool, call_handle first so a long schema cut short
-   * still carries it. The recovery answers of call_tool give the same.
+   * search's ref answer for a tool, call_handle first so a long schema cut short
+   * still carries it. The recovery answers of execute_<tier> give the same.
    */
   function described(
     found: { server: GatewayServer; tool: GatewayTool },
@@ -2272,8 +2202,8 @@ export function buildGatewayServer(
   }
 
   /**
-   * A tool as describe gives it, as a value: with its call_handle for
-   * describe itself, without one for run_code's pcp.describe, whose
+   * A tool as search's ref gives it, as a value: with its call_handle for
+   * search itself, without one for run_<tier>'s pcp.describe, whose
    * pcp.call takes names.
    */
   function describedTool(
@@ -2406,7 +2336,7 @@ export function buildGatewayServer(
   }
 
   /**
-   * call_tool was given something other than a handle: most often a
+   * execute_<tier> was given something other than a handle: most often a
    * server/tool name, from habit. When that names a tool this token can
    * see, the answer describes it, so the next call can be the right one.
    */
@@ -2480,12 +2410,21 @@ export function buildGatewayServer(
         'Decode base64 (or base64url) text in a JSON answer back into the text it encodes, at these paths. A path matches wherever the answer\'s keys end with it, so ["body.data"] decodes the body of every part of a Gmail message, however deeply the parts nest. What is not text (an attachment) is left encoded. search\'s "returns" for a ref marks such text "string (base64)"; leave it out of fields when you do not need it, since encoded text is long.',
       ),
     keep: z
-      .array(z.string().min(1).max(200))
+      .array(
+        z
+          .string()
+          .min(1)
+          .max(200)
+          .regex(
+            /^[^[\]]+$/,
+            "A keep path has no list indexes: it matches at any depth, in every item of a list.",
+          ),
+      )
       .min(1)
       .max(MAX_FIELDS)
       .optional()
       .describe(
-        'Keep these parts of a JSON answer as results instead of reading them, as paths like decode\'s: ["attachments.data", "body"]. Each comes back as a handle, {"$result": "<id>", "type", "size" or "length", …}, that you pass as it is in any later call\'s arguments where the value belongs, so a file or a long text moves between tools without passing through you. Files sent as base64 are kept this way without asking.',
+        'Keep these parts of a JSON answer as results instead of reading them, as paths of keys like decode\'s, matched at any depth and in every item of a list, never with an index: ["attachments.data", "token"]. Each comes back as a handle and nothing else, {"$result": "<id>", "type", "size" or "length", …}, with no preview of its value, even where fields leaves it out: pass it as it is in any later call\'s arguments where the value belongs. It is the way to move a credential one tool makes (a token, a password) into another without it passing through you: PCP never reads such a handle out (read_result, view_image, a link and the like refuse it, code pass_only), and the same value in the answer\'s other text shows as [kept: <path>]. An answer that is not JSON is kept whole as one handle; a part that cannot be kept is left out, never shown. Files sent as base64 are kept this way without asking. An error that is not JSON is shown as it came.',
       ),
   })
 
@@ -2500,7 +2439,7 @@ export function buildGatewayServer(
   }
 
   /**
-   * call_tool_write's and call_tool_destructive's: the same, and how to
+   * execute_write's and execute_destructive's: the same, and how to
    * repeat on purpose a call the duplicate guard (calls/guard.ts) holds back.
    */
   const changeCallInput = callInput
@@ -2535,7 +2474,7 @@ export function buildGatewayServer(
   /**
    * What is wrong with a call's arguments against the tool's inputSchema
    * (tools/validate.ts), with the schema to fix them by, or null when they
-   * fit. Checked for call_tool and run_code's pcp.call alike, before
+   * fit. Checked for execute_<tier> and run_<tier>'s pcp.call alike, before
    * anything runs or the owner is asked, so a call that cannot work never
    * becomes a request for them.
    */
@@ -2617,7 +2556,7 @@ export function buildGatewayServer(
   }
 
   /**
-   * call_tool_read, call_tool_write and call_tool_destructive: the same
+   * execute_read, execute_write and execute_destructive: the same
    * call, at the token's level, on the tool its call_handle stands for.
    * Each runs only tools at or below its own tier (tool-tiers.ts), so a
    * client that lets Read (or Write) tools through on their own can do so
@@ -2689,7 +2628,7 @@ export function buildGatewayServer(
   /**
    * A call of a server's tool, by name, once the way in has named it: at
    * the token's level, refused above the entry's tier, its arguments
-   * checked, the owner asked where the level says so. What call_tool_<tier>
+   * checked, the owner asked where the level says so. What execute_<tier>
    * runs for a call_handle, and PCP's own store tools for a store.
    */
   async function callResolved(
@@ -2712,7 +2651,7 @@ export function buildGatewayServer(
       keep: ReturnType<typeof readFields>
       fix: string
       /**
-       * The duplicate guard (calls/guard.ts), for call_tool_*; PCP's own
+       * The duplicate guard (calls/guard.ts), for execute_<tier>; PCP's own
        * store tools leave it out (stores are not guarded).
        */
       guard?: { rerun: boolean }
@@ -2843,7 +2782,7 @@ export function buildGatewayServer(
   }
 
   /**
-   * One call to a tool among the token's own, as run_code's pcp.call and
+   * One call to a tool among the token's own, as run_<tier>'s pcp.call and
    * the capability tools (capabilities/) make it, with the answer as a
    * value: resolveCall first (blocked, a secret, a missing handle), then
    * the caller's tier (a tool above it refused before anything is checked
@@ -2901,7 +2840,7 @@ export function buildGatewayServer(
 
     lookedUp?.(found.tool.tier === "read")
 
-    // As call_tool's: checked before anything runs or asks.
+    // As execute_<tier>'s: checked before anything runs or asks.
     const row = await toolRow(found.server.id, found.tool.name)
     const unfit = row
       ? await argumentsUnfit(found.server, found.tool.name, row, callArgs, {
@@ -2956,7 +2895,13 @@ export function buildGatewayServer(
     ]
     const noted = <T extends object>(outcome: T) =>
       notes.length > 0 && "ok" in outcome && outcome.ok
-        ? { ...outcome, notes }
+        ? {
+            ...outcome,
+            notes: [
+              ...notes,
+              ...((outcome as { notes?: string[] }).notes ?? []),
+            ],
+          }
         : outcome
     const before = noteBefore()
 
@@ -3038,14 +2983,12 @@ export function buildGatewayServer(
   /**
    * One of PCP's own tools that execute_<tier> names (`tool`): by its bare
    * name as search gives it, "pcp/<name>" or with an app's prefix. Never an
-   * entry or a retired entry's name.
+   * entry's name.
    */
   const executable = (given: string) => {
     const bare = given.trim().replace(/^pcp\//, "")
 
-    return ENTRY_NAMES.has(bare) || bare in RETIRED_ENTRIES
-      ? null
-      : ownTool(bare)
+    return ENTRY_NAMES.has(bare) ? null : ownTool(bare)
   }
 
   /** The tier one of PCP's own tools runs at: what it advertises. */
@@ -3198,11 +3141,9 @@ export function buildGatewayServer(
   const executeRefusal = (given: string, tier: ToolTier): Outcome => {
     const bare = given.trim().replace(/^pcp\//, "")
 
-    if (ENTRY_NAMES.has(bare) || bare in RETIRED_ENTRIES) {
-      const entry = RETIRED_ENTRIES[bare] ?? bare
-
+    if (ENTRY_NAMES.has(bare)) {
       return failure(
-        `${entry} is one of PCP's entry tools: call it directly, not through ${callEntryFor(tier)}. Nothing was run or asked.`,
+        `${bare} is one of PCP's entry tools: call it directly, not through ${callEntryFor(tier)}. Nothing was run or asked.`,
         "invalid_arguments",
       )
     }
@@ -3292,24 +3233,6 @@ export function buildGatewayServer(
       },
       { entry: true, dispatch: executeDispatch(tier) },
     )
-
-    // Its old name, for one release.
-    register(
-      {
-        name: `call_tool_${tier}`,
-        title: `Call a ${TOOL_TIER_LABELS[tier]} tool`,
-        description: `${CALL_LEADS[tier]} Takes only the call_handle search gives for the tool. Now ${callEntryFor(tier)}.`,
-        input: call,
-        annotations: ENTRY_HINTS[tier],
-        run: (args: CallArgs, ctx) =>
-          callUpstream(args, {
-            tier,
-            signal: ctx.signal,
-            logAs: ctx.logAs,
-          }),
-      },
-      { retired: callEntryFor(tier) },
-    )
   }
 
   // ---- Capabilities (capabilities/) ------------------------------------
@@ -3333,7 +3256,7 @@ export function buildGatewayServer(
   /**
    * The bridge a capability tool's calls go through: forwardCall, each call
    * a line of its own in the request log under the capability tool's name,
-   * as a program's calls are under run_code's.
+   * as a program's calls are under run_<tier>'s.
    */
   const bridgeFor =
     (name: string, signal?: AbortSignal): Bridge =>
@@ -3392,6 +3315,11 @@ export function buildGatewayServer(
         return failure(missingResultMessage(), "not_found")
       }
 
+      // A provider would read a part keep named out (OCR, a conversion).
+      if (info.passOnly) {
+        return failure(passOnlyMessage(info.id), "pass_only")
+      }
+
       files.push({ id: info.id, name: info.name, mediaType: info.mediaType })
     }
 
@@ -3402,7 +3330,9 @@ export function buildGatewayServer(
   const sniffResult = async (id: string): Promise<string | null> => {
     const opened = await openResult(scope.ctx, { tokenId: scope.tokenId, id })
 
-    return opened ? sniffMediaType(opened.bytes().subarray(0, 64)) : null
+    return opened && !opened.passOnly
+      ? sniffMediaType(opened.bytes().subarray(0, 64))
+      : null
   }
 
   const fileArg = (what: string) =>
@@ -4047,7 +3977,7 @@ export function buildGatewayServer(
         status: z.string(),
         /**
          * What it came to, in words, as the text says it: for a call that
-         * ran, its answer as call_tool_* would have given it.
+         * ran, its answer as execute_<tier> would have given it.
          */
         result: z.string(),
         /** A server it added, as it is now. */
@@ -4544,6 +4474,11 @@ export function buildGatewayServer(
 
       if (!opened || uri.href !== resultUri(opened.id)) {
         throw new ResourceNotFoundError(uri.href)
+      }
+
+      // A part keep named is passed on in arguments, never read out (#149).
+      if (opened.passOnly) {
+        throw new Error(passOnlyMessage(opened.id))
       }
 
       const contents =
@@ -7019,7 +6954,7 @@ export function buildGatewayServer(
   }
 
   // Only for a token the owner made with "run code". Each call the program
-  // makes is looked up and decided as call_tool's are (resolveCall), and
+  // makes is looked up and decided as execute_<tier>'s are (resolveCall), and
   // nothing else reaches it (lib/core/code/).
   if (scope.runCode) {
     // The sandbox's languages, while its runner is connected (code/sandbox.ts).
@@ -7069,7 +7004,7 @@ export function buildGatewayServer(
       }
     }
     /**
-     * One tool the token can see, as describe gives it, with no call_handle:
+     * One tool the token can see, as search's ref gives it, with no call_handle:
      * a tool it cannot see (blocked, or not there) is refused as findTool
      * refuses it, and no server is read for it.
      */
@@ -7099,7 +7034,7 @@ export function buildGatewayServer(
       "It has the JavaScript language, with atob, btoa, TextEncoder, TextDecoder (UTF-8), crypto.getRandomValues and crypto.randomUUID, and nothing else: no network, no files, no timers (no setTimeout), no require or import.",
       `await pcp.call(server, tool, args, { fields, decode, keep }) calls a tool as execute_* does, but by its server and name as search gives them (no call_handle), with the arguments its inputSchema asks for (pcp.describe gives it), and returns its answer as a value: the parsed JSON, or the text. The options are execute_*'s, and nothing is cut to a preview: the program gets the whole answer, up to ${limits.answerChars.toLocaleString("en")} characters of JSON. A tool's error, a refusal, arguments that do not fit its inputSchema and a blocked tool throw an Error the program may catch. A call that PCP's pacing holds waits, within the run; past the run's end, pcp.call throws an Error with code "paced" and retryAfterMs. A tool error with a code of its own carries it as error.code ("timeout", "browser_busy", …), with error.retryAfterMs where it says when to try again. A Write or Destructive call the token made with the same arguments within ${DUPLICATE_WINDOW_WORDS} is not made again: it throws an Error with code "duplicate_call" that says how the first one went; { rerun: true, reason: "why" } in the options makes it again on purpose.`,
       `Waiting: await pcp.sleep(ms) waits on PCP's clock, ${MAX_SLEEP_MS / 1000} seconds at most at once, counted in the run's time (a wait past the run's end is refused). await pcp.withTimeout(ms, () => pcp.call(…)) returns what the function returns, or throws an Error with code "timeout" when it has none in time; what the function started may still finish (a call under way is not taken back and may have gone through), so check before you try it again.`,
-      'Files in an answer (attachments, images) come back as handles, {"$result": id, "type", "size", …}: pass a handle as it is where a tool wants the file, and PCP puts the file there (as base64 where the tool wants a string). keep works as in execute_*: pcp.call(…, { keep: ["password"] }) hands the program a handle in place of that value, so a secret one tool makes goes into another tool\'s arguments without the program or you ever reading it. A handle stands for a whole string; to put a file inside a text you build (a MIME message), read its bytes.',
+      'Files in an answer (attachments, images) come back as handles, {"$result": id, "type", "size", …}: pass a handle as it is where a tool wants the file, and PCP puts the file there (as base64 where the tool wants a string). keep works as in execute_*: pcp.call(…, { keep: ["password"] }) hands the program a handle in place of that value, with no preview of it, so a secret one tool makes goes into another tool\'s arguments without the program or you ever reading it (pcp.read and pcp.image refuse such a handle, error.code "pass_only"); an answer that is not JSON comes back whole as one handle, and what keep could not do is printed as a [PCP] line. A handle stands for a whole string; to put a file inside a text you build (a MIME message), read its bytes.',
       'await pcp.read(handle) reads a kept text, and pcp.read(handle, { as: "base64" }) a file\'s bytes as base64 ({ as: "bytes" } as a Uint8Array); { offset, length } reads a part (bytes of a file, characters of a text). await pcp.keep(text, { name, type }) keeps a text and returns its handle; pcp.keep(base64, { encoding: "base64", name, type }), or a Uint8Array, keeps a file. await pcp.tools() lists the servers, and pcp.tools(server) every tool on one, as list_tools does. await pcp.describe(server, tool) gives one tool as search with its ref does, without a call_handle: its inputSchema (the arguments pcp.call takes), what it returns, its access and annotations; read it before calling a tool whose arguments you have not seen. await pcp.step("name", async () => { … }) runs a part under a name: its calls are listed under it, and an error from it reads "failed at step \'name\'" (error.step names it).',
       `Images and videos: await pcp.image.compress(handle, { maxWidth, maxHeight, crop: { x, y, width, height }, grayscale, format: "jpeg" | "webp" | "png", quality }) makes a smaller copy of a kept PNG, JPEG, WebP or GIF and returns { handle, width, height, bytes, type }; await pcp.video.frames(handle, { at: [seconds] | every: seconds | count, maxWidth }) returns { duration, width, height, frames: [{ t, handle }] }${shells.length > 0 ? "." : ", and needs PCP's sandbox, which is not running."} Compress an image before you read it or return it: to read text or a screen, crop to the part you need, grayscale, about 1200 pixels wide; to judge a layout or a design, keep the colour at a lower quality; to pass an image to another tool (OCR, an upload), send the original handle. From a video, take a few frames and compress those.`,
     ].join("\n\n")
@@ -7113,14 +7048,10 @@ export function buildGatewayServer(
         "Run code that may delete for good over the owner's tools: its pcp.call reaches every tier, Destructive included. Prefer run_read or run_write when the program needs no more.",
     }
 
-    // Each entry, and its old name for one release (run_code_<tier>).
-    for (const [tier, retired] of TOOL_TIERS.flatMap((each) => [
-      [each, false] as const,
-      [each, true] as const,
-    ])) {
+    for (const tier of TOOL_TIERS) {
       register(
         {
-          name: retired ? `run_code_${tier}` : runEntryFor(tier),
+          name: runEntryFor(tier),
           title: `Run code that calls ${TOOL_TIER_LABELS[tier]} tools`,
           description: [
             `${RUN_LEADS[tier]} A JavaScript program on PCP that calls tools and works on their answers, so that a large answer is filtered, counted, joined or moved from one tool to another without passing through you. Use it when a task needs many calls, or answers bigger than you need to read; the code argument says what a program has.`,
@@ -7216,7 +7147,7 @@ export function buildGatewayServer(
             )
           },
         },
-        retired ? { retired: runEntryFor(tier) } : { entry: true },
+        { entry: true },
       )
     }
 

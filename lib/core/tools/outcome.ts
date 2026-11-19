@@ -12,7 +12,7 @@ import {
 import type { CallToolResult } from "@modelcontextprotocol/server"
 import { z } from "zod"
 
-import { isPcpError, type PcpErrorCode } from "../errors"
+import { isPcpError, PassOnlyError, type PcpErrorCode } from "../errors"
 
 /**
  * What a tool's run comes to, before it is an MCP result: @kaperkunde/mcp's
@@ -77,6 +77,12 @@ export type ToolErrorCode =
    * one went and how to repeat it on purpose.
    */
   | "duplicate_call"
+  /**
+   * The kept result holds a part the assistant named in keep (#149): PCP
+   * puts it in a tool's arguments and never reads it out (read_result,
+   * pcp.read, view_image, a link, a capability's input).
+   */
+  | "pass_only"
   /** A fault in PCP itself. */
   | "internal"
 
@@ -194,7 +200,10 @@ export function expectedPcpError(
   error: unknown,
 ): { message: string; code: ToolErrorCode } | undefined {
   return isPcpError(error)
-    ? { message: error.message, code: error.code }
+    ? {
+        message: error.message,
+        code: error instanceof PassOnlyError ? "pass_only" : error.code,
+      }
     : undefined
 }
 

@@ -155,6 +155,24 @@ describe("view_image on a picture", () => {
     expect(answer.text).toContain(`Shown at ${VIEW_IMAGE_SIDE} × 784`)
   })
 
+  it("refuses a picture that holds a part keep named (final 3)", async () => {
+    const kept = await keepBytes(ctx, {
+      tokenId: scope.tokenId,
+      serverId: null,
+      toolName: "test",
+      bytes: await gradient(40, 20),
+      mediaType: "image/png",
+      name: "qr.png",
+      passOnly: true,
+    })
+
+    const answer = await view({ file: { $result: kept.id } })
+
+    expect(answer.isError).toBe(true)
+    expect(answer.image).toBeNull()
+    expect(answer.text).toMatch(/never reads it out/)
+  })
+
   it("crops in the original's pixels, makes it grey and keeps to max_width", async () => {
     const id = await kept(await gradient(1600, 1200), "image/png", "a.png")
 

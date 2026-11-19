@@ -182,16 +182,15 @@ so in the summary; the bump itself waits for the request.
   `search` (a query; a `ref`, which is what `describe` was; neither, the
   owner's standing rules), `execute_read`, `execute_write`,
   `execute_destructive` and, for a token that runs code, `run_read`,
-  `run_write`, `run_destructive`. Every other tool of PCP's is registered
-  unlisted, found by `search` (kind `pcp`) and run by name through the
+  `run_write`, `run_destructive`. Every other tool of PCP's is not registered
+  under its name, found by `search` (kind `pcp`) and run by name through the
   `execute_<tier>` of its own tier (`tool`, with only `arguments` beside
   it), served as its own call (its validator, its log line, the lead); an
   entry's tier is its name, never the owner's choice. A new tool of PCP's
   is one of those behind them, not a new entry. The old names (`describe`,
   `call_tool_<tier>`, `run_code_<tier>`, and each of PCP's own tools by
-  its name) still answer for one release with a line naming the new entry
-  (`RETIRED_ENTRIES`, `retiredNote`, `ownNameNote`), then are `retired`:
-  refused as unknown, and its own tools answer only through execute.
+  its name) are retired: refused as unknown tools, and PCP's own tools
+  answer only through execute (docs/breaking-changes.md).
 - `execute_read`, `execute_write` and `execute_destructive` take one of
   the owner's tools only as a `call_handle` from `search`'s ref
   (`lib/core/call-handles.ts`: an HMAC under the vault key over the token,
@@ -622,7 +621,18 @@ embeddingProvider`, which hands `embeddings/provider.ts` the header;
   `browser/call.ts`
   (`lib/core/result-handles.ts`), with the token's own
   results, before anything is sent; a waiting request stores the handle,
-  never the content. File links (`lib/core/file-links.ts`, only for a token
+  never the content. A part `keep` names (`answers.ts` `Handles`) comes
+  back as a handle only, on every path (execute_<tier>, `pcp.call`, a call
+  the owner allowed once and its `check_permission`): no `preview`, never
+  its value or a `resource_link`, left out with a note when it cannot be
+  kept, an answer with no JSON kept whole, `[kept: <path>]` in the text
+  beside the JSON, and out of sight in an error's JSON (one that is not
+  JSON shows as it came). Its result is `pass_only`: only a tool's arguments
+  (`resultOpener`) and the owner's page open it; every reader (read_result,
+  the resource, `pcp.read`/`image`/`frames`, view_image, links, a
+  capability's input, the browser's `upload_file`) refuses it with code `pass_only`, and a new reader
+  calls `refusePassOnly`. A tool that echoes its input can still hand the
+  value back, out of PCP's control. File links (`lib/core/file-links.ts`, only for a token
   with `shareFiles`) move one kept file to or from the assistant's own
   computer: the link's secret is the credential for that file alone, stored
   only as its hash, the file encrypted under a key derived from it (an

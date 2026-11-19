@@ -24,7 +24,12 @@ import {
 } from "./media-types"
 import { appendKeylessLog, type KeylessTool } from "./request-log"
 import { loadResourceLimits } from "./resources/state"
-import { describeResults, openResult, RESULT_TTL_MS } from "./tool-results"
+import {
+  describeResults,
+  openResult,
+  refusePassOnly,
+  RESULT_TTL_MS,
+} from "./tool-results"
 
 /**
  * Links that move a file between PCP and an assistant's own computer (its
@@ -160,6 +165,9 @@ export async function shareResult(
   if (!info?.found || !opened) {
     throw notFound("That result")
   }
+
+  // A part keep named never leaves by link either (#149).
+  refusePassOnly(opened)
 
   await roomForLink(ctx, input.tokenId, now)
 

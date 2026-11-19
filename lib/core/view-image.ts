@@ -14,7 +14,7 @@ import {
 import { decodeImage, encodeJpeg } from "./code/media"
 import { runProgram } from "./code/run"
 import { sandboxLanguages } from "./code/sandbox"
-import { isPcpError } from "./errors"
+import { isPcpError, passOnlyMessage } from "./errors"
 import { bareType, sniffMediaType } from "./media-types"
 import type { PermissionScope } from "./permissions"
 import { missingResultMessage } from "./result-handles"
@@ -374,6 +374,11 @@ export async function viewImage(
 
   if (!opened) {
     return toolError(missingResultMessage(), { code: "not_found" })
+  }
+
+  // A part keep named is passed on, never shown (#149).
+  if (opened.passOnly) {
+    return toolError(passOnlyMessage(opened.id), { code: "pass_only" })
   }
 
   const bytes = opened.bytes()

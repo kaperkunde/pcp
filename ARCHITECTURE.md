@@ -4885,12 +4885,10 @@ minute, one message each (`app/mcp/route.ts`). The tools:
   Every tier's entry takes the same handle; a tool above the entry's tier
   is refused, naming the entry that runs it, before anything else.
 - `search_tools` and `describe_tool`, the old names, are gone after their
-  release (docs/breaking-changes.md). For one release from #113, `describe`,
-  `call_tool_<tier>` and `run_code_<tier>` are still registered under their
-  old names, unlisted, and answer as the entry that took over
-  (`RETIRED_ENTRIES` in `tool-tiers.ts`), and each of PCP's own tools still
-  answers by its own name; every such answer opens with a line naming what
-  to call now (`retiredNote`, `ownNameNote`).
+  release (docs/breaking-changes.md). `describe`, `call_tool_<tier>` and
+  `run_code_<tier>`, which #113 kept for a release, are refused as unknown
+  tools too, and each of PCP's own tools answers only through
+  `execute_<tier>`, never by its own name.
 - `check_permission(id? | ids?, mode?)` (several ids wait together, `any` or `all`, `checkPermissions`), `withdraw_request(id)`, `check_server(server)`,
   `register_server(...)` and `propose_tool_access(changes)` belong to the
   permission flow below.
@@ -5096,7 +5094,47 @@ first bytes or by looking like standard base64; and, when the answer is
 still too long, its longest texts, longest first, up to 20. Image, audio and
 embedded file blocks are kept too, and one too large to pass on is replaced
 by its handle. At most 50 per answer; a note at the top names each. A handle
-is `{"$result": id, type, size or length, name?, preview?, readableUntil}`.
+is `{"$result": id, type, size or length, name?, preview?, readableUntil}`;
+only a text kept because the answer was too long carries a `preview` (its
+start). A part `keep` names is the assistant saying it must not read it (a
+token one tool mints for another), so it comes back as a handle and nothing
+else (#149): no preview, no `resource_link` (a client may read one into the
+conversation), never the name of a file beside it, any JSON value (an object,
+a number) kept whole, and one PCP could not keep (past the 50, too large, or
+deeper than it looks) is left out as `[left out: …]` with a note, never
+passed on as its value. `keep` matches a path of keys at any depth, in every
+item of a list, so a path with a list index is refused; where `fields` leaves
+a part `keep` names out, it is picked all the same, and a path that matches
+nothing is said in the note. An answer with no JSON is kept whole as one
+handle (`(the answer)`); an error is never shaped, but where its text (or
+what follows its first line) is JSON, what `keep` names is put out of sight.
+With `keep`, the answer's `structuredContent`, which has those parts as
+values, is not passed on. The same rules hold for a program's `pcp.call`
+(`answerValue`, whose notes the run prints as `[PCP]` lines) and for a call
+the owner allowed once: its stored outcome is the shaped answer with its
+handles, which `check_permission` gives the token that asked; the handles the
+shaping made are sealed with that outcome under their own label
+(`permission_request:<id>:result_handles`), and the note of answered requests
+names each (`path → id`) from there, never from the answer's text. Where
+the same value stands in the answer's other text (a text block beside the
+JSON, an embedded text resource: "Created tok_…"), it reads `[kept: <path>]`
+there; an error that is not JSON is shown as it came.
+
+What `keep` made is **pass-only** (`tool_result.pass_only`, set through the
+keepers when the handle is made, the whole answer's included): PCP puts it in
+a tool's arguments (`resultOpener`, `lib/core/result-handles.ts`) and shows it
+to the owner on a waiting request's page, and nothing else reads it out.
+read_result, the `pcp://results` resource, `pcp.read`, `pcp.image` and
+`pcp.video.frames` (an error with code `pass_only` the program may catch),
+view_image, a file link (`share_result`), the browser's `upload_file` (a page
+could echo the file back) and a capability's input (read_image,
+edit_pdf, convert_document, whose provider would read it out) refuse it with
+the tool error code `pass_only` (`refusePassOnly`, `PassOnlyError`). This
+keeps PCP from reading the value out, not every tool: one that echoes its
+input (an API that returns what it was sent, a store's `save_file` then
+`get_file`) can still hand it back as an ordinary answer, which is out of
+PCP's control. Like every kept result, it is not exported and `wipeVault`
+removes it.
 Each answer also carries a `resource_link` per handle (`pcp://results/<id>`),
 the mail tools' own included; the gateway's resource template of that name
 gives the text or the file's bytes to the token that kept it, and lists

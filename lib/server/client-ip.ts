@@ -37,20 +37,13 @@ let warned = false
  * value, so a bad entry is warned about once.
  */
 export async function clientIp(): Promise<string> {
-  let sent = await headers()
-
-  // Next fills X-Forwarded-For from the socket when a request had none, so
-  // without the entry's marker the forwarded headers are PCP's own echo of
-  // the peer: they say nothing, and are neither trusted nor warned about.
-  if (sent.has(PEER_HEADER) && !sent.has(FORWARDED_HEADER)) {
-    sent = new Headers(sent)
-    sent.delete("x-forwarded-for")
-    sent.delete("x-real-ip")
-  }
-
-  const found = resolveClientIp(sent, {
+  const found = resolveClientIp(await headers(), {
     trustedProxies: process.env.PCP_TRUSTED_PROXIES,
     peerHeader: PEER_HEADER,
+    // Next fills X-Forwarded-For from the socket when a request had none, so
+    // without the entry's marker the forwarded headers are PCP's own echo of
+    // the peer: they say nothing, and are neither trusted nor warned about.
+    forwardedHeader: FORWARDED_HEADER,
   })
 
   if (found.untrustedForwarded && !warned) {

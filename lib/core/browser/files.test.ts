@@ -860,6 +860,24 @@ describe.skipIf(!executable)(
       })
       await expect(unknown).rejects.toThrow(/not there for this token/)
 
+      // A pass-only result is never put into a page: the page could echo it.
+      const secretFile = await keepBytes(ctx, {
+        tokenId,
+        serverId: null,
+        toolName: "keep",
+        bytes: Buffer.from("never read out"),
+        mediaType: "text/plain",
+        name: "kept.txt",
+        passOnly: true,
+      })
+      await expect(
+        viaGateway("upload_file", {
+          tab,
+          ref: refOf(form, /button "Statement"/),
+          files: [{ $result: secretFile.id }],
+        }),
+      ).rejects.toThrow(/never reads it out/)
+
       const intoField = await viaGateway("upload_file", {
         tab,
         ref: refOf(form, /button "Statement"/),

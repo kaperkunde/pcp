@@ -137,6 +137,11 @@ type Host = {
   signature?: "good" | "bad"
   /** Whether the pulled image has a digest from its registry (a local build has none). */
   digest?: boolean
+  /**
+   * Lingering as loginctl reports it: "on" already, "off" and enabling works
+   * (the default), or "stuck" off and enabling fails.
+   */
+  linger?: "on" | "off" | "stuck"
 }
 
 const roots: string[] = []
@@ -162,6 +167,7 @@ function host({
   docker = "absent",
   podman,
   session = true,
+  linger = "off",
   uid = 1000,
   system = "Linux",
   state = "running",
@@ -285,7 +291,13 @@ esac`,
   *show-environment*) exit ${session ? 0 : 1} ;;
 esac`,
   )
-  shim("loginctl", "")
+  shim(
+    "loginctl",
+    `case "$1" in
+  show-user) ${linger === "on" ? "echo yes" : "echo no"} ;;
+  enable-linger) ${linger === "stuck" ? "exit 1" : "exit 0"} ;;
+esac`,
+  )
   shim("curl", `exit ${healthy ? 0 : 22}`)
   answer("uname", `echo "${system}"`)
   answer(
@@ -586,6 +598,21 @@ describe("install.sh with Docker", () => {
 })
 
 describe("install.sh with Podman", () => {
+  it("leaves lingering alone, with no note, when it is already on", () => {
+    const result = host({ podman: "5.2.2", linger: "on" }).run()
+    expect(result.status).toBe(0)
+    expect(result.calls.join("\n")).toContain("loginctl show-user")
+    expect(result.calls).not.toContain("loginctl enable-linger")
+    expect(result.stdout + result.stderr).not.toContain("enable-linger")
+  })
+
+  it("says so only when lingering is off and cannot be turned on", () => {
+    const result = host({ podman: "5.2.2", linger: "stuck" }).run()
+    expect(result.status).toBe(0)
+    expect(result.calls).toContain("loginctl enable-linger")
+    expect(result.stdout + result.stderr).toContain("loginctl enable-linger")
+  })
+
   it("writes a Quadlet unit and starts it with the user's systemd", () => {
     const machine = host({ podman: "5.2.2" })
     const result = machine.run()

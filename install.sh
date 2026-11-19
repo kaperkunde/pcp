@@ -953,9 +953,17 @@ install_quadlet() {
   LOGS=$JOURNAL
   MODE=quadlet
   if [ "$ROOT" = 0 ]; then
-    loginctl enable-linger >/dev/null 2>&1 ||
+    ensure_linger ||
       warn "Note: PCP stops when you log out until you run: loginctl enable-linger"
   fi
+}
+
+# Succeeds when the user's services keep running after logout: already on, or
+# turned on now. Fails only when it is off and enabling it did not work.
+ensure_linger() {
+  [ "$(loginctl show-user "$(id -un)" -p Linger --value 2>/dev/null)" = yes ] &&
+    return 0
+  loginctl enable-linger >/dev/null 2>&1
 }
 
 install_podman() {
@@ -1056,7 +1064,7 @@ enable_auto_update() {
     unit_ctl daemon-reload
     unit_ctl enable --now pcp-update.timer
     if [ "$ROOT" = 0 ]; then
-      loginctl enable-linger >/dev/null 2>&1 || true
+      ensure_linger || true
     fi
     AUTO=timer
   else
@@ -1107,7 +1115,7 @@ enable_request_watch() {
     unit_ctl daemon-reload
     unit_ctl enable --now pcp-update-request.timer
     if [ "$ROOT" = 0 ]; then
-      loginctl enable-linger >/dev/null 2>&1 || true
+      ensure_linger || true
     fi
     BUTTON=timer
   else

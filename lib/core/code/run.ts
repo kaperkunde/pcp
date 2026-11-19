@@ -5,7 +5,7 @@ import type { CallToolResult } from "@modelcontextprotocol/server"
 import type { ToolTier } from "../constants"
 import { readFields, type AnswerShape } from "../answers"
 import { isConnectResult } from "../connect"
-import { isPcpError } from "../errors"
+import { isPcpError, passOnlyMessage } from "../errors"
 import { bareType, isTextType } from "../media-types"
 import type { CodeCallOutcome, PermissionScope } from "../permissions"
 import { REUSE_EXECUTED_MS } from "../permission-rules"
@@ -1111,6 +1111,12 @@ export async function runProgram(
       return refuse(missingResultMessage())
     }
 
+    // A part keep named goes into a tool's arguments, never into the
+    // program (#149).
+    if (opened.passOnly) {
+      return { ok: false, error: passOnlyMessage(id), code: "pass_only" }
+    }
+
     if (
       as === "text" &&
       opened.kind === "bytes" &&
@@ -1309,6 +1315,12 @@ export async function runProgram(
       return refuse(missingResultMessage())
     }
 
+    // A part keep named goes into a tool's arguments, never into the
+    // program (#149).
+    if (opened.passOnly) {
+      return { ok: false, error: passOnlyMessage(id), code: "pass_only" }
+    }
+
     const bytes = opened.bytes()
     const found = mediaKind(bytes, opened.mediaType)
 
@@ -1378,6 +1390,12 @@ export async function runProgram(
 
     if (!opened) {
       return refuse(missingResultMessage())
+    }
+
+    // A part keep named goes into a tool's arguments, never into the
+    // program (#149).
+    if (opened.passOnly) {
+      return { ok: false, error: passOnlyMessage(id), code: "pass_only" }
     }
 
     const found = mediaKind(opened.bytes(), opened.mediaType)

@@ -311,6 +311,29 @@ describe("a capability with no provider", () => {
     })
   })
 
+  it("refuses a file that holds a part keep named (final 3)", async () => {
+    const kept = await keepBytes(ctx, {
+      tokenId: scope.tokenId,
+      serverId: null,
+      toolName: "test",
+      bytes: Buffer.from("secret scan"),
+      mediaType: "application/pdf",
+      name: "s.pdf",
+      passOnly: true,
+    })
+
+    for (const tool of ["convert_document", "read_image", "edit_pdf"]) {
+      const answer = await call(tool, {
+        file: { $result: kept.id },
+        ...(tool === "convert_document" ? { to: "markdown" } : {}),
+        ...(tool === "edit_pdf" ? { operation: "flatten" } : {}),
+      })
+
+      expect(answer.isError, tool).toBe(true)
+      expect(answer.text, tool).toMatch(/never reads it out/)
+    }
+  })
+
   it("refuses a file that is not the token's", async () => {
     const answer = await call("convert_document", {
       file: { $result: "nope" },

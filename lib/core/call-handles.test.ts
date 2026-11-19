@@ -343,6 +343,22 @@ describe("call_tool with a call handle", () => {
     expect(ran).toEqual([])
   })
 
+  it("refuses a keep path with a list index before anything runs (#149 review 3)", async () => {
+    const client = await connect()
+    const handle = await describedHandle(client, "postcards", "send_postcard")
+
+    const result = await call(client, "execute_destructive", {
+      call_handle: handle,
+      arguments: { to: "Grace" },
+      keep: ["items[0].token"],
+    })
+
+    expect(result.isError).toBe(true)
+    // The schema's pattern refuses it; keep's description says why.
+    expect(result.text).toContain('"keep/0" does not match')
+    expect(ran).toEqual([])
+  })
+
   it("refuses another token's handle", async () => {
     const other = await tokenScope("Other")
     const theirs = await describedHandle(
