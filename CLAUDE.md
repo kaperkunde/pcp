@@ -630,7 +630,7 @@ embeddingProvider`, which hands `embeddings/provider.ts` the header;
   JSON shows as it came). Its result is `pass_only`: only a tool's arguments
   (`resultOpener`) and the owner's page open it; every reader (read_result,
   the resource, `pcp.read`/`image`/`frames`, view_image, links, a
-  capability's input) refuses it with code `pass_only`, and a new reader
+  capability's input, the browser's `upload_file`) refuses it with code `pass_only`, and a new reader
   calls `refusePassOnly`. A tool that echoes its input can still hand the
   value back, out of PCP's control. File links (`lib/core/file-links.ts`, only for a token
   with `shareFiles`) move one kept file to or from the assistant's own

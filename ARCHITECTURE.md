@@ -5126,7 +5126,8 @@ a tool's arguments (`resultOpener`, `lib/core/result-handles.ts`) and shows it
 to the owner on a waiting request's page, and nothing else reads it out.
 read_result, the `pcp://results` resource, `pcp.read`, `pcp.image` and
 `pcp.video.frames` (an error with code `pass_only` the program may catch),
-view_image, a file link (`share_result`) and a capability's input (read_image,
+view_image, a file link (`share_result`), the browser's `upload_file` (a page
+could echo the file back) and a capability's input (read_image,
 edit_pdf, convert_document, whose provider would read it out) refuse it with
 the tool error code `pass_only` (`refusePassOnly`, `PassOnlyError`). This
 keeps PCP from reading the value out, not every tool: one that echoes its

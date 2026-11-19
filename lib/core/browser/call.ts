@@ -53,6 +53,7 @@ import { loadResourceLimits } from "../resources/state"
 import { missingResultMessage, resolveHandles } from "../result-handles"
 import {
   handleOf,
+  refusePassOnly,
   type BytesKeeper,
   type ResultKeeper,
   type ResultOpener,
@@ -2324,6 +2325,9 @@ async function keptUploads(
     if (!opened) {
       throw invalid(missingResultMessage())
     }
+
+    // The page could echo the file back to the assistant.
+    refusePassOnly(opened)
 
     const buffer = opened.bytes()
     total += buffer.length

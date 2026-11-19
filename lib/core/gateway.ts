@@ -481,9 +481,9 @@ const MAX_ALWAYS_MEMORY_TEXT = 8_000
 const WRAPPER_CHANGES = { max: 20, windowMs: 10 * 60_000 }
 /** web_fetch requests per token, asked about or not. */
 const WEB_FETCHES = { max: 120, windowMs: 10 * 60_000 }
-/** run_code runs per token; each may make many calls (code/limits.ts). */
+/** run_<tier> runs per token; each may make many calls (code/limits.ts). */
 const CODE_RUNS = { max: 60, windowMs: 10 * 60_000 }
-/** How much of a tool's description describe and its kin answer with. */
+/** How much of a tool's description search's ref and its kin answer with. */
 const MAX_DESCRIBED_CHARS = 60_000
 
 /** What describing a tool and checking its handle read of its row. */
@@ -1124,10 +1124,10 @@ export function buildGatewayServer(
     lookupHost?: HostLookup
     /** What runs a call upstream; replaced in tests. */
     executor?: PermissionExecutor
-    /** What runs run_code's programs; replaced in tests. */
+    /** What runs run_<tier>'s programs; replaced in tests. */
     codeExecutor?: Executor
     /**
-     * How long run_code and check_run hold a call, and how often they send
+     * How long run_<tier> and check_run hold a call, and how often they send
      * progress while they do; shorter in tests.
      */
     runTiming?: { answerMs?: number; waitMs?: number; progressMs?: number }
@@ -1201,7 +1201,7 @@ export function buildGatewayServer(
 
   /**
    * The tool a call names, among the token's own, when it may run or ask:
-   * what call_tool and run_code's calls go through first. A blocked tool is
+   * what execute_<tier> and run_<tier>'s calls go through first. A blocked tool is
    * refused, and so is a handle the token has no kept result for, by name,
    * so the owner is never asked about a call that cannot run.
    */
@@ -1307,7 +1307,7 @@ export function buildGatewayServer(
 
   /**
    * PCP's own tools this token has, as registered: search finds them (kind
-   * pcp) and describe reads them, by their bare names.
+   * pcp) and search's ref reads them, by their bare names.
    */
   const ownTools: Tool[] = []
 
@@ -1340,7 +1340,7 @@ export function buildGatewayServer(
     ]
   }
   /**
-   * search's and describe's answer with sessionLines after it, each a text
+   * search's answer (a ref's too) with sessionLines after it, each a text
    * of its own, so an answer that is JSON stays JSON. Only a plain answer:
    * a refusal says nothing more.
    */
@@ -1429,7 +1429,7 @@ export function buildGatewayServer(
 
   /**
    * One of PCP's own tools by the name an assistant gave: as it is, or with
-   * its app's prefix (mcp__<server>__run_code), which the note explains.
+   * its app's prefix (mcp__<server>__run_<tier>), which the note explains.
    */
   const ownTool = (
     given: string,
@@ -1450,7 +1450,7 @@ export function buildGatewayServer(
     return tool ? { tool, note: clientPrefixNote(prefixed) } : null
   }
 
-  /** describe's answer for one of PCP's own tools. */
+  /** search's ref answer for one of PCP's own tools. */
   const describeOwn = async ({
     tool,
     note,
@@ -1916,7 +1916,7 @@ export function buildGatewayServer(
     },
   })
 
-  /** One tool, described: what describe answers for it. */
+  /** One tool, described: what search's ref answers for it. */
   async function describeTool(slug: string, name: string): Promise<Outcome> {
     const found = await lookup(slug, name)
 
@@ -2021,7 +2021,7 @@ export function buildGatewayServer(
 
   type DescribeArgs = { ref?: string; server?: string; tool?: string }
 
-  /** The server and tool a describe names, when it names a tool by them. */
+  /** The server and tool a search ref names, when it names a tool by them. */
   function namedTool(
     args: DescribeArgs,
   ): { server: string; tool: string } | null {
@@ -2039,7 +2039,7 @@ export function buildGatewayServer(
       : null
   }
 
-  /** describe: a tool, a skill or a memory, by the ref search gave. */
+  /** search's ref: a tool, a skill or a memory, by the ref search gave. */
   async function describeRef(args: DescribeArgs): Promise<Outcome> {
     const tool = namedTool(args)
     // pcp/<name>, when no server is called pcp: one of PCP's own tools.
@@ -2183,8 +2183,8 @@ export function buildGatewayServer(
   }
 
   /**
-   * describe's answer for a tool, call_handle first so a long schema cut short
-   * still carries it. The recovery answers of call_tool give the same.
+   * search's ref answer for a tool, call_handle first so a long schema cut short
+   * still carries it. The recovery answers of execute_<tier> give the same.
    */
   function described(
     found: { server: GatewayServer; tool: GatewayTool },
@@ -2202,8 +2202,8 @@ export function buildGatewayServer(
   }
 
   /**
-   * A tool as describe gives it, as a value: with its call_handle for
-   * describe itself, without one for run_code's pcp.describe, whose
+   * A tool as search's ref gives it, as a value: with its call_handle for
+   * search itself, without one for run_<tier>'s pcp.describe, whose
    * pcp.call takes names.
    */
   function describedTool(
@@ -2336,7 +2336,7 @@ export function buildGatewayServer(
   }
 
   /**
-   * call_tool was given something other than a handle: most often a
+   * execute_<tier> was given something other than a handle: most often a
    * server/tool name, from habit. When that names a tool this token can
    * see, the answer describes it, so the next call can be the right one.
    */
@@ -2474,7 +2474,7 @@ export function buildGatewayServer(
   /**
    * What is wrong with a call's arguments against the tool's inputSchema
    * (tools/validate.ts), with the schema to fix them by, or null when they
-   * fit. Checked for call_tool and run_code's pcp.call alike, before
+   * fit. Checked for execute_<tier> and run_<tier>'s pcp.call alike, before
    * anything runs or the owner is asked, so a call that cannot work never
    * becomes a request for them.
    */
@@ -2782,7 +2782,7 @@ export function buildGatewayServer(
   }
 
   /**
-   * One call to a tool among the token's own, as run_code's pcp.call and
+   * One call to a tool among the token's own, as run_<tier>'s pcp.call and
    * the capability tools (capabilities/) make it, with the answer as a
    * value: resolveCall first (blocked, a secret, a missing handle), then
    * the caller's tier (a tool above it refused before anything is checked
@@ -2840,7 +2840,7 @@ export function buildGatewayServer(
 
     lookedUp?.(found.tool.tier === "read")
 
-    // As call_tool's: checked before anything runs or asks.
+    // As execute_<tier>'s: checked before anything runs or asks.
     const row = await toolRow(found.server.id, found.tool.name)
     const unfit = row
       ? await argumentsUnfit(found.server, found.tool.name, row, callArgs, {
@@ -3256,7 +3256,7 @@ export function buildGatewayServer(
   /**
    * The bridge a capability tool's calls go through: forwardCall, each call
    * a line of its own in the request log under the capability tool's name,
-   * as a program's calls are under run_code's.
+   * as a program's calls are under run_<tier>'s.
    */
   const bridgeFor =
     (name: string, signal?: AbortSignal): Bridge =>
@@ -6954,7 +6954,7 @@ export function buildGatewayServer(
   }
 
   // Only for a token the owner made with "run code". Each call the program
-  // makes is looked up and decided as call_tool's are (resolveCall), and
+  // makes is looked up and decided as execute_<tier>'s are (resolveCall), and
   // nothing else reaches it (lib/core/code/).
   if (scope.runCode) {
     // The sandbox's languages, while its runner is connected (code/sandbox.ts).
@@ -7004,7 +7004,7 @@ export function buildGatewayServer(
       }
     }
     /**
-     * One tool the token can see, as describe gives it, with no call_handle:
+     * One tool the token can see, as search's ref gives it, with no call_handle:
      * a tool it cannot see (blocked, or not there) is refused as findTool
      * refuses it, and no server is read for it.
      */

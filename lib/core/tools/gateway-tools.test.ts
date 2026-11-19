@@ -400,6 +400,18 @@ describe("PCP's own tools", () => {
     expect(length("register_server")).toBeLessThan(2_500)
   })
 
+  it("says in execute_*'s keep description that a kept part is never read out", async () => {
+    for (const tier of ["read", "write", "destructive"]) {
+      const tool = everyTool.find((entry) => entry.name === `execute_${tier}`)!
+      const keep = (
+        tool.inputSchema.properties as Record<string, { description?: string }>
+      ).keep
+
+      expect(keep?.description, tier).toMatch(/never reads such a handle out/)
+      expect(keep?.description, tier).toContain("pass_only")
+    }
+  })
+
   it("take the new argument names, and the old ones for one release", async () => {
     const tools = everyTool
     const keys = (name: string) =>
