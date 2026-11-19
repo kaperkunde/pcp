@@ -5096,7 +5096,20 @@ first bytes or by looking like standard base64; and, when the answer is
 still too long, its longest texts, longest first, up to 20. Image, audio and
 embedded file blocks are kept too, and one too large to pass on is replaced
 by its handle. At most 50 per answer; a note at the top names each. A handle
-is `{"$result": id, type, size or length, name?, preview?, readableUntil}`.
+is `{"$result": id, type, size or length, name?, preview?, readableUntil}`;
+only a text kept because the answer was too long carries a `preview` (its
+start). A part `keep` names is the assistant saying it must not read it (a
+token one tool mints for another), so it comes back as a handle and nothing
+else (#149): no preview, never the name of a file beside it, any JSON value
+(an object, a number) kept whole, and one PCP could not keep (past the 50, or
+too large) is left out as `[left out: …]` with a note, never passed on as its
+value. A path `keep` names is picked even where `fields` leaves it out, and
+one that matches nothing is said in the note. With `keep`, the answer's
+`structuredContent`, which has those parts as values, is not passed on. The
+same rules hold for a program's `pcp.call` (`answerValue`) and for a call the
+owner allowed once: its stored outcome is the shaped answer with its handles,
+which `check_permission` gives the token that asked, and the note of answered
+requests names each handle (`path → id`).
 Each answer also carries a `resource_link` per handle (`pcp://results/<id>`),
 the mail tools' own included; the gateway's resource template of that name
 gives the text or the file's bytes to the token that kept it, and lists

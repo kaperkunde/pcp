@@ -449,18 +449,25 @@ function clip(text: string, max: number): string {
 /** A JSON value's fields and decoding applied, with notes on what was done. */
 function applyShape(
   value: unknown,
-  { fields, decode }: AnswerShape,
+  { fields, decode, keep }: AnswerShape,
 ): { value: unknown; notes: string[] } {
   const notes: string[] = []
   let shaped = value
 
   if (fields) {
-    const picked = pickFields(value, fields)
+    // A part to keep is asked for too: fields that leave it out never drop
+    // it, or keep would do nothing and say nothing (#149). Whether it is
+    // there at all, the handles' own note says.
+    const picked = pickFields(value, [
+      ...fields,
+      ...(keep ?? []).filter((path) => !fields.includes(path)),
+    ])
+    const missing = picked.missing.filter((path) => fields.includes(path))
     shaped = picked.value
 
-    if (picked.missing.length > 0) {
+    if (missing.length > 0) {
       notes.push(
-        `Not in the answer: ${picked.missing.join(", ")}. Kept only the fields asked for that it has.`,
+        `Not in the answer: ${missing.join(", ")}. Kept only the fields asked for that it has.`,
       )
     }
   }
@@ -534,7 +541,10 @@ function prepareAnswer(
     }
   }
 
-  const shaping = fields !== undefined || decode !== undefined
+  // keep shapes the text too: its parts there are handles, so the
+  // structuredContent beside it, which has them as values, never goes on.
+  const shaping =
+    fields !== undefined || decode !== undefined || keep !== undefined
   let sawJson = false
   let repeatsStructured = false
   const parts: Part[] = []
@@ -557,17 +567,19 @@ function prepareAnswer(
       )
     parts.push({
       kind: "json",
-      ...applyShape(parsed.value, { fields, decode }),
+      ...applyShape(parsed.value, { fields, decode, keep }),
     })
   }
 
   // Asked for fields, decoding or keeping with the JSON only in
   // structuredContent: shape that.
-  const fromStructured =
-    (shaping || keep !== undefined) && !sawJson && structured !== undefined
+  const fromStructured = shaping && !sawJson && structured !== undefined
 
   if (fromStructured) {
-    parts.push({ kind: "json", ...applyShape(structured, { fields, decode }) })
+    parts.push({
+      kind: "json",
+      ...applyShape(structured, { fields, decode, keep }),
+    })
   }
 
   const asked = [fields && "fields", decode && "decode", keep && "keep"].filter(
@@ -668,6 +680,11 @@ export const MAX_HANDLES_PER_ANSWER = 50
 export const HANDLE_PREVIEW_CHARS = 200
 /** Paths a handle note names before "and N more". */
 const MAX_NOTED_HANDLES = 10
+/**
+ * What stands in for a part named in keep that PCP could not keep: never
+ * its value (#149).
+ */
+export const WITHHELD = "[left out: not kept, see the note]"
 
 /** Keeps a value of an answer for the token the call was made for. */
 export type AnswerKeepers = {
@@ -794,6 +811,10 @@ class Handles {
   made: Array<{ path: string; handle: ResultHandle }> = []
   /** Handles already in the answer: a mail tool keeps its own. */
   seen: Array<{ path: string; handle: ResultHandle }> = []
+  /** Parts named in keep that could not be kept: left out, never shown. */
+  withheld: string[] = []
+  /** The paths of keep that matched a part of the answer. */
+  matched = new Set<string>()
   capped = false
 
   constructor(
@@ -830,12 +851,28 @@ class Handles {
     }
   }
 
-  private keepText(path: string, text: string, mediaType: string) {
+  /**
+   * A text kept as a result. One found too long to pass on shows its start
+   * (`preview`); a part named in keep never does, so its value reaches no
+   * one but the tool it is passed to (#149).
+   */
+  private keepText(
+    path: string,
+    text: string,
+    mediaType: string,
+    { preview }: { preview: boolean },
+  ) {
     return this.kept(
       path,
       () => this.keepers.text({ text, mediaType }),
-      text.slice(0, HANDLE_PREVIEW_CHARS),
+      preview ? text.slice(0, HANDLE_PREVIEW_CHARS) : undefined,
     )
+  }
+
+  /** What stands in for a part named in keep that could not be kept. */
+  private withhold(path: string): string {
+    this.withheld.push(path || "(the answer)")
+    return WITHHELD
   }
 
   private keepFile(
@@ -867,19 +904,41 @@ class Handles {
       return value
     }
 
-    const asked = this.keep.some(({ parts }) => endsWith(keys, parts))
+    const askedBy = this.keep.filter(({ parts }) => endsWith(keys, parts))
+    const asked = askedBy.length > 0
 
+    for (const { path: named } of askedBy) {
+      this.matched.add(named)
+    }
+
+    // A part named in keep comes back as a handle, or not at all: never as
+    // its value, whatever it is (#149).
     if (asked && value !== null && typeof value === "object") {
-      if (!this.room()) {
+      if (isRecord(value) && isHandleObject(value)) {
+        this.seen.push({ path, handle: value })
         return value
       }
 
+      if (!this.room()) {
+        return this.withhold(path)
+      }
+
       return (
-        (await this.keepText(
-          path,
-          JSON.stringify(value),
-          "application/json",
-        )) ?? value
+        (await this.keepText(path, JSON.stringify(value), "application/json", {
+          preview: false,
+        })) ?? this.withhold(path)
+      )
+    }
+
+    if (asked && (typeof value === "number" || typeof value === "boolean")) {
+      if (!this.room()) {
+        return this.withhold(path)
+      }
+
+      return (
+        (await this.keepText(path, String(value), "text/plain", {
+          preview: false,
+        })) ?? this.withhold(path)
       )
     }
 
@@ -895,14 +954,14 @@ class Handles {
       }
 
       if (!this.room()) {
-        return value
+        return asked ? this.withhold(path) : value
       }
 
-      return (
-        (file
-          ? await this.keepFile(path, file, siblings)
-          : await this.keepText(path, value, "text/plain")) ?? value
-      )
+      const handle = file
+        ? await this.keepFile(path, file, siblings)
+        : await this.keepText(path, value, "text/plain", { preview: false })
+
+      return handle ?? (asked ? this.withhold(path) : value)
     }
 
     if (Array.isArray(value)) {
@@ -922,13 +981,20 @@ class Handles {
       }
 
       const out: Record<string, unknown> = {}
+      // A part named in keep never names the file beside it.
+      const named = Object.fromEntries(
+        Object.entries(value).filter(
+          ([key]) =>
+            !this.keep.some(({ parts }) => endsWith([...keys, key], parts)),
+        ),
+      )
 
       for (const [key, item] of Object.entries(value)) {
         out[key] = await this.transform(
           item,
           [...keys, key],
           path ? `${path}.${key}` : key,
-          value,
+          named,
         )
       }
 
@@ -998,6 +1064,7 @@ class Handles {
         candidate.path,
         candidate.text,
         "text/plain",
+        { preview: true },
       )
 
       if (handle) {
@@ -1079,6 +1146,37 @@ class Handles {
             text: `PCP kept this ${kept.what} as a result too, to hand to another tool: ${json}`,
           },
         ]
+  }
+
+  /**
+   * What the answer says of keep beyond its handles: the parts it could not
+   * keep (left out), and the paths that matched nothing. Null for nothing.
+   */
+  keepNote(): string | null {
+    const unmatched = this.keep
+      .map(({ path }) => path)
+      .filter((path) => !this.matched.has(path))
+    const said: string[] = []
+
+    if (this.withheld.length > 0) {
+      const named = this.withheld.slice(0, MAX_NOTED_HANDLES).join(", ")
+      const more =
+        this.withheld.length > MAX_NOTED_HANDLES
+          ? ` and ${this.withheld.length - MAX_NOTED_HANDLES} more`
+          : ""
+
+      said.push(
+        `Left out, not shown: ${named}${more}. PCP could not keep ${this.withheld.length === 1 ? "it" : "them"} as results, and a part named in keep is never passed on as its value.`,
+      )
+    }
+
+    if (unmatched.length > 0) {
+      said.push(
+        `Nothing to keep at ${unmatched.join(", ")}: the answer has no such part.`,
+      )
+    }
+
+    return said.length > 0 ? said.join(" ") : null
   }
 
   /** The note for the handles made since `from`, or null for none. */
@@ -1188,6 +1286,14 @@ export async function shapeAnswerKeeping(
         value,
         notes: note ? [...part.notes, note] : part.notes,
       })
+    }
+
+    // Once, before the first JSON: where keep fell short.
+    const said = handles.keepNote()
+    const first = parts.find((part) => part.kind === "json")
+
+    if (said && first?.kind === "json") {
+      first.notes = [...first.notes, said]
     }
 
     prepared.parts = parts

@@ -455,6 +455,46 @@ describe("asking the owner", () => {
     expect(await openResult(ctx, { tokenId: other.id, id: id! })).toBeNull()
   })
 
+  it("hands back a file kept on sight in a call allowed once as its handle (#149)", async () => {
+    const { ctx, scope, server, tokenId } = await setup()
+    const png = Buffer.concat([
+      Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+      Buffer.alloc(2_000, 7),
+    ])
+    const executor: PermissionExecutor = {
+      ...stub().executor,
+      callTool: async () => ({
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({
+              name: "chart.png",
+              data: png.toString("base64"),
+            }),
+          },
+        ],
+      }),
+    }
+
+    await withPermission(scope, call(server, "add_numbers", { a: 2 }))
+    const row = await db().permissionRequest.findFirstOrThrow()
+    await decidePermission(
+      ctx,
+      row.id,
+      "allow_once",
+      { publicUrl: PUBLIC_URL },
+      executor,
+    )
+
+    const checked = textOf(await checkPermission(scope, row.id))
+    const id = checked.match(/"data":\{"\$result":"([^"]+)"/)?.[1]
+    expect(checked).toContain('"type":"image/png"')
+    expect(checked).not.toContain(png.toString("base64").slice(0, 40))
+    expect(
+      (await openResult(ctx, { tokenId, id: id! }))?.bytes().equals(png),
+    ).toBe(true)
+  })
+
   it("answers a call it runs itself with a kept part as its handle alone, no preview (#149)", async () => {
     const { ctx, tokenId } = await setup()
     const secret = "tok_live_0a1b2c3d4e5f60718293"

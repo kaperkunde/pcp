@@ -4317,20 +4317,48 @@ export async function listAnsweredRequests(
             ?.trim() ?? "")
         : ""
 
+    const clipped =
+      line.length > ANSWERED_OUTCOME_CHARS
+        ? `${line.slice(0, ANSWERED_OUTCOME_CHARS - 1).trimEnd()}…`
+        : line
+    // A call that ran names what it kept for the token, so the handles reach
+    // it with the line (#149); the values stay in the results.
+    const kept =
+      view.kind === "call" && said?.type === "text"
+        ? keptHandlesOf(said.text)
+        : null
+
     answered.push({
       id,
       kind: view.kind,
       title: view.title,
       status: view.status,
       decidedAt,
-      outcome:
-        line.length > ANSWERED_OUTCOME_CHARS
-          ? `${line.slice(0, ANSWERED_OUTCOME_CHARS - 1).trimEnd()}…`
-          : line,
+      outcome: kept ? `${clipped} ${kept}` : clipped,
     })
   }
 
   return { seen, answered, more: fresh.length - picked.length }
+}
+
+/**
+ * The handles an answer's note says it made ("PCP kept 2 values of this
+ * answer as results, …: data.token → <id> (text/plain, 29 characters); …"),
+ * as a short sentence; null when it made none.
+ */
+function keptHandlesOf(text: string): string | null {
+  const named = [
+    ...text.matchAll(
+      /PCP kept \d+ values? of this answer as results, each shown as \{"\$result": …\}: ([^\n]*?)\. Pass a handle/g,
+    ),
+  ]
+    .flatMap((match) => match[1]!.split("; "))
+    .map((entry) => entry.replace(/ \([^()]*\)$/, ""))
+    .filter((entry) => entry.includes(" → "))
+
+  return named.length > 0
+    ? `Kept as results, each passed on as {"$result": "<id>"}: ${named.join("; ")}.`
+    : null
 }
 
 /** One answered request's line, as check_permission and the note say it. */
