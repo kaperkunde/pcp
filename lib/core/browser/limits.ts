@@ -174,6 +174,18 @@ export const MAX_FAILURE_SNAPSHOT_CHARS = 4_000
 export const MAX_PAGE_REFS = 20_000
 export const MAX_GONE_REFS = 2_000
 /**
+ * How many elements a tab remembers by role and name for an approved call
+ * to find again (refs.ts remember): the fields a secret was asked for.
+ */
+export const MAX_REMEMBERED_REFS = 50
+/**
+ * How many events a tab's trail keeps (trail.ts): its navigations,
+ * reloads and ref resets, newest last, in memory with the tab, and how
+ * many of them an error about a missing element tells.
+ */
+export const MAX_TRAIL_ENTRIES = 40
+export const TRAIL_LINES_IN_ERROR = 8
+/**
  * read_page's text from the page's HTML shorter than this, in characters
  * that are not white space, is next to none: read_page gives the text of
  * the accessibility snapshot instead, when that has more.

@@ -67,6 +67,7 @@ import {
 } from "./proxy"
 import { bounded, inLane, newLane, type Lane, type LaneOptions } from "./queue"
 import type { TabRun } from "./sweep"
+import { noteTrail } from "./trail"
 import type { TabControl, TabView } from "./types"
 
 /**
@@ -1411,6 +1412,12 @@ async function listen(
       }
     }, DIALOG_DISMISS_MS).unref()
   })
+  // For a field report: where the tab went and when (trail.ts).
+  page.on("framenavigated", (frame) => {
+    if (mine() && frame === page.mainFrame()) {
+      noteTrail(tab, "navigated", frame.url())
+    }
+  })
   // Reopened on the next call (reopenTab).
   page.on("crash", () => {
     if (mine()) tab.unresponsive = true
@@ -1583,6 +1590,7 @@ export function reopenTab(vault: VaultBrowser, tab: Tab): Promise<Reopened> {
     tab.unresponsive = true
     const old = tab.page
     const address = old.url()
+    noteTrail(tab, "reopened", address)
     const page = await openPage(await tabContext(vault, tab), vault.mode)
 
     try {

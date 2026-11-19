@@ -163,6 +163,24 @@ function resetMsOf(raw: string | null, now: number): number | undefined {
 type HeaderSource = Pick<Headers, "get">
 
 /**
+ * A header source over the plain object a browser library hands back
+ * (Playwright's response.headers(): lower-case names, a header sent more
+ * than once joined with a newline). The WHATWG Headers constructor refuses
+ * such a value, and a page that sends several Content-Security-Policy
+ * headers (Google's) made the call that read them fail, so this one only
+ * looks a name up and never throws. A header sent more than once reads as WHATWG Headers joins it, with ", ".
+ */
+export function plainHeaders(headers: Record<string, string>): HeaderSource {
+  const lower = new Map<string, string>()
+
+  for (const [name, value] of Object.entries(headers)) {
+    lower.set(name.toLowerCase(), value.split("\n").join(", "))
+  }
+
+  return { get: (name) => lower.get(name.toLowerCase()) ?? null }
+}
+
+/**
  * HTTP's own: 429 always, and 503 when the server says when to come back
  * (a 503 with no Retry-After is a server that is down, not one asking for
  * time); how long, from Retry-After, else the rate limit's reset. Null for

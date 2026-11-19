@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 
 import { TabRefs } from "./refs"
 import { mapRefs, parseSnapshot } from "./snapshot"
@@ -167,5 +167,58 @@ describe("writing a snapshot's refs", () => {
 - paragraph [ref=xe7]: see [ref=e7]
 - /url: /x`,
     )
+  })
+})
+
+describe("a tab's refs across bundles", () => {
+  it("are one map per tab, whichever copy of the module asks", async () => {
+    const holder = { page: {} } as never
+    const first = await import("./refs")
+    first.refsOf(holder).adopt(PAGE, "doc1")
+    vi.resetModules()
+    const second = await import("./refs")
+
+    expect(second.TabRefs).not.toBe(first.TabRefs)
+    expect(second.refsOf(holder)).toBe(first.refsOf(holder))
+    expect(second.refStatus(holder, "e3")).toBe("gone")
+  })
+})
+
+describe("an element recalled by what it is", () => {
+  it("is found again by role and name after the document changed", () => {
+    const refs = new TabRefs()
+    const text = refs.adopt(
+      `- textbox "Enter your password" [ref=e5]\n- button "Next" [ref=e6]`,
+      "doc1",
+    )
+    const ref = text.match(/textbox .*\[ref=(e\d+)\]/)![1]!
+
+    refs.remember(ref)
+    refs.adopt(`- heading "Other" [ref=e1]`, "doc2")
+
+    expect(refs.playwrightRef(ref)).toBeNull()
+    expect(refs.recalled(ref)).toEqual({
+      role: "textbox",
+      name: "Enter your password",
+    })
+    expect(refs.recalled("e999")).toBeNull()
+  })
+
+  it("does not remember a name cut at the limit", () => {
+    const refs = new TabRefs()
+    const text = refs.adopt(`- button "${"x".repeat(300)}" [ref=e6]`, "doc1")
+    const ref = text.match(/\[ref=(e\d+)\]/)![1]!
+
+    refs.remember(ref)
+
+    expect(refs.recalled(ref)).toBeNull()
+  })
+
+  it("remembers only what it was asked to", () => {
+    const refs = new TabRefs()
+    const text = refs.adopt(`- button "Next" [ref=e6]`, "doc1")
+    const ref = text.match(/\[ref=(e\d+)\]/)![1]!
+
+    expect(refs.recalled(ref)).toBeNull()
   })
 })

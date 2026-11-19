@@ -11,7 +11,7 @@ import { db } from "../db"
 import { invalid, PcpError } from "../errors"
 import { CHALLENGE_LINE } from "../fetch/challenge"
 import { recordSite, siteCooling } from "../gate"
-import { httpThrottle, type Throttle } from "../throttle-signal"
+import { httpThrottle, plainHeaders, type Throttle } from "../throttle-signal"
 import { isPcpSite } from "../fetch/fetch"
 import { sliceText } from "../fetch/html"
 import { resolvePrivateAccess, siteKey } from "../fetch/rules"
@@ -93,6 +93,7 @@ import {
   MAX_FAILURE_SNAPSHOT_CHARS,
   MAX_LANE_QUEUE,
   MAX_QUEUE_WAIT_MS,
+  TRAIL_LINES_IN_ERROR,
   MAX_TABS,
   MAX_UPLOAD_BYTES,
   MAX_FULL_PAGE_HEIGHT,
@@ -115,7 +116,8 @@ import { bounded, inLane, LaneBusy, LaneGaveUp, pause } from "./queue"
 import { ocrHint, ocrToolFor } from "./ocr"
 import { setTabPace, tabPace, tabPaceFor } from "./tab-pace"
 import { leftOutNote, readableMarkdown } from "./read-page"
-import { missingRefMessage, resolveTabRef, tabSnapshot } from "./refs"
+import { missingRefMessage, refsOf, resolveTabRef, tabSnapshot } from "./refs"
+import { noteTrail, trailLines } from "./trail"
 import {
   browserHeld,
   closeTab,
@@ -165,6 +167,7 @@ import {
   type BrowserToolSpec,
 } from "./tools"
 import {
+  isOwnerNeeded,
   OwnerNeeded,
   type BrowseAsk,
   type SecretTypeCall,
@@ -1508,7 +1511,7 @@ export async function performNavigate(
           seen.throttle = response
             ? httpThrottle(
                 response.status(),
-                new Headers(response.headers()),
+                plainHeaders(response.headers()),
                 siteKey(url),
               )
             : null
@@ -2119,14 +2122,23 @@ async function typeSecret(
       )
     }
 
-    const value = await typer.value({
-      tabId: tab.id,
-      origin,
-      url: tab.page.url(),
-      title: await tabTitle(tab),
-      field: label,
-      call: secretCall(args),
-    })
+    // The owner may be asked, and answer on a page that has drawn itself
+    // anew: the call is made again with this ref, found by what it is.
+    if (args.ref) refsOf(tab).remember(args.ref as string)
+
+    const value = await typer
+      .value({
+        tabId: tab.id,
+        origin,
+        url: tab.page.url(),
+        title: await tabTitle(tab),
+        field: label,
+        call: secretCall(args),
+      })
+      .catch((error: unknown) => {
+        if (isOwnerNeeded(error)) noteTrail(tab, "asked owner", tab.page.url())
+        throw error
+      })
 
     await locator.fill("", { timeout: ACTION_TIMEOUT_MS })
     await locator.focus({ timeout: ACTION_TIMEOUT_MS })
@@ -2209,14 +2221,32 @@ async function typeSecret(
 }
 
 /** A ref that names nothing on the tab's page now: gone, or never the tab's. */
-function staleRef(tab: Tab, ref: string): CallToolResult {
-  return text(missingRefMessage(tab, ref), true)
+function staleRef(tab: Tab, ref: string, more: string[] = []): CallToolResult {
+  const trail = trailLines(tab, Date.now(), TRAIL_LINES_IN_ERROR)
+
+  const said = [missingRefMessage(tab, ref), ...more].join(" ")
+
+  return text(
+    trail.length > 0
+      ? `${said}\nWhat the tab did lately (times in UTC):\n${trail.join("\n")}`
+      : said,
+    true,
+  )
 }
 
 /** The element a call names, by its ref or its target, or why not. */
 async function element(
   tab: Tab,
   args: Record<string, unknown>,
+  {
+    recall = false,
+  }: {
+    /**
+     * Find a ref that went stale again by what it was when the owner was
+     * asked: only for the secret type call they approved, never another tool.
+     */
+    recall?: boolean
+  } = {},
 ): Promise<{ locator: Locator; label: string } | CallToolResult> {
   if (args.target) {
     const target = args.target as Target
@@ -2232,7 +2262,35 @@ async function element(
 
   const ref = args.ref as string
   const locator = await resolveTabRef(tab, ref)
-  return locator ? { locator, label: ref } : staleRef(tab, ref)
+
+  if (locator) {
+    return { locator, label: ref }
+  }
+
+  // A call the owner was asked about (a secret's use) is made again with
+  // its ref once they answer, and the page may have drawn itself anew
+  // since: the element is then found by what it was when they were asked,
+  // as a target names it, and refused when that is none or several.
+  const was = recall ? refsOf(tab).recalled(ref) : null
+
+  if (!was) {
+    return staleRef(tab, ref)
+  }
+
+  const resolved = await resolveTarget(tab, {
+    role: was.role,
+    name: was.name,
+    exact: true,
+  })
+
+  return "locator" in resolved
+    ? {
+        locator: resolved.locator,
+        label: `the ${was.role} "${was.name}" (${ref}, found again by what it is)`,
+      }
+    : staleRef(tab, ref, [
+        `It was the ${was.role} "${was.name}" when the owner was asked, and by that name: ${resolved.refusal}`,
+      ])
 }
 
 function isElement(
@@ -3474,7 +3532,9 @@ async function runTool(
       }
 
       return onTab(scope, tab, spec, async (current) => {
-        const found = await element(current, args)
+        const found = await element(current, args, {
+          recall: named !== null,
+        })
         if (!isElement(found)) return found
 
         if (named !== null) {
