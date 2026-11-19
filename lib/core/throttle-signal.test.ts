@@ -24,6 +24,12 @@ describe("plainHeaders", () => {
     expect(headers.get("x-missing")).toBeNull()
   })
 
+  it("joins a header sent more than once as Headers does", () => {
+    const headers = plainHeaders({ "ratelimit-remaining": "0\n5" })
+
+    expect(headers.get("RateLimit-Remaining")).toBe("0, 5")
+  })
+
   it("feeds httpThrottle", () => {
     expect(httpThrottle(429, plainHeaders(sent), "Google")).toEqual({
       reason: "Google answered HTTP 429: it asks PCP to slow down",

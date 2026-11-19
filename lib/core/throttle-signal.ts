@@ -168,13 +168,13 @@ type HeaderSource = Pick<Headers, "get">
  * than once joined with a newline). The WHATWG Headers constructor refuses
  * such a value, and a page that sends several Content-Security-Policy
  * headers (Google's) made the call that read them fail, so this one only
- * looks a name up and never throws. A joined value answers its first line.
+ * looks a name up and never throws. A header sent more than once reads as WHATWG Headers joins it, with ", ".
  */
 export function plainHeaders(headers: Record<string, string>): HeaderSource {
   const lower = new Map<string, string>()
 
   for (const [name, value] of Object.entries(headers)) {
-    lower.set(name.toLowerCase(), value.split("\n")[0] ?? "")
+    lower.set(name.toLowerCase(), value.split("\n").join(", "))
   }
 
   return { get: (name) => lower.get(name.toLowerCase()) ?? null }

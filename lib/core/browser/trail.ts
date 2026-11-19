@@ -9,8 +9,7 @@ import { MAX_TRAIL_ENTRIES } from "./limits"
  * the last few (trailLines), so a report shows what the page did.
  */
 
-export type TrailKind =
-  "navigated" | "reloaded" | "reopened" | "refs reset" | "asked owner"
+export type TrailKind = "navigated" | "reopened" | "refs reset" | "asked owner"
 
 type Entry = { at: number; kind: TrailKind; site: string }
 

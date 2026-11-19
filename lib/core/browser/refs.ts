@@ -259,7 +259,12 @@ export class TabRefs {
   remember(ref: string): void {
     const entry = this.live.get(ref)
 
-    if (!entry || entry.name === "") {
+    // A name cut at the limit can never match a page's whole name.
+    if (
+      !entry ||
+      entry.name === "" ||
+      entry.name.length >= MAX_ELEMENT_NAME_CHARS
+    ) {
       return
     }
 

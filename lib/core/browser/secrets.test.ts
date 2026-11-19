@@ -307,6 +307,21 @@ describe.skipIf(!executable)("typing a secret", { timeout: 90_000 }, () => {
     expect(await fieldValue(tab, "#pw")).toBe(VALUE)
   })
 
+  it("does not find a remembered field again for any other tool", async () => {
+    const { tab, opened } = await open("/login")
+    const password = refOf(opened, /textbox "Password"/)
+
+    await owner(
+      call("type", { tab, ref: password, text: { $secret: "Shop password" } }),
+    )
+    await call("navigate", { tab, url: `${site.origin}/login?again=1` })
+
+    const clicked = await call("click", { tab, ref: password })
+
+    expect(clicked.isError).toBe(true)
+    expect(textOf(clicked)).toContain(`${password} is no longer on the page`)
+  })
+
   it("says what the tab did lately when the field is not there any more", async () => {
     const { tab, opened } = await open("/login")
     const password = refOf(opened, /textbox "Password"/)

@@ -2224,16 +2224,12 @@ async function typeSecret(
 function staleRef(tab: Tab, ref: string, more: string[] = []): CallToolResult {
   const trail = trailLines(tab, Date.now(), TRAIL_LINES_IN_ERROR)
 
+  const said = [missingRefMessage(tab, ref), ...more].join(" ")
+
   return text(
-    [
-      missingRefMessage(tab, ref),
-      ...more,
-      ...(trail.length > 0
-        ? [`What the tab did lately (times in UTC):\n${trail.join("\n")}`]
-        : []),
-    ]
-      .join(" ")
-      .replace(/ (What the tab did)/, "\n$1"),
+    trail.length > 0
+      ? `${said}\nWhat the tab did lately (times in UTC):\n${trail.join("\n")}`
+      : said,
     true,
   )
 }
@@ -2242,6 +2238,15 @@ function staleRef(tab: Tab, ref: string, more: string[] = []): CallToolResult {
 async function element(
   tab: Tab,
   args: Record<string, unknown>,
+  {
+    recall = false,
+  }: {
+    /**
+     * Find a ref that went stale again by what it was when the owner was
+     * asked: only for the secret type call they approved, never another tool.
+     */
+    recall?: boolean
+  } = {},
 ): Promise<{ locator: Locator; label: string } | CallToolResult> {
   if (args.target) {
     const target = args.target as Target
@@ -2266,7 +2271,7 @@ async function element(
   // its ref once they answer, and the page may have drawn itself anew
   // since: the element is then found by what it was when they were asked,
   // as a target names it, and refused when that is none or several.
-  const was = refsOf(tab).recalled(ref)
+  const was = recall ? refsOf(tab).recalled(ref) : null
 
   if (!was) {
     return staleRef(tab, ref)
@@ -3527,7 +3532,9 @@ async function runTool(
       }
 
       return onTab(scope, tab, spec, async (current) => {
-        const found = await element(current, args)
+        const found = await element(current, args, {
+          recall: named !== null,
+        })
         if (!isElement(found)) return found
 
         if (named !== null) {

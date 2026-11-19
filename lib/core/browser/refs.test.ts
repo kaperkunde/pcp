@@ -204,6 +204,16 @@ describe("an element recalled by what it is", () => {
     expect(refs.recalled("e999")).toBeNull()
   })
 
+  it("does not remember a name cut at the limit", () => {
+    const refs = new TabRefs()
+    const text = refs.adopt(`- button "${"x".repeat(300)}" [ref=e6]`, "doc1")
+    const ref = text.match(/\[ref=(e\d+)\]/)![1]!
+
+    refs.remember(ref)
+
+    expect(refs.recalled(ref)).toBeNull()
+  })
+
   it("remembers only what it was asked to", () => {
     const refs = new TabRefs()
     const text = refs.adopt(`- button "Next" [ref=e6]`, "doc1")
