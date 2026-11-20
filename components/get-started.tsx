@@ -1,4 +1,5 @@
 import { ButtonLink } from "@kaperkunde/ui/button"
+import { ThingsToSay } from "@/components/things-to-say"
 import {
   Card,
   CardContent,
@@ -8,38 +9,32 @@ import {
 } from "@kaperkunde/ui/card"
 
 /**
- * Before there is anything here: an assistant can do the adding. It finds
- * the server or the API's schema and proposes it with register_server, and
- * nothing exists until the owner agrees, so all it needs is a token.
+ * Before there is anything here: an assistant can do the adding. Asked in
+ * the owner's words, it finds what PCP can set up (search's "can set up"
+ * lines), says what it takes and proposes it, and nothing exists until the
+ * owner agrees, so all it needs is to be connected.
  */
 export function GetStarted({ hasToken }: { hasToken: boolean }) {
   return (
     <Card data-testid="servers-start">
       <CardHeader>
-        <CardTitle>Let an assistant set them up</CardTitle>
+        <CardTitle>Talk to Claude</CardTitle>
         <CardDescription>
-          You do not have to add servers and endpoints by hand. Connect an
-          assistant to PCP with an API token, then ask it, for example:
+          You do not have to set things up by hand. Add PCP to Claude or another
+          assistant, then ask it, for example:
         </CardDescription>
       </CardHeader>
       <CardContent>
-        <ul className="flex flex-col gap-2 text-[15px]">
-          <li>
-            <q className="font-medium">Have PCP add my Gmail</q>
-          </li>
-          <li>
-            <q className="font-medium">Have PCP add the Porkbun API</q>
-          </li>
-        </ul>
+        <ThingsToSay />
         <p className="leading-relaxed text-muted-foreground">
-          It finds the server, or the API&apos;s schema, and asks you first: you
-          see the address and the tools, and nothing is added until you agree. A
+          It says what that takes and asks you first, with a link to PCP: you
+          see what it would add or run, and nothing changes until you agree. A
           password or key it needs, you type in on PCP&apos;s own page, never in
           the chat.
         </p>
         <div>
           <ButtonLink href="/tokens">
-            {hasToken ? "Open your API tokens" : "Create your first API token"}
+            {hasToken ? "Open your assistants" : "Connect an assistant"}
           </ButtonLink>
         </div>
       </CardContent>

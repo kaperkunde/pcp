@@ -1,5 +1,36 @@
 # Using PCP
 
+## Talking to Claude
+
+Talking to your assistant is a way to use PCP of its own. Every page in PCP
+still does everything, but anything PCP can do can also be found from the
+conversation: when you ask for something PCP could do but you have not set up,
+the assistant says what it takes ("you just have to sign in here", "I'd launch
+the Whisper service on your server; approve it here") and then does the work,
+asking you first on PCP's page.
+
+1. **Sign up.** Set PCP up with a password, and save the recovery key.
+2. **Add PCP to Claude.** **Connect an assistant** under Assistants: in
+   Claude's apps it is a custom connector with PCP's address, which signs in at
+   PCP; in Claude Code, one command.
+3. **Say what you want.** PCP's Home shows a few things to try:
+   - "I'd like to add my Gmail"
+   - "Can you connect to my printer?"
+   - "I'd like to set up an SSH connection to my server so I can host things"
+
+How it knows: PCP keeps a short list of what it can set up (the browser, PDF
+tools, document conversion, Claude Code sessions, search by meaning, a VPN
+exit, bunq, mail accounts, calendar accounts and SSH servers; Whisper
+transcription is not a ready-made item yet). When the assistant searches with
+your words and you have not set one of them up, the answer says what it does,
+what it takes from you and how to go about it, with a link to its page in PCP
+(the common items' are under `/plugins/<name>`). The assistant then proposes it
+(a mail or calendar account, or a service from PCP's common items, each a
+request you approve), or hands you the link where only you can do it (installing
+the browser, adding an SSH server, a VPN exit). Its instructions say so too.
+
+## In PCP
+
 1. **Secrets.** Add the API keys and personal access tokens your servers
    need. Each is stored encrypted and can be revealed, rotated or deleted.
 2. **Servers.** Add an MCP server by URL, describe what it is for in a

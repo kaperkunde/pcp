@@ -592,6 +592,11 @@ storageConnect`), never in the background, and SFTP for nothing else;
   the import page at the common repository's head). A new capability is a
   row in `list.ts`, its operations in `providers.ts`, and a test against
   fake providers (`capabilities.test.ts`).
+  What PCP can set up when the owner asks in a conversation is the
+  catalogue (`catalogue.ts`, static: search never reads the common items
+  from GitHub), set up or not as the vault says (`catalogue-state.ts`);
+  search names what is not set up, and an assistant only proposes it (never
+  an SSH server or an exit). A new entry gets a test in `catalogue.test.ts`.
 - Search (`lib/core/search.ts`, pure) finds a tool by keywords with no
   provider: stems, a short synonym table, and for PCP's own tools what
   their description's lead says they are for (task phrases there, in a

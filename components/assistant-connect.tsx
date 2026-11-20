@@ -10,6 +10,7 @@ import { FormError } from "@kaperkunde/ui/form-status"
 import { OwnerConfirmFields } from "@/components/owner-confirm-fields"
 import { ServerScopeFields } from "@/components/server-scope-fields"
 import { SubmitButton } from "@kaperkunde/ui/submit-button"
+import { ThingsToSay } from "@/components/things-to-say"
 import { TokenOptionRow, TOKEN_OPTION_NAMES } from "@/components/token-options"
 import { Button, buttonVariants } from "@kaperkunde/ui/button"
 import {
@@ -392,6 +393,7 @@ function Connector({
           own.
         </li>
       </ol>
+      <FirstThings />
       {https ? null : (
         <p
           role="note"
@@ -528,6 +530,8 @@ function Ready({
         you the first time.
       </p>
 
+      <FirstThings />
+
       <DialogFooter>
         <Button
           type="button"
@@ -537,6 +541,18 @@ function Ready({
           Done
         </Button>
       </DialogFooter>
+    </div>
+  )
+}
+
+/** Once PCP is added: a few things to say, which it sets up when asked. */
+function FirstThings() {
+  return (
+    <div className="flex flex-col gap-2 rounded-xl bg-field px-4 py-3">
+      <p className="text-[13px] font-semibold text-muted-foreground">
+        Then try saying
+      </p>
+      <ThingsToSay className="flex flex-col gap-1 text-[13px]" />
     </div>
   )
 }
