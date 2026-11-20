@@ -109,7 +109,12 @@ function answerSessions(request: IncomingMessage, response: ServerResponse) {
         : message.method === "tools/list"
           ? {
               tools: ["login_status", "login_start", "login_finish"].map(
-                (name) => ({ name, inputSchema: { type: "object" } }),
+                (name) => ({
+                  name,
+                  inputSchema: { type: "object" },
+                  // Its status only reads: PCP reads it by itself.
+                  annotations: { readOnlyHint: name === "login_status" },
+                }),
               ),
             }
           : message.method === "tools/call"

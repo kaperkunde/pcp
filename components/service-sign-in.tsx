@@ -209,10 +209,20 @@ export function ServiceSignIn({ id, name }: { id: string; name: string }) {
       ) : (
         <List>
           <ListRow
-            title={state ? "Not signed in" : "Reading…"}
+            title={
+              state
+                ? "Not signed in"
+                : error
+                  ? "Whether it is signed in is not known"
+                  : "Reading…"
+            }
             description="Starting a sign-in ends one still waiting for its code, here or in another tab."
             trailing={
-              <Button size="sm" disabled={pending || !state} onClick={start}>
+              <Button
+                size="sm"
+                disabled={pending || (!state && !error)}
+                onClick={start}
+              >
                 Start signing in
               </Button>
             }

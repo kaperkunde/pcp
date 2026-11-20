@@ -1666,7 +1666,8 @@ own step, not a wrapper, a blocked tool and a secret the owner makes up:
   tier is Read (`statusReadable`, `tool-tiers.ts`, the owner's choice
   included): the definition names the tool, so one that names a tool that
   changes things gets no call, its status reads as unknown, and
-  connect_account says so. The start and finish tools are called only on
+  connect_account says so; the owner's page still offers the sign-in, and
+  a finish its tool took reads as signed in, as whom unknown. The start and finish tools are called only on
   the owner's own action on their page, whatever their tiers; the page,
   the launch request, the launch form, a repository's review and the
   service's page (with each tool's tier) say so.

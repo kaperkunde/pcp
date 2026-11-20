@@ -720,6 +720,13 @@ describe(
         /cannot read whether Claude sessions is signed in: its status tool login_status is not a Read tool/,
       )
 
+      // The owner's page still signs in: its finish says so, unread.
+      await startServiceSignin(ctx, serverId, PUBLIC)
+      expect(
+        await finishServiceSignin(ctx, serverId, GOOD_CODE, PUBLIC),
+      ).toEqual({ signedIn: true, who: null })
+      account = null
+
       const failed = await client.callTool({
         name: "execute_read",
         arguments: await withCallHandle(client, {

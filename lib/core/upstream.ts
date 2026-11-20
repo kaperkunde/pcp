@@ -121,6 +121,7 @@ import {
   readSignin,
   scrubCode,
   signinTarget,
+  statusReadable,
   startSignin,
   type SigninCall,
   type SigninStart,
@@ -3415,6 +3416,12 @@ export async function finishServiceSignin(
 
   if (problem) {
     throw new PcpError("upstream", problem)
+  }
+
+  // Its finish tool took the code. Its status tool, when it is not a Read
+  // tool, is not called: signed in, as whom not known.
+  if (!(await statusReadable(ctx, target))) {
+    return { signedIn: true, who: null }
   }
 
   return readSignin(ctx, target, call)
