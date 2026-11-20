@@ -1,3 +1,4 @@
+import { PcpError } from "../errors"
 import { visible, type ShownText } from "../permission-rules"
 import { PCP_BUILT_AT, PCP_COMMIT, PCP_VERSION } from "../version"
 import {
@@ -7,6 +8,7 @@ import {
   type InstallHost,
 } from "./install"
 import { releasePageUrl, type UpdateChannel } from "./limits"
+import { checkNow } from "./runtime"
 import { isDevBuild } from "./semver"
 import {
   getUpdateConfig,
@@ -43,7 +45,11 @@ export type VersionReport = {
   channel: UpdateChannel
   /** The daily check is on. */
   check: boolean
-  /** The newest version on the channel, as the last check found it. */
+  /**
+   * The newest version on the channel, as the last check found it; null
+   * while checking is off (an earlier check's answer is not passed off as
+   * known).
+   */
   latest: string | null
   checked_at: string | null
   /** Null while it is not known: checking is off, or nothing was found yet. */
@@ -76,8 +82,10 @@ export async function versionReport(
     getUpdateConfig(),
     getUpdateStatus(),
   ])
-  const latest = status.latest ?? null
-  const known = config.check && latest !== null
+  // With checking off, what an earlier check found is not known now: none
+  // of it is answered (Check now on Settings is the owner's to press).
+  const latest = config.check ? (status.latest ?? null) : null
+  const known = latest !== null
   const newer = known ? newerRelease(status) : null
   const way = installWay(host, config.channel, {
     version: PCP_VERSION,
@@ -93,14 +101,17 @@ export async function versionReport(
     channel: config.channel,
     check: config.check,
     latest: latest?.version ?? null,
-    checked_at: status.lastCheckedAt ?? null,
+    checked_at: config.check ? (status.lastCheckedAt ?? null) : null,
     up_to_date: known ? newer === null : null,
     changelog: newer
       ? {
           version: newer.version,
           published_at: newer.publishedAt ?? null,
           url: releasePageUrl(newer.version),
-          notes_untrusted: trimmedNotes(newer.notes ?? "", CHANGELOG_CHARS),
+          // As the owner's page shows them: nothing that does not show.
+          notes_untrusted: visible(
+            trimmedNotes(newer.notes ?? "", CHANGELOG_CHARS),
+          ),
         }
       : null,
     can_update_itself: way.can,
@@ -141,10 +152,10 @@ export function versionText(report: VersionReport): string {
     report.last_install
       ? `Last install: v${report.last_install.from} → v${report.last_install.to}, asked ${report.last_install.asked_at}: ${
           report.last_install.state === "finished"
-            ? "finished, it is running."
+            ? `finished; this PCP runs v${report.version}.`
             : report.last_install.state === "installing"
               ? "still installing."
-              : `did not finish; this PCP is still v${report.version}.`
+              : `did not finish; this PCP runs v${report.version}.`
         }`
       : null,
   ].filter(Boolean)
@@ -255,14 +266,36 @@ export function describePcpUpdateAsk(ask: PcpUpdateAsk): {
 
 /**
  * The owner's yes: the install, through the same check and request as their
- * own button, only while the version they were shown is still the newest.
+ * own button. Neither installer installs a named version (install.sh pulls
+ * the channel's tag, the desktop app reads the latest release), so PCP checks
+ * again first, as the owner's own click may even with checking off, and
+ * installs only while the newest is still the version they were shown, on
+ * the channel they were asked on.
  */
 export async function applyPcpUpdate(
   ask: PcpUpdateAsk,
   host: InstallHost = installHost(),
   now = new Date(),
 ): Promise<string> {
+  const { channel } = await getUpdateConfig()
+
+  if (channel !== ask.channel) {
+    throw new PcpError(
+      "state",
+      `PCP follows the ${channel} channel now, not ${ask.channel} as when you were asked, so nothing was installed. The assistant can ask again.`,
+    )
+  }
+
+  const checked = await checkNow()
+
+  if (checked.lastError) {
+    throw new PcpError(
+      "upstream",
+      `PCP could not check which version is the newest just now (${checked.lastError}), so nothing was installed. Try again in a while.`,
+    )
+  }
+
   const installed = await installNewest(host, { now, version: ask.to })
 
-  return `Installing v${installed.version}: ${installed.message} The restart may drop this connection; once PCP is back, get_version says whether v${installed.version} is running.`
+  return `Installing v${installed.version}, the newest on the ${ask.channel} channel as of the check just made: ${installed.message} The restart may drop this connection; once PCP is back, get_version says whether v${installed.version} is running.`
 }

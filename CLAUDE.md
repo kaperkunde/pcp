@@ -1046,8 +1046,8 @@ embeddingProvider`, which hands `embeddings/provider.ts` the header;
   offered on the stable channel. An assistant reads it through `get_version`
   (the last check's answer, never a new request) and asks for an install only
   through `update_pcp`, a `pcp_update` request whose yes is the owner's
-  button's `installNewest` (`updates/install.ts`), every time, never a
-  standing allow.
+  button's `installNewest` (`updates/install.ts`) after a fresh check that
+  the newest is still the version shown, every time, never a standing allow.
 - `desktop/` is a host for the production build, not part of the app. It
   imports nothing from `lib/`, `app/` or `components/`; the app knows it only
   as `PCP_DESKTOP=1` and `PCP_DESKTOP_UPDATER` (`lib/server/desktop.ts`), for

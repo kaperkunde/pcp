@@ -331,6 +331,11 @@ describe("an install request for the desktop app", () => {
     expect(
       lastInstallState(status, later(24 * 60 * 60_000), "999.0.0")?.state,
     ).toBe("finished")
+    // Or a later one (the newest at the yes, the daily update, a hand
+    // update): it got there, and further.
+    expect(
+      lastInstallState(status, later(24 * 60 * 60_000), "999.0.3")?.state,
+    ).toBe("finished")
     expect(lastInstallState({}, NOW)).toBeNull()
   })
 

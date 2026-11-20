@@ -15,9 +15,18 @@ export function buildCommit(value: string | undefined): string | null {
   return /^[0-9a-f]{7,40}$/.test(commit) ? commit : null
 }
 
-/** A build's time as an ISO instant; null when there is none or it is no date. */
+/**
+ * A build's time, given as a full ISO timestamp in UTC (`date -u
+ * +%Y-%m-%dT%H:%M:%SZ`), as an ISO instant; null for anything else.
+ */
 export function buildDate(value: string | undefined): string | null {
-  const time = Date.parse(value?.trim() ?? "")
+  const text = value?.trim() ?? ""
+
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d+)?)?Z$/.test(text)) {
+    return null
+  }
+
+  const time = Date.parse(text)
 
   return Number.isFinite(time) ? new Date(time).toISOString() : null
 }

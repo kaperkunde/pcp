@@ -27,7 +27,11 @@ export type InstallHost = {
   kind: "desktop" | "container" | "source"
   /** The desktop app's updater: "auto" installs, "manual" only downloads. */
   desktopUpdater: "auto" | "manual"
-  /** The Linux installer watches for the owner's request. */
+  /**
+   * The Linux installer watches for the owner's request: in the container
+   * it runs only (install.sh passes PCP_HOST_UPDATER in), or, in a build
+   * made for the e2e suite (PCP_TEST_BUILD), a checkout that says so.
+   */
   hostUpdater: boolean
   /** ...and installs from the channel the request names (develop too). */
   hostUpdaterFollowsChannel: boolean
@@ -39,23 +43,29 @@ export type InstallHost = {
  * Read from the environment the host set: PCP_DESKTOP and
  * PCP_DESKTOP_UPDATER (desktop/main.mjs), PCP_CONTAINER (the Dockerfile),
  * PCP_HOST_UPDATER and PCP_AUTO_UPDATE (install.sh). lib/server's
- * install-kind.ts and desktop.ts read the same through this.
+ * install-kind.ts reads the same through this. `testBuild` is written into
+ * the build (next.config.ts), never read from the running environment.
  */
 export function installHost(
   env: Record<string, string | undefined> = process.env,
+  testBuild: boolean = process.env.PCP_TEST_BUILD === "1",
 ): InstallHost {
-  const hostUpdater = env.PCP_HOST_UPDATER
+  const kind =
+    env.PCP_DESKTOP === "1"
+      ? "desktop"
+      : env.PCP_CONTAINER === "1"
+        ? "container"
+        : "source"
+  const said = env.PCP_HOST_UPDATER
+  const watches =
+    (said === "1" || said === "2") &&
+    (kind === "container" || (kind === "source" && testBuild))
 
   return {
-    kind:
-      env.PCP_DESKTOP === "1"
-        ? "desktop"
-        : env.PCP_CONTAINER === "1"
-          ? "container"
-          : "source",
+    kind,
     desktopUpdater: env.PCP_DESKTOP_UPDATER === "auto" ? "auto" : "manual",
-    hostUpdater: hostUpdater === "1" || hostUpdater === "2",
-    hostUpdaterFollowsChannel: hostUpdater === "2",
+    hostUpdater: watches,
+    hostUpdaterFollowsChannel: watches && said === "2",
     autoUpdated: env.PCP_AUTO_UPDATE === "1",
   }
 }
@@ -107,8 +117,7 @@ export function installWay(
         }
   }
 
-  // The installer watches wherever it says so (install.sh passes
-  // PCP_HOST_UPDATER into the container it runs, and nothing else sets it).
+  // The installer watches its container (installHost says where).
   if (host.hostUpdater) {
     if (channel === "develop" && !host.hostUpdaterFollowsChannel) {
       return {

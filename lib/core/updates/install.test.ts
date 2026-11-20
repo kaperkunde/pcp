@@ -64,6 +64,33 @@ describe("installHost", () => {
     })
     expect(installHost({ PCP_HOST_UPDATER: "yes" }).hostUpdater).toBe(false)
   })
+
+  it("takes the installer's word in its container only, and in a checkout only in a build for the e2e suite", () => {
+    const watching = { PCP_HOST_UPDATER: "2" }
+
+    expect(
+      installHost({ ...watching, PCP_CONTAINER: "1" }, false),
+    ).toMatchObject({ hostUpdater: true, hostUpdaterFollowsChannel: true })
+    // A checkout that says so is not believed in a real build…
+    expect(installHost(watching, false)).toMatchObject({
+      kind: "source",
+      hostUpdater: false,
+      hostUpdaterFollowsChannel: false,
+    })
+    expect(installWay(installHost(watching, false), "stable")).toMatchObject({
+      can: false,
+      reason: "source",
+    })
+    // …only in one made for the e2e suite.
+    expect(installHost(watching, true)).toMatchObject({
+      kind: "source",
+      hostUpdater: true,
+    })
+    // The desktop app never has one.
+    expect(
+      installHost({ ...watching, PCP_DESKTOP: "1" }, true).hostUpdater,
+    ).toBe(false)
+  })
 })
 
 describe("installWay", () => {
@@ -169,6 +196,15 @@ describe("the build's commit and date", () => {
     expect(buildCommit(undefined)).toBeNull()
 
     expect(buildDate("2026-11-20T10:00:00Z")).toBe("2026-11-20T10:00:00.000Z")
+    expect(buildDate("2026-11-20T10:00Z")).toBe("2026-11-20T10:00:00.000Z")
+    expect(buildDate("2026-11-20T10:00:00.123Z")).toBe(
+      "2026-11-20T10:00:00.123Z",
+    )
+    // Only a full UTC timestamp: Date.parse would take these.
+    expect(buildDate("1")).toBeNull()
+    expect(buildDate("2026-11-20")).toBeNull()
+    expect(buildDate("2026-11-20T10:00:00+02:00")).toBeNull()
+    expect(buildDate("Nov 20 2026")).toBeNull()
     expect(buildDate("yesterday")).toBeNull()
     expect(buildDate("")).toBeNull()
     expect(buildDate(undefined)).toBeNull()

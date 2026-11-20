@@ -487,12 +487,14 @@ function PendingNote({ view }: { view: PermissionView }) {
     case "pcp_update":
       return (
         <p className={note}>
-          Install and restart installs this version only, as{" "}
+          Install and restart first checks again which version is the newest on
+          your channel, then installs it as{" "}
           <Link href="/settings#updates" className="underline">
             Settings → Updates
           </Link>{" "}
-          does: an assistant asks you again for every install. The release notes
-          are GitHub&apos;s, shown as they are.
+          does. If a newer one than this came out since, nothing is installed
+          and the assistant can ask again with it. Each install is asked anew.
+          The release notes are GitHub&apos;s, shown as they are.
         </p>
       )
     case "secret_request":

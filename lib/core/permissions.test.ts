@@ -70,7 +70,12 @@ import { setToolTier } from "./tool-tiers"
 import { setupVault } from "./vault"
 import { createSshServer } from "./ssh/hosts"
 import { installSignalFile } from "./updates/host-signal"
-import { getUpdateStatus, saveUpdateStatus } from "./updates/state"
+import { setUpdateChannel, setUpdateFetch } from "./updates/runtime"
+import {
+  getUpdateStatus,
+  saveUpdateConfig,
+  saveUpdateStatus,
+} from "./updates/state"
 import { proposePcpUpdate, type PcpUpdateAsk } from "./updates/tools"
 import { openSecretMeta, secretNameWhere } from "./secret-meta"
 
@@ -3798,8 +3803,97 @@ describe("a PCP update an assistant asked for (#161)", () => {
     return { ctx, scope, tokenId, id: await onlyRequestId() }
   }
 
+  /**
+   * What GitHub says to the check the owner's yes makes first (the
+   * installers take the channel's newest, never a named version); null
+   * fails the request.
+   */
+  let github: string | null
+  let checks: number
+
+  beforeEach(() => {
+    github = "v999.0.0"
+    checks = 0
+    setUpdateFetch((async () => {
+      checks++
+
+      if (!github) {
+        throw new Error("offline")
+      }
+
+      return new Response(
+        JSON.stringify({ tag_name: github, body: "Notes.", assets: [] }),
+        { status: 200 },
+      )
+    }) as unknown as typeof fetch)
+  })
+
   afterEach(() => {
+    setUpdateFetch()
     vi.unstubAllEnvs()
+  })
+
+  it("checks again on the owner's yes, even with checking off, and installs the newest it was shown", async () => {
+    const { ctx, id } = await askUpdate()
+    await saveUpdateConfig({ check: false })
+
+    const answer = await decidePermission(ctx, id, "allow_once", {
+      publicUrl: PUBLIC_URL,
+    })
+
+    expect(checks).toBe(1)
+    expect(textOf(answer)).toContain("Installing v999.0.0")
+    expect((await getUpdateStatus()).lastCheckedAt).not.toBe(
+      "2026-11-20T08:00:00.000Z",
+    )
+  })
+
+  it("refuses when a newer release came out since the owner was shown one", async () => {
+    const { ctx, id } = await askUpdate()
+    // The installers would take this one, whose notes nobody read.
+    github = "v999.0.1"
+
+    const answer = await decidePermission(ctx, id, "allow_once", {
+      publicUrl: PUBLIC_URL,
+    })
+
+    expect(answer.isError).toBe(true)
+    expect(textOf(answer)).toContain(
+      "v999.0.0 is no longer the newest version PCP knows of (v999.0.1 is), so nothing was installed.",
+    )
+    expect((await getUpdateStatus()).installRequest).toBeUndefined()
+  })
+
+  it("refuses when the check cannot reach GitHub", async () => {
+    const { ctx, id } = await askUpdate()
+    github = null
+
+    const answer = await decidePermission(ctx, id, "allow_once", {
+      publicUrl: PUBLIC_URL,
+    })
+
+    expect(answer.isError).toBe(true)
+    expect(textOf(answer)).toMatch(
+      /^PCP could not check which version is the newest just now/,
+    )
+    expect((await getUpdateStatus()).installRequest).toBeUndefined()
+  })
+
+  it("refuses when the channel changed since the owner was asked", async () => {
+    const { ctx, id } = await askUpdate()
+    await setUpdateChannel("develop")
+    github = null
+
+    const answer = await decidePermission(ctx, id, "allow_once", {
+      publicUrl: PUBLIC_URL,
+    })
+
+    expect(answer.isError).toBe(true)
+    expect(textOf(answer)).toContain(
+      "PCP follows the develop channel now, not stable as when you were asked",
+    )
+    expect(checks).toBe(0)
+    expect((await getUpdateStatus()).installRequest).toBeUndefined()
   })
 
   it("installs on the owner's yes: the request and the installer's signal", async () => {
@@ -3865,6 +3959,7 @@ describe("a PCP update an assistant asked for (#161)", () => {
   it("refuses a version that is no longer the newest when the owner answers", async () => {
     const { ctx, id } = await askUpdate()
     await saveUpdateStatus(release("999.2.0"))
+    github = "v999.2.0"
 
     const answer = await decidePermission(ctx, id, "allow_once", {
       publicUrl: PUBLIC_URL,

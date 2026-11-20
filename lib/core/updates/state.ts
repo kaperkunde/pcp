@@ -222,7 +222,9 @@ export async function requestInstall(
 
 /**
  * How the last install went, by the version that runs now: `finished` once
- * it is the one asked for, `installing` while the request is fresh, else
+ * it is the one asked for or a later one (the installers take the newest,
+ * and a daily or hand update may pass it), `installing` while the request is
+ * fresh, else
  * `not_finished` (the installer or the app did not get there in time).
  */
 export type LastInstallState = LastInstall & {
@@ -242,12 +244,11 @@ export function lastInstallState(
 
   return {
     ...last,
-    state:
-      version === last.to
-        ? "finished"
-        : now.getTime() - Date.parse(last.at) <= INSTALL_REQUEST_FRESH_MS
-          ? "installing"
-          : "not_finished",
+    state: !isNewer(last.to, version)
+      ? "finished"
+      : now.getTime() - Date.parse(last.at) <= INSTALL_REQUEST_FRESH_MS
+        ? "installing"
+        : "not_finished",
   }
 }
 
