@@ -48,7 +48,7 @@ test("sets up the owner on first visit, or signs in", async ({ page }) => {
 
   // Home then says what to ask an assistant once PCP is added to it (#163).
   const start = page.getByTestId("servers-start")
-  await expect(start.getByText("Talk to Claude")).toBeVisible()
+  await expect(start.getByText("Talk to your assistant")).toBeVisible()
   await expect(start.getByTestId("things-to-say").locator("li")).toHaveText([
     "I'd like to add my Gmail",
     "Can you connect to my printer?",

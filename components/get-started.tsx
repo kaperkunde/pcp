@@ -18,10 +18,10 @@ export function GetStarted({ hasToken }: { hasToken: boolean }) {
   return (
     <Card data-testid="servers-start">
       <CardHeader>
-        <CardTitle>Talk to Claude</CardTitle>
+        <CardTitle>Talk to your assistant</CardTitle>
         <CardDescription>
-          You do not have to set things up by hand. Add PCP to Claude or another
-          assistant, then ask it, for example:
+          You do not have to set things up by hand. Add PCP to your assistant
+          (Claude, or another app), then ask it, for example:
         </CardDescription>
       </CardHeader>
       <CardContent>

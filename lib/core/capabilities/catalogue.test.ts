@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto"
 import { Client, InMemoryTransport } from "@modelcontextprotocol/client"
 import type { CallToolResult } from "@modelcontextprotocol/server"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
@@ -6,6 +7,7 @@ import { createApiToken, resolveApiToken } from "../api-tokens"
 import { chromiumExecutable } from "../browser/executable"
 import type { VaultContext } from "../context"
 import { db } from "../db"
+import { writeEmbeddingsConfig } from "../embeddings/config"
 import {
   buildGatewayServer,
   loadGatewayServers,
@@ -13,33 +15,34 @@ import {
   STANDING_LEAD,
   type GatewayScope,
 } from "../gateway"
+import { canonicalJson } from "../permission-rules"
 import { createServer } from "../servers"
+import { sealedServiceOwn } from "../services/own-values"
+import { sealedServiceDefinition } from "../spec-rows"
 import { scratchDatabase } from "../test-db"
+import { writeToolAccess } from "../tool-access"
 import { setupVault } from "../vault"
 import {
   CATALOGUE,
   CATALOGUE_IDS,
   catalogueNamed,
-  entrySources,
+  entriesOfImages,
+  imageName,
+  LIMITED_TOKEN_NOTE,
   pluginEntry,
 } from "./catalogue"
 import { setUpEntries } from "./catalogue-state"
 import { CAPABILITIES } from "./list"
-import { vaultServices } from "./setup"
 
 // The catalogue (#163): what PCP can set up when the owner asks for it in a
-// conversation, named by search while the vault has not set it up.
+// conversation, named by search while the token has not got it.
 
 vi.mock("../browser/executable", () => ({
   chromiumExecutable: vi.fn(async () => null),
 }))
 
-vi.mock("./setup", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("./setup")>()),
-  vaultServices: vi.fn(async () => []),
-}))
-
 const PUBLIC_URL = "https://pcp.example"
+const DIGEST = `sha256:${"a".repeat(64)}`
 
 describe("the catalogue", () => {
   it("has every entry once, each saying what it does and takes", () => {
@@ -57,7 +60,10 @@ describe("the catalogue", () => {
         expect(entry.serverKinds?.length, entry.id).toBeGreaterThan(0)
       } else {
         expect(entry.item, entry.id).not.toBeUndefined()
-        expect(entrySources(entry).length, entry.id).toBeGreaterThan(0)
+        expect(
+          (entry.images?.length ?? 0) > 0 || entry.setting !== undefined,
+          entry.id,
+        ).toBe(true)
       }
     }
   })
@@ -96,11 +102,73 @@ describe("the catalogue", () => {
     expect(pluginEntry("mail")).toBeNull()
   })
 
-  it("never offers an assistant to propose an exit", () => {
-    const vpn = CATALOGUE.find((entry) => entry.id === "vpn_exit")!
-    expect(vpn.how).not.toContain("register_server")
-    const ssh = CATALOGUE.find((entry) => entry.id === "ssh")!
-    expect(ssh.how).toContain("Only the owner")
+  it("launches a common item from its page, never retyped into register_server", () => {
+    for (const entry of CATALOGUE.filter((e) => e.item)) {
+      expect(entry.how, entry.id).not.toContain("register_server")
+      expect(entry.how, entry.id).toMatch(/link to its page/)
+    }
+  })
+
+  it("never offers an assistant to propose an exit or an SSH server", () => {
+    for (const id of ["vpn_exit", "ssh"]) {
+      const entry = CATALOGUE.find((e) => e.id === id)!
+      expect(entry.ownerOnly, id).toBe(true)
+      expect(entry.how, id).toMatch(/^Only the owner/)
+    }
+  })
+
+  it("says once that Whisper has no common item yet, in its how", () => {
+    const whisper = CATALOGUE.find((entry) => entry.id === "whisper")!
+    expect(whisper.takes).not.toMatch(/common item/i)
+    expect(whisper.how).toContain("PCP's common items have none yet")
+  })
+})
+
+describe("an image's name", () => {
+  it("is the repository's last part, without tag or digest", () => {
+    expect(imageName(`ghcr.io/kaperkunde/pdf-mcp-server@${DIGEST}`)).toBe(
+      "pdf-mcp-server",
+    )
+    expect(imageName("ghcr.io/docling-project/docling-serve-cpu:latest")).toBe(
+      "docling-serve-cpu",
+    )
+    expect(imageName(`docker.io/qmcgaw/gluetun@${DIGEST}`)).toBe("gluetun")
+    expect(imageName("localhost:5000/team/Whisper:1")).toBe("whisper")
+    expect(imageName("gluetun")).toBe("gluetun")
+  })
+
+  it("matches an entry's images whole, never a part of one", () => {
+    const ids = (images: string[]) =>
+      entriesOfImages(images).map((entry) => entry.id)
+
+    // PCP's common items, as they stand in kaperkunde/pcp-gg-common.
+    expect(
+      ids([
+        `ghcr.io/kaperkunde/pdf-mcp-server@${DIGEST}`,
+        `ghcr.io/docling-project/docling-serve-cpu@${DIGEST}`,
+        "ghcr.io/kaperkunde/claude-sessions-mcp:latest",
+        `docker.io/qmcgaw/gluetun@${DIGEST}`,
+        `ghcr.io/kaperkunde/bunq-mcp@${DIGEST}`,
+        "docker.io/onerahmet/openai-whisper-asr-webservice:latest",
+      ]),
+    ).toEqual([
+      "pdf",
+      "documents",
+      "claude_sessions",
+      "vpn_exit",
+      "bunq",
+      "whisper",
+    ])
+
+    // Neighbours with a name of their own are not those items.
+    expect(
+      ids([
+        "docker.io/qdm12/gluetun-webui:latest",
+        "ghcr.io/someone/whisper-ui:1",
+        "ghcr.io/someone/my-pdf-mcp-server-fork:2",
+        "ghcr.io/kaperkunde/pdf-mcp-server-extras:1",
+      ]),
+    ).toEqual([])
   })
 })
 
@@ -111,12 +179,7 @@ let scope: GatewayScope
 beforeEach(async () => {
   ;({ cleanup } = await scratchDatabase())
   ctx = await setupVault({ name: "Ada", password: "correct horse battery" })
-  const { token } = await createApiToken(ctx, {
-    name: "Claude",
-    allowAllServers: true,
-  })
-  scope = { ...(await resolveApiToken(token))!, publicUrl: PUBLIC_URL }
-  vi.mocked(vaultServices).mockResolvedValue([])
+  scope = await tokenScope({ allowAllServers: true })
   vi.mocked(chromiumExecutable).mockResolvedValue(null)
 })
 
@@ -124,21 +187,71 @@ afterEach(async () => {
   await cleanup()
 })
 
+async function tokenScope(
+  reach: { allowAllServers: true } | { serverIds: string[] },
+): Promise<GatewayScope> {
+  const { token } = await createApiToken(ctx, {
+    name: "Claude",
+    allowAllServers: "allowAllServers" in reach,
+    serverIds: "serverIds" in reach ? reach.serverIds : [],
+  })
+  return { ...(await resolveApiToken(token))!, publicUrl: PUBLIC_URL }
+}
+
 /** A server of this kind in the vault, as the owner would have added it. */
-async function serverOfKind(kind: string): Promise<void> {
+async function serverOfKind(kind: string): Promise<string> {
   const { id } = await createServer(ctx, {
-    name: `A ${kind}`,
+    name: `A ${kind} ${randomUUID().slice(0, 6)}`,
     url: `https://${kind}.example.com/mcp`,
     authType: "none",
   })
   await db().mcpServer.update({ where: { id }, data: { kind } })
+  return id
 }
 
-async function search(args: Record<string, unknown>): Promise<string> {
+/** A service running this image, as a launch stores it (its spec sealed). */
+async function serviceOf(image: string): Promise<string> {
+  const id = await serverOfKind("service")
+  const definition = {
+    image,
+    ports: [{ container: 8000 }],
+    registers: { kind: "none" },
+  }
+
+  await db().serviceSpec.create({
+    data: {
+      serverId: id,
+      ...sealedServiceDefinition(
+        ctx,
+        id,
+        JSON.stringify(definition),
+        canonicalJson(definition),
+      ),
+      engine: "docker",
+      ...sealedServiceOwn(ctx, id, {
+        containerName: `pcp-${id.slice(0, 8)}`,
+        publish: "{}",
+        values: "{}",
+      }),
+    },
+  })
+
+  return id
+}
+
+/** What the token behind `scope` has, as search works it out. */
+async function tokenHas(
+  hasProvider: () => Promise<boolean> = async () => false,
+) {
+  return setUpEntries(ctx, await loadGatewayServers(scope), hasProvider)
+}
+
+async function search(
+  args: Record<string, unknown>,
+  as: GatewayScope = scope,
+): Promise<string> {
   const [clientSide, serverSide] = InMemoryTransport.createLinkedPair()
-  await buildGatewayServer(scope, await loadGatewayServers(scope)).connect(
-    serverSide,
-  )
+  await buildGatewayServer(as, await loadGatewayServers(as)).connect(serverSide)
   const client = new Client({ name: "test", version: "1.0.0" })
   await client.connect(clientSide)
   const result = (await client.callTool({
@@ -152,22 +265,19 @@ async function search(args: Record<string, unknown>): Promise<string> {
     .join("\n")
 }
 
-describe("what the vault has set up", () => {
-  it("is read from its servers, services and settings", async () => {
-    expect([...(await setUpEntries(ctx))]).toEqual([])
+describe("what a token has", () => {
+  it("is read from the servers and services it reaches", async () => {
+    expect([...(await tokenHas())]).toEqual([])
 
     await serverOfKind("imap")
     await serverOfKind("ssh")
-    vi.mocked(vaultServices).mockResolvedValue([
-      {
-        id: "s1",
-        name: "PDF",
-        image: "ghcr.io/kaperkunde/pdf-mcp-server@sha256:abc",
-      },
-      { id: "s2", name: "Speech", image: "ghcr.io/someone/whisper-asr:1" },
-    ])
+    await serviceOf(`ghcr.io/kaperkunde/pdf-mcp-server@${DIGEST}`)
+    await serviceOf(
+      `docker.io/onerahmet/openai-whisper-asr-webservice@${DIGEST}`,
+    )
+    await serviceOf(`docker.io/qdm12/gluetun-webui@${DIGEST}`)
 
-    expect([...(await setUpEntries(ctx))].sort()).toEqual([
+    expect([...(await tokenHas())].sort()).toEqual([
       "mail",
       "pdf",
       "ssh",
@@ -175,12 +285,45 @@ describe("what the vault has set up", () => {
     ])
   })
 
-  it("counts the browser only once Chromium is on this machine", async () => {
+  it("leaves out what the token does not reach", async () => {
+    const mail = await serverOfKind("imap")
+    await serviceOf(`ghcr.io/kaperkunde/pdf-mcp-server@${DIGEST}`)
+    const ssh = await serverOfKind("ssh")
+
+    scope = await tokenScope({ serverIds: [ssh] })
+    expect([...(await tokenHas())]).toEqual(["ssh"])
+
+    scope = await tokenScope({ serverIds: [mail] })
+    expect([...(await tokenHas())]).toEqual(["mail"])
+  })
+
+  it("has a capability's entry when a provider of it is among its tools", async () => {
+    const has = await tokenHas(async () => true)
+    expect(has.has("pdf")).toBe(true)
+    expect(has.has("documents")).toBe(true)
+    expect(has.has("claude_sessions")).toBe(false)
+  })
+
+  it("has search by meaning only when the owner chose a provider", async () => {
+    await serviceOf(`ghcr.io/huggingface/text-embeddings-inference@${DIGEST}`)
+    expect((await tokenHas()).has("embeddings")).toBe(false)
+
+    await writeEmbeddingsConfig(ctx, {
+      provider: "openai",
+      url: "https://embeddings.example/v1",
+      model: "small",
+      secretId: null,
+      embed: { tools: true, skills: false, memories: false },
+    })
+    expect((await tokenHas()).has("embeddings")).toBe(true)
+  })
+
+  it("has the browser only once Chromium is on this machine", async () => {
     await serverOfKind("browser")
-    expect((await setUpEntries(ctx)).has("browser")).toBe(false)
+    expect((await tokenHas()).has("browser")).toBe(false)
 
     vi.mocked(chromiumExecutable).mockResolvedValue("/usr/bin/chromium")
-    expect((await setUpEntries(ctx)).has("browser")).toBe(true)
+    expect((await tokenHas()).has("browser")).toBe(true)
   })
 })
 
@@ -196,9 +339,29 @@ describe("search", () => {
     expect(text).toContain(
       `[Add a mail account in PCP](${PUBLIC_URL}/servers/mail/new)`,
     )
+    // A token that reaches every server is not told to ask for access.
+    expect(text).not.toContain(LIMITED_TOKEN_NOTE)
   })
 
-  it("says nothing of what the vault has set up", async () => {
+  it("tells a limited token the owner may have it, out of its reach", async () => {
+    // The vault has a mail account; this token reaches only the SSH server.
+    await serverOfKind("imap")
+    const ssh = await serverOfKind("ssh")
+    const limited = await tokenScope({ serverIds: [ssh] })
+
+    const text = await search({ query: "I'd like to add my Gmail" }, limited)
+
+    expect(text).toContain("can set up: A mail account")
+    expect(text).toContain(LIMITED_TOKEN_NOTE)
+
+    // The same words whether or not the vault has one: nothing is learnt.
+    await db().mcpServer.deleteMany({ where: { kind: "imap" } })
+    expect(await search({ query: "I'd like to add my Gmail" }, limited)).toBe(
+      text,
+    )
+  })
+
+  it("says nothing of what the token has", async () => {
     await serverOfKind("ssh")
 
     const text = await search({ query: "Can you connect to my printer?" })
@@ -213,11 +376,59 @@ describe("search", () => {
     expect(text).not.toContain("can set up: PDF tools")
   })
 
-  it("names a common item with its own page", async () => {
+  it("offers no common item for a capability another server provides", async () => {
+    // A converter of the owner's own, not Docling, as Docling's API takes files.
+    const { id } = await createServer(ctx, {
+      name: "converter",
+      url: "https://converter.example.com/mcp",
+      authType: "none",
+    })
+    await db().mcpTool.create({
+      data: {
+        id: randomUUID(),
+        serverId: id,
+        plainName: "convert_file",
+        plainDescription: "Convert documents from files to Markdown.",
+        plainInputSchema: JSON.stringify({
+          type: "object",
+          properties: {
+            files: {
+              type: "array",
+              items: {
+                type: "object",
+                properties: {
+                  $result: { type: "string" },
+                  name: { type: "string" },
+                  type: { type: "string" },
+                },
+                required: ["$result"],
+                additionalProperties: false,
+              },
+            },
+          },
+          required: ["files"],
+          additionalProperties: false,
+        }),
+        annotations: JSON.stringify({
+          readOnlyHint: false,
+          destructiveHint: false,
+        }),
+      },
+    })
+    await writeToolAccess(ctx, scope.tokenId, id, "convert_file", "allowed")
+
+    const text = await search({ query: "turn this docx into text, docling" })
+
+    expect(text).not.toContain("not installed: Convert documents")
+    expect(text).not.toContain("can set up: Document conversion")
+  })
+
+  it("names a common item with its own page, launched there", async () => {
     const text = await search({ query: "my claude code sessions" })
 
     expect(text).toContain("can set up: Claude Code sessions")
-    expect(text).toContain("services/claude-sessions.yaml")
+    expect(text).toContain("launch it on their SSH server in one click")
+    expect(text).not.toContain("register_server")
     expect(text).toContain(`(${PUBLIC_URL}/plugins/claude_sessions)`)
   })
 
@@ -227,7 +438,7 @@ describe("search", () => {
     expect(text).not.toContain("can set up:")
   })
 
-  it("lists what is not set up yet once, in the standing rules", async () => {
+  it("lists what the token has not got once, in the standing rules", async () => {
     await serverOfKind("caldav")
 
     const text = await search({})
@@ -238,7 +449,23 @@ describe("search", () => {
     expect(line).toContain("The browser, PDF tools")
     expect(line).toContain("A mail account")
     expect(line).not.toContain("A calendar account")
+    expect(line).not.toContain("some may be set up already")
     expect(text).toContain(STANDING_LEAD)
     expect(text).toContain(SET_UP_RULE)
+  })
+
+  it("lists them per token, and a limited token hears it may lack access", async () => {
+    const caldav = await serverOfKind("caldav")
+    const ssh = await serverOfKind("ssh")
+    const limited = await tokenScope({ serverIds: [ssh] })
+
+    const line = (await search({}, limited))
+      .split("\n")
+      .find((row) => row.startsWith("What PCP can set up"))!
+
+    expect(caldav).not.toBe(ssh)
+    expect(line).toContain("A calendar account")
+    expect(line).not.toContain("An SSH server")
+    expect(line).toContain("some may be set up already")
   })
 })

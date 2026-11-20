@@ -155,10 +155,17 @@ async function EntryPage({ entry }: { entry: CatalogueEntry }) {
           <span className="font-medium">What it takes: </span>
           {entry.takes}
         </p>
-        <p className="text-muted-foreground">
-          You can also ask an assistant to set it up: it says what it needs and
-          asks you here first. Nothing runs until you agree.
-        </p>
+        {entry.ownerOnly ? (
+          <p className="text-muted-foreground">
+            Only you launch it, here: an assistant can point you to this page
+            but never proposes it.
+          </p>
+        ) : (
+          <p className="text-muted-foreground">
+            You can also ask an assistant to set it up: it says what it needs
+            and asks you in PCP first. Nothing runs until you agree.
+          </p>
+        )}
       </Card>
 
       {entry.item ? null : (

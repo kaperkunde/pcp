@@ -5431,21 +5431,35 @@ the browser, mail and calendar accounts, SSH servers; `common_item`: PDF
 tools, Docling, Claude Code sessions, Text Embeddings Inference, Gluetun,
 bunq, and Whisper transcription, which has no common item yet), how an
 assistant goes about it and the owner's page. Search never reads PCP's common
-items from GitHub to find one. Whether an entry is set up is read from the
-vault inside the request (`catalogue-state.ts setUpEntries`, nothing stored):
-a server of a builtin's kind (the browser also needs Chromium on this
-machine), a service whose image or source tag carries the item's words
-however it was launched, and for search by meaning also a provider on
-Settings → Search.
+items from GitHub to find one. Whether a token has an entry is read inside the
+request from what that token reaches, never from the rest of the vault
+(`catalogue-state.ts setUpEntries`, nothing stored), so a token limited to
+some servers learns nothing of the others, and only the service definitions
+it reaches are opened: a server of a builtin's kind among its servers (the
+browser also needs Chromium on this machine); a service among them, or one
+that registered a server among them, whose image or source tag is the
+item's (`imageName`: the repository's last path part, without tag or digest,
+matched whole against the entry's `images`, so `gluetun-webui` is not
+Gluetun); for an entry that provides a capability, any provider of it among
+the token's tools (`capabilityProviders`), whoever's server it is; and for
+search by meaning only a provider the owner chose on Settings → Search, never
+a Text Embeddings Inference service that merely runs.
 
 `search` with a query adds a "can set up" line for each entry the query names
-(`catalogueNamed`, every word of a phrase by stem) that the vault has not set
-up, but for one whose capability already has its "not installed" line: what it
-does, what it takes, how (`register_server` for a mail or calendar account or
-a common item's service; the owner's own page for the browser, an SSH server
-and a VPN exit, which an assistant never proposes), and the page as a
-markdown link. `search` with no arguments lists the titles of what is not set
-up yet once, and the instructions and key rules carry the rule
+(`catalogueNamed`, every word of a phrase by stem) that the token has not got,
+but for one whose capability already has its "not installed" line: what it
+does, what it takes, how, and the page as a markdown link. How is
+`register_server` for a mail or calendar account; for a common item, the link
+to its page, where the owner reads the item and launches it as it is (an
+assistant never retypes a common item's definition into `register_server`,
+which could drift from it: digest, sign-in, files); the owner's own page for
+the browser, an SSH server and a VPN exit, which an assistant never proposes
+(`ownerOnly`). A token the owner limited to some servers gets the same line
+with `LIMITED_TOKEN_NOTE`, whether or not the vault has it: the owner may have
+it already, so ask whether to give this token access before setting up
+another. `search` with no arguments lists, per token, the titles of what it
+has not got, with the same caution for a limited token, and the instructions
+and key rules carry the rule
 (`SET_UP_RULE`), as PCP's suggested instructions do from version 8. A common
 item that is no capability has its page at `/plugins/<id>` (`itemOffers`,
 the capability pages' offers), Whisper's saying there is none yet. After

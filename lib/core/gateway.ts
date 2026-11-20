@@ -1638,7 +1638,7 @@ export function buildGatewayServer(
         ...(offered.length > 0
           ? [
               "",
-              `What PCP can set up when the owner asks, not set up yet: ${offered.map((entry) => entry.title).join(", ")}. search with their words says what each takes.`,
+              `What PCP can set up when the owner asks, which this token does not have: ${offered.map((entry) => entry.title).join(", ")}. search with their words says what each takes.${limitedToken ? " The owner chose which servers this token reaches, so some may be set up already: ask them before setting up another." : ""}`,
             ]
           : []),
         "",
@@ -1766,17 +1766,34 @@ export function buildGatewayServer(
     return { lines, ids }
   }
 
-  /** The catalogue's entries the vault has not set up (catalogue.ts). */
+  /**
+   * The catalogue's entries this token has (catalogue-state.ts): from the
+   * servers and services it reaches and the providers among its tools,
+   * never from the rest of the vault.
+   */
+  function tokenHas() {
+    return setUpEntries(scope.ctx, currentServers(), async (id) =>
+      Object.values(await providersFor(id)).some(
+        (list) => (list?.length ?? 0) > 0,
+      ),
+    )
+  }
+
+  /** The catalogue's entries this token has not got (catalogue.ts). */
   async function notSetUp() {
-    const done = await setUpEntries(scope.ctx)
+    const done = await tokenHas()
 
     return CATALOGUE.filter((entry) => !done.has(entry.id))
   }
 
+  /** A token the owner limited to servers they chose: it sees no others. */
+  const limitedToken = Boolean(scope.serverIds)
+
   /**
    * search's "can set up" line for each catalogue entry the query names
-   * that the vault has not set up, but for one whose capability already
-   * has its "not installed" line.
+   * that this token has not got, but for one whose capability already has
+   * its "not installed" line. A token limited to some servers is told the
+   * owner may have it already, out of its reach.
    */
   async function canSetUp(
     query: string,
@@ -1790,13 +1807,15 @@ export function buildGatewayServer(
       return []
     }
 
-    const done = await setUpEntries(scope.ctx)
+    const done = await tokenHas()
     const base = scope.publicUrl.replace(/\/+$/, "")
 
     return named
       .filter((entry) => !done.has(entry.id))
       .map((entry) =>
-        canSetUpLine(entry, markdownLink(entry.label, `${base}${entry.page}`)),
+        canSetUpLine(entry, markdownLink(entry.label, `${base}${entry.page}`), {
+          limited: limitedToken,
+        }),
       )
   }
 

@@ -133,11 +133,11 @@ The first run is short:
    - "I'd like to set up an SSH connection to my server so I can host things"
 
 The assistant finds what PCP can set up with `search`, which names each thing
-PCP has but you have not set up yet (the browser, PDF tools, document
+PCP has but the assistant cannot use yet (the browser, PDF tools, document
 conversion, Claude Code sessions, search by meaning, a VPN exit, bunq, mail and
-calendar accounts, SSH servers) with what it takes. It only ever proposes: you
-see what would be added or run, a password goes in on PCP's own page, and
-nothing changes until you agree.
+calendar accounts, SSH servers) with what it takes. It only ever proposes or
+hands you a link: a ready-made service you launch on its page in PCP, a password
+goes in on PCP's own page, and nothing changes until you agree.
 
 ## Learn more
 

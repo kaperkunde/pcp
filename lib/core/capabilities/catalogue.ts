@@ -56,12 +56,21 @@ export type CatalogueEntry = {
   how: string
   /** A builtin's server kinds: one of them in the vault is it set up. */
   serverKinds?: ServerKind[]
-  /**
-   * A common item's item; null when PCP's common items have none yet (the
-   * entry still says what it takes). A service whose image or source tag
-   * carries one of its `sources` is it set up.
-   */
+  /** A common item's item; null when PCP's common items have none yet. */
   item?: CommonItem | null
+  /**
+   * The image repositories that are it, by the last part of their name
+   * (imageName): a service the token sees that runs one is it set up,
+   * however it was launched.
+   */
+  images?: string[]
+  /**
+   * Set up only by the owner's choice on a settings page, never by a
+   * service that merely runs (search by meaning: Settings → Search).
+   */
+  setting?: "embeddings"
+  /** Only the owner sets it up: an assistant never proposes it. */
+  ownerOnly?: boolean
   /** The capability it provides, whose own search line says it first. */
   capability?: CapabilityId
 }
@@ -98,10 +107,13 @@ const BUNQ: CommonItem = {
   sources: ["bunq-mcp"],
 }
 
-/** How an assistant proposes a common item it may propose. */
-function proposeItem(name: string): string {
-  return `Propose it with register_server (kind service, on an SSH server the owner added) from PCP's common item services/${name}.yaml in kaperkunde/pcp-gg-common, or hand the owner the link to its page, where they launch it in one click.`
-}
+/**
+ * How an assistant goes about a common item: the owner's page, where they
+ * read it whole and launch it as it is. Never retyped into register_server:
+ * a copy could drift from the item (its digest, its sign-in, its files).
+ */
+const LAUNCH_ITEM =
+  'Hand the owner the link to its page in PCP, where they read it and launch it on their SSH server in one click ("I\'d launch it on your server; approve it here").'
 
 export const CATALOGUE: readonly CatalogueEntry[] = [
   {
@@ -144,7 +156,8 @@ export const CATALOGUE: readonly CatalogueEntry[] = [
     kind: "common_item",
     page: "/plugins/pdf_edit",
     label: "Set up PDF tools in PCP",
-    how: proposeItem(PDF_MCP.name),
+    how: LAUNCH_ITEM,
+    images: ["pdf-mcp-server", "pdf-mcp"],
     item: PDF_MCP,
     capability: "pdf_edit",
   },
@@ -168,7 +181,8 @@ export const CATALOGUE: readonly CatalogueEntry[] = [
     kind: "common_item",
     page: "/plugins/convert_document",
     label: "Set up document conversion in PCP",
-    how: proposeItem(DOCLING.name),
+    how: LAUNCH_ITEM,
+    images: ["docling-serve", "docling-serve-cpu", "docling-serve-cu124"],
     item: DOCLING,
     capability: "convert_document",
   },
@@ -188,7 +202,8 @@ export const CATALOGUE: readonly CatalogueEntry[] = [
     kind: "common_item",
     page: "/plugins/claude_sessions",
     label: "Set up Claude Code sessions in PCP",
-    how: proposeItem(CLAUDE_SESSIONS.name),
+    how: LAUNCH_ITEM,
+    images: ["claude-sessions-mcp"],
     item: CLAUDE_SESSIONS,
   },
   {
@@ -206,7 +221,8 @@ export const CATALOGUE: readonly CatalogueEntry[] = [
     kind: "common_item",
     page: "/plugins/embeddings",
     label: "Set up search by meaning in PCP",
-    how: proposeItem(EMBEDDINGS.name),
+    how: LAUNCH_ITEM,
+    setting: "embeddings",
     item: EMBEDDINGS,
   },
   {
@@ -227,8 +243,10 @@ export const CATALOGUE: readonly CatalogueEntry[] = [
     kind: "common_item",
     page: "/plugins/vpn_exit",
     label: "Set up a VPN exit in PCP",
-    how: "Only the owner launches an exit: hand them the link to its page.",
+    how: "Only the owner launches an exit: hand them the link to its page, where they read it and launch it.",
     item: GLUETUN,
+    images: ["gluetun"],
+    ownerOnly: true,
   },
   {
     id: "bunq",
@@ -240,7 +258,8 @@ export const CATALOGUE: readonly CatalogueEntry[] = [
     kind: "common_item",
     page: "/plugins/bunq",
     label: "Set up bunq in PCP",
-    how: proposeItem(BUNQ.name),
+    how: LAUNCH_ITEM,
+    images: ["bunq-mcp"],
     item: BUNQ,
   },
   {
@@ -309,13 +328,14 @@ export const CATALOGUE: readonly CatalogueEntry[] = [
     label: "Add an SSH server in PCP",
     how: "Only the owner adds one (register_server has no kind for it): hand them the link, then help with what runs there.",
     serverKinds: ["ssh"],
+    ownerOnly: true,
   },
   {
     id: "whisper",
     title: "Whisper transcription",
     does: "Turns speech in a recording (a voice memo, a meeting) into text.",
     takes:
-      "Not available as a common item yet: an SSH server you added to PCP with Docker or Podman on it, and a Whisper service an assistant writes the definition of for you to approve.",
+      "An SSH server you added to PCP with Docker or Podman on it, and a Whisper service an assistant writes the definition of for you to approve.",
     queryWords: [
       "whisper",
       "transcribe",
@@ -328,17 +348,35 @@ export const CATALOGUE: readonly CatalogueEntry[] = [
     label: "Set up transcription in PCP",
     how: "PCP's common items have none yet: propose a service with register_server (kind service) with a definition of your own, its image pinned by digest, on an SSH server the owner added; or an MCP server that transcribes, by its address.",
     item: null,
+    images: [
+      "openai-whisper-asr-webservice",
+      "whisper-asr-webservice",
+      "faster-whisper-server",
+      "speaches",
+      "whisper",
+    ],
   },
 ]
 
-/** The sources of an entry that is not one of PCP's common items yet. */
-const NOT_YET: Partial<Record<CatalogueId, string[]>> = {
-  whisper: ["whisper"],
+/**
+ * An image reference's repository name, its last path part without a tag
+ * or digest, in lower case: "ghcr.io/kaperkunde/pdf-mcp-server@sha256:…"
+ * is "pdf-mcp-server". Matched whole, so "gluetun-webui" is not "gluetun".
+ */
+export function imageName(image: string): string {
+  const bare = image.trim().toLowerCase().split("@")[0]!
+  const last = bare.split("/").at(-1) ?? ""
+
+  return last.split(":")[0] ?? ""
 }
 
-/** Words in a service's image or source tag that mark it as this entry. */
-export function entrySources(entry: CatalogueEntry): string[] {
-  return entry.item?.sources ?? NOT_YET[entry.id] ?? []
+/** The entries one of these images (or source tags) is, by its name. */
+export function entriesOfImages(images: string[]): CatalogueEntry[] {
+  const names = new Set(images.map(imageName).filter(Boolean))
+
+  return CATALOGUE.filter((entry) =>
+    (entry.images ?? []).some((name) => names.has(name)),
+  )
 }
 
 export function isCatalogueId(value: unknown): value is CatalogueId {
@@ -375,9 +413,22 @@ export function pluginEntry(id: string): CatalogueEntry | null {
 }
 
 /**
- * search's line for an entry the vault has not set up: what it does, what
+ * What a token limited to the servers the owner chose is told beside a
+ * "can set up" line: PCP may hold it already, out of this token's reach,
+ * and it does not know (nor say) which, so it asks before setting up
+ * another.
+ */
+export const LIMITED_TOKEN_NOTE =
+  "This token reaches only the servers the owner chose for it, so they may have this set up already: ask them whether to give this token access to it (on its page in PCP) before setting up another."
+
+/**
+ * search's line for an entry this token has not got: what it does, what
  * it takes and how, with the owner's page as a markdown link.
  */
-export function canSetUpLine(entry: CatalogueEntry, ownerLink: string): string {
-  return `can set up: ${entry.title} — ${entry.does} It takes: ${entry.takes} ${entry.how} The owner's page: ${ownerLink}`
+export function canSetUpLine(
+  entry: CatalogueEntry,
+  ownerLink: string,
+  { limited = false }: { limited?: boolean } = {},
+): string {
+  return `can set up: ${entry.title} — ${entry.does} It takes: ${entry.takes} ${entry.how}${limited ? ` ${LIMITED_TOKEN_NOTE}` : ""} The owner's page: ${ownerLink}`
 }

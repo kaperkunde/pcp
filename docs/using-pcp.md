@@ -22,12 +22,17 @@ How it knows: PCP keeps a short list of what it can set up (the browser, PDF
 tools, document conversion, Claude Code sessions, search by meaning, a VPN
 exit, bunq, mail accounts, calendar accounts and SSH servers; Whisper
 transcription is not a ready-made item yet). When the assistant searches with
-your words and you have not set one of them up, the answer says what it does,
-what it takes from you and how to go about it, with a link to its page in PCP
-(the common items' are under `/plugins/<name>`). The assistant then proposes it
-(a mail or calendar account, or a service from PCP's common items, each a
-request you approve), or hands you the link where only you can do it (installing
-the browser, adding an SSH server, a VPN exit). Its instructions say so too.
+your words and it has not got one of them, the answer says what it does, what
+it takes from you and how to go about it, with a link to its page in PCP (the
+common items' are under `/plugins/<name>`). For a mail or calendar account the
+assistant proposes it, a request you approve. For one of PCP's common items it
+hands you the link to its page, where you read it and launch it on your SSH
+server in one click ("I'd launch it on your server; approve it here"). Where
+only you can do it (installing the browser, adding an SSH server, a VPN exit) it
+hands you the link too. What counts as set up is what that assistant can reach:
+one you gave only some servers is told you may have it already, and asks
+whether to give it access rather than set up another. Search by meaning counts
+once you chose a provider on Settings → Search. Its instructions say so too.
 
 ## In PCP
 
