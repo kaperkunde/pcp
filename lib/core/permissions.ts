@@ -209,7 +209,11 @@ import {
   type SecretSitesShown,
   type SecretUseLevel,
 } from "./browser-secrets"
-import { checkPasswordRecipe, generatePassword } from "./generate-password"
+import {
+  checkPasswordRecipe,
+  describeRecipe,
+  generatePassword,
+} from "./generate-password"
 import {
   credentialUse,
   resolveSecretRef,
@@ -723,7 +727,14 @@ async function ownerFirst(
   // The browser needs the owner first: a site to allow, or a tab handed
   // over. Asked like any other request.
   if (isOwnerNeeded(error)) {
-    return withPermission({ ctx, tokenId, publicUrl }, error.ask)
+    const asked = await withPermission({ ctx, tokenId, publicUrl }, error.ask)
+
+    return error.note
+      ? {
+          ...asked,
+          content: [{ type: "text", text: error.note }, ...asked.content],
+        }
+      : asked
   }
 
   if (
@@ -1197,7 +1208,7 @@ async function reusedSecretLines(
   return [...named]
     .filter(([id]) => uses.has(id))
     .map(([id, name]) => {
-      const by = uses.get(id)!.map((use) => use.name)
+      const by = uses.get(id)!.uses.map((use) => use.name)
 
       return by.length > 0
         ? `Reuses your secret "${name}", already used by ${namesInWords(by)}: you do not enter it again`
@@ -1755,7 +1766,21 @@ async function toView(
               ? { ...decision, label: "Update it" }
               : decision,
           )
-        : decisionsFor(kind),
+        : kind === "secret_request" &&
+            (readArgs(ctx, row) as SecretRequestAsk).origins.length === 0
+          ? // No sites, so no uses to choose: it is saved, or not.
+            decisionsFor(kind)
+              .filter(
+                (decision) =>
+                  decision.value === "allow_once" ||
+                  decision.value === "decline",
+              )
+              .map((decision) =>
+                decision.value === "allow_once"
+                  ? { ...decision, label: "Save it" }
+                  : decision,
+              )
+          : decisionsFor(kind),
     connect:
       finished && row.server && needsConnecting(row.server)
         ? connectLinks(row.server, publicUrl)
@@ -1917,7 +1942,10 @@ type NewSecret = {
   defaultRecipe: PasswordRecipe
 }
 
-function newSecretOf(ctx: VaultContext, row: PermissionRequest): NewSecret | null {
+function newSecretOf(
+  ctx: VaultContext,
+  row: PermissionRequest,
+): NewSecret | null {
   if (row.kind === "secret_request") {
     const asked = readArgs(ctx, row) as SecretRequestAsk
 
@@ -2728,15 +2756,19 @@ export async function decidePermission(
   // A secret for the browser: its value (or one the owner added since) and
   // the sites, checked before anything is written, so a mistyped seed can
   // be typed again.
-  // Generate makes the value here, on PCP's machine: it is stored and never
-  // passes through the page or the assistant.
+  // "Have PCP make it" makes the value here, on PCP's machine, for any
+  // request that names a new secret: it is stored and never passes through
+  // the page, the assistant, the request's arguments or its outcome.
   let typedValue = secretValue
 
-  if (
-    kind === "secret_request" &&
-    generate !== undefined &&
-    generate !== null
-  ) {
+  if (newSecret && generate !== undefined && generate !== null) {
+    if (newSecret.kind === "totp") {
+      return text(
+        "One-time codes come from the site's seed: PCP does not make one.",
+        true,
+      )
+    }
+
     try {
       typedValue = generatePassword(checkPasswordRecipe(generate))
     } catch (error) {
@@ -2772,12 +2804,12 @@ export async function decidePermission(
     }
   } else if (newSecret) {
     const problem =
-      secretValue ||
+      typedValue ||
       !(
         newSecret.optional ||
         (await resolveSecretRef(ctx, newSecret.name, newSecret.use))
       )
-        ? validateSecretValue(secretValue ?? "")
+        ? validateSecretValue(typedValue ?? "")
         : null
 
     if (problem) {
@@ -2880,7 +2912,7 @@ export async function decidePermission(
                     readArgs(ctx, row) as WrapperChangeAsk,
                     {
                       tokenId: row.tokenId,
-                      ...(secretValue ? { secretValue } : {}),
+                      ...(typedValue ? { secretValue: typedValue } : {}),
                       access: chosenAccess,
                     },
                   ),
@@ -2924,7 +2956,9 @@ export async function decidePermission(
                             readArgs(ctx, row) as ServiceChangeAsk,
                             {
                               tokenId: row.tokenId,
-                              ...(secretValue ? { secretValue } : {}),
+                              ...(typedValue
+                                ? { secretValue: typedValue }
+                                : {}),
                               access: chosenAccess,
                               launch: (launchCtx, input) =>
                                 (executor.launchService ?? launchService)(
@@ -3009,7 +3043,7 @@ export async function decidePermission(
                                               row,
                                               publicUrl,
                                               executor,
-                                              secretValue,
+                                              typedValue,
                                               allowPrivate === true,
                                               chosenAccess,
                                               chosenLimits,
@@ -3026,6 +3060,26 @@ export async function decidePermission(
       isPcpError(error) ? error.message : "Something went wrong inside PCP.",
       true,
     )
+  }
+
+  // A value PCP made for a new secret (not request_secret's, whose answer
+  // says so itself): the assistant learns that it exists, never what it is.
+  if (
+    newSecret &&
+    kind !== "secret_request" &&
+    typedValue !== secretValue &&
+    result.isError !== true
+  ) {
+    result = {
+      ...result,
+      content: [
+        ...result.content,
+        {
+          type: "text",
+          text: `PCP made the value of the new secret "${newSecret.name}" itself (${describeRecipe(checkPasswordRecipe(generate))}); the owner can see it under Secrets. You never get it.`,
+        },
+      ],
+    }
   }
 
   // A call that reached an unconnected server did not run; a new server that

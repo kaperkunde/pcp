@@ -66,6 +66,7 @@ const OWN_TOOLS = [
   "update_endpoint",
   "get_endpoint",
   "list_secrets",
+  "request_secret",
   "get_wrapper",
   "create_wrapper",
   "update_wrapper",
@@ -118,6 +119,7 @@ const PROPOSALS = [
   "register_server",
   "propose_tool_access",
   "propose_server_limits",
+  "request_secret",
   "create_wrapper",
   "update_wrapper",
   "delete_wrapper",
@@ -269,6 +271,7 @@ describe("PCP's own tools", () => {
         "read_image",
         "receive_file",
         "register_server",
+        "request_secret",
         "share_result",
         "update_endpoint",
         "update_wrapper",
@@ -304,6 +307,7 @@ describe("PCP's own tools", () => {
       "check_upload",
       "propose_tool_access",
       "propose_server_limits",
+      "request_secret",
       "update_endpoint",
       "create_wrapper",
       "update_wrapper",
@@ -327,7 +331,7 @@ describe("PCP's own tools", () => {
       const first = tool.description!.slice(0, 25)
 
       expect(first, tool.name).toMatch(
-        /^(Check first: |(Search|List|Get|Execute|Run|Check|Withdraw|Read|Share|Receive|Propose|Change|Fetch|Save|Edit|Convert|Find|Make|Move|Delete|View) )/,
+        /^(Check first: |(Search|List|Get|Execute|Run|Check|Withdraw|Read|Share|Receive|Request|Propose|Change|Fetch|Save|Edit|Convert|Find|Make|Move|Delete|View) )/,
       )
       // A verb and an object, not a verb alone.
       expect(first.trim().split(/\s+/).length, tool.name).toBeGreaterThan(2)
@@ -357,6 +361,7 @@ describe("PCP's own tools", () => {
       check_upload: /upload/,
       register_server: /server/,
       list_secrets: /secret/,
+      request_secret: /^Request a new secret/,
       get_endpoint: /endpoint/,
       get_wrapper: /wrapper/,
       create_wrapper: /wrapper/,

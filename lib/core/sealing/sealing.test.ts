@@ -187,7 +187,9 @@ describe("secrets", () => {
       id,
     )
 
-    expect(await resolveSecretRef(ctx, "Old mail", { kind: "browser_type" })).toMatchObject({ id })
+    expect(
+      await resolveSecretRef(ctx, "Old mail", { kind: "browser_type" }),
+    ).toMatchObject({ id })
     await expect(
       createSecret(ctx, { name: "Old mail", value: "c" }),
     ).rejects.toThrow(/already exists/)
@@ -195,7 +197,9 @@ describe("secrets", () => {
     expect(await ensureSealed(ctx)).toBe(true)
 
     expect(await onDisk("From before")).toBe(false)
-    expect(await resolveSecretRef(ctx, "Old mail", { kind: "browser_type" })).toMatchObject({ id })
+    expect(
+      await resolveSecretRef(ctx, "Old mail", { kind: "browser_type" }),
+    ).toMatchObject({ id })
     expect(await listSecrets(ctx)).toMatchObject([
       { id, name: "Old mail", description: "From before" },
     ])

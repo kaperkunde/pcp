@@ -695,9 +695,7 @@ describe("one-time codes", () => {
   it("never go out as a server's secret", async () => {
     await createSecret(ctx, { name: "Codes", value: SEED, kind: "totp" })
     const { resolveSecretRef } = await import("./secret-refs")
-    expect(
-      await resolveSecretRef(ctx, "Codes", { kind: "header" }),
-    ).toBeNull()
+    expect(await resolveSecretRef(ctx, "Codes", { kind: "header" })).toBeNull()
   })
 })
 

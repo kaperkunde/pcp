@@ -1,5 +1,9 @@
 import { z } from "zod"
 
+import { checkSecretRequest } from "./browser-secrets"
+import type { SecretRequestAsk } from "./browser/types"
+import type { VaultContext } from "./context"
+import { isPcpError } from "./errors"
 import {
   MAX_GENERATE_EXCLUDE,
   MAX_GENERATED_LENGTH,
@@ -60,4 +64,45 @@ export function recipeArg(what: string) {
         ),
     })
     .describe(what)
+}
+
+/** request_secret's arguments, as PCP's own tool takes them. */
+export type SecretRequestArgs = {
+  name: string
+  purpose: string
+  kind?: "text" | "totp"
+  username?: string
+  origins?: string[]
+  generate?: unknown
+}
+
+/**
+ * PCP's own request_secret (#162): the owner is asked to store a secret on
+ * PCP's page, typed in or made by PCP there, its sites optional. The
+ * browser's request_secret, an alias for one release, asks the same
+ * (browser/call.ts). Checked before the owner is asked; a refusal is the
+ * assistant's to fix, said in words.
+ */
+export async function prepareSecretRequest(
+  ctx: VaultContext,
+  args: SecretRequestArgs,
+): Promise<{ ask: SecretRequestAsk } | { refused: string }> {
+  try {
+    return {
+      ask: await checkSecretRequest(ctx, null, {
+        name: args.name,
+        purpose: args.purpose,
+        ...(args.origins ? { origins: args.origins } : {}),
+        ...(args.kind ? { kind: args.kind } : {}),
+        ...(args.username !== undefined ? { username: args.username } : {}),
+        ...(args.generate !== undefined ? { generate: args.generate } : {}),
+      }),
+    }
+  } catch (error) {
+    if (isPcpError(error)) {
+      return { refused: error.message }
+    }
+
+    throw error
+  }
 }

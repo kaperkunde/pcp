@@ -1469,7 +1469,7 @@ describe("a running service", { timeout: 30_000 }, () => {
     const secret = await db().secret.findFirstOrThrow({
       where: secretNameWhere(ctx, "docs-key"),
     })
-    const uses = (await secretUses(ctx)).get(secret.id) ?? []
+    const uses = (await secretUses(ctx)).get(secret.id)?.uses ?? []
     expect(uses.map((use) => use.kind).sort()).toEqual([
       "API endpoint",
       "service",

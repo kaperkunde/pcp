@@ -3759,7 +3759,12 @@ async function runTool(
         throw error
       }
 
-      throw new OwnerNeeded({ kind: "secret_request", input })
+      // An alias of PCP's own request_secret for one release
+      // (docs/breaking-changes.md): the same request, with the new name.
+      throw new OwnerNeeded(
+        { kind: "secret_request", input },
+        "The browser's request_secret is now PCP's own request_secret, run through execute_write: call that from now on, as this one goes in the next release. It takes the same arguments, and sites are optional there.",
+      )
     }
     case "update_secret_sites": {
       let input

@@ -126,7 +126,10 @@ export function describeSecretRequestAsk(ask: SecretRequestAsk): {
   warning: string | null
 } {
   return {
-    title: `Store "${ask.name}" for the browser to type?`,
+    title:
+      ask.origins.length > 0
+        ? `Store "${ask.name}" for the browser to type?`
+        : `Store the secret "${ask.name}"?`,
     lines: [
       `It says: ${ask.purpose}`,
       ask.kind === "totp"
@@ -138,10 +141,14 @@ export function describeSecretRequestAsk(ask: SecretRequestAsk): {
             `It asks PCP to make a new password: ${describeRecipe(ask.generate)}. Nobody sees it but you, on the Secrets page.`,
           ]
         : []),
-      `Sites: ${ask.origins.join(", ")}`,
+      ask.origins.length > 0
+        ? `Sites: ${ask.origins.join(", ")}`
+        : "No sites: the browser does not type it. It is sent only where you later name it: a server, a service or a wrapper you approve.",
     ],
     warning:
-      "Type the value here, on PCP's page, never in the conversation. The assistant gets the secret's name only, and PCP types it only at the sites you leave in.",
+      ask.origins.length > 0
+        ? "Type the value here, on PCP's page, never in the conversation. The assistant gets the secret's name only, and PCP types it only at the sites you leave in."
+        : "Type the value here, on PCP's page, never in the conversation, or have PCP make it. The assistant gets the secret's name only.",
   }
 }
 

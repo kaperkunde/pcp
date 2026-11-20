@@ -237,7 +237,16 @@ import {
 } from "./secret-uses"
 import { validateSecretName } from "./secrets"
 import { credentialUse, resolveSecretRef } from "./secret-refs"
-import { recipeArg } from "./secret-request"
+import {
+  prepareSecretRequest,
+  recipeArg,
+  type SecretRequestArgs,
+} from "./secret-request"
+import {
+  MAX_SECRET_PURPOSE_CHARS,
+  MAX_SECRET_REQUEST_ORIGINS,
+  MAX_URL_LENGTH,
+} from "./browser/limits"
 import { checkPasswordRecipe } from "./generate-password"
 import {
   isStorageKind,
@@ -4445,6 +4454,77 @@ export function buildGatewayServer(
       }
 
       return asked({ kind: "limits_change", input: ask })
+    },
+  })
+
+  // A secret the owner stores on PCP's page, typed in or made by PCP there
+  // (#162; the browser's request_secret is its alias for one release).
+  register({
+    name: "request_secret",
+    title: "Ask the owner for a secret",
+    description: `Request a new secret from the owner: a password, an API key or token, or a sign-in's one-time codes, stored on PCP's page so its value never passes through you or the conversation. They type it in, or have PCP make it (generate: a password, or a token of letters and digits, hex or base64url, for a key a server or service is to be given), and check the login name and the sites. origins, optional, are the sites the browser may type it at; with none it is sent only where the owner later names it (register_server's secret or env_secrets, a wrapper's secrets). Answers "Not done yet" with a link. ${OWNER_LINK_RULE} ${nextMessageCheck("check_permission with the id it gave")} Never ask for the value in the conversation. A name PCP already holds is refused: name that one instead.`,
+    input: z
+      .object({
+        name: z
+          .string()
+          .min(1)
+          .max(100)
+          .describe(
+            "The secret's name, as the owner sees it under Secrets: Example password, Docling API key.",
+          ),
+        purpose: z
+          .string()
+          .min(1)
+          .max(MAX_SECRET_PURPOSE_CHARS)
+          .describe("What it is for, in a sentence, for the owner."),
+        kind: z
+          .enum(["text", "totp"])
+          .optional()
+          .describe(
+            "text (the default): a password, key or token. totp: a sign-in's one-time codes, from the seed the site showed (base32 or an otpauth:// link), typed by the browser only, so it needs origins.",
+          ),
+        username: z
+          .string()
+          .min(1)
+          .max(200)
+          .optional()
+          .describe(
+            'The login name (user name or email address) it goes with, kept with the secret for the owner to check: the browser types it with {"$secret": name, "part": "username"}. Not for totp.',
+          ),
+        origins: z
+          .array(z.string().min(1).max(MAX_URL_LENGTH))
+          .max(MAX_SECRET_REQUEST_ORIGINS)
+          .optional()
+          .describe(
+            "The sites the browser may type it at, like https://example.com (an address there will do). Leave out for a secret only a server, service or wrapper is sent.",
+          ),
+        generate: recipeArg(
+          "Ask PCP to make the value rather than the owner typing one: a password for a sign-up or a password change, or a token (format alphanumeric, hex or base64url) for a key a server or service is to be set up with. Made on PCP's machine and stored at once; the owner can change the recipe on the page and see the value under Secrets, and you never get it. Not for totp.",
+        ).optional(),
+      })
+      .meta({
+        allOf: [
+          {
+            if: { properties: { kind: { const: "totp" } }, required: ["kind"] },
+            then: {
+              required: ["origins"],
+              not: {
+                anyOf: [{ required: ["username"] }, { required: ["generate"] }],
+              },
+            },
+          },
+        ],
+      }),
+    output: NEEDS_OWNER,
+    annotations: PROPOSES,
+    async run(args: SecretRequestArgs) {
+      const prepared = await prepareSecretRequest(scope.ctx, args)
+
+      if ("refused" in prepared) {
+        return failure(prepared.refused)
+      }
+
+      return asked({ kind: "secret_request", input: prepared.ask })
     },
   })
 

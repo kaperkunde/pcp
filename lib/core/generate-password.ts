@@ -217,8 +217,7 @@ const TOKEN_ALPHABETS: Record<Exclude<SecretFormat, "password">, string> = {
   alphanumeric:
     "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789",
   hex: "0123456789abcdef",
-  base64url:
-    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_",
+  base64url: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_",
 }
 
 /** A token format's characters, without the ones left out. */

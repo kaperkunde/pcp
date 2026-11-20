@@ -1029,17 +1029,20 @@ export async function admitSecretUse(
 
 /**
  * request_secret's arguments, checked before the owner is asked: a name
- * PCP holds already is refused (the browser types that one; nothing an
- * assistant asks for writes over it), and so is a purpose with characters
- * that do not show on screen.
+ * PCP holds already is refused (nothing an assistant asks for writes over
+ * it), and so is a purpose with characters that do not show on screen.
+ * Sites are optional: a secret with none is not typed by the browser, only
+ * sent where the owner later names it (a server, a service, a wrapper).
+ * `serverId` is the browser whose request_secret asked (the alias), or null
+ * for PCP's own tool.
  */
 export async function checkSecretRequest(
   ctx: VaultContext,
-  serverId: string,
+  serverId: string | null,
   args: {
     name: string
     purpose: string
-    origins: string[]
+    origins?: string[]
     kind?: string
     username?: string
     generate?: unknown
@@ -1069,13 +1072,14 @@ export async function checkSecretRequest(
     throw invalid(`Keep the purpose under ${MAX_SECRET_PURPOSE} characters.`)
   }
 
-  const origins = parseOrigins(args.origins)
-
-  if (origins.length === 0) {
-    throw invalid("Name the sites the secret is typed at, in origins.")
-  }
-
+  const origins = parseOrigins(args.origins ?? [])
   const kind = args.kind === "totp" ? "totp" : "text"
+
+  if (kind === "totp" && origins.length === 0) {
+    throw invalid(
+      "One-time codes are typed by the browser only: name the sites they are typed at, in origins.",
+    )
+  }
 
   if (kind === "totp" && (args.username || args.generate)) {
     throw invalid(
@@ -1096,8 +1100,8 @@ export async function checkSecretRequest(
     throw new PcpError(
       "conflict",
       isOwnerSecretKind(existing.kind)
-        ? `The owner already has a secret called "${name}", and PCP never writes over one: type it with text {"$secret": "${name}"}. Its first use at a site where this token may not type it yet asks the owner.`
-        : `There is a secret called "${name}" already, and the browser does not type it. Choose another name.`,
+        ? `The owner already has a secret called "${name}", and PCP never writes over one: name it where a secret is taken (register_server's secret, env_secrets), or type it with text {"$secret": "${name}"}. Its first use at a site where this token may not type it yet asks the owner.`
+        : `There is a secret called "${name}" already, which PCP keeps for one of the owner's servers. Choose another name.`,
     )
   }
 
@@ -1139,7 +1143,7 @@ export async function checkSecretAnswer(
     throw error
   }
 
-  if (parsed.length === 0) {
+  if (parsed.length === 0 && ask.origins.length > 0) {
     return "Leave at least one site where the secret is typed."
   }
 
@@ -1201,7 +1205,7 @@ export async function applySecretRequest(
 ): Promise<string> {
   const origins = parseOrigins(chosen ?? ask.origins)
 
-  if (origins.length === 0) {
+  if (origins.length === 0 && ask.origins.length > 0) {
     throw invalid("Leave at least one site where the secret is typed.")
   }
 
@@ -1238,6 +1242,14 @@ export async function applySecretRequest(
     await grantSecretUse(ctx, { tokenId, secretId: secret.id, origin, level })
   }
 
+  if (origins.length === 0) {
+    return `The owner saved the secret "${secret.name}". It has no sites, so the browser does not type it: name it where a secret is taken (register_server's secret or env_secrets, a wrapper's secrets), which the owner approves. You never see its value.${generated ? " PCP made its value itself; the owner can see it on the Secrets page." : ""}`
+  }
+
+  const made = generated
+    ? " PCP made its value itself (a new password, which the owner can see on the Secrets page); use it where the site asks for a new password."
+    : ""
+
   const where = origins.join(", ")
   const uses =
     level === "always"
@@ -1246,9 +1258,6 @@ export async function applySecretRequest(
         ? "This token may have it typed there for the next hour; after that each use asks the owner."
         : "This token may have it typed there once; after that each use asks the owner."
 
-  const made = generated
-    ? " PCP made its value itself (a new password, which the owner can see on the Secrets page); use it where the site asks for a new password."
-    : ""
   const withLogin = login
     ? ` Its login name, ${login}, is kept with it: type that with {"$secret": "${secret.name}", "part": "username"}.`
     : ""

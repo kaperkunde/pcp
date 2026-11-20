@@ -187,7 +187,9 @@ function SecretRow({
                 ? "SSH key"
                 : secret.kind === "proxy_password"
                   ? "Proxy password"
-                  : "OAuth tokens"}
+                  : secret.kind === "generated"
+                    ? "Made by PCP"
+                    : "OAuth tokens"}
             </Badge>
           ) : null}
           {totp ? <Badge variant="secondary">One-time codes</Badge> : null}

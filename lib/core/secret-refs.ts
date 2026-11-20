@@ -1,10 +1,6 @@
 import type { VaultContext } from "./context"
 import { db } from "./db"
-import {
-  SECRET_META_SELECT,
-  secretName,
-  secretNameWhere,
-} from "./secret-meta"
+import { SECRET_META_SELECT, secretName, secretNameWhere } from "./secret-meta"
 import type { OwnerSecretKind } from "./secrets"
 
 /**

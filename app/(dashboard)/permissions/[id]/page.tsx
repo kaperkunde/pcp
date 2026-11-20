@@ -479,7 +479,16 @@ function PendingNote({ view }: { view: PermissionView }) {
         </p>
       )
     case "secret_request":
-      return (
+      return view.secretToEnter?.origins?.length === 0 ? (
+        <p className={note}>
+          Saving stores the secret under{" "}
+          <Link href="/secrets" className="underline">
+            Secrets
+          </Link>
+          , with no sites: the browser does not type it, and it is sent only
+          where you name it later, on a server, service or wrapper you approve.
+        </p>
+      ) : (
         <p className={note}>
           Saving stores the secret under{" "}
           <Link href="/secrets" className="underline">
