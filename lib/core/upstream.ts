@@ -114,6 +114,7 @@ import { SIGNIN_CALL_TIMEOUT_MS } from "./services/limits"
 import {
   checkSigninCode,
   finishProblem,
+  signinTools,
   readSignin,
   scrubCode,
   signinTarget,
@@ -176,6 +177,7 @@ import {
 import { noteExitUsed, noteSecretTyped } from "./request-log"
 import { resolveHandles } from "./result-handles"
 import type { BytesKeeper, ResultKeeper, ResultOpener } from "./tool-results"
+import { TOOL_NAME_SELECT, toolName } from "./tool-rows"
 import { isToolName } from "./tools/define"
 import { familyError } from "./tools/family"
 import {
@@ -3283,6 +3285,25 @@ export async function launchService(
 
     if (sync.status !== "ok") {
       message += ` PCP could not read its tools yet: ${sync.message}`
+    }
+  }
+
+  // Its sign-in calls tools of what it registered: say so when one is not
+  // there, rather than on the owner's sign-in page later.
+  const signin = prepared.definition.signin
+
+  if (signin && result.registeredId) {
+    const served = await db().mcpTool.findMany({
+      where: { serverId: result.registeredId },
+      select: TOOL_NAME_SELECT,
+    })
+    const names = new Set(served.map((tool) => toolName(ctx, tool)))
+    const missing = signinTools(signin).filter((name) => !names.has(name))
+
+    if (served.length > 0 && missing.length > 0) {
+      message += ` Its sign-in names ${missing.join(", ")}, which it does not serve: signing in to its account will not work until its definition names its own tools.`
+    } else if (missing.length === 0) {
+      message += " Sign in to its account on its page to use it."
     }
   }
 

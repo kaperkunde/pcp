@@ -1633,6 +1633,59 @@ With `definition` it is another of a service definition the token sees,
 its own part only, launched while `definitionBasis` holds. A definition
 with a `build` is refused: a build is the owner's alone.
 
+**A value PCP makes** (`generated` on a variable, format 6,
+`services/generated.ts`): at launch, `upstream.ts launchService` makes a
+random value for each generated variable the owner bound no secret to
+(`generate-password.ts`, letters and digits, 40 by default, or the
+definition's length and symbols), keeps it as a text secret named after
+the service and binds it as if the owner had chosen it, so it reaches the
+container over standard input and is what the server it registers sends
+when the variable is its header's (`registers.auth`). Nobody types it; a
+launch that fails takes it back; a settings save that leaves the variable
+to PCP keeps it; changing it on the Secrets page remakes the service, as
+for any secret it takes. (The secrets' own `createGeneratedSecret`, once
+there, takes the place of the helper.)
+
+**Connecting an account** (`signin`, format 6, `services/signin.ts`): a
+service that works under an account of the owner's (an app signed in as
+them) names the three tools of the server it registers that sign it in:
+`status` (a true or false field, and who), `start` (a field with the
+provider's address, and when the sign-in ends) and `finish` (the argument
+the pasted code goes in), style `paste_code`. Signing in is then PCP's
+own step, not a wrapper, a blocked tool and a secret the owner makes up:
+
+- The owner's page `/servers/<id>/sign-in` (either the service's id or its
+  server's) reads the status, starts a sign-in when it is signed out (and
+  again by itself once the start's time has passed), shows the provider's
+  address with its host plainly (`checkSigninUrl`: https only, no user
+  name or password in it, within `MAX_SIGNIN_URL_CHARS`: it is the
+  service's text), and takes the code. Its server action
+  (`lib/actions/service-sign-in.ts`) hands the code to
+  `upstream.ts finishServiceSignin`, which checks it (one line, within
+  `MAX_SIGNIN_CODE_CHARS`) before anything is sent, puts it in the finish
+  tool's arguments for that one call through `callServerTool` (paced and
+  through the service's tunnel), scrubs it from the answer's error and
+  anything thrown, and reads the status. The code is never stored or in an
+  answer, and the page's calls are the owner's own: no token's levels
+  apply (so the finish tool's level for tokens can stay blocked) and the
+  request log, a token's calls, has no line for them.
+- An assistant calls `connect_account` (Write: it starts what the owner
+  finishes) with the service or its server: signed in, it says as whom;
+  signed out, `needs_owner` reason `signin`, `signin: {serverId, slug,
+name, pageUrl}`, the page's link last labelled "Sign in to <name> in
+  PCP", and check_server to call on the owner's next message, which reads
+  the status (waiting up to its usual time while it is still signed out,
+  `SIGNIN_POLL_MS` apart) and says who is signed in, or hands the link
+  again.
+- A call to the server that comes back an error is checked against the
+  status (`signinOffer`, in `permissions.ts runCall`, so execute and a
+  call the owner allowed alike): signed out, the answer is the same
+  `signin` link, with what the service said, so signing in again is
+  offered by itself. The sign-in's own tools are left as they answered.
+- The launch says which of the three tools the server it registered does
+  not serve, if any; the launch form, the launch request, a repository's
+  review and the service's page (an Account row) show the sign-in.
+
 The test engine (`services/fake-docker.ts`) is a Node program on the PATH of
 a real sh that the test SSH server runs each command in, recording the
 words it got and the env file it read; it keeps named volumes (as folders

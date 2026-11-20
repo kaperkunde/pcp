@@ -297,7 +297,10 @@ so in the summary; the bump itself waits for the request.
   (snake_case, as `create_wrapper` takes it); only one that has a pace is
   written as format 5 (`wrapperFormat`), an older-format one naming it is
   refused, and a pace change is never `textOnly` (its review flags it, and
-  says where it goes past the owner's bounds). PCP's common items,
+  says where it goes past the owner's bounds). Format 6 adds a service's
+  `signin` and a variable's `generated`; only a service document that has
+  either is written as format 6 (`serviceFormat`), and an older-format one
+  naming either is refused. PCP's common items,
   `kaperkunde/pcp-gg-common` (`repos/common.ts`), are offered in one click,
   linked read-only and untrusted (pinned imports), read without a sign-in.
   A push is one commit per item, fast-forward only, and
@@ -567,7 +570,18 @@ storageConnect`), never in the background, and SFTP for nothing else;
   it made, `removeContainer` reporting what the engine would not remove, the
   container's first and last lines in the error; a secret the owner typed
   for it is kept and the error names it. A failed remake marks the service
-  failed and says that Start makes it again. Limits go in
+  failed and says that Start makes it again. A variable marked `generated`
+  gets a random value at launch (`services/generated.ts`), a secret bound
+  like one the owner chose, kept when a settings save leaves it to PCP. A
+  definition's `signin` (`services/signin.ts`) is PCP's own sign-in step:
+  `/servers/<id>/sign-in`, the owner's page, calls its start tool (an
+  https address only, its host shown), then its finish tool with the code
+  the owner pastes, from `upstream.ts finishServiceSignin`: never stored,
+  in no request-log line or answer, scrubbed from errors; no token's levels
+  apply to the page's calls. An assistant gets `connect_account` (Write)
+  and, when a call fails while the status says signed out, the same
+  `needs_owner` reason `signin` with the page's link last and check_server
+  on the next message. Limits go in
   `services/limits.ts`; a new command, tool or argument gets a test against
   the fake engine (`services/fake-docker.ts`, `services.test.ts`).
 - Capabilities (`lib/core/capabilities/`): `read_image`, `edit_pdf` and

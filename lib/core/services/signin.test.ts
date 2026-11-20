@@ -250,7 +250,9 @@ const SESSIONS: ServiceDefinitionInput = {
 }
 
 /** The sessions service, launched on a pinned SSH server: its server's id. */
-async function launched(): Promise<{ serviceId: string; serverId: string }> {
+async function launched(
+  definition: ServiceDefinitionInput = SESSIONS,
+): Promise<{ serviceId: string; serverId: string; message: string }> {
   const { id: hostId } = await createSshServer(ctx, {
     name: "Build box",
     host: "127.0.0.1",
@@ -267,7 +269,7 @@ async function launched(): Promise<{ serviceId: string; serverId: string }> {
     {
       name: "Claude sessions",
       hostId,
-      definition: SESSIONS,
+      definition,
       publish: {
         address: "127.0.0.1",
         ports: [{ container: 8080, host: httpPort }],
@@ -277,7 +279,11 @@ async function launched(): Promise<{ serviceId: string; serverId: string }> {
     FAST,
   )
 
-  return { serviceId: service.id, serverId: service.registeredId! }
+  return {
+    serviceId: service.id,
+    serverId: service.registeredId!,
+    message: service.message,
+  }
 }
 
 /** Every file under PCP's data folder (database, log), read as text. */
@@ -349,6 +355,25 @@ describe("the owner's sign-in page", { timeout: 30_000 }, () => {
     expect(token.id).toBeTruthy()
     expect(new Set(seen.map((each) => each.authorization)).size).toBe(1)
     expect(seen[0]!.authorization).toMatch(/^Bearer [A-Za-z0-9]{40}$/)
+  })
+
+  it("says at launch to sign in, or which sign-in tool the server does not serve", async () => {
+    expect((await launched()).message).toContain(
+      "Sign in to its account on its page to use it.",
+    )
+  })
+
+  it("names a sign-in tool the server does not serve at launch", async () => {
+    const { message } = await launched({
+      ...SESSIONS,
+      signin: {
+        ...SESSIONS.signin!,
+        finish: { tool: "login_complete", argument: "code" },
+      },
+    })
+    expect(message).toContain(
+      "Its sign-in names login_complete, which it does not serve",
+    )
   })
 
   it("never keeps the code: not in the database, the request log, an answer or an error", async () => {
