@@ -3,6 +3,7 @@ import { existsSync, readFileSync } from "node:fs"
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
 
 import { scratchDatabase } from "../test-db"
+import { PCP_VERSION } from "../version"
 import { setupVault } from "../vault"
 import { installSignalFile } from "./host-signal"
 import {
@@ -19,6 +20,7 @@ import {
   clearFinishedInstall,
   defaultChannel,
   INSTALL_REQUEST_FRESH_MS,
+  lastInstallState,
   pendingInstallRequest,
   requestInstall,
   getUpdateConfig,
@@ -129,7 +131,15 @@ describe("the develop channel", () => {
     const request = await requestInstall(NOW)
 
     await setUpdateChannel("develop")
-    expect(await getUpdateStatus()).toEqual({ installRequest: request })
+    expect(await getUpdateStatus()).toEqual({
+      installRequest: request,
+      lastInstall: {
+        id: request.id,
+        at: request.at,
+        from: PCP_VERSION,
+        to: "999.0.0",
+      },
+    })
     expect(await availableUpdate()).toBeNull()
 
     // Picking the channel it already follows changes nothing.
@@ -288,6 +298,54 @@ describe("an install request for the desktop app", () => {
     })
     await clearFinishedInstall(later(60_000))
     expect((await getUpdateStatus()).installRequest).toBeUndefined()
+  })
+
+  it("is remembered as the last install past the restart, finished once its version runs", async () => {
+    setUpdateFetch(answer("v999.0.0"))
+    await checkNow()
+    const request = await requestInstall(NOW)
+    const last = {
+      id: request.id,
+      at: request.at,
+      from: PCP_VERSION,
+      to: "999.0.0",
+    }
+
+    expect((await getUpdateStatus()).lastInstall).toEqual(last)
+    expect(lastInstallState(await getUpdateStatus(), later(60_000))).toEqual({
+      ...last,
+      state: "installing",
+    })
+
+    // The restart: the request is let go of, the record stays.
+    await clearFinishedInstall(later(INSTALL_REQUEST_FRESH_MS + 1))
+    const status = await getUpdateStatus()
+    expect(status.installRequest).toBeUndefined()
+    expect(status.lastInstall).toEqual(last)
+
+    // Still this version once the request is old: it did not finish.
+    expect(
+      lastInstallState(status, later(INSTALL_REQUEST_FRESH_MS + 1))?.state,
+    ).toBe("not_finished")
+    // The version it asked for runs: finished, whenever it is read.
+    expect(
+      lastInstallState(status, later(24 * 60 * 60_000), "999.0.0")?.state,
+    ).toBe("finished")
+    expect(lastInstallState({}, NOW)).toBeNull()
+  })
+
+  it("installs only the version the owner was shown, while it is the newest", async () => {
+    setUpdateFetch(answer("v999.0.0"))
+    await checkNow()
+
+    await expect(requestInstall(NOW, { version: "998.0.0" })).rejects.toThrow(
+      /v998\.0\.0 is no longer the newest version PCP knows of \(v999\.0\.0 is\)/,
+    )
+    expect((await getUpdateStatus()).installRequest).toBeUndefined()
+    expect((await getUpdateStatus()).lastInstall).toBeUndefined()
+
+    const request = await requestInstall(NOW, { version: "999.0.0" })
+    expect(request.version).toBe("999.0.0")
   })
 
   it("is left in the data folder for the installer only when asked", async () => {

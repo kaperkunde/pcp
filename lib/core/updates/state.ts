@@ -1,8 +1,8 @@
 import { randomUUID } from "node:crypto"
 
-import { invalid } from "../errors"
+import { invalid, PcpError } from "../errors"
 import { getHostJson, setHostJson } from "../host-settings"
-import { PCP_VERSION } from "../version"
+import { PCP_BUILT_AT, PCP_COMMIT, PCP_VERSION } from "../version"
 import { removeInstallSignal, writeInstallSignal } from "./host-signal"
 import {
   isUpdateChannel,
@@ -51,7 +51,16 @@ export type UpdateStatus = {
    * install `version` (desktop/updates.mjs, install.sh).
    */
   installRequest?: { id: string; at: string; version: string }
+  /**
+   * The last install asked for, from which version to which: kept past the
+   * restart that answers it (clearFinishedInstall lets go of
+   * `installRequest` only), so whether it finished can be told after,
+   * by the version that runs then (`lastInstallState`).
+   */
+  lastInstall?: LastInstall
 }
+
+export type LastInstall = { id: string; at: string; from: string; to: string }
 
 /**
  * The channel when the owner has not picked one: the one this PCP came from,
@@ -123,6 +132,9 @@ export type UpdatesOverview = {
   downloads: string
   /** An install the owner asked for, while it is fresh. */
   installRequest: { id: string; at: string; version: string } | null
+  /** The commit this build was made from and when, where it says (version.ts). */
+  commit: string | null
+  builtAt: string | null
 }
 
 type InstallRequest = NonNullable<UpdateStatus["installRequest"]>
@@ -157,13 +169,33 @@ export async function requestInstall(
   {
     signalHost = false,
     signalChannel,
-  }: { signalHost?: boolean; signalChannel?: UpdateChannel } = {},
+    version,
+  }: {
+    signalHost?: boolean
+    signalChannel?: UpdateChannel
+    /**
+     * The version the owner was shown (update_pcp's request): installed only
+     * while it is still the newest PCP knows of.
+     */
+    version?: string
+  } = {},
 ): Promise<InstallRequest> {
   const status = await getUpdateStatus()
   const release = newerRelease(status)
 
   if (!release) {
-    throw invalid("There is no newer version to install. Check now first.")
+    throw invalid(
+      version
+        ? `v${version} is not newer than this PCP, v${PCP_VERSION}, any more, so nothing was installed.`
+        : "There is no newer version to install. Check now first.",
+    )
+  }
+
+  if (version !== undefined && release.version !== version) {
+    throw new PcpError(
+      "state",
+      `v${version} is no longer the newest version PCP knows of (v${release.version} is), so nothing was installed. Ask again for v${release.version}.`,
+    )
   }
 
   const request = {
@@ -171,7 +203,16 @@ export async function requestInstall(
     at: now.toISOString(),
     version: release.version,
   }
-  await saveUpdateStatus({ ...status, installRequest: request })
+  await saveUpdateStatus({
+    ...status,
+    installRequest: request,
+    lastInstall: {
+      id: request.id,
+      at: request.at,
+      from: PCP_VERSION,
+      to: request.version,
+    },
+  })
   if (signalHost) {
     await writeInstallSignal(request, signalChannel)
   }
@@ -179,7 +220,41 @@ export async function requestInstall(
   return request
 }
 
-/** At boot: a request this version answers (or one too old to act on) is done. */
+/**
+ * How the last install went, by the version that runs now: `finished` once
+ * it is the one asked for, `installing` while the request is fresh, else
+ * `not_finished` (the installer or the app did not get there in time).
+ */
+export type LastInstallState = LastInstall & {
+  state: "finished" | "installing" | "not_finished"
+}
+
+export function lastInstallState(
+  status: UpdateStatus,
+  now = new Date(),
+  version = PCP_VERSION,
+): LastInstallState | null {
+  const last = status.lastInstall
+
+  if (!last) {
+    return null
+  }
+
+  return {
+    ...last,
+    state:
+      version === last.to
+        ? "finished"
+        : now.getTime() - Date.parse(last.at) <= INSTALL_REQUEST_FRESH_MS
+          ? "installing"
+          : "not_finished",
+  }
+}
+
+/**
+ * At boot: a request this version answers (or one too old to act on) is
+ * done. The last install's record stays, so how it went can still be told.
+ */
 export async function clearFinishedInstall(now = new Date()): Promise<void> {
   const status = await getUpdateStatus()
 
@@ -216,6 +291,8 @@ export async function updatesOverview(): Promise<UpdatesOverview> {
         : null,
     ),
     installRequest: freshRequest(status.installRequest, new Date()),
+    commit: PCP_COMMIT,
+    builtAt: PCP_BUILT_AT,
   }
 }
 

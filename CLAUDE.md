@@ -1043,7 +1043,11 @@ embeddingProvider`, which hands `embeddings/provider.ts` the header;
   installer read out of the image it pulled (`/app/install.sh`), never out
   of the running container; PCP never addresses the host. A build of develop (`X.Y.Z-dev.N`, a pre-release that
   `.github/workflows/develop.yml` makes on every push to develop) is never
-  offered on the stable channel.
+  offered on the stable channel. An assistant reads it through `get_version`
+  (the last check's answer, never a new request) and asks for an install only
+  through `update_pcp`, a `pcp_update` request whose yes is the owner's
+  button's `installNewest` (`updates/install.ts`), every time, never a
+  standing allow.
 - `desktop/` is a host for the production build, not part of the app. It
   imports nothing from `lib/`, `app/` or `components/`; the app knows it only
   as `PCP_DESKTOP=1` and `PCP_DESKTOP_UPDATER` (`lib/server/desktop.ts`), for

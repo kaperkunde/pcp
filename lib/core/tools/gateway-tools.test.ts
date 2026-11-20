@@ -56,6 +56,8 @@ const OWN_TOOLS = [
   "check_server",
   "get_server_limits",
   "propose_server_limits",
+  "get_version",
+  "update_pcp",
   "read_result",
   "share_result",
   "receive_file",
@@ -122,6 +124,7 @@ const PROPOSALS = [
   "update_wrapper",
   "delete_wrapper",
   "update_endpoint",
+  "update_pcp",
 ]
 
 let cleanup: () => Promise<void>
@@ -262,6 +265,7 @@ describe("PCP's own tools", () => {
         "edit_pdf",
         "get_endpoint",
         "get_server_limits",
+        "get_version",
         "get_wrapper",
         "list_secrets",
         "propose_server_limits",
@@ -271,6 +275,7 @@ describe("PCP's own tools", () => {
         "register_server",
         "share_result",
         "update_endpoint",
+        "update_pcp",
         "update_wrapper",
       ].sort(),
     )
@@ -308,6 +313,7 @@ describe("PCP's own tools", () => {
       "create_wrapper",
       "update_wrapper",
       "delete_wrapper",
+      "update_pcp",
     ]) {
       expect(
         tools.find((tool) => tool.name === name)!.description,
@@ -327,7 +333,7 @@ describe("PCP's own tools", () => {
       const first = tool.description!.slice(0, 25)
 
       expect(first, tool.name).toMatch(
-        /^(Check first: |(Search|List|Get|Execute|Run|Check|Withdraw|Read|Share|Receive|Propose|Change|Fetch|Save|Edit|Convert|Find|Make|Move|Delete|View) )/,
+        /^(Check first: |(Search|List|Get|Execute|Run|Check|Withdraw|Read|Share|Receive|Propose|Change|Fetch|Save|Edit|Convert|Find|Make|Move|Delete|View|Update) )/,
       )
       // A verb and an object, not a verb alone.
       expect(first.trim().split(/\s+/).length, tool.name).toBeGreaterThan(2)
@@ -349,6 +355,8 @@ describe("PCP's own tools", () => {
       check_server: /server/,
       get_server_limits: /^Get a server's limits/,
       propose_server_limits: /^Propose server limits/,
+      get_version: /^Get PCP's version/,
+      update_pcp: /^Update PCP to the newes/,
       check_run: /run/,
       read_result: /result/,
       share_result: /file/,
@@ -928,6 +936,8 @@ describe("execute_<tier> by name, and the names kept for one release (#113)", ()
         "view_image",
         "convert_document",
         "edit_pdf",
+        // Its request is found again while it waits; a refusal is asked anew.
+        "update_pcp",
       ].sort(),
     )
     expect(declared("reads")).toEqual(["memory", "web_fetch"])

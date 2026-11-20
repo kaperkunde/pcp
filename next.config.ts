@@ -61,7 +61,14 @@ const nextConfig: NextConfig = {
   // at the fake GitHub (lib/core/repos/github.ts fakeGitHubAllowed). The
   // value is written into the build here, so a release, built without it,
   // ignores the variable when it runs.
-  env: { PCP_TEST_BUILD: process.env.PCP_TEST_BUILD === "1" ? "1" : "" },
+  // The commit and the time of a release's or a build of develop's build
+  // (lib/core/version.ts PCP_COMMIT, PCP_BUILT_AT), from the Dockerfile's
+  // build arguments or build-desktop.yml; empty, so unknown, anywhere else.
+  env: {
+    PCP_TEST_BUILD: process.env.PCP_TEST_BUILD === "1" ? "1" : "",
+    PCP_COMMIT: process.env.PCP_COMMIT?.trim() ?? "",
+    PCP_BUILT_AT: process.env.PCP_BUILT_AT?.trim() ?? "",
+  },
   // Required at runtime, not bundled: better-sqlite3 is a native module;
   // acme-client (HTTPS, lib/core/network/tls.ts) brings axios and
   // node-forge, which are happier required than bundled; the mail libraries

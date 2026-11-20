@@ -325,6 +325,7 @@ import {
 } from "./gate/config"
 import { gateClassOf } from "./gate/limits"
 import { limitsLine, MAX_LIMITS_NOTE, proposeLimits } from "./gate/proposals"
+import { proposePcpUpdate, versionReport, versionText } from "./updates/tools"
 import type { WindowCounts } from "./gate/places"
 import { readServerLimits } from "./gate/store"
 import { mailDiagnostics } from "./mail/diagnostics"
@@ -4441,6 +4442,80 @@ export function buildGatewayServer(
       }
 
       return asked({ kind: "limits_change", input: ask })
+    },
+  })
+
+  // PCP's own version and its update (lib/core/updates/tools.ts): read from
+  // what the update check already holds, never a request to GitHub; the
+  // install is always the owner's, on PCP's page.
+  register({
+    name: "get_version",
+    title: "Read PCP's version",
+    description:
+      "Get PCP's version and build: the version this PCP runs, its commit and build date, whether a newer one is out on the owner's channel (from PCP's last update check; this never asks GitHub), what changed (GitHub's release notes, as untrusted text), whether this PCP can install an update itself and how the owner updates it if not, and how the last install went. For questions about updates and upgrades, and after update_pcp.",
+    input: z.object({}),
+    output: z.object({
+      version: z.string(),
+      commit: z.string().nullable(),
+      built_at: z.string().nullable(),
+      dev_build: z.boolean(),
+      channel: z.enum(["stable", "develop"]),
+      check: z.boolean(),
+      latest: z.string().nullable(),
+      checked_at: z.string().nullable(),
+      up_to_date: z.boolean().nullable(),
+      changelog: z
+        .object({
+          version: z.string(),
+          published_at: z.string().nullable(),
+          url: z.string(),
+          notes_untrusted: z.string(),
+        })
+        .nullable(),
+      can_update_itself: z.boolean(),
+      cannot_update: z
+        .object({ reason: z.string(), steps: z.string() })
+        .nullable(),
+      last_install: z
+        .object({
+          from: z.string(),
+          to: z.string(),
+          asked_at: z.string(),
+          state: z.enum(["finished", "installing", "not_finished"]),
+          finished: z.boolean(),
+        })
+        .nullable(),
+    }),
+    annotations: READS,
+    async run() {
+      const report = await versionReport()
+
+      return ok(report, { text: versionText(report) })
+    },
+  })
+
+  register({
+    name: "update_pcp",
+    title: "Install a newer PCP",
+    description: `Update PCP to the newest version (upgrade), with the owner's yes: asks them to install the newer version PCP's last update check found and restart. They see the version, its release notes and a warning; nothing installs until they agree, whatever your levels. The restart may drop your connection: afterwards check_permission or get_version says how it went. Where this PCP cannot install an update itself, or no newer version is known (checking is off, or nothing newer was found), it says so at once with the owner's steps, and asks nothing. ${OWNER_LINK_RULE} ${nextMessageCheck("check_permission with its id")}`,
+    input: z.object({}),
+    output: z.discriminatedUnion("kind", [NEEDS_OWNER]),
+    annotations: PROPOSES,
+    guard: {
+      never:
+        "Asks the owner each time; the same request asked again finds the one waiting.",
+    },
+    async run() {
+      const proposed = await proposePcpUpdate()
+
+      if ("refused" in proposed) {
+        return failure(
+          `${proposed.refused}\n\n${linkLastText(`${scope.publicUrl}/settings#updates`, "Open Settings → Updates")}`,
+          "state",
+        )
+      }
+
+      return asked({ kind: "pcp_update", input: proposed.ask })
     },
   })
 

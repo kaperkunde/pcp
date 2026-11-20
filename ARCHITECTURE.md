@@ -4515,6 +4515,33 @@ update to the copy with a note. With no copy (no timer of PCP's) nothing is
 read, and the unit changes when the installer next runs. `write_unit` leaves drop-ins in `pcp.container.d/` alone
 and names them, since one may do what the unit now does itself.
 
+**Assistants read the version and ask for an install** (#161). Two of
+PCP's own tools, behind `execute_read` and `execute_write`
+(`updates/tools.ts`): `get_version` answers the version, the commit and the
+time of the build (`PCP_COMMIT`, `PCP_BUILT_AT` in `lib/core/version.ts`,
+written into the build by `next.config.ts` from the Dockerfile's build
+arguments and `build-desktop.yml`, which both take the tag's commit; null in
+a checkout or the dev server), whether it is a build of develop, the owner's
+channel and check, the newest version the last check found (never a new
+request: with the check off, `up_to_date` is null), the release notes as
+untrusted text with a link built from `releasePageUrl`, whether this PCP can
+install an update itself, and the last install. `update_pcp` is a
+`pcp_update` request, always, whatever the levels (own tools have none, and
+its only answers are **Install and restart** and **Not now**: an "always" or
+"allow for" is refused, never read as a yes): the page shows both versions,
+the notes as text and that the restart may drop the assistant's connection.
+The yes runs `installNewest` (`updates/install.ts`), the same check and
+request as the owner's button: one function says whether this PCP installs
+itself (the desktop app's own updater, or an installer that watches,
+`PCP_HOST_UPDATER`) and why not, with the steps Settings shows
+(`lib/update-steps.ts`); and it installs only the version the owner was
+shown while it is still the newest PCP knows of. Where PCP cannot, or the
+check is off, or nothing newer is known, `update_pcp` refuses at once with
+those steps and a link to Settings → Updates, and asks nothing.
+`update.status` keeps `lastInstall` (from, to, when) past the restart that
+clears the request, so `get_version` says whether it finished: it did once
+the running version is the one asked for.
+
 ## Cleanup and the log
 
 **The request log** (`lib/core/request-log.ts`) is what assistants did with
