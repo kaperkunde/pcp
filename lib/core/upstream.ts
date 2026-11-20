@@ -110,6 +110,19 @@ import {
   dropGeneratedSecrets,
   makeGeneratedSecrets,
 } from "./services/generated"
+import { SIGNIN_CALL_TIMEOUT_MS } from "./services/limits"
+import {
+  checkSigninCode,
+  finishProblem,
+  readSignin,
+  scrubCode,
+  signinTarget,
+  startSignin,
+  type SigninCall,
+  type SigninStart,
+  type SigninState,
+  type SigninTarget,
+} from "./services/signin"
 import {
   AddressBlockedError,
   isOwnAddress,
@@ -3274,6 +3287,93 @@ export async function launchService(
   }
 
   return { ...result, message }
+}
+
+// ---- Signing in to a service's account (services/signin.ts) -----------------
+
+/**
+ * How the sign-in reaches the server a service registered: callServerTool,
+ * paced and through the service's tunnel like any call, with no token's
+ * levels: what PCP calls for its own sign-in step, or for the owner's page.
+ */
+export function signinCaller(ctx: VaultContext, publicUrl: string): SigninCall {
+  return (server, tool, args) =>
+    callServerTool(ctx, server, tool, args, {
+      publicUrl,
+      deadline: Date.now() + SIGNIN_CALL_TIMEOUT_MS,
+    })
+}
+
+/** The service that signs in behind this server id, or not found. */
+export async function requireSigninTarget(
+  ctx: VaultContext,
+  serverId: string,
+): Promise<SigninTarget> {
+  const server = await findServer(ctx, { id: serverId, vaultId: ctx.vaultId })
+  const target = server ? await signinTarget(ctx, server) : null
+
+  if (!target) {
+    throw notFound("A service that signs in to an account")
+  }
+
+  return target
+}
+
+/** Whether a service is signed in, for the owner's sign-in page. */
+export async function readServiceSignin(
+  ctx: VaultContext,
+  serverId: string,
+  { publicUrl }: { publicUrl: string },
+): Promise<SigninState> {
+  const target = await requireSigninTarget(ctx, serverId)
+  return readSignin(target, signinCaller(ctx, publicUrl))
+}
+
+/** Starts a sign-in, for the owner's sign-in page: the provider's address. */
+export async function startServiceSignin(
+  ctx: VaultContext,
+  serverId: string,
+  { publicUrl }: { publicUrl: string },
+): Promise<SigninStart> {
+  const target = await requireSigninTarget(ctx, serverId)
+  return startSignin(target, signinCaller(ctx, publicUrl))
+}
+
+/**
+ * The owner's code, handed to the service's finish tool, then its status
+ * read. The code goes into that one call's arguments here and nowhere
+ * else: never stored, never logged (the owner's page writes no request-log
+ * line), and taken out of whatever error comes back.
+ */
+export async function finishServiceSignin(
+  ctx: VaultContext,
+  serverId: string,
+  pasted: unknown,
+  { publicUrl }: { publicUrl: string },
+): Promise<SigninState> {
+  const code = checkSigninCode(pasted)
+  const target = await requireSigninTarget(ctx, serverId)
+  const call = signinCaller(ctx, publicUrl)
+  let answer: CallToolResult
+
+  try {
+    answer = await call(target.server, target.signin.finish.tool, {
+      [target.signin.finish.argument]: code,
+    })
+  } catch (error) {
+    throw new PcpError(
+      isPcpError(error) ? error.code : "upstream",
+      scrubCode(error instanceof Error ? error.message : String(error), code),
+    )
+  }
+
+  const problem = finishProblem(target, answer, code)
+
+  if (problem) {
+    throw new PcpError("upstream", problem)
+  }
+
+  return readSignin(target, call)
 }
 
 /** The service's state now, read on its SSH server for the owner's page. */

@@ -34,6 +34,8 @@ type Variable = {
   plain: boolean
   /** Its fixed value, or a plain one's when none is typed. */
   value: string | null
+  /** PCP makes its value at launch, unless a secret is chosen for it. */
+  generated?: boolean
 }
 
 /** The select's choice that types a new secret in on this form. */
@@ -127,6 +129,8 @@ function readShape(text: string): {
   env: Variable[]
   /** It registers an exit: a VPN's proxy, on the SSH server's loopback. */
   exit: boolean
+  /** The tool its account's sign-in starts with, when it signs in to one. */
+  signin: string | null
   problem: string | null
 } {
   try {
@@ -138,8 +142,10 @@ function readShape(text: string): {
         description?: unknown
         plain?: unknown
         value?: unknown
+        generated?: unknown
       }>
       registers?: { kind?: unknown }
+      signin?: { start?: { tool?: unknown } }
     }
 
     return {
@@ -155,8 +161,13 @@ function readShape(text: string): {
             typeof entry.description === "string" ? entry.description : "",
           plain: entry.plain === true,
           value: typeof entry.value === "string" ? entry.value : null,
+          generated: entry.generated !== undefined && entry.generated !== false,
         })),
       exit: value.registers?.kind === "exit",
+      signin:
+        typeof value.signin?.start?.tool === "string"
+          ? value.signin.start.tool
+          : null,
       problem: null,
     }
   } catch {
@@ -164,6 +175,7 @@ function readShape(text: string): {
       ports: [],
       env: [],
       exit: false,
+      signin: null,
       problem: "The definition is not JSON yet.",
     }
   }
@@ -223,8 +235,10 @@ function SecretSelect({
         label={variable.name}
         htmlFor={`service-env-${variable.name}`}
         hint={
-          variable.description ||
-          (variable.required ? "The service needs it." : undefined)
+          variable.generated
+            ? `${variable.description ? `${variable.description} ` : ""}PCP makes a random value for it when the service is launched, kept as a secret; choose one of yours only if you want your own.`
+            : variable.description ||
+              (variable.required ? "The service needs it." : undefined)
         }
       >
         <Select
@@ -232,12 +246,14 @@ function SecretSelect({
           name={`env.${variable.name}`}
           value={value}
           onChange={(event) => onChange(event.target.value)}
-          required={variable.required}
+          required={variable.required && !variable.generated}
         >
           <option value="">
-            {variable.required
-              ? "Choose a secret"
-              : "None (or its fixed value)"}
+            {variable.generated
+              ? "PCP makes one (recommended)"
+              : variable.required
+                ? "Choose a secret"
+                : "None (or its fixed value)"}
           </option>
           {secrets.map((secret) => (
             <option key={secret.id} value={secret.id}>
@@ -586,6 +602,19 @@ export function ServiceLaunchForm({
               allowNew
             />
           ))}
+        </FormSection>
+      ) : null}
+      {shape.signin ? (
+        <FormSection title="Its account">
+          <p
+            className="text-xs leading-relaxed text-muted-foreground"
+            data-testid="service-form-signin"
+          >
+            It works under an account of yours. Once it runs, you sign in on
+            PCP&apos;s sign-in page for it (its page links there): PCP calls its{" "}
+            {shape.signin} for the provider&apos;s address and hands it the code
+            you paste back. An assistant only gets the link.
+          </p>
         </FormSection>
       ) : null}
       <FormFooter

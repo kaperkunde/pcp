@@ -346,7 +346,7 @@ function serviceFlags(
     flag(
       "service",
       after.env.length > 0
-        ? `Its variables: ${listed(after.env.map((entry) => (entry.value !== undefined ? `${entry.name}=${entry.value}` : `${entry.name}${entry.required ? " (needed)" : ""}`)))}.`
+        ? `Its variables: ${listed(after.env.map((entry) => (entry.value !== undefined ? `${entry.name}=${entry.value}` : entry.generated !== undefined ? `${entry.name} (a random value PCP makes at launch)` : `${entry.name}${entry.required ? " (needed)" : ""}`)))}.`
         : "It takes no variables.",
     )
   }
@@ -384,6 +384,16 @@ function serviceFlags(
       after.health.kind === "http"
         ? `Its health check is GET ${after.health.path} on port ${after.health.port}.`
         : "It has no health check.",
+    )
+  }
+
+  if (changed((definition) => definition.signin ?? null)) {
+    const signin = after.signin
+    flag(
+      "service",
+      signin
+        ? `It signs in to an account of yours on PCP's sign-in page: PCP calls ${signin.start.tool} for the provider's address, ${signin.finish.tool} with the code you paste and ${signin.status.tool} to say who is signed in.`
+        : "It signs in to no account through PCP.",
     )
   }
 

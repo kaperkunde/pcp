@@ -78,6 +78,11 @@ export function ServiceCard({ view }: { view: ServiceView }) {
   }
 
   const running = status?.state === "running"
+  const generated = new Set(
+    view.definition.env
+      .filter((entry) => entry.generated !== undefined)
+      .map((entry) => entry.name),
+  )
   const publish = view.publish.ports
     .map((port) => `${view.publish.address}:${port.host} → ${port.container}`)
     .join(", ")
@@ -199,13 +204,21 @@ export function ServiceCard({ view }: { view: ServiceView }) {
             description={`${view.exit.name}${view.exit.label ? ` (${view.exit.label})` : ""}: web fetch and the browser go out through this VPN for the tokens you allow. Its proxy listens on ${view.host.name}'s 127.0.0.1 only${view.definition.cap_add.length > 0 || view.definition.devices.length > 0 ? `; the container has ${[...view.definition.cap_add, ...view.definition.devices].join(" and ")}` : ""}. Removing the service removes the exit.`}
           />
         ) : null}
+        {view.definition.signin && view.registered ? (
+          <ListRow
+            href={`/servers/${view.registered.id}/sign-in`}
+            title="Account"
+            description={`It works under an account of yours: sign in, or see who is signed in. PCP calls ${view.definition.signin.start.tool} and ${view.definition.signin.finish.tool} of ${view.registered.name} for you there, with the code you paste.`}
+            data-testid="service-account"
+          />
+        ) : null}
         {view.env.length > 0 ? (
           <ListRow
             title="Variables"
             description={view.env
               .map(
                 (entry) =>
-                  `${entry.name}: ${entry.secretName ?? entry.value ?? "its fixed value or none"}`,
+                  `${entry.name}: ${entry.secretName ?? entry.value ?? "its fixed value or none"}${generated.has(entry.name) && entry.secretName ? " (made by PCP)" : ""}`,
               )
               .join(" · ")}
           />

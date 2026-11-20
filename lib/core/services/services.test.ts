@@ -557,6 +557,20 @@ describe("launching a service", { timeout: 30_000 }, () => {
     )
     expect(JSON.stringify(docker.commands)).not.toContain(value)
     expect(new Set(mcpSeen)).toEqual(new Set([`Bearer ${value}`]))
+
+    // Saved with its variable left to PCP, it keeps the value PCP made.
+    expect(
+      await saveServiceSettings(ctx, launched.id, { name: "Docs", env: {} }),
+    ).toEqual({ envChanged: false })
+    expect(
+      JSON.parse(
+        (
+          await db().serviceSpec.findUniqueOrThrow({
+            where: { serverId: launched.id },
+          })
+        ).env,
+      ),
+    ).toEqual(bound)
   })
 
   it("takes back the value it made when the launch fails", async () => {

@@ -416,6 +416,25 @@ describe("reviewing a service", () => {
       "PCP adds an MCP server at /mcp on port 5001, sending DOCLING_SERVE_API_KEY's secret in Authorization.",
     ])
 
+    const signin = reviewItem(SERVICE, {
+      ...SERVICE,
+      definition: parseServiceDefinition({
+        ...DOCLING,
+        env: [{ name: "DOCLING_SERVE_API_KEY", generated: true }],
+        signin: {
+          style: "paste_code",
+          status: { tool: "login_status", signed_in: "signed_in" },
+          start: { tool: "login_start", url: "url" },
+          finish: { tool: "login_finish", argument: "code" },
+        },
+      }),
+    })
+    expect(signin.textOnly).toBe(false)
+    expect(signin.flags.map((flag) => flag.message)).toEqual([
+      "Its variables: DOCLING_SERVE_API_KEY (a random value PCP makes at launch).",
+      "It signs in to an account of yours on PCP's sign-in page: PCP calls login_start for the provider's address, login_finish with the code you paste and login_status to say who is signed in.",
+    ])
+
     const described = reviewItem(SERVICE, {
       ...SERVICE,
       description: "Other words.",

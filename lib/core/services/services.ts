@@ -67,6 +67,7 @@ import {
   checkEnvBindings,
   checkPlainValues,
   COMMIT,
+  generatedEnv,
   LOCAL_IMAGE,
   EXIT_PUBLISH_ADDRESS,
   parsePublish,
@@ -1832,7 +1833,16 @@ export async function saveServiceSettings(
   const values = input.values
     ? checkPlainValues(input.values, loaded.definition)
     : loaded.values
-  const env = checkEnvBindings(input.env, loaded.definition, values)
+  // A variable PCP made a value for keeps it unless a secret is chosen.
+  const given = { ...input.env }
+
+  for (const { name: variable } of generatedEnv(loaded.definition)) {
+    if (!given[variable] && loaded.env[variable]) {
+      given[variable] = loaded.env[variable]
+    }
+  }
+
+  const env = checkEnvBindings(given, loaded.definition, values)
   const ids = [...new Set(Object.values(env))]
   const found = await db().secret.count({
     where: { vaultId: ctx.vaultId, id: { in: ids }, kind: "text" },
