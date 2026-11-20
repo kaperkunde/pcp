@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto"
+import { existsSync } from "node:fs"
 
 import { firstServer, toolNamed, toolsWhere } from "./test-servers"
 import type { CallToolResult } from "@modelcontextprotocol/server"
@@ -68,6 +69,14 @@ import {
 import { setToolTier } from "./tool-tiers"
 import { setupVault } from "./vault"
 import { createSshServer } from "./ssh/hosts"
+import { installSignalFile } from "./updates/host-signal"
+import { setUpdateChannel, setUpdateFetch } from "./updates/runtime"
+import {
+  getUpdateStatus,
+  saveUpdateConfig,
+  saveUpdateStatus,
+} from "./updates/state"
+import { proposePcpUpdate, type PcpUpdateAsk } from "./updates/tools"
 import { openSecretMeta, secretNameWhere } from "./secret-meta"
 
 // The owner's permission against a scratch database, with the upstream
@@ -3764,5 +3773,217 @@ describe("a mail account an assistant proposes", () => {
       "127.0.0.1 is, or resolves to, a private or local address, so PCP did not look at it from here. If you agree, PCP signs in there from your own network.",
     )
     expect(view?.lines.some((line) => line.startsWith("Checked:"))).toBe(false)
+  })
+})
+
+describe("a PCP update an assistant asked for (#161)", () => {
+  const release = (version: string) => ({
+    lastCheckedAt: "2026-11-20T08:00:00.000Z",
+    latest: { version, publishedAt: null, notes: "Notes.", assets: [] },
+  })
+
+  async function askUpdate() {
+    vi.stubEnv("PCP_DESKTOP", "")
+    vi.stubEnv("PCP_CONTAINER", "1")
+    vi.stubEnv("PCP_HOST_UPDATER", "1")
+    await saveUpdateStatus(release("999.0.0"))
+    const { ctx, scope, tokenId } = await setup()
+    const proposed = await proposePcpUpdate()
+
+    if (!("ask" in proposed)) {
+      throw new Error(proposed.refused)
+    }
+
+    const result = await withPermission(scope, {
+      kind: "pcp_update",
+      input: proposed.ask,
+    })
+    expect(textOf(result)).toContain("Not done yet")
+
+    return { ctx, scope, tokenId, id: await onlyRequestId() }
+  }
+
+  /**
+   * What GitHub says to the check the owner's yes makes first (the
+   * installers take the channel's newest, never a named version); null
+   * fails the request.
+   */
+  let github: string | null
+  let checks: number
+
+  beforeEach(() => {
+    github = "v999.0.0"
+    checks = 0
+    setUpdateFetch((async () => {
+      checks++
+
+      if (!github) {
+        throw new Error("offline")
+      }
+
+      return new Response(
+        JSON.stringify({ tag_name: github, body: "Notes.", assets: [] }),
+        { status: 200 },
+      )
+    }) as unknown as typeof fetch)
+  })
+
+  afterEach(() => {
+    setUpdateFetch()
+    vi.unstubAllEnvs()
+  })
+
+  it("checks again on the owner's yes, even with checking off, and installs the newest it was shown", async () => {
+    const { ctx, id } = await askUpdate()
+    await saveUpdateConfig({ check: false })
+
+    const answer = await decidePermission(ctx, id, "allow_once", {
+      publicUrl: PUBLIC_URL,
+    })
+
+    expect(checks).toBe(1)
+    expect(textOf(answer)).toContain("Installing v999.0.0")
+    expect((await getUpdateStatus()).lastCheckedAt).not.toBe(
+      "2026-11-20T08:00:00.000Z",
+    )
+  })
+
+  it("refuses when a newer release came out since the owner was shown one", async () => {
+    const { ctx, id } = await askUpdate()
+    // The installers would take this one, whose notes nobody read.
+    github = "v999.0.1"
+
+    const answer = await decidePermission(ctx, id, "allow_once", {
+      publicUrl: PUBLIC_URL,
+    })
+
+    expect(answer.isError).toBe(true)
+    expect(textOf(answer)).toContain(
+      "v999.0.0 is no longer the newest version PCP knows of (v999.0.1 is), so nothing was installed.",
+    )
+    expect((await getUpdateStatus()).installRequest).toBeUndefined()
+  })
+
+  it("refuses when the check cannot reach GitHub", async () => {
+    const { ctx, id } = await askUpdate()
+    github = null
+
+    const answer = await decidePermission(ctx, id, "allow_once", {
+      publicUrl: PUBLIC_URL,
+    })
+
+    expect(answer.isError).toBe(true)
+    expect(textOf(answer)).toMatch(
+      /^PCP could not [^(]+\([^)]*\)\. So nothing was installed: /,
+    )
+    expect((await getUpdateStatus()).installRequest).toBeUndefined()
+  })
+
+  it("refuses when the channel changed since the owner was asked", async () => {
+    const { ctx, id } = await askUpdate()
+    await setUpdateChannel("develop")
+    github = null
+
+    const answer = await decidePermission(ctx, id, "allow_once", {
+      publicUrl: PUBLIC_URL,
+    })
+
+    expect(answer.isError).toBe(true)
+    expect(textOf(answer)).toContain(
+      "PCP follows the develop channel now, not stable as when you were asked",
+    )
+    expect(checks).toBe(0)
+    expect((await getUpdateStatus()).installRequest).toBeUndefined()
+  })
+
+  it("installs on the owner's yes: the request and the installer's signal", async () => {
+    const { ctx, scope, id } = await askUpdate()
+
+    const answer = await decidePermission(ctx, id, "allow_once", {
+      publicUrl: PUBLIC_URL,
+    })
+
+    expect(answer.isError).not.toBe(true)
+    expect(textOf(answer)).toContain("Installing v999.0.0")
+    expect((await getUpdateStatus()).installRequest?.version).toBe("999.0.0")
+    expect(existsSync(installSignalFile())).toBe(true)
+    // What check_permission hands the assistant afterwards.
+    expect(textOf(await checkPermission(scope, id))).toContain(
+      "Installing v999.0.0",
+    )
+  })
+
+  it("takes no answer that would stand for later installs, and leaves no allowance", async () => {
+    const { ctx, tokenId, id } = await askUpdate()
+
+    for (const decision of ["always", "allow_for", "block"] as const) {
+      const answer = await decidePermission(ctx, id, decision, {
+        publicUrl: PUBLIC_URL,
+        minutes: 60,
+      })
+      expect(answer.isError, decision).toBe(true)
+      expect(textOf(answer)).toBe(
+        "That is not one of the answers to this request.",
+      )
+    }
+
+    expect(
+      (await db().permissionRequest.findUniqueOrThrow({ where: { id } }))
+        .status,
+    ).toBe("pending")
+    expect(await listTokenAllowances(ctx, tokenId)).toEqual([])
+    expect((await getUpdateStatus()).installRequest).toBeUndefined()
+  })
+
+  it("is asked again after a yes: no answer stands for the next install", async () => {
+    const { ctx, scope, id } = await askUpdate()
+    await decidePermission(ctx, id, "allow_once", { publicUrl: PUBLIC_URL })
+
+    // A newer one is out, and the assistant asks for it.
+    await saveUpdateStatus({
+      ...(await getUpdateStatus()),
+      ...release("999.1.0"),
+    })
+    const proposed = await proposePcpUpdate()
+    const again = await withPermission(scope, {
+      kind: "pcp_update",
+      input: (proposed as { ask: PcpUpdateAsk }).ask,
+    })
+
+    expect(textOf(again)).toContain("Not done yet")
+    expect(
+      await db().permissionRequest.count({ where: { status: "pending" } }),
+    ).toBe(1)
+  })
+
+  it("refuses a version that is no longer the newest when the owner answers", async () => {
+    const { ctx, id } = await askUpdate()
+    await saveUpdateStatus(release("999.2.0"))
+    github = "v999.2.0"
+
+    const answer = await decidePermission(ctx, id, "allow_once", {
+      publicUrl: PUBLIC_URL,
+    })
+
+    expect(answer.isError).toBe(true)
+    expect(textOf(answer)).toContain(
+      "v999.0.0 is no longer the newest version PCP knows of (v999.2.0 is), so nothing was installed.",
+    )
+    expect((await getUpdateStatus()).installRequest).toBeUndefined()
+    expect(
+      (await db().permissionRequest.findUniqueOrThrow({ where: { id } }))
+        .status,
+    ).toBe("failed")
+  })
+
+  it("installs nothing when the owner says not now", async () => {
+    const { ctx, id } = await askUpdate()
+
+    const answer = await decidePermission(ctx, id, "decline", {
+      publicUrl: PUBLIC_URL,
+    })
+
+    expect(textOf(answer)).toContain("The owner said no, so nothing ran.")
+    expect((await getUpdateStatus()).installRequest).toBeUndefined()
   })
 })

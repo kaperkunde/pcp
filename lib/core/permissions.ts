@@ -54,6 +54,11 @@ import {
 } from "./gate/proposals"
 import { writeServerLimits } from "./gate/store"
 import {
+  applyPcpUpdate,
+  describePcpUpdateAsk,
+  type PcpUpdateAsk,
+} from "./updates/tools"
+import {
   applyNoteChange,
   setPersonalNote,
   type NoteChangeAsk,
@@ -391,6 +396,7 @@ export type PermissionAsk =
   | { kind: "script_use"; input: ScriptUseAsk }
   | { kind: "tab_pace"; input: TabPaceAsk }
   | { kind: "limits_change"; input: LimitsChangeAsk }
+  | { kind: "pcp_update"; input: PcpUpdateAsk }
 
 /** The requests about a secret the browser types (browser-secrets.ts). */
 function isSecretKind(kind: string): kind is "secret_use" | "secret_request" {
@@ -961,6 +967,11 @@ function describeAsk(ask: PermissionAsk): {
         target: `limits:${ask.input.serverId}\n${JSON.stringify(ask.input.proposed)}`,
         args: ask.input as Record<string, unknown>,
       }
+    case "pcp_update":
+      return {
+        target: `pcp_update:${ask.input.to}`,
+        args: ask.input as Record<string, unknown>,
+      }
     case "exit_use":
       return {
         target: `exit_use:${ask.input.exitId}\n${ask.input.via} ${ask.input.fetch ? `${ask.input.fetch.method} ${ask.input.fetch.url}` : (ask.input.browse?.url ?? "")}`,
@@ -1012,6 +1023,8 @@ function toolNameOf(ask: PermissionAsk): string {
       return "tabs"
     case "limits_change":
       return "propose_server_limits"
+    case "pcp_update":
+      return "update_pcp"
     // A skill is changed through the memory tool, as a memory is.
     case "skill_change":
     default:
@@ -1310,6 +1323,12 @@ async function summarizeRow(
 
   if (row.kind === "limits_change") {
     const asked = describeLimitsAsk(args as LimitsChangeAsk)
+
+    return { ...asked, lines: [...asked.lines, asker] }
+  }
+
+  if (row.kind === "pcp_update") {
+    const asked = describePcpUpdateAsk(args as PcpUpdateAsk)
 
     return { ...asked, lines: [...asked.lines, asker] }
   }
@@ -2524,13 +2543,17 @@ export async function decidePermission(
     kind === "exit_use" ||
     kind === "script_use" ||
     isSecretKind(kind)
-  const choice: PermissionDecision = !settles
-    ? decision === "always" || decision === "allow_for"
-      ? "allow_once"
-      : decision === "block"
-        ? "decline"
-        : decision
-    : decision
+  // A PCP update is this install alone: an answer that would stand for
+  // later ones (always, allow_for, block) is refused below, never read as
+  // a yes or a no.
+  const choice: PermissionDecision =
+    !settles && kind !== "pcp_update"
+      ? decision === "always" || decision === "allow_for"
+        ? "allow_once"
+        : decision === "block"
+          ? "decline"
+          : decision
+      : decision
 
   if (!decisionsFor(kind).some((offered) => offered.value === choice)) {
     return text("That is not one of the answers to this request.", true)
@@ -2939,16 +2962,25 @@ export async function decidePermission(
                                                 sites ?? {},
                                               ),
                                             )
-                                          : await executeRegister(
-                                              ctx,
-                                              row,
-                                              publicUrl,
-                                              executor,
-                                              secretValue,
-                                              allowPrivate === true,
-                                              chosenAccess,
-                                              chosenLimits,
-                                            )
+                                          : kind === "pcp_update"
+                                            ? text(
+                                                await applyPcpUpdate(
+                                                  readArgs(
+                                                    ctx,
+                                                    row,
+                                                  ) as PcpUpdateAsk,
+                                                ),
+                                              )
+                                            : await executeRegister(
+                                                ctx,
+                                                row,
+                                                publicUrl,
+                                                executor,
+                                                secretValue,
+                                                allowPrivate === true,
+                                                chosenAccess,
+                                                chosenLimits,
+                                              )
   } catch (error) {
     if (!isPcpError(error)) {
       console.error("[permissions] running an allowed request failed", {

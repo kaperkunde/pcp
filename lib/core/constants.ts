@@ -176,6 +176,7 @@ export type PermissionKind =
   | "script_use"
   | "tab_pace"
   | "limits_change"
+  | "pcp_update"
   | "wrapper_change"
   | "skill_change"
   | "repo_change"

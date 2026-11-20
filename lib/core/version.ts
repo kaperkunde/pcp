@@ -7,3 +7,37 @@ import pkg from "@/package.json"
  * uses this rather than a literal.
  */
 export const PCP_VERSION: string = pkg.version
+
+/** A commit as git names it, whole or shortened, in lower case; else null. */
+export function buildCommit(value: string | undefined): string | null {
+  const commit = value?.trim().toLowerCase() ?? ""
+
+  return /^[0-9a-f]{7,40}$/.test(commit) ? commit : null
+}
+
+/**
+ * A build's time, given as a full ISO timestamp in UTC (`date -u
+ * +%Y-%m-%dT%H:%M:%SZ`), as an ISO instant; null for anything else.
+ */
+export function buildDate(value: string | undefined): string | null {
+  const text = value?.trim() ?? ""
+
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d+)?)?Z$/.test(text)) {
+    return null
+  }
+
+  const time = Date.parse(text)
+
+  return Number.isFinite(time) ? new Date(time).toISOString() : null
+}
+
+/**
+ * The commit this build was made from, and when it was built: written into
+ * the build by next.config.ts from PCP_COMMIT and PCP_BUILT_AT, which the
+ * release and develop builds set (the Dockerfile's build arguments,
+ * build-images.yml and build-desktop.yml). Null where nobody set them: a
+ * checkout's own build, the dev server, a test. Read as written, never at
+ * runtime (Next.js puts the values in place of `process.env.…` here).
+ */
+export const PCP_COMMIT: string | null = buildCommit(process.env.PCP_COMMIT)
+export const PCP_BUILT_AT: string | null = buildDate(process.env.PCP_BUILT_AT)

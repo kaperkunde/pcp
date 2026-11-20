@@ -6,6 +6,11 @@
 // staged: it picks HOSTNAME, which the wrapper sets itself; what else it does
 // (the peer stamp) is docker/peer-stamp.cjs, staged with server-entry.cjs.
 //
+// The commit and the time of the build (PCP_COMMIT, PCP_BUILT_AT) are in the
+// standalone output already: next.config.ts writes them into the build, from
+// the Dockerfile's build arguments in the image and from build-desktop.yml's
+// Build step here, so nothing of them is staged or set apart.
+//
 // Nor is install.sh, which the image carries only for the Linux installer on
 // the host to read when it updates a container: the app has no installer.
 //

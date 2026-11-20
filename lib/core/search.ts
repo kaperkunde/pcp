@@ -133,6 +133,7 @@ const SYNONYM_GROUPS: ReadonlyArray<readonly string[]> = [
   ["store", "save", "keep"],
   ["email", "mail"],
   ["folder", "directory"],
+  ["version", "release"],
 ]
 
 const SYNONYMS: ReadonlyMap<string, readonly string[]> = (() => {

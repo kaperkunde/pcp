@@ -1,6 +1,7 @@
 import {
   BookOpen,
   ChevronLeft,
+  Download,
   FolderGit2,
   Gauge,
   Globe,
@@ -211,7 +212,10 @@ export default async function PermissionPage({
         ) : null}
         {view.skill ? <SkillReview skill={view.skill} /> : null}
         {view.full ? (
-          <ShownInFull parts={view.full} open={view.kind === "script_use"} />
+          <ShownInFull
+            parts={view.full}
+            open={view.kind === "script_use" || view.kind === "pcp_update"}
+          />
         ) : null}
         {view.warning && view.memory ? (
           // The text is what to check; the warning says what to look for,
@@ -369,6 +373,8 @@ function RequestTile({ view }: { view: PermissionView }) {
       return <IconTile size="lg" icon={Timer} className={tile} />
     case "limits_change":
       return <IconTile size="lg" icon={Gauge} className={tile} />
+    case "pcp_update":
+      return <IconTile size="lg" icon={Download} className={tile} />
     default:
       return <IconTile size="lg" icon={Server} className={tile} />
   }
@@ -476,6 +482,19 @@ function PendingNote({ view }: { view: PermissionView }) {
             Settings → Pacing
           </Link>
           .
+        </p>
+      )
+    case "pcp_update":
+      return (
+        <p className={note}>
+          Install and restart first checks again which version is the newest on
+          your channel, then installs it as{" "}
+          <Link href="/settings#updates" className="underline">
+            Settings → Updates
+          </Link>{" "}
+          does. If a newer one than this came out since, nothing is installed
+          and the assistant can ask again with it. Each install is asked anew.
+          The release notes are GitHub&apos;s, shown as they are.
         </p>
       )
     case "secret_request":
