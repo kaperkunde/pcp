@@ -21,7 +21,11 @@ import {
 } from "../endpoints"
 import { invalid, PcpError } from "../errors"
 import { checkPersonalNote, setPersonalNote } from "../personal-notes"
-import { findTextSecretByName } from "../secrets"
+import {
+  credentialUse,
+  resolveSecretRef,
+  type SecretRefUse,
+} from "../secret-refs"
 import {
   writeServer,
   openServers,
@@ -170,6 +174,18 @@ function authSecrets(auth: EndpointAuthDocument): string[] {
   }
 }
 
+/** What a server document's sign-in names its secrets for. */
+function authUse(document: EndpointDocument | ServerDocument): SecretRefUse {
+  return credentialUse({ authType: document.auth.kind })
+}
+
+/** What an item names its secrets for (secretsNamed). */
+function itemSecretUse(document: ItemDocument): SecretRefUse {
+  return document.kind === "endpoint" || document.kind === "server"
+    ? authUse(document)
+    : { kind: "wrapper_binding" }
+}
+
 /**
  * The secrets an item names that the vault should hold: a wrapper's secret
  * places, and the secrets a format-1 server document signs in with (used
@@ -191,15 +207,20 @@ function secretsNamed(document: ItemDocument): string[] {
   }
 }
 
-/** Secret names to their ids in this vault, for the ones it has. */
+/**
+ * Secret names to their ids in this vault, for the ones it has: a server's
+ * sign-in as its kind takes one (`use`), a wrapper's places as their sends
+ * do, text secrets only, as before (secret-refs.ts).
+ */
 async function secretIds(
   ctx: VaultContext,
   names: string[],
+  use: SecretRefUse,
 ): Promise<Map<string, string>> {
   const found = new Map<string, string>()
 
   for (const name of new Set(names)) {
-    const secret = await findTextSecretByName(ctx, name)
+    const secret = await resolveSecretRef(ctx, name, use)
 
     if (secret) {
       found.set(name, secret.id)
@@ -297,7 +318,7 @@ export async function resolveItem(
     onto && (document.kind === "endpoint" || document.kind === "server")
       ? []
       : secretsNamed(document)
-  const found = await secretIds(ctx, names)
+  const found = await secretIds(ctx, names, itemSecretUse(document))
   const missingSecrets = [...new Set(names)].filter((name) => !found.has(name))
   const problems =
     document.kind === "wrapper" || document.kind === "flow"
@@ -667,7 +688,7 @@ async function applyEndpoint(
       ? instanceCredential(instance)
       : credentialInput(
           document.auth,
-          await secretIds(ctx, authSecrets(document.auth)),
+          await secretIds(ctx, authSecrets(document.auth), authUse(document)),
           what,
           notes,
         )
@@ -741,7 +762,7 @@ async function applyServer(
       ? instanceCredential(instance)
       : credentialInput(
           document.auth,
-          await secretIds(ctx, authSecrets(document.auth)),
+          await secretIds(ctx, authSecrets(document.auth), authUse(document)),
           what,
           notes,
         )

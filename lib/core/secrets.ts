@@ -271,37 +271,6 @@ export async function listSecrets(ctx: VaultContext): Promise<SecretSummary[]> {
   )
 }
 
-/** A secret the owner entered, found by its name (for register_server). */
-export async function findTextSecretByName(
-  ctx: VaultContext,
-  name: string,
-): Promise<{ id: string; name: string } | null> {
-  const row = await db().secret.findFirst({
-    where: { ...secretNameWhere(ctx, name.trim()), kind: "text" },
-    select: SECRET_META_SELECT,
-  })
-
-  return row ? { id: row.id, name: secretName(ctx, row) } : null
-}
-
-/**
- * One of the owner's own secrets (text or TOTP) by its name: what the
- * browser types (lib/core/browser-secrets.ts).
- */
-export async function findOwnerSecretByName(
-  ctx: VaultContext,
-  name: string,
-): Promise<{ id: string; name: string; kind: OwnerSecretKind } | null> {
-  const row = await db().secret.findFirst({
-    where: secretNameWhere(ctx, name.trim()),
-    select: { ...SECRET_META_SELECT, kind: true },
-  })
-
-  return row && isOwnerSecretKind(row.kind)
-    ? { id: row.id, name: secretName(ctx, row), kind: row.kind }
-    : null
-}
-
 export function validateSecretValue(
   value: string,
   kind: OwnerSecretKind = "text",

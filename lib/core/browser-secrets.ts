@@ -32,10 +32,10 @@ import {
   secretNameWhere,
 } from "./secret-meta"
 import { openText, sealText, type Sealed } from "./sealed"
+import { resolveSecretRef, type ResolvedSecret } from "./secret-refs"
 import {
   checkLoginName,
   createSecret,
-  findOwnerSecretByName,
   isOwnerSecretKind,
   openSecretDetails,
   validateSecretName,
@@ -87,7 +87,7 @@ export const MAX_SECRET_PURPOSE = MAX_SECRET_PURPOSE_CHARS
 
 export type SecretUseLevel = "once" | "hour" | "always"
 
-export type TypableSecret = { id: string; name: string; kind: OwnerSecretKind }
+export type TypableSecret = ResolvedSecret
 
 /**
  * One of a secret's sites: an origin, and with `subdomains` every origin at
@@ -385,11 +385,11 @@ function allowanceOrigins(ctx: VaultContext, origin: string): string[] {
 }
 
 /** A secret the browser can type, by its name: one the owner entered. */
-export async function findTypableSecret(
+function findTypableSecret(
   ctx: VaultContext,
   name: string,
 ): Promise<TypableSecret | null> {
-  return findOwnerSecretByName(ctx, name)
+  return resolveSecretRef(ctx, name, { kind: "browser_type" })
 }
 
 async function requireTypable(

@@ -32,10 +32,12 @@ import {
 import { allowSiteFor, allowToolFor, parseAllowForMinutes } from "./allowances"
 import { openRequestTool, sealedLevelName } from "./level-names"
 import type { SyncResult } from "./catalogue"
-import type {
-  PasswordRecipe,
-  PermissionDecision,
-  PermissionKind,
+import {
+  DEFAULT_PASSWORD_RECIPE,
+  DEFAULT_TOKEN_RECIPE,
+  type PasswordRecipe,
+  type PermissionDecision,
+  type PermissionKind,
 } from "./constants"
 import type { VaultContext } from "./context"
 import { asBytes, decryptString, encryptString } from "./crypto"
@@ -129,7 +131,6 @@ import { summarize } from "./search"
 import {
   createSecretNamedAfter,
   deleteSecret,
-  findTextSecretByName,
   validateSecretValue,
 } from "./secrets"
 import { oauthRedirectUrl } from "./oauth-client"
@@ -202,7 +203,6 @@ import {
   checkSecretAnswer,
   checkSecretSitesAnswer,
   dropOnceAllowance,
-  findTypableSecret,
   grantSecretUse,
   isBoundOrigin,
   showSecretSitesChange,
@@ -210,6 +210,14 @@ import {
   type SecretUseLevel,
 } from "./browser-secrets"
 import { checkPasswordRecipe, generatePassword } from "./generate-password"
+import {
+  credentialUse,
+  resolveSecretRef,
+  type SecretRefUse,
+} from "./secret-refs"
+
+/** What the browser types: the secrets request_secret and secret_use name. */
+const BROWSER_TYPE: SecretRefUse = { kind: "browser_type" }
 import { resourceLimits } from "./resources/state"
 import {
   askFirstLine,
@@ -324,6 +332,12 @@ export type RegisterArgs = Omit<ServerInput, "authExtraHeaders"> & {
    * token address; with a header it is sent with every call.
    */
   newSecretOptional?: boolean
+  /**
+   * The value the assistant proposed PCP make for the new secret
+   * (register_server's `generate`), filled in on the page for the owner to
+   * keep, change or type a value instead. Never a value.
+   */
+  newSecretGenerate?: PasswordRecipe | null
   endpoint?: EndpointRegistration
   /** A mail account (JMAP or IMAP) rather than an MCP server or an API. */
   mail?: MailRegistration
@@ -514,8 +528,13 @@ export type PermissionView = {
     origins?: string[]
     /** request_secret: the login name it goes with, which the owner can change. */
     username?: string | null
-    /** request_secret: the password the assistant asked PCP to make. */
+    /**
+     * The value the assistant asked PCP to make (request_secret, or a
+     * proposal's `generate`), which the page starts from.
+     */
     generate?: PasswordRecipe | null
+    /** What the page offers to make when the assistant asked for nothing. */
+    defaultRecipe: PasswordRecipe
   } | null
   /**
    * update_secret_sites: the secret's sites now and each change asked for,
@@ -1288,7 +1307,7 @@ async function summarizeRow(
 
   if (row.kind === "secret_use") {
     const ask = args as SecretUseAsk
-    const secret = await findTypableSecret(ctx, ask.secretName)
+    const secret = await resolveSecretRef(ctx, ask.secretName, BROWSER_TYPE)
     const asked = describeSecretUseAsk(ask, {
       bound: secret ? await isBoundOrigin(ctx, secret.id, ask.origin) : false,
     })
@@ -1878,20 +1897,27 @@ function browserTabOf(
   return typeof tabId === "string" ? tabId : null
 }
 
-/** A secret the owner types in to agree to a new server, if there is one. */
-function newSecretOf(
-  ctx: VaultContext,
-  row: PermissionRequest,
-): {
+/**
+ * A secret the owner types in, or has PCP make, to agree to a request, if
+ * there is one: its name, what it is for (`use`, which says which of the
+ * vault's secrets of that name would do, secret-refs.ts), and the value PCP
+ * would make (`generate`: the assistant's recipe, or `defaultRecipe` for
+ * the use when it asked for none).
+ */
+type NewSecret = {
   name: string
   optional: boolean
   clientId: string | null
   login: string | null
+  use: SecretRefUse
   kind?: "text" | "totp"
   origins?: string[]
   username?: string | null
   generate?: PasswordRecipe | null
-} | null {
+  defaultRecipe: PasswordRecipe
+}
+
+function newSecretOf(ctx: VaultContext, row: PermissionRequest): NewSecret | null {
   if (row.kind === "secret_request") {
     const asked = readArgs(ctx, row) as SecretRequestAsk
 
@@ -1900,18 +1926,31 @@ function newSecretOf(
       optional: false,
       clientId: null,
       login: null,
+      use: BROWSER_TYPE,
       kind: asked.kind,
       origins: asked.origins,
       username: asked.username ?? null,
       generate: asked.generate ?? null,
+      defaultRecipe: DEFAULT_PASSWORD_RECIPE,
     }
   }
 
   if (row.kind === "service_change") {
-    const { newSecret } = readArgs(ctx, row) as ServiceChangeAsk
+    const { newSecret, newSecretGenerate } = readArgs(
+      ctx,
+      row,
+    ) as ServiceChangeAsk
 
     return newSecret
-      ? { name: newSecret, optional: false, clientId: null, login: null }
+      ? {
+          name: newSecret,
+          optional: false,
+          clientId: null,
+          login: null,
+          use: { kind: "service_env" },
+          generate: newSecretGenerate ?? null,
+          defaultRecipe: DEFAULT_TOKEN_RECIPE,
+        }
       : null
   }
 
@@ -1919,7 +1958,14 @@ function newSecretOf(
     const { newSecret } = readArgs(ctx, row) as WrapperChangeAsk
 
     return newSecret
-      ? { name: newSecret, optional: false, clientId: null, login: null }
+      ? {
+          name: newSecret,
+          optional: false,
+          clientId: null,
+          login: null,
+          use: { kind: "wrapper_binding" },
+          defaultRecipe: DEFAULT_TOKEN_RECIPE,
+        }
       : null
   }
 
@@ -1936,8 +1982,23 @@ function newSecretOf(
         clientId:
           args.authType === "oauth" ? (args.oauthClientId ?? null) : null,
         login: args.authType === "basic" ? (args.authUsername ?? null) : null,
+        use: registerSecretUse(args),
+        generate: args.newSecretGenerate ?? null,
+        defaultRecipe:
+          args.authType === "basic"
+            ? DEFAULT_PASSWORD_RECIPE
+            : DEFAULT_TOKEN_RECIPE,
       }
     : null
+}
+
+/** The use of a new server's secret, as the request describes the server. */
+function registerSecretUse(args: RegisterArgs): SecretRefUse {
+  return credentialUse({
+    authType: args.authType,
+    mail: Boolean(args.mail),
+    calendar: Boolean(args.calendar),
+  })
 }
 
 async function secretToEnter(
@@ -1946,15 +2007,16 @@ async function secretToEnter(
 ): Promise<PermissionView["secretToEnter"]> {
   const secret = newSecretOf(ctx, row)
 
-  return secret
-    ? {
-        ...secret,
-        exists:
-          row.kind === "secret_request"
-            ? (await findTypableSecret(ctx, secret.name)) !== null
-            : (await findTextSecretByName(ctx, secret.name)) !== null,
-      }
-    : null
+  if (!secret) {
+    return null
+  }
+
+  const { use: _use, ...shown } = secret
+
+  return {
+    ...shown,
+    exists: (await resolveSecretRef(ctx, secret.name, secret.use)) !== null,
+  }
 }
 
 /** What the assistant is told about a request that is no longer pending. */
@@ -2711,7 +2773,10 @@ export async function decidePermission(
   } else if (newSecret) {
     const problem =
       secretValue ||
-      !(newSecret.optional || (await findTextSecretByName(ctx, newSecret.name)))
+      !(
+        newSecret.optional ||
+        (await resolveSecretRef(ctx, newSecret.name, newSecret.use))
+      )
         ? validateSecretValue(secretValue ?? "")
         : null
 
@@ -3148,7 +3213,7 @@ async function executeSecretUse(
   }
 
   const asked = readArgs(ctx, row) as SecretUseAsk
-  const secret = await findTypableSecret(ctx, asked.secretName)
+  const secret = await resolveSecretRef(ctx, asked.secretName, BROWSER_TYPE)
 
   if (!secret) {
     return text(
@@ -3559,7 +3624,11 @@ async function secretForRegister(
   }
 
   if (!secretValue) {
-    const existing = await findTextSecretByName(ctx, asked.newSecretName)
+    const existing = await resolveSecretRef(
+      ctx,
+      asked.newSecretName,
+      registerSecretUse(asked),
+    )
 
     if (!existing && !asked.newSecretOptional) {
       throw invalid(`Enter the value of the secret "${asked.newSecretName}".`)

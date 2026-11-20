@@ -2,22 +2,31 @@ import { randomInt } from "node:crypto"
 
 import {
   DEFAULT_PASSWORD_RECIPE,
+  DEFAULT_TOKEN_RECIPE,
   MAX_GENERATE_EXCLUDE,
   MAX_GENERATED_LENGTH,
   MIN_GENERATED_LENGTH,
   PASSWORD_SYMBOLS,
+  SECRET_FORMATS,
   type PasswordRecipe,
+  type SecretFormat,
 } from "./constants"
 import { invalid } from "./errors"
 
 /**
- * A password PCP makes for one of the owner's secrets (request_secret's
- * `generate`, or the Generate switch on its page), so that neither the
- * owner nor an assistant has to come up with one and nobody sees it on the
- * way: it is made here, on PCP's machine, with Node's CSPRNG
- * (crypto.randomInt, which draws without modulo bias), and stored as the
- * secret's value at once. The owner can reveal it on the Secrets page; an
- * assistant never gets it back.
+ * A value PCP makes for one of the owner's secrets (request_secret's
+ * `generate`, a proposal's, or "Have PCP make it" on a request's page), so
+ * that neither the owner nor an assistant has to come up with one and
+ * nobody sees it on the way: it is made here, on PCP's machine, with Node's
+ * CSPRNG (crypto.randomInt, which draws without modulo bias), and stored as
+ * the secret's value at once. The owner can reveal it on the Secrets page;
+ * an assistant never gets it back.
+ *
+ * A recipe's `format` says what it looks like: a password from the kinds
+ * of character it turns on (a character of each), or a token of letters
+ * and digits, hex digits or base64url characters, `length` characters
+ * long. (@kaperkunde/next-kit's randomCode makes grouped codes from one
+ * alphabet, with no random source a test can swap, so it is not used.)
  *
  * Pure but for the random source, which a test may swap.
  */
@@ -53,11 +62,22 @@ const cryptoBelow: RandomBelow = (max) => randomInt(max)
  */
 export function checkPasswordRecipe(input: unknown): PasswordRecipe {
   if (input === null || typeof input !== "object" || Array.isArray(input)) {
-    throw invalid("Describe the password to make as an object.")
+    throw invalid("Describe the value to make as an object.")
   }
 
   const raw = input as Record<string, unknown>
-  const length = raw.length ?? DEFAULT_PASSWORD_RECIPE.length
+  const format = raw.format ?? "password"
+
+  if (
+    typeof format !== "string" ||
+    !(SECRET_FORMATS as readonly string[]).includes(format)
+  ) {
+    throw invalid(`format is one of ${SECRET_FORMATS.join(", ")}.`)
+  }
+
+  const base =
+    format === "password" ? DEFAULT_PASSWORD_RECIPE : DEFAULT_TOKEN_RECIPE
+  const length = raw.length ?? base.length
 
   if (
     typeof length !== "number" ||
@@ -66,11 +86,15 @@ export function checkPasswordRecipe(input: unknown): PasswordRecipe {
     length > MAX_GENERATED_LENGTH
   ) {
     throw invalid(
-      `A made password is ${MIN_GENERATED_LENGTH} to ${MAX_GENERATED_LENGTH} characters long.`,
+      `A made value is ${MIN_GENERATED_LENGTH} to ${MAX_GENERATED_LENGTH} characters long.`,
     )
   }
 
-  const recipe: PasswordRecipe = { ...DEFAULT_PASSWORD_RECIPE, length }
+  const recipe: PasswordRecipe = {
+    ...DEFAULT_PASSWORD_RECIPE,
+    format: format as SecretFormat,
+    length,
+  }
 
   for (const name of SET_NAMES) {
     const value = raw[name]
@@ -103,6 +127,23 @@ export function checkPasswordRecipe(input: unknown): PasswordRecipe {
   }
 
   recipe.exclude = [...new Set(exclude)].join("")
+
+  if (recipe.format !== "password") {
+    // A token's alphabet is fixed by its format: hex and base64url are
+    // encodings, so nothing is left out of them.
+    if (recipe.exclude && recipe.format !== "alphanumeric") {
+      throw invalid(
+        `exclude is for a password or letters and digits, not ${recipe.format}.`,
+      )
+    }
+
+    if (alphabetOf(recipe).length < 2) {
+      throw invalid("exclude leaves too few characters to make it from.")
+    }
+
+    return recipe
+  }
+
   const sets = chosenSets(recipe)
 
   if (sets.length === 0) {
@@ -143,7 +184,20 @@ export function generatePassword(
   recipe: PasswordRecipe,
   random: RandomBelow = cryptoBelow,
 ): string {
-  const sets = chosenSets(checkPasswordRecipe(recipe)).map(([, chars]) => chars)
+  const checked = checkPasswordRecipe(recipe)
+
+  if (checked.format !== "password") {
+    const alphabet = alphabetOf(checked)
+    let value = ""
+
+    while (value.length < checked.length) {
+      value += alphabet[random(alphabet.length)]!
+    }
+
+    return value
+  }
+
+  const sets = chosenSets(checked).map(([, chars]) => chars)
   const all = sets.join("")
   const chars: string[] = sets.map((set) => set[random(set.length)]!)
 
@@ -159,8 +213,39 @@ export function generatePassword(
   return chars.join("")
 }
 
+const TOKEN_ALPHABETS: Record<Exclude<SecretFormat, "password">, string> = {
+  alphanumeric:
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789",
+  hex: "0123456789abcdef",
+  base64url:
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_",
+}
+
+/** A token format's characters, without the ones left out. */
+function alphabetOf(recipe: PasswordRecipe): string {
+  const format = recipe.format ?? "password"
+
+  return format === "password"
+    ? ""
+    : [...TOKEN_ALPHABETS[format]]
+        .filter((char) => !recipe.exclude.includes(char))
+        .join("")
+}
+
+const FORMAT_WORDS: Record<Exclude<SecretFormat, "password">, string> = {
+  alphanumeric: "letters and digits",
+  hex: "hex digits",
+  base64url: "base64url characters (letters, digits, - and _)",
+}
+
 /** A recipe in the owner's words, for the request's page and its answer. */
 export function describeRecipe(recipe: PasswordRecipe): string {
+  const format = recipe.format ?? "password"
+
+  if (format !== "password") {
+    return `${recipe.length} characters: ${FORMAT_WORDS[format]}${recipe.exclude ? `, without ${recipe.exclude}` : ""}`
+  }
+
   const kinds = SET_NAMES.filter((name) => recipe[name]).map(
     (name) => SET_WORDS[name],
   )

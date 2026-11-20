@@ -19,7 +19,8 @@ import {
   type WrapperPaceInput,
 } from "../pacing/input"
 import { canonicalJson } from "../permission-rules"
-import { createSecretNamedAfter, findTextSecretByName } from "../secrets"
+import { resolveSecretRef } from "../secret-refs"
+import { createSecretNamedAfter } from "../secrets"
 import { tierOfCalls } from "../tool-tiers"
 import {
   contentInstance,
@@ -973,7 +974,12 @@ async function withSecretIds(
       })
     ).id
   } else if (newSecret) {
-    id = (await findTextSecretByName(ctx, newSecret))?.id ?? null
+    id =
+      (
+        await resolveSecretRef(ctx, newSecret, {
+          kind: "wrapper_binding",
+        })
+      )?.id ?? null
   }
 
   if (!id) {

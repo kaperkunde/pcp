@@ -12,11 +12,10 @@ import {
   type ProposedAccess,
   type ToolAccessArg,
 } from "../proposed-access"
-import {
-  createSecretNamedAfter,
-  findTextSecretByName,
-  validateSecretName,
-} from "../secrets"
+import type { PasswordRecipe } from "../constants"
+import { checkPasswordRecipe, describeRecipe } from "../generate-password"
+import { resolveSecretRef } from "../secret-refs"
+import { createSecretNamedAfter, validateSecretName } from "../secrets"
 import { getServer, normalizeNameAndDescription } from "../servers"
 import { parseSshAddress } from "../ssh/hosts"
 import {
@@ -77,6 +76,11 @@ export type ServiceChangeAsk = {
   env: ProposedVariable[]
   /** A secret PCP does not hold yet, which the owner types in. */
   newSecret: string | null
+  /**
+   * The value the assistant proposed PCP make for the new secret
+   * (env_secrets' `generate`), filled in on the page; never a value.
+   */
+  newSecretGenerate?: PasswordRecipe | null
   note: string | null
   /**
    * Levels and tiers the assistant proposed for what it registers, by name
@@ -99,7 +103,7 @@ export type ServiceProposalArgs = {
   sshServerId: string
   publishAddress?: string
   publishPorts?: Array<{ container: number; host: number }>
-  envSecrets?: Array<{ name: string; secret: string }>
+  envSecrets?: Array<{ name: string; secret: string; generate?: unknown }>
   note?: string
   /** tool_access: levels and tiers proposed for what it registers. */
   toolAccess?: ToolAccessArg
@@ -194,6 +198,7 @@ export async function prepareServiceProposal(
 
   const known = new Set(definition.env.map((entry) => entry.name))
   const given = new Map<string, string>()
+  const generated = new Map<string, PasswordRecipe>()
 
   for (const entry of args.envSecrets ?? []) {
     if (!known.has(entry.name)) {
@@ -205,16 +210,28 @@ export async function prepareServiceProposal(
     }
 
     given.set(entry.name, entry.secret.trim())
+
+    if (entry.generate !== undefined) {
+      generated.set(entry.name, checkPasswordRecipe(entry.generate))
+    }
   }
 
   let newSecret: string | null = null
+  let newSecretGenerate: PasswordRecipe | null = null
   const env: ProposedVariable[] = []
 
   for (const entry of definition.env) {
     const secretName = given.get(entry.name) ?? null
     const stored = secretName
-      ? await findTextSecretByName(ctx, secretName)
+      ? await resolveSecretRef(ctx, secretName, { kind: "service_env" })
       : null
+    const recipe = generated.get(entry.name) ?? null
+
+    if (recipe && stored) {
+      throw invalid(
+        `${entry.name} takes "${stored.name}", which the owner already holds: generate is for a new secret only.`,
+      )
+    }
 
     if (secretName && !stored) {
       const problem = validateSecretName(secretName)
@@ -230,7 +247,17 @@ export async function prepareServiceProposal(
         )
       }
 
+      if (recipe && newSecretGenerate && newSecret === secretName) {
+        // Two variables take the same new secret: one recipe for it.
+        if (JSON.stringify(recipe) !== JSON.stringify(newSecretGenerate)) {
+          throw invalid(
+            `"${secretName}" is made once: give it one generate, or none.`,
+          )
+        }
+      }
+
       newSecret = secretName
+      newSecretGenerate = recipe ?? newSecretGenerate
     }
 
     if (!secretName && entry.required && entry.value === undefined) {
@@ -284,6 +311,7 @@ export async function prepareServiceProposal(
     publish,
     env,
     newSecret,
+    ...(newSecretGenerate ? { newSecretGenerate } : {}),
     note,
     ...(proposedAccess ? { proposedAccess } : {}),
   }
@@ -326,7 +354,9 @@ export function describeServiceAsk(ask: ServiceChangeAsk): {
         ? `Variable ${entry.name}: ${fixed !== undefined ? `its fixed value, ${fixed}` : "not set"}`
         : entry.secretId
           ? `Variable ${entry.name}: your secret "${entry.secret}"`
-          : `Variable ${entry.name}: a new secret, saved as "${entry.secret}", which you enter here when you agree`
+          : ask.newSecretGenerate
+            ? `Variable ${entry.name}: a new secret, saved as "${entry.secret}", which the assistant proposes PCP makes (${describeRecipe(ask.newSecretGenerate)}); you can type one instead`
+            : `Variable ${entry.name}: a new secret, saved as "${entry.secret}", which you enter here when you agree`
     }),
     definition.volumes.length > 0
       ? `Named volumes (never a folder of the server): ${definition.volumes.map((volume) => `${volume.name} at ${volume.path}`).join(", ")}`
@@ -433,7 +463,13 @@ export async function applyServiceChange(
       }
 
       id =
-        saved?.id ?? (await findTextSecretByName(ctx, entry.secret))?.id ?? null
+        saved?.id ??
+        (
+          await resolveSecretRef(ctx, entry.secret, {
+            kind: "service_env",
+          })
+        )?.id ??
+        null
     }
 
     if (!id) {

@@ -22,7 +22,7 @@ import { storeTools, type SyncResult } from "./catalogue"
 import type { VaultContext } from "./context"
 import { asBytes, decryptString, encryptString } from "./crypto"
 import { db } from "./db"
-import { admitSecretUse, findTypableSecret } from "./browser-secrets"
+import { admitSecretUse } from "./browser-secrets"
 import { callBrowserTool } from "./browser/call"
 import { syncBrowserTools } from "./browser/server"
 import { isOwnerNeeded, type SecretTyper } from "./browser/types"
@@ -177,6 +177,7 @@ import {
   type SecretGrant,
 } from "./wrappers/placeholders"
 import { SECRET_META_SELECT, secretName } from "./secret-meta"
+import { resolveSecretRef } from "./secret-refs"
 import { findServer, type OpenServer, writeServer } from "./server-meta"
 
 /**
@@ -2353,7 +2354,9 @@ async function callBrowser(
     async value(use) {
       if (part === "username") {
         // Refused before the owner is asked when there is none to type.
-        const named = await findTypableSecret(ctx, name)
+        const named = await resolveSecretRef(ctx, name, {
+          kind: "browser_type",
+        })
         if (named) await readTypedLogin(ctx, named.id)
       }
 
