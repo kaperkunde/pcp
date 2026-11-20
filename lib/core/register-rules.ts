@@ -59,6 +59,8 @@ export type RegisterShape = {
   publish_address?: string
   publish_ports?: unknown[]
   env_secrets?: unknown[]
+  /** A recipe for the value PCP is to make for the new secret in secret. */
+  generate?: unknown
 }
 
 /** The arguments only a service takes. */
@@ -264,6 +266,15 @@ export function checkRegisterShape(
     return "Header authentication needs the name of a secret the owner stored in PCP, in secret."
   }
 
+  // An OAuth client's secret may be new without a name (PCP names it).
+  if (
+    args.generate !== undefined &&
+    !args.secret?.trim() &&
+    !(authType === "oauth" && args.client_id?.trim())
+  ) {
+    return "generate makes the value of the new secret named in secret: name one there, with auth_type header or basic (or oauth with client_id)."
+  }
+
   return null
 }
 
@@ -347,6 +358,10 @@ function checkServiceShape(args: RegisterShape): string | null {
 
   if ((args.auth_type ?? "none") !== "none") {
     return "A service signs in to nothing: leave auth_type out. A secret it needs goes to one of its variables, by name, in env_secrets."
+  }
+
+  if (args.generate !== undefined) {
+    return "For a service, generate goes with the variable whose new secret PCP is to make, in env_secrets."
   }
 
   if (args.definition === undefined && args.service === undefined) {

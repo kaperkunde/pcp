@@ -485,3 +485,51 @@ describe("a service (kind service)", () => {
     ).toMatch(/leave description out/)
   })
 })
+
+describe("generate (#162)", () => {
+  const mcp = { url: "https://mcp.example.com/mcp" }
+
+  it("goes with a new secret named in secret, or an OAuth client's", () => {
+    expect(
+      checkRegisterShape("mcp", {
+        ...mcp,
+        auth_type: "header",
+        secret: "Linear key",
+        generate: {},
+      }),
+    ).toBeNull()
+    expect(
+      checkRegisterShape("api", {
+        openapi_schema: "{}",
+        auth_type: "basic",
+        username: "ada",
+        secret: "Pets password",
+        generate: {},
+      }),
+    ).toBeNull()
+    expect(
+      checkRegisterShape("mcp", {
+        ...mcp,
+        auth_type: "oauth",
+        client_id: "pcp",
+        generate: {},
+      }),
+    ).toBeNull()
+  })
+
+  it("is refused with nothing to make, and for a service, whose variables take it", () => {
+    expect(checkRegisterShape("mcp", { ...mcp, generate: {} })).toMatch(
+      /generate makes the value of the new secret named in secret/,
+    )
+    expect(
+      checkRegisterShape("mcp", { ...mcp, auth_type: "oauth", generate: {} }),
+    ).toMatch(/generate makes the value/)
+    expect(
+      checkRegisterShape("service", {
+        service: {},
+        ssh_server: "build-box",
+        generate: {},
+      }),
+    ).toMatch(/generate goes with the variable/)
+  })
+})

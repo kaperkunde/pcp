@@ -6,6 +6,22 @@ release, with a note in front of the answer ("addPatches was renamed to
 add_patches; use add_patches."); after that it is refused like any other
 unknown key.
 
+## `request_secret` is PCP's own tool
+
+Asking the owner to store a secret is PCP's own `request_secret` now, run
+through `execute_write` (`{"tool": "request_secret", "arguments": {…}}`),
+no longer only the browser's. It takes the same arguments: `name`,
+`purpose`, `kind` (`text` or `totp`), `username`, `origins` and `generate`.
+`origins` is optional: a secret with no sites is not typed by the browser,
+only sent where the owner later names it (`register_server`'s `secret`,
+`env_secrets`, a wrapper's `secrets`). `generate` takes a `format`:
+`password` (the default, as before), `alphanumeric`, `hex` or `base64url`,
+its `length` in characters.
+
+The browser's `request_secret` still works for this release, as an alias:
+the same request, with a note before the link that names the new tool. It
+goes in the next release.
+
 ## A paced call's code moves to `_meta`, like every tool error's
 
 A call PCP holds back (pacing, or the call gate: a server cooling down, its

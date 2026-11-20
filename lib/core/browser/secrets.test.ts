@@ -1,5 +1,13 @@
 import type { CallToolResult } from "@modelcontextprotocol/server"
-import { afterAll, afterEach, beforeEach, describe, expect, it } from "vitest"
+import {
+  afterAll,
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from "vitest"
 
 import { openServer } from "../server-meta"
 
@@ -20,6 +28,14 @@ import { createBrowserServer } from "./server"
 import { isOwnerNeeded, type BrowserAsk } from "./types"
 import { secretNameWhere } from "../secret-meta"
 import type { OpenServer } from "../server-meta"
+import { resolveSecretRef } from "../secret-refs"
+
+// Every secret named by name goes through the one resolver (#162): watched
+// here, as it is.
+vi.mock("../secret-refs", async (importOriginal) => {
+  const real = await importOriginal<typeof import("../secret-refs")>()
+  return { ...real, resolveSecretRef: vi.fn(real.resolveSecretRef) }
+})
 
 // Typing the owner's secrets into pages, against a real headless Chromium
 // and pages served on this machine, through upstream.ts as every call comes
@@ -603,6 +619,12 @@ describe.skipIf(!executable)("typing a secret", { timeout: 90_000 }, () => {
 
     await expect(typed).rejects.toThrow(/keeps no login name/)
     expect(await db().permissionRequest.count()).toBe(0)
+    // Found as a secret the browser types, before anything else.
+    expect(vi.mocked(resolveSecretRef)).toHaveBeenCalledWith(
+      expect.anything(),
+      "Shop password",
+      { kind: "browser_type" },
+    )
   })
 
   it("takes a secret only as type's text, and from a wrapper only where it is bound", async () => {

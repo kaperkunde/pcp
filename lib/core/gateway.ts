@@ -5356,12 +5356,6 @@ export function buildGatewayServer(
       const own = applyLimitsChange({}, limitsChangeOf(args.limits))
       const proposedLimits = sameLimits(own, {}) ? null : own
 
-      if (kind === "service" && args.generate !== undefined) {
-        return failure(
-          "For a service, generate goes with the variable whose new secret PCP is to make, in env_secrets.",
-        )
-      }
-
       if (kind === "service") {
         if (
           !checkRateLimit(
@@ -5569,11 +5563,10 @@ export function buildGatewayServer(
       let newSecretGenerate: PasswordRecipe | null = null
 
       if (args.generate !== undefined) {
+        // The shape check made sure a secret is named: one PCP holds.
         if (!newSecretName) {
           return failure(
-            authType === "none"
-              ? "generate is for a new secret, and nothing is sent: leave it out."
-              : `generate is for a new secret, and "${secretName ?? args.secret?.trim() ?? ""}" is one the owner holds: leave it out to reuse that one, or name a new secret.`,
+            `generate is for a new secret, and "${secretName ?? ""}" is one the owner holds: leave it out to reuse that one, or name a new secret.`,
           )
         }
 

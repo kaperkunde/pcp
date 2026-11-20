@@ -1,6 +1,6 @@
 import { openRequestTool } from "./level-names"
 import type { CallToolResult } from "@modelcontextprotocol/server"
-import { afterEach, beforeEach, describe, expect, it } from "vitest"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import { openServer } from "./server-meta"
 
@@ -55,6 +55,14 @@ import { DEFAULT_PASSWORD_RECIPE } from "./constants"
 import { SECRET_SIGN_IN_WINDOW_MS } from "./browser/limits"
 import { setupVault } from "./vault"
 import { secretName, secretNameWhere } from "./secret-meta"
+import { resolveSecretRef } from "./secret-refs"
+
+// Every secret named by name goes through the one resolver (#162): watched
+// here, as it is.
+vi.mock("./secret-refs", async (importOriginal) => {
+  const real = await importOriginal<typeof import("./secret-refs")>()
+  return { ...real, resolveSecretRef: vi.fn(real.resolveSecretRef) }
+})
 
 // Secrets the browser types, against a scratch database: the sites a secret
 // belongs to, a token's allowance per secret and site (once, an hour,
@@ -730,9 +738,17 @@ describe("request_secret", () => {
     await expect(
       checkSecretRequest(ctx, serverId, { ...ASK, purpose: "x".repeat(501) }),
     ).rejects.toThrow(/under 500/)
+    // Sites are optional, but one-time codes are typed by the browser only.
+    expect(
+      await checkSecretRequest(ctx, serverId, { ...ASK, origins: [] }),
+    ).toMatchObject({ origins: [] })
     await expect(
-      checkSecretRequest(ctx, serverId, { ...ASK, origins: [] }),
-    ).rejects.toThrow(/Name the sites/)
+      checkSecretRequest(ctx, serverId, {
+        ...ASK,
+        origins: [],
+        kind: "totp",
+      }),
+    ).rejects.toThrow(/name the sites they are typed at/)
     await expect(
       checkSecretRequest(ctx, serverId, {
         ...ASK,
@@ -759,6 +775,13 @@ describe("request_secret", () => {
     })
     expect(requested).toMatchObject({ serverId })
     expect(openRequestTool(ctx, requested)).toBe("request_secret")
+    // An alias for one release, which says so before the link.
+    expect(textOf(asked)).toContain(
+      "The browser's request_secret is now PCP's own request_secret",
+    )
+    expect(textOf(asked).indexOf("PCP's own request_secret")).toBeLessThan(
+      textOf(asked).indexOf(`${PUBLIC_URL}/permissions/`),
+    )
 
     const held = await runCall(
       ctx,
@@ -774,7 +797,7 @@ describe("request_secret", () => {
   it("never writes over a secret PCP holds", async () => {
     await expect(
       checkSecretRequest(ctx, serverId, { ...ASK, name: "Shop password" }),
-    ).rejects.toThrow(/never writes over one: type it/)
+    ).rejects.toThrow(/never writes over one: name it/)
   })
 
   it("saves what the owner typed, with the sites they left, and tells the assistant the name only", async () => {
@@ -1297,6 +1320,25 @@ describe("the owner's answer to a secret's use", () => {
     expect(JSON.stringify(view)).not.toContain(VALUE)
   })
 
+  it("finds the secret for the owner's page and their answer through the resolver (#162)", async () => {
+    const id = await asked()
+    vi.mocked(resolveSecretRef).mockClear()
+    await getPermissionView(ctx, id, { publicUrl: PUBLIC_URL })
+    await decidePermission(
+      ctx,
+      id,
+      "allow_once",
+      { publicUrl: PUBLIC_URL },
+      stub().executor,
+    )
+
+    const calls = vi.mocked(resolveSecretRef).mock.calls
+    expect(calls.length).toBeGreaterThanOrEqual(2)
+    for (const [, name, use] of calls) {
+      expect([name, use]).toEqual(["Shop password", { kind: "browser_type" }])
+    }
+  })
+
   it("types it once on Allow once, the call made again with the secret's name", async () => {
     const id = await asked()
     const { calls, executor } = stub()
@@ -1404,5 +1446,54 @@ describe("the owner's answer to a secret's use", () => {
 
     expect(calls).toEqual([])
     expect(await listSecretAllowances(ctx)).toEqual([])
+  })
+})
+
+describe("the secrets the browser names, through the resolver (#162)", () => {
+  it("finds every one as a secret the browser types", async () => {
+    vi.mocked(resolveSecretRef).mockClear()
+    const input = await checkSecretRequest(ctx, serverId, {
+      name: "Mail password",
+      purpose: "To sign in to the webmail.",
+      origins: ["https://mail.example"],
+    })
+    await withPermission(
+      { ctx, tokenId, publicUrl: PUBLIC_URL },
+      { kind: "secret_request", input },
+    )
+    const row = await db().permissionRequest.findFirstOrThrow({
+      where: { kind: "secret_request" },
+    })
+    await decidePermission(ctx, row.id, "allow_once", {
+      publicUrl: PUBLIC_URL,
+      secretValue: "mail-pass",
+    })
+    await expect(
+      admitSecretUse(ctx, {
+        tokenId,
+        serverId,
+        name: "Nothing by that name",
+        use: pageAt(SHOP),
+      }),
+    ).rejects.toThrow(/no secret called/)
+    await checkSecretSitesChange(ctx, serverId, {
+      name: "Shop password",
+      reason: "The shop moved.",
+      add: [{ origin: "https://shop.example" }],
+    })
+
+    const uses = vi
+      .mocked(resolveSecretRef)
+      .mock.calls.map(([, name, use]) => [name, use.kind])
+    expect(uses).toEqual(
+      expect.arrayContaining([
+        ["Mail password", "browser_type"],
+        ["Nothing by that name", "browser_type"],
+        ["Shop password", "browser_type"],
+      ]),
+    )
+    expect(new Set(uses.map(([, kind]) => kind))).toEqual(
+      new Set(["browser_type"]),
+    )
   })
 })
