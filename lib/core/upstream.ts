@@ -107,6 +107,10 @@ import {
 } from "./services/services"
 import { newerImageOn, type NewerImage } from "./services/updates"
 import {
+  dropGeneratedSecrets,
+  makeGeneratedSecrets,
+} from "./services/generated"
+import {
   AddressBlockedError,
   isOwnAddress,
   isPublicAddress,
@@ -3201,8 +3205,16 @@ export async function launchService(
   input: ServiceLaunchInput,
   options: ServiceOptions,
 ): Promise<LaunchResult & { message: string }> {
-  const prepared = await prepareLaunch(ctx, input)
-  const connection = await serviceConnection(ctx, prepared.host, options)
+  const asked = await prepareLaunch(ctx, input)
+  const connection = await serviceConnection(ctx, asked.host, options)
+  // The variables PCP makes a value for (generated): a secret each, bound
+  // like one the owner chose; taken back when the launch fails.
+  const generated = await makeGeneratedSecrets(ctx, {
+    service: asked.name,
+    definition: asked.definition,
+    bindings: asked.env,
+  })
+  const prepared = { ...asked, env: generated.bindings }
   const registers = prepared.definition.registers
   // An exit's proxy gets a login of its own, made here for this instance:
   // a random password the container reads among its variables and the
@@ -3214,19 +3226,30 @@ export async function launchService(
           password: randomBytes(24).toString("base64url"),
         }
       : undefined
-  const access: ServiceAccess = {
-    host: connection.host,
-    forward: connection.forward,
-    env: await serviceEnv(ctx, prepared.definition, prepared.env, {
-      typed: prepared.values,
-      proxyAuth,
-    }),
-    ...(registers.kind === "exit"
-      ? { loopback: connection.loopback, ...(proxyAuth ? { proxyAuth } : {}) }
-      : {}),
-    ...(options.timing ? { timing: options.timing } : {}),
+  let result: LaunchResult
+
+  try {
+    const access: ServiceAccess = {
+      host: connection.host,
+      forward: connection.forward,
+      env: await serviceEnv(ctx, prepared.definition, prepared.env, {
+        typed: prepared.values,
+        proxyAuth,
+      }),
+      ...(registers.kind === "exit"
+        ? {
+            loopback: connection.loopback,
+            ...(proxyAuth ? { proxyAuth } : {}),
+          }
+        : {}),
+      ...(options.timing ? { timing: options.timing } : {}),
+    }
+    result = await launchServiceOn(ctx, prepared, access)
+  } catch (error) {
+    await dropGeneratedSecrets(ctx, generated.made)
+    throw error
   }
-  const result = await launchServiceOn(ctx, prepared, access)
+
   let message = `${prepared.name} is running on ${prepared.host.name}.`
 
   if (result.exitId && prepared.exit) {

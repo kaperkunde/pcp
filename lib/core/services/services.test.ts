@@ -18,7 +18,12 @@ import { exportVault, readExport, restoreExport } from "../backup"
 import type { VaultContext } from "../context"
 import { db } from "../db"
 import { downloadSpec } from "../endpoints"
-import { createSecret, deleteSecret, updateSecret } from "../secrets"
+import {
+  createSecret,
+  deleteSecret,
+  readSecretValue,
+  updateSecret,
+} from "../secrets"
 import { secretUses } from "../secret-uses"
 import { deleteServer, getServer } from "../servers"
 import { startFakeSsh, type FakeSsh } from "../ssh/fake-server"
@@ -520,6 +525,56 @@ describe("launching a service", { timeout: 30_000 }, () => {
     expect(server.tools.map((tool) => tool.name)).toEqual(["convert"])
     expect(mcpSeen.length).toBeGreaterThan(0)
     expect(new Set(mcpSeen)).toEqual(new Set([`Bearer ${API_KEY}`]))
+  })
+
+  it("makes a value for a generated variable: a secret of the vault, sent by the MCP server and handed to the container", async () => {
+    const hostId = await pinnedHost()
+    const input = await launchInput(hostId, {
+      definition: definition({
+        env: [{ name: "API_KEY", required: true, generated: true }],
+        registers: MCP_WITH_AUTH,
+      }),
+      env: {},
+    })
+    const secretsBefore = await db().secret.count()
+    const launched = await launchService(ctx, input, FAST)
+    const server = await getServer(ctx, launched.registeredId!)
+    const spec = await db().serviceSpec.findUniqueOrThrow({
+      where: { serverId: launched.id },
+    })
+    const bound = JSON.parse(spec.env) as Record<string, string>
+
+    // One new secret, bound to the variable and to the server's header.
+    expect(await db().secret.count()).toBe(secretsBefore + 1)
+    expect(bound.API_KEY).toBeTruthy()
+    expect(server.authSecretId).toBe(bound.API_KEY)
+    const value = await readSecretValue(ctx, bound.API_KEY!)
+    expect(value).toMatch(/^[A-Za-z0-9]{40}$/)
+
+    // Over standard input, never on a command line.
+    expect(docker.state().containers["pcp-docs"]!.env).toBe(
+      `API_KEY=${value}\n`,
+    )
+    expect(JSON.stringify(docker.commands)).not.toContain(value)
+    expect(new Set(mcpSeen)).toEqual(new Set([`Bearer ${value}`]))
+  })
+
+  it("takes back the value it made when the launch fails", async () => {
+    const hostId = await pinnedHost()
+    forwarding = false
+    const input = await launchInput(hostId, {
+      definition: definition({
+        env: [{ name: "API_KEY", required: true, generated: true }],
+        registers: MCP_WITH_AUTH,
+      }),
+      env: {},
+    })
+    const secretsBefore = await db().secret.count()
+
+    await expect(launchService(ctx, input, FAST)).rejects.toThrow(
+      /did not become healthy/,
+    )
+    expect(await db().secret.count()).toBe(secretsBefore)
   })
 
   it("refuses to launch an MCP server with a header before its variable has a secret", async () => {

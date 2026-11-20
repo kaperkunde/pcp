@@ -81,3 +81,17 @@ export const FILE_PROBE_BYTES = 8 * 1024
  * padding and end): the most read back is the largest file plus these.
  */
 export const FILE_TAR_OVERHEAD_BYTES = 64 * 1024
+
+/** A value PCP makes for a `generated` variable: its length by default and bounds. */
+export const GENERATED_VALUE_LENGTH = 40
+export const MIN_GENERATED_VALUE_LENGTH = 16
+export const MAX_GENERATED_VALUE_LENGTH = 128
+
+/** The longest sign-in address a service's start tool may hand the owner. */
+export const MAX_SIGNIN_URL_CHARS = 4000
+/** The longest code the owner pastes on a service's sign-in page. */
+export const MAX_SIGNIN_CODE_CHARS = 2000
+/** How long one sign-in call (status, start, finish) may take, at most. */
+export const SIGNIN_CALL_TIMEOUT_MS = 60_000
+/** How often check_server reads a service's sign-in while the owner is on it. */
+export const SIGNIN_POLL_MS = 3_000
