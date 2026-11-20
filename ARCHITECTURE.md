@@ -1648,11 +1648,16 @@ reaches the container over standard input as any bound secret does.
 Nobody types or chooses it: the launch form, the settings form, the
 launch request, a repository's review and the service's page show it as
 made by PCP, and `register_server`'s `env_secrets` naming it (with
-`generate` or without) is refused. Made once per name: a remake, or a
-variable its definition gains later (an update, a repository's change),
-gets its value the next time PCP reaches the service (`bindGeneratedEnv`
-in `upstream.ts serviceAccess`), and one made before is kept
-(`created: false`). Each is named in the launch's list as soon as it
+`generate` or without) is refused. Each is its service's own: a bound variable keeps its value (a remake),
+and a value made now is always a new secret, its name getting "-2", "-3",
+… when taken (a service of that name renamed since, or removed with the
+server it registered kept, which still sends its value), so two services
+never share a token. A variable its definition gains later (an update, a
+repository's change) gets its value only on a way in that may make the
+container again (start, restart, remake, update, start on demand, the
+reconcile pass; never a status, logs or image read, or a removal:
+`ServiceOptions.bindGenerated`), and the server it registered moves to it
+only once the container is made with it (`followRegisteredAuth`). Each is named in the launch's list as soon as it
 exists, so a launch that fails, even part way through making them, takes
 back exactly what it made (`takeBackGenerated`). Removing the service
 removes its generated secrets (`deleteManagedSecret`), except one the

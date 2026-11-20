@@ -37,6 +37,7 @@ import {
   callServerTool,
   checkServiceImage,
   launchService,
+  readServiceLogs,
   readServiceStatus,
   reconcileServices,
   recreateService,
@@ -761,6 +762,118 @@ describe("launching a service", { timeout: 30_000 }, () => {
     )
     // The MCP server it registered is kept, and still sends it.
     expect(await db().secret.count({ where: { id: madeSecond[0] } })).toBe(1)
+  })
+
+  it("gives a new service of an old one's name a token of its own: never the one a renamed or removed service still sends", async () => {
+    const hostId = await pinnedHost()
+    const generated = {
+      definition: definition({
+        env: [{ name: "API_KEY", required: true, generated: true }],
+        registers: MCP_WITH_AUTH,
+      }),
+      env: {},
+    }
+    const tokenOf = async (serviceId: string) =>
+      (
+        JSON.parse(
+          (
+            await db().serviceSpec.findUniqueOrThrow({
+              where: { serverId: serviceId },
+            })
+          ).env,
+        ) as Record<string, string>
+      ).API_KEY!
+
+    // Docs, renamed Docs A: its token stays its own.
+    const first = await launchService(
+      ctx,
+      await launchInput(hostId, generated),
+      FAST,
+    )
+    const firstToken = await tokenOf(first.id)
+    await saveServiceSettings(ctx, first.id, { name: "Docs A", env: {} })
+
+    // A new Docs gets a token of its own.
+    const second = await launchService(
+      ctx,
+      await launchInput(hostId, generated),
+      FAST,
+    )
+    const secondToken = await tokenOf(second.id)
+    expect(secondToken).not.toBe(firstToken)
+
+    // Removed with its MCP server kept: that server still sends its token,
+    // and the next Docs does not get it.
+    await removeService(
+      ctx,
+      second.id,
+      { volumes: true, registered: false },
+      PUBLIC,
+    )
+    expect(await db().secret.count({ where: { id: secondToken } })).toBe(1)
+    const third = await launchService(
+      ctx,
+      await launchInput(hostId, generated),
+      FAST,
+    )
+    const thirdToken = await tokenOf(third.id)
+    expect(thirdToken).not.toBe(secondToken)
+    expect(thirdToken).not.toBe(firstToken)
+  })
+
+  it("moves the registered server's header to a value its definition gained only once the container is made with it, never on a status or logs read", async () => {
+    const hostId = await pinnedHost()
+    const launched = await launchService(
+      ctx,
+      await launchInput(hostId, {
+        definition: definition({ registers: MCP_WITH_AUTH }),
+      }),
+      FAST,
+    )
+    const before = (await getServer(ctx, launched.registeredId!)).authSecretId
+    const secretsBefore = await db().secret.count()
+
+    // Its definition now has PCP make the header's value.
+    await writeServiceDefinition(
+      ctx,
+      launched.id,
+      parseServiceDefinition(
+        definition({
+          env: [
+            { name: "API_KEY", required: true, generated: true },
+            { name: "LOG_LEVEL", value: "info" },
+          ],
+          registers: MCP_WITH_AUTH,
+        }),
+      ),
+    )
+    await db().serviceSpec.update({
+      where: { serverId: launched.id },
+      data: { env: "{}" },
+    })
+
+    await readServiceStatus(ctx, launched.id, PUBLIC)
+    await readServiceLogs(ctx, launched.id, 10, PUBLIC)
+    expect((await getServer(ctx, launched.registeredId!)).authSecretId).toBe(
+      before,
+    )
+    expect(await db().secret.count()).toBe(secretsBefore)
+
+    // Made again: the container and the header take the new value together.
+    await recreateService(ctx, launched.id, FAST)
+    const bound = (
+      JSON.parse(
+        (
+          await db().serviceSpec.findUniqueOrThrow({
+            where: { serverId: launched.id },
+          })
+        ).env,
+      ) as Record<string, string>
+    ).API_KEY!
+    expect(bound).not.toBe(before)
+    expect((await getServer(ctx, launched.registeredId!)).authSecretId).toBe(
+      bound,
+    )
   })
 
   it("takes back the value it made when the launch fails", async () => {

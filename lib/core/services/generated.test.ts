@@ -94,7 +94,7 @@ describe("makeGeneratedSecrets", () => {
     })
   })
 
-  it("keeps a value made before: a remake does not change it, nor takes it back", async () => {
+  it("keeps a variable's value once bound (a remake), and never hands an unbound one a value that exists by its name", async () => {
     const first: MadeSecret[] = []
     const before = await makeGeneratedSecrets(ctx, {
       service: "Sessions",
@@ -102,20 +102,43 @@ describe("makeGeneratedSecrets", () => {
       bindings: {},
       made: first,
     })
-    const again: MadeSecret[] = []
-    const after = await makeGeneratedSecrets(ctx, {
+
+    // A remake: bound already, nothing made.
+    const remade: MadeSecret[] = []
+    const kept = await makeGeneratedSecrets(ctx, {
+      service: "Sessions",
+      definition: DEFINITION,
+      bindings: before.bindings,
+      made: remade,
+    })
+    expect(kept.bindings).toEqual(before.bindings)
+    expect(remade).toEqual([])
+
+    // Another service of the same name: values of its own, under "-2".
+    const other: MadeSecret[] = []
+    const fresh = await makeGeneratedSecrets(ctx, {
       service: "Sessions",
       definition: DEFINITION,
       bindings: {},
-      made: again,
+      made: other,
     })
+    for (const name of ["FIRST", "SECOND", "THIRD"]) {
+      expect(fresh.bindings[name]).not.toBe(before.bindings[name])
+    }
+    expect(other.every((each) => each.created)).toBe(true)
+    const names = await db().secret.findMany({
+      where: { id: { in: other.map((each) => each.id) } },
+      select: { id: true },
+    })
+    expect(names).toHaveLength(3)
 
-    expect(after.bindings).toEqual(before.bindings)
-    expect(again.every((each) => !each.created)).toBe(true)
-    await dropGeneratedSecrets(ctx, again)
+    // Taking back the second leaves the first's alone.
+    await dropGeneratedSecrets(ctx, other)
     expect(
-      await db().secret.count({ where: { id: before.bindings.FIRST } }),
-    ).toBe(1)
+      await db().secret.count({
+        where: { id: { in: Object.values(before.bindings) } },
+      }),
+    ).toBe(3)
   })
 
   it("names each secret as it is made, so one that fails part way is taken back whole", async () => {

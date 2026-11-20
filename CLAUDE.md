@@ -577,8 +577,9 @@ storageConnect`), never in the background, and SFTP for nothing else;
   failed and says that Start makes it again. A variable marked `generated`
   gets a random value at launch, or when its definition gains it, before
   the next remake (`services/generated.ts`): a managed `generated` secret
-  (`secrets.ts createGeneratedSecret`, named `generatedSecretName`, made
-  once, kept by a remake), bound only where PCP bound it (`generatedEnv`),
+  (`secrets.ts createGeneratedSecret`, named `generatedSecretName`, the
+  service's own: kept by a remake, never one that exists by that name,
+  bound for a gained variable only where a remake may follow), bound only where PCP bound it (`generatedEnv`),
   never a choice among the owner's secrets on any form or proposal
   (`env_secrets` naming one is refused), taken back with a launch that
   fails (`takeBackGenerated`), removed with its service unless something

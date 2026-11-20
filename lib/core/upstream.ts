@@ -2970,6 +2970,13 @@ export type ServiceOptions = {
    * the reconcile pass leave it off.
    */
   byOwner?: boolean
+  /**
+   * The way in may make the container again (a start, a restart, a remake,
+   * an update, the reconcile pass): a generated variable its definition
+   * gained gets its value first. Never on a read (status, logs, a newer
+   * image, a failure's reason) or a removal.
+   */
+  bindGenerated?: boolean
 }
 
 /**
@@ -3081,8 +3088,7 @@ async function serviceEnv(
 async function serviceAccess(
   ctx: VaultContext,
   given: LoadedService,
-  { publicUrl, timing, byOwner = false }: ServiceOptions,
-  { bindGenerated = true }: { bindGenerated?: boolean } = {},
+  { publicUrl, timing, byOwner = false, bindGenerated = false }: ServiceOptions,
 ): Promise<ServiceAccess | null> {
   if (!given.host) {
     return null
@@ -3479,7 +3485,11 @@ export async function runServiceAction(
   return serviceActionOn(
     loaded,
     action,
-    await requireAccess(ctx, loaded, { ...options, byOwner: true }),
+    await requireAccess(ctx, loaded, {
+      ...options,
+      byOwner: true,
+      bindGenerated: action !== "stop",
+    }),
   )
 }
 
@@ -3492,7 +3502,11 @@ export async function recreateService(
   const loaded = await loadService(ctx, id)
   return recreateServiceOn(
     loaded,
-    await requireAccess(ctx, loaded, { ...options, byOwner: true }),
+    await requireAccess(ctx, loaded, {
+      ...options,
+      byOwner: true,
+      bindGenerated: true,
+    }),
   )
 }
 
@@ -3510,7 +3524,11 @@ export async function updateService(
   const loaded = await loadService(ctx, id)
   return updateServiceOn(
     loaded,
-    await requireAccess(ctx, loaded, { ...options, byOwner: true }),
+    await requireAccess(ctx, loaded, {
+      ...options,
+      byOwner: true,
+      bindGenerated: true,
+    }),
     choice,
   )
 }
@@ -3537,7 +3555,7 @@ export async function removeService(
   const said = await removeServiceOn(
     ctx,
     loaded,
-    await serviceAccess(ctx, loaded, options, { bindGenerated: false }),
+    await serviceAccess(ctx, loaded, options),
     choices,
   )
 
@@ -3565,7 +3583,11 @@ export async function restartServicesUsingSecret(
       const loaded = await loadService(ctx, id)
       const status = await recreateServiceOn(
         loaded,
-        await requireAccess(ctx, loaded, { ...options, byOwner: true }),
+        await requireAccess(ctx, loaded, {
+          ...options,
+          byOwner: true,
+          bindGenerated: true,
+        }),
       )
       outcomes.push({
         id,
@@ -3600,7 +3622,10 @@ async function wakeService(
       return null
     }
 
-    const access = await serviceAccess(ctx, loaded, { publicUrl })
+    const access = await serviceAccess(ctx, loaded, {
+      publicUrl,
+      bindGenerated: true,
+    })
     return access ? await startOnDemand(loaded, access) : null
   } catch {
     return null
@@ -3620,7 +3645,7 @@ export async function reconcileServices(
 ): Promise<ReconcileRun> {
   return reconcileServicesWith(
     ctx,
-    (loaded) => serviceAccess(ctx, loaded, { publicUrl }),
+    (loaded) => serviceAccess(ctx, loaded, { publicUrl, bindGenerated: true }),
     options,
   ).catch(() => ({ started: [] }))
 }

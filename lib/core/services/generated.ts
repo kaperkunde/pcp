@@ -8,10 +8,9 @@ import {
   generatedSecretName,
   takeBackGenerated,
 } from "../secrets"
-import { setMcpHeaderCredential } from "../servers"
+import { isPcpError, PcpError } from "../errors"
 import {
   generatedEnv,
-  registerAuth,
   type ServiceDefinition,
   type ServiceEnvBindings,
   type ServiceGenerated,
@@ -30,11 +29,17 @@ import type { LoadedService } from "./services"
  * (registers.auth). No step of the owner's, and no choice of theirs: the
  * launch form, the review and the service's page show it as made by PCP.
  *
- * Made once per name: a remake, or a variable already bound, keeps it
- * (`created: false`); only what this call made is taken back when a launch
- * fails (takeBackGenerated). Removing the service removes them, unless
- * something still sends one.
+ * Each is the service's own, bound to it by id: a variable already bound
+ * keeps its value (a remake), and one made now is always a new secret. A
+ * name that is taken (a service of the same name renamed since, or removed
+ * with the server it registered kept, which still sends its value) gets
+ * "-2", "-3", …, so two services never share a token. Only what this call
+ * made is taken back when a launch fails (takeBackGenerated). Removing the
+ * service removes them, unless something still sends one.
  */
+
+/** How many names a new value tries before PCP gives up. */
+const MAX_NAME_TRIES = 50
 
 /** A value made for a variable, and whether this call made it. */
 export type MadeSecret = { id: string; created: boolean }
@@ -81,17 +86,67 @@ export async function makeGeneratedSecrets(
       continue
     }
 
-    const secret = await createGeneratedSecret(ctx, {
-      name: generatedSecretName(service, entry.name),
+    const id = await newGeneratedSecret(ctx, {
+      service,
+      variable: entry.name,
       recipe: generatedRecipe(entry.generated),
-      description: `PCP made this value for ${entry.name} of the service ${service}.`,
     })
-    made.push({ id: secret.id, created: secret.created })
-    bound[entry.name] = secret.id
+    made.push({ id, created: true })
+    bound[entry.name] = id
     generated.push(entry.name)
   }
 
   return { bindings: bound, generated }
+}
+
+/**
+ * A new generated secret for one variable of one service: never one that
+ * exists already under that name (another service's, or one a kept server
+ * still sends), whose value would then be shared; the name gets "-2", "-3",
+ * … until it is free.
+ */
+async function newGeneratedSecret(
+  ctx: VaultContext,
+  {
+    service,
+    variable,
+    recipe,
+  }: { service: string; variable: string; recipe: PasswordRecipe },
+): Promise<string> {
+  // Room for the "-n" a taken name gets, within a name's length.
+  const thing = service.slice(0, 60)
+
+  for (let n = 1; n <= MAX_NAME_TRIES; n++) {
+    const name = generatedSecretName(
+      thing,
+      n === 1 ? variable : `${variable}-${n}`,
+    )
+    let secret: { id: string; created: boolean }
+
+    try {
+      secret = await createGeneratedSecret(ctx, {
+        name,
+        recipe,
+        description: `PCP made this value for ${variable} of the service ${service}.`,
+      })
+    } catch (error) {
+      // A secret of the owner's by that name: the next one.
+      if (isPcpError(error) && error.code === "conflict") {
+        continue
+      }
+
+      throw error
+    }
+
+    if (secret.created) {
+      return secret.id
+    }
+  }
+
+  throw new PcpError(
+    "conflict",
+    `PCP could not find a free name for the value of ${variable} of ${service}: rename or remove some of the secrets named after it.`,
+  )
 }
 
 /** Takes back what a launch that failed made for its variables. */
@@ -105,10 +160,12 @@ export async function dropGeneratedSecrets(
 /**
  * A service whose definition gained a generated variable since it was
  * launched (an update, a repository's change, a definition saved): its
- * value is made now, before the container is made again with its
- * variables, and bound on the service as at launch. The server it
- * registered sends it when it is that server's header. Nothing happens
- * when every generated variable has a secret already.
+ * value is made now, on a way in that may make the container again
+ * (upstream.ts serviceAccess with bindGenerated), and bound on the service
+ * as at launch; `loaded` takes the binding in place, so the remake hands
+ * it to the container. The server it registered moves to it only when the
+ * container is made with it (services.ts followRegisteredAuth), never
+ * before. Nothing happens when every generated variable has a secret.
  */
 export async function bindGeneratedEnv(
   ctx: VaultContext,
@@ -143,22 +200,8 @@ export async function bindGeneratedEnv(
     throw error
   }
 
-  const auth = registerAuth(loaded.definition.registers)
-
-  if (
-    auth &&
-    loaded.definition.registers.kind === "mcp" &&
-    loaded.spec.registeredId &&
-    missing.some((entry) => entry.name === auth.env)
-  ) {
-    await setMcpHeaderCredential(ctx, loaded.spec.registeredId, {
-      headerName: auth.header,
-      valueTemplate: auth.template,
-      secretId: env[auth.env]!,
-    })
-  }
-
-  return { ...loaded, env }
+  loaded.env = env
+  return loaded
 }
 
 /** The values PCP made that a service's variables take: its generated ones. */
