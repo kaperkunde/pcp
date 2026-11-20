@@ -930,8 +930,10 @@ embeddingProvider`, which hands `embeddings/provider.ts` the header;
   proposing it (`change_secret_scope`, below; `update_secret_sites` is its
   alias for one release): the page shows the sites now, each change and
   lookalikes flagged unticked (`lookalike-sites.ts`), and makes only what
-  the owner ticked. A secret with no site that is not anywhere is never
-  typed; an anywhere one is, after a `secret_use` ask.
+  the owner ticked. A secret with no site that is not anywhere, typed other
+  than through a wrapper's place for it, asks every time (`outOfScope`:
+  Once, or Always at this site, which adds the site; never an allowance
+  for a while), as an anywhere one asks.
   Allowances are not exported; origins are, with their flag.
   `navigate`, `snapshot` and `tabs` open name the owner's secrets bound to
   the page's origin (`browser/sign-in-hint.ts`, louder at a password
@@ -946,9 +948,12 @@ embeddingProvider`, which hands `embeddings/provider.ts` the header;
   while it does), its sites, or `scope_anywhere`. Only the owner's pages
   widen it: the Secrets page's Scope, their own pick of a secret on a
   server's page (the use is the grant), or their yes to a proposal whose
-  page showed "also allows <secret> for <consumer>" ticked
-  (`secret-scope-asks.ts`, `decidePermission`'s `alsoAllow`, then
-  `keepUsesInScope`). It is checked in one place, `resolveSecretRef` with
+  page showed one "also allows <secret> for <consumer>" per secret and
+  consumer ticked, a wrapper's siblings included (`secret-scope-asks.ts`,
+  `decidePermission`'s `alsoAllow`, then `keepAllowed`, which keeps only
+  those); a linked repository's item the same way on its review
+  (`repos/apply.ts resolveItem`'s `alsoAllows`, `applyItem`'s
+  `alsoAllow`), and never by a change that applies by itself. It is checked in one place, `resolveSecretRef` with
   the use's `consumer` (`check` refuses naming `change_secret_scope`, `ask`
   is a proposal's, `granted` the owner's yes); a secret from before is
   worked out from its uses by the first request with the key

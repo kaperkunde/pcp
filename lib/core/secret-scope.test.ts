@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
 
 import { createApiToken, resolveApiToken } from "./api-tokens"
-import { admitSecretUse, bindOrigin } from "./browser-secrets"
+import { admitSecretUse, bindOrigin, grantSecretUse } from "./browser-secrets"
 import { createBrowserServer } from "./browser/server"
 import type { VaultContext } from "./context"
 import { db } from "./db"
@@ -16,7 +16,7 @@ import {
   scopeCovers,
   setSecretAnywhere,
 } from "./secret-scope"
-import { createSecret } from "./secrets"
+import { createSecret, writeManagedSecret } from "./secrets"
 import { serverCreateData } from "./server-meta"
 import { createServer } from "./servers"
 import { scratchDatabase } from "./test-db"
@@ -308,46 +308,189 @@ describe("resolveSecretRef and the scope", () => {
 })
 
 describe("the browser's gate and the scope", () => {
-  it("never types a secret with no sites unless it may be used anywhere, and then asks", async () => {
+  const use = {
+    tabId: "t1",
+    origin: "https://webmail.example",
+    url: "https://webmail.example/login",
+    title: "Sign in",
+    field: 'the textbox "Password"',
+    call: { tab: "t1", ref: "e3" },
+  }
+
+  async function typing(bound = false) {
     const { token } = await createApiToken(ctx, {
-      name: "Claude",
+      name: `Claude ${newId()}`,
       allowAllServers: true,
     })
     const tokenId = (await resolveApiToken(token))!.tokenId
-    const browser = await createBrowserServer(ctx)
-    await createSecret(ctx, { name: "Key", value: "v" })
-    const use = {
-      tabId: "t1",
-      origin: "https://shop.example",
-      url: "https://shop.example/login",
-      title: "Sign in",
-      field: 'the textbox "Password"',
-      call: { tab: "t1", ref: "e3" },
+    const browser =
+      (await db().mcpServer.findFirst({ where: { kind: "browser" } })) ??
+      (await createBrowserServer(ctx))
+
+    return {
+      tokenId,
+      type: () =>
+        admitSecretUse(ctx, {
+          tokenId,
+          serverId: browser.id,
+          name: "Mail password",
+          use,
+          ...(bound ? { bound: true } : {}),
+        }),
     }
-    const typing = () =>
-      admitSecretUse(ctx, {
-        tokenId,
-        serverId: browser.id,
-        name: "Key",
-        use,
-      })
+  }
 
-    expect(await refusal(typing())).toMatch(
-      /has no sites the browser may type it at.*change_secret_scope/,
-    )
+  it("asks every time for a secret with no site outside its scope: Once types it that time, an allowance for a while does not", async () => {
+    // A mail account's password, never given a site (day one's case).
+    const { id } = await createSecret(ctx, {
+      name: "Mail password",
+      value: "v",
+    })
+    await headerServer("Mail", id)
+    const { tokenId, type } = await typing()
 
-    const { id } = (await db().secret.findFirst({ select: { id: true } }))!
-    await setSecretAnywhere(ctx, id, true)
-    // Allowed anywhere: the owner is asked, as before.
-    await expect(typing()).rejects.toMatchObject({
-      ask: { kind: "secret_use" },
+    await expect(type()).rejects.toMatchObject({
+      ask: { kind: "secret_use", input: { outOfScope: true } },
     })
 
-    // With a site and not anywhere: asked at its site.
+    // An hour's allowance (from before, or for another site's sake) is not
+    // an answer to this use.
+    await grantSecretUse(ctx, {
+      tokenId,
+      secretId: id,
+      origin: use.origin,
+      level: "hour",
+    })
+    await expect(type()).rejects.toMatchObject({
+      ask: { input: { outOfScope: true } },
+    })
+
+    // The owner's Once: typed that one time, the scope unchanged.
+    await grantSecretUse(ctx, {
+      tokenId,
+      secretId: id,
+      origin: use.origin,
+      level: "once",
+    })
+    await expect(type()).resolves.toMatchObject({ name: "Mail password" })
+    expect(await db().secretBrowserOrigin.count()).toBe(0)
+    await expect(type()).rejects.toMatchObject({
+      ask: { input: { outOfScope: true } },
+    })
+
+    // Always at this site adds the site: then it is in scope, as before.
+    await grantSecretUse(ctx, {
+      tokenId,
+      secretId: id,
+      origin: use.origin,
+      level: "always",
+    })
+    await expect(type()).resolves.toMatchObject({ name: "Mail password" })
+  })
+
+  it("lets a wrapper's place for it type it through the gate as before", async () => {
+    const { id } = await createSecret(ctx, {
+      name: "Mail password",
+      value: "v",
+    })
+    const browser = await createBrowserServer(ctx)
+    await wrapper("Mail flow", id, browser.id)
+    const { tokenId, type } = await typing(true)
+
+    // Asked about the site as before, not as outside its scope.
+    const asked = await type().catch((error: unknown) => error)
+    expect(asked).toMatchObject({ ask: { kind: "secret_use" } })
+    expect(
+      (asked as { ask: { input: { outOfScope?: true } } }).ask.input.outOfScope,
+    ).toBeUndefined()
+
+    // And an hour's allowance counts there, as before.
+    await grantSecretUse(ctx, {
+      tokenId,
+      secretId: id,
+      origin: use.origin,
+      level: "hour",
+    })
+    await expect(type()).resolves.toMatchObject({ name: "Mail password" })
+  })
+
+  it("asks as before for one allowed anywhere, and for one with a site", async () => {
+    const { id } = await createSecret(ctx, {
+      name: "Mail password",
+      value: "v",
+      anywhere: true,
+    })
+    const { type } = await typing()
+    const asked = await type().catch((error: unknown) => error)
+
+    expect(asked).toMatchObject({ ask: { kind: "secret_use" } })
+    expect(
+      (asked as { ask: { input: { outOfScope?: true } } }).ask.input.outOfScope,
+    ).toBeUndefined()
+
     await setSecretAnywhere(ctx, id, false)
-    await bindOrigin(ctx, id, "https://shop.example")
-    await expect(typing()).rejects.toMatchObject({
-      ask: { kind: "secret_use" },
+    await bindOrigin(ctx, id, "https://other.example")
+    const again = await type().catch((error: unknown) => error)
+    expect(
+      (again as { ask: { input: { outOfScope?: true } } }).ask.input.outOfScope,
+    ).toBeUndefined()
+  })
+})
+
+describe("filling in a scope from before", () => {
+  it("leaves a secret nothing seems to use unfilled while a wrapper's definition does not read, and fills it once it does", async () => {
+    const spare = await createSecret(ctx, { name: "Spare", value: "b" })
+    const used = await createSecret(ctx, { name: "Used", value: "a" })
+    await headerServer("Upstream", used.id)
+    const broken = newId()
+    await db().mcpServer.create({
+      data: serverCreateData(ctx, {
+        id: broken,
+        vaultId: ctx.vaultId,
+        kind: "wrapper",
+        name: "Broken",
+        slug: "broken",
+        url: "pcp:wrapper",
+        wrapperSpec: {
+          create: { plainDefinition: "{not json", hash: "x" },
+        },
+      }),
     })
+    await fromBefore(spare.id)
+    await fromBefore(used.id)
+
+    await ensureSecretScopes(ctx)
+
+    const marks = async () =>
+      Object.fromEntries(
+        (
+          await db().secret.findMany({
+            select: { id: true, scopeAnywhere: true },
+          })
+        ).map((row) => [row.id, row.scopeAnywhere]),
+      )
+    // The one with a use is narrowed; the other is not made anywhere.
+    expect(await marks()).toEqual({ [spare.id]: null, [used.id]: false })
+
+    await db().mcpServer.delete({ where: { id: broken } })
+    await ensureSecretScopes(ctx)
+    expect((await marks())[spare.id]).toBe(true)
+  })
+
+  it("never makes one of PCP's own secrets anywhere", async () => {
+    await writeManagedSecret(ctx, {
+      kind: "generated",
+      name: "svc/API_KEY",
+      description: "A value PCP made.",
+      value: "x",
+    })
+    await db().secret.updateMany({ data: { scopeAnywhere: null } })
+
+    await ensureSecretScopes(ctx)
+
+    expect(
+      (await db().secret.findFirstOrThrow({ where: { kind: "generated" } }))
+        .scopeAnywhere,
+    ).toBe(false)
   })
 })

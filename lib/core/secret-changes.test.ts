@@ -346,6 +346,102 @@ describe("rotate_secret", () => {
   })
 })
 
+describe("rotate_secret and what uses the secret", () => {
+  it("clears the credential alerts of a service and a wrapper that use it", async () => {
+    const upstreamServer = await upstream()
+    const service = newId()
+    await db().mcpServer.create({
+      data: serverCreateData(ctx, {
+        id: service,
+        vaultId: ctx.vaultId,
+        kind: "service",
+        name: "Docs",
+        slug: "docs",
+        url: "pcp:service",
+        serviceSpec: {
+          create: {
+            plainDefinition: "{}",
+            hash: "0",
+            engine: "docker",
+            plainContainerName: "pcp-docs",
+            env: JSON.stringify({ API_KEY: keyId }),
+          },
+        },
+      }),
+    })
+    const wrapper = newId()
+    await db().mcpServer.create({
+      data: serverCreateData(ctx, {
+        id: wrapper,
+        vaultId: ctx.vaultId,
+        kind: "wrapper",
+        name: "Lookup",
+        slug: "lookup",
+        url: "pcp:wrapper",
+        wrapperSpec: {
+          create: {
+            plainDefinition: JSON.stringify({
+              version: 1,
+              tools: [],
+              secrets: [
+                {
+                  secret: "Linear key",
+                  secretId: keyId,
+                  serverId: upstreamServer.id,
+                  tool: "search",
+                  argument: "/key",
+                  template: "{{secret}}",
+                  url: "https://linear.example/mcp",
+                },
+              ],
+            }),
+            hash: "x",
+          },
+        },
+      }),
+    })
+
+    for (const id of [service, wrapper]) {
+      await writeServer(ctx, id, {
+        status: "auth_required",
+        statusMessage: "rejected the credentials",
+      })
+    }
+
+    await call("rotate_secret", { name: "Linear key", reason: "Leaked." })
+    const done = await decide((await newest()).row.id, {
+      publicUrl: PUBLIC_URL,
+      secretValue: "a-new-value",
+    })
+    expect(done.isError, textOf(done)).not.toBe(true)
+
+    for (const id of [service, wrapper]) {
+      expect(
+        (await db().mcpServer.findUniqueOrThrow({ where: { id } })).status,
+        id,
+      ).toBe("ok")
+    }
+  })
+
+  it("is not refused as changed when the secret's scope was filled in after the upgrade", async () => {
+    // As the migration leaves a secret from before.
+    await db().secret.update({
+      where: { id: keyId },
+      data: { scopeAnywhere: null },
+    })
+    await call("edit_secret", {
+      name: "Linear key",
+      reason: "Clearer.",
+      description: "The Linear token.",
+    })
+    const { row, view } = await newest()
+
+    expect(view.secretChange!.stale).toBe(false)
+    const done = await decide(row.id, { publicUrl: PUBLIC_URL })
+    expect(done.isError, textOf(done)).not.toBe(true)
+  })
+})
+
 describe("change_secret_scope", () => {
   it("asks to add a server and a site, shows each to tick, and makes only the ticked ones", async () => {
     const linear = await upstream()
@@ -400,6 +496,39 @@ describe("change_secret_scope", () => {
         })
       ).text,
     ).toMatch(/Nothing would change/)
+  })
+
+  it("writes nothing when one change cannot be made: a server that uses it since stays", async () => {
+    const linear = await upstream()
+    await grantSecretScope(ctx, keyId, linear.id)
+    await call("change_secret_scope", {
+      name: "Linear key",
+      reason: "Linear is done with; it signs in at linear.app now.",
+      remove_servers: ["linear"],
+      add_sites: [{ origin: "https://linear.app" }],
+    })
+    const { row } = await newest()
+    // Linear starts using it since (not part of the secret's basis).
+    await db().mcpServer.update({
+      where: { id: linear.id },
+      data: { authType: "header", authSecretId: keyId },
+    })
+
+    const refused = await decide(row.id, {
+      publicUrl: PUBLIC_URL,
+      sites: {
+        keep: ["site:add:https://linear.app", `server:remove:${linear.id}`],
+      },
+    })
+    expect(refused.isError).toBe(true)
+    expect(textOf(refused)).toMatch(/Linear uses "Linear key" now/)
+    // The site ticked beside it was not added either.
+    expect(await sitesOf(ctx, keyId)).toEqual([])
+    expect(
+      await db().secretScope.count({
+        where: { secretId: keyId, serverId: linear.id },
+      }),
+    ).toBe(1)
   })
 
   it("refuses an answer once the scope moved since it was asked", async () => {
@@ -497,9 +626,10 @@ describe("also allows", () => {
 
     expect(view.alsoAllows).toEqual([
       {
-        key: `also:${keyId}`,
+        key: `also:${keyId}:new`,
         secretId: keyId,
         secretName: "Linear key",
+        consumerId: null,
         consumer: "Tracker",
       },
     ])
@@ -520,7 +650,7 @@ describe("also allows", () => {
       ctx,
       row.id,
       "allow_once",
-      { publicUrl: PUBLIC_URL, alsoAllow: [`also:${keyId}`] },
+      { publicUrl: PUBLIC_URL, alsoAllow: [`also:${keyId}:new`] },
       executor,
     )
     expect(done.isError, textOf(done)).not.toBe(true)

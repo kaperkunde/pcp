@@ -90,6 +90,12 @@ const SERVER = { ...SERVER_META_SELECT, kind: true } as const
 export async function secretUses(
   ctx: VaultContext,
   ids?: string[],
+  /**
+   * Counts the wrapper definitions that did not read, whose uses are
+   * missing from the answer: a caller that decides on "nothing uses it"
+   * (secret-scope.ts) waits until they read.
+   */
+  report?: { unread: number },
 ): Promise<Map<string, SecretUsage>> {
   const rows = await db().secret.findMany({
     where: { vaultId: ctx.vaultId, ...(ids ? { id: { in: ids } } : {}) },
@@ -183,7 +189,9 @@ export async function secretUses(
         openWrapperSpec(ctx, wrapper.wrapperSpec).definition,
       ).secrets.map((binding) => binding.secretId)
     } catch {
-      // A definition that does not read is no use of anything.
+      // A definition that does not read is no use of anything here; a
+      // caller that needs to know is told.
+      if (report) report.unread += 1
       continue
     }
 

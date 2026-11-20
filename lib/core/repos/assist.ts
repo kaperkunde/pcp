@@ -17,6 +17,8 @@ import {
   type RepoItemRow,
 } from "./store"
 import { applyMerged, pendingChange, type ChangeShown } from "./sync"
+import { resolveItem } from "./apply"
+import type { AlsoAllow } from "../secret-scope-asks"
 import { localItem } from "./local"
 import { hiddenCharacter } from "../memories"
 import { TOKEN_NAME_SELECT, tokenName } from "../token-names"
@@ -552,6 +554,8 @@ export async function applyRepoChange(
   ctx: VaultContext,
   tokenId: string,
   ask: RepoChangeAsk,
+  /** The "Also allow" the owner left ticked (repoChangeAlsoAllows). */
+  alsoAllow?: string[],
 ): Promise<string> {
   let item: RepoItemRow
 
@@ -597,6 +601,7 @@ export async function applyRepoChange(
   })
   const notes = await applyMerged(ctx, item, document, {
     remoteSha: ask.pendingSha,
+    alsoAllow,
     proposer: {
       by: "assistant",
       tokenName: token ? tokenName(ctx, token) : "an assistant",
@@ -604,6 +609,33 @@ export async function applyRepoChange(
   })
 
   return [`Applied ${item.data.path} as you were shown it.`, ...notes].join(" ")
+}
+
+/**
+ * What a repo_change would let use the owner's secrets outside their scope
+ * (#162): shown ticked beside the yes, which needs each. Empty once the
+ * item is gone or its files do not read.
+ */
+export async function repoChangeAlsoAllows(
+  ctx: VaultContext,
+  ask: RepoChangeAsk,
+): Promise<AlsoAllow[]> {
+  try {
+    const item = await getRepoItem(ctx, ask.repoItemId)
+
+    return (
+      await resolveItem(ctx, await documentOf(ask.ref, ask.files), {
+        onto: true,
+        id: item.itemId,
+      })
+    ).alsoAllows
+  } catch (error) {
+    if (isPcpError(error)) {
+      return []
+    }
+
+    throw error
+  }
 }
 
 /** The lines and title of a repo_change request, for the permission page. */

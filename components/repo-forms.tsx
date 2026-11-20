@@ -5,6 +5,8 @@ import { useRouter } from "next/navigation"
 import { useActionState, useEffect, useState, useTransition } from "react"
 
 import { useAnswer } from "@/components/answer-queue"
+import { AlsoAllowBoxes } from "@/components/also-allow-boxes"
+import type { AlsoAllow } from "@/lib/core/secret-scope-asks"
 import { FormError, FormNote } from "@kaperkunde/ui/form-status"
 import { ChoiceField } from "@/components/server-form-parts"
 import { SubmitButton } from "@kaperkunde/ui/submit-button"
@@ -623,16 +625,40 @@ export function AddItemsButton({
 }: {
   repoId: string
   commit: string
-  items: Array<{ root: string; hash: string }>
+  items: Array<{ root: string; hash: string; alsoAllows?: AlsoAllow[] }>
 }) {
+  const shown = items.flatMap((item) => item.alsoAllows ?? [])
+  const [alsoKeep, setAlsoKeep] = useState<string[]>(() =>
+    shown.map((also) => also.key),
+  )
+
   // What it said stays on the page: refreshing would read the items again.
   return (
-    <ActionButton
-      variant="default"
-      label={`Add ${items.length === 1 ? "this item" : `these ${items.length} items`}`}
-      pendingLabel="Adding…"
-      run={() => addItemsAction(repoId, commit, items)}
-    />
+    <div className="flex flex-col items-end gap-3">
+      <AlsoAllowBoxes
+        alsoAllows={shown}
+        kept={alsoKeep}
+        onChange={setAlsoKeep}
+      />
+      <ActionButton
+        variant="default"
+        label={`Add ${items.length === 1 ? "this item" : `these ${items.length} items`}`}
+        pendingLabel="Adding…"
+        run={() =>
+          addItemsAction(
+            repoId,
+            commit,
+            items.map((item) => ({
+              root: item.root,
+              hash: item.hash,
+              alsoAllow: (item.alsoAllows ?? [])
+                .map((also) => also.key)
+                .filter((key) => alsoKeep.includes(key)),
+            })),
+          )
+        }
+      />
+    </div>
   )
 }
 
@@ -694,6 +720,7 @@ export function ChangeAnswer({
   hash,
   flags,
   conflict,
+  alsoAllows = [],
 }: {
   itemId: string
   sha: string
@@ -701,7 +728,12 @@ export function ChangeAnswer({
   /** How many things that reach further the page showed. */
   flags: number
   conflict: boolean
+  /** Secrets it would let be used further (#162), ticked to start. */
+  alsoAllows?: AlsoAllow[]
 }) {
+  const [alsoKeep, setAlsoKeep] = useState<string[]>(() =>
+    alsoAllows.map((also) => also.key),
+  )
   // The same way through as a request's answer (components/answer-queue.tsx):
   // the count drops at once, then the owner is taken on to what waits next.
   const { submit, pending, error, done } = useAnswer(
@@ -714,6 +746,9 @@ export function ChangeAnswer({
         sha,
         hash,
         flags,
+        ...(choice === "approve" && alsoAllows.length > 0
+          ? { alsoAllow: alsoKeep }
+          : {}),
       })
 
       return result.status === "ok"
@@ -739,6 +774,12 @@ export function ChangeAnswer({
 
   return (
     <div className="flex flex-col gap-3">
+      <AlsoAllowBoxes
+        alsoAllows={alsoAllows}
+        kept={alsoKeep}
+        onChange={setAlsoKeep}
+        disabled={pending}
+      />
       <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
         {conflict ? (
           <>

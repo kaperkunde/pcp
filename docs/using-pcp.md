@@ -619,8 +619,11 @@ lists its sites and the tokens allowed there, each with a way to end it, as
 does the token's page. `request_secret` asks you for a secret PCP does not
 hold yet: you type it on PCP's page, check its sites and choose how its uses
 go, and the assistant gets its name. The request log names the secret and the
-site of each use, never the value. A secret with no site is typed only when
-you let it be used anywhere (below), and then only after asking you.
+site of each use, never the value. A secret with no site, used anywhere or
+not, is typed only after asking you: for one you have not let be used
+anywhere, you answer **Once** (this time only) or **Always at this site**
+(which adds the site to it). A browser flow you approved types the secrets
+it has a place for at its sites as before.
 
 **Where a secret may be used.** Each secret has a scope, under **Scope** on
 its row: the servers, API endpoints, mail and calendar accounts, services
@@ -634,7 +637,7 @@ scopes got what used them as their scope, and the ones nothing used are
 Anywhere, so nothing changed for them. When an assistant proposes something
 that uses one of your secrets outside its scope, its request shows **Also
 allow "<secret>" for <what>**, ticked: agreeing adds it to the scope, and
-the request cannot be agreed to with it unticked.
+the request cannot be agreed to with it unticked. A change to a wrapper lists each other wrapper of the same definition too, since they get the same places, and an item from a linked repository asks the same on its review.
 
 **Changes an assistant proposes to a secret.** `edit_secret`,
 `rotate_secret`, `change_secret_scope` and `delete_secret` always ask you,

@@ -25,6 +25,7 @@ import { decidePermissionAction } from "@/lib/actions/permissions"
 import type { SecretSitesShown } from "@/lib/core/browser-secrets"
 import type { SecretScopeChangeShown } from "@/lib/core/secret-changes"
 import type { AlsoAllow } from "@/lib/core/secret-scope-asks"
+import { AlsoAllowBoxes } from "@/components/also-allow-boxes"
 import {
   ALLOW_FOR_MINUTES,
   DEFAULT_ALLOW_FOR_MINUTES,
@@ -650,36 +651,12 @@ export function PermissionDecision({
           ))}
         </fieldset>
       ) : null}
-      {alsoAllows.length > 0 ? (
-        <fieldset className="m-0 flex flex-col gap-3 border-0 p-0">
-          <legend className="mb-2 text-sm font-medium">
-            Your secrets this uses
-          </legend>
-          <p className="m-0 text-sm text-muted-foreground">
-            Each is outside where you let it be used so far. Agreeing adds it
-            there; you can change that under Secrets.
-          </p>
-          {alsoAllows.map((also) => (
-            <Label key={also.key} className="items-start font-normal">
-              <Checkbox
-                className="mt-0.5"
-                checked={alsoKeep.includes(also.key)}
-                onChange={(event) =>
-                  setAlsoKeep((current) =>
-                    event.target.checked
-                      ? [...current, also.key]
-                      : current.filter((key) => key !== also.key),
-                  )
-                }
-                disabled={pending}
-              />
-              <span className="break-words">
-                Also allow &quot;{also.secretName}&quot; for {also.consumer}
-              </span>
-            </Label>
-          ))}
-        </fieldset>
-      ) : null}
+      <AlsoAllowBoxes
+        alsoAllows={alsoAllows}
+        kept={alsoKeep}
+        onChange={setAlsoKeep}
+        disabled={pending}
+      />
       {limits ? (
         <fieldset className="m-0 flex flex-col gap-3 border-0 p-0">
           <legend className="mb-1 text-[15px] text-foreground">

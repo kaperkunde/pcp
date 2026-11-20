@@ -2366,6 +2366,8 @@ async function callBrowser(
         name,
         use,
         part,
+        // A wrapper's or flow's place for it, which matchGrant found above.
+        bound: options.secrets !== undefined,
       })
 
       // The login name is no secret from the assistant (the page's sign-in

@@ -108,6 +108,12 @@ export type SecretUseAsk = {
   call: SecretTypeCall
   /** "username": the secret's login name is typed, not its value. */
   part?: SecretPart
+  /**
+   * The secret has no site and is not one the owner lets be used anywhere
+   * (#162): Once types it this one time, Always at this site adds the site
+   * to its scope, and nothing else is offered.
+   */
+  outOfScope?: true
 }
 
 /**

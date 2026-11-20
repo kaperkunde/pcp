@@ -3,6 +3,7 @@ import { db } from "./db"
 import { notFound, PcpError } from "./errors"
 import { SERVER_META_SELECT, serverName, serverSlug } from "./server-meta"
 import { kindWords, secretUses, type SecretUse } from "./secret-uses"
+import { isOwnerSecretKind } from "./secrets"
 
 /**
  * Where one of the owner's secrets may be used (#162): its scope, granted
@@ -23,8 +24,8 @@ import { kindWords, secretUses, type SecretUse } from "./secret-uses"
  * `resolveSecretRef` (secret-refs.ts) is the one place a secret named by
  * name is checked against it. An assistant's proposal that names a secret
  * outside its scope is shown to the owner as "also allows <secret> for
- * <consumer>", and their yes adds the consumer (`keepUsesInScope` once it
- * is made). Only the owner widens a scope; nothing an assistant sends does.
+ * <consumer>", and their yes adds that consumer alone, once it is made
+ * (secret-scope-asks.ts keepAllowed). Only the owner widens a scope; nothing an assistant sends does.
  *
  * A secret from before the scope (`scope_anywhere` null, the migration's
  * mark) gets its uses as its scope, or anywhere when nothing uses it, on
@@ -76,26 +77,36 @@ function scopedUses(uses: readonly SecretUse[]): SecretUse[] {
 export async function ensureSecretScopes(ctx: VaultContext): Promise<void> {
   const pending = await db().secret.findMany({
     where: { vaultId: ctx.vaultId, scopeAnywhere: null },
-    select: { id: true },
+    select: { id: true, kind: true },
   })
 
   if (pending.length === 0) {
     return
   }
 
+  const report = { unread: 0 }
   const usage = await secretUses(
     ctx,
     pending.map((row) => row.id),
+    report,
   )
 
-  for (const { id } of pending) {
+  for (const { id, kind } of pending) {
     const uses = scopedUses(usage.get(id)?.uses ?? [])
     const serverIds = [...new Set(uses.map((use) => use.id))]
+    // PCP's own secrets are for what they were made for, never anywhere.
+    const anywhere = serverIds.length === 0 && isOwnerSecretKind(kind)
+
+    // A wrapper whose definition did not read may use it: "nothing uses
+    // it" is not known, so it waits for a request where they all read.
+    if (anywhere && report.unread > 0) {
+      continue
+    }
 
     await db().$transaction(async (tx) => {
       const { count } = await tx.secret.updateMany({
         where: { id, scopeAnywhere: null },
-        data: { scopeAnywhere: serverIds.length === 0 },
+        data: { scopeAnywhere: anywhere },
       })
 
       if (count !== 1) {
@@ -330,30 +341,19 @@ export async function setSecretAnywhere(
   })
 }
 
-/**
- * Keeps what uses these secrets now in their scopes, as rows: after the
- * owner's yes to a proposal that named them ("also allows"), so the grant
- * outlives the use.
- */
-export async function keepUsesInScope(
+/** What uses each of these secrets now, by consumer id (no repositories). */
+export async function consumersNow(
   ctx: VaultContext,
   secretIds: readonly string[],
-): Promise<void> {
-  if (secretIds.length === 0) {
-    return
-  }
+): Promise<Map<string, Set<string>>> {
+  const usage = await secretUses(ctx, [...new Set(secretIds)])
 
-  const usage = await secretUses(ctx, [...secretIds])
-
-  for (const [secretId, { uses }] of usage) {
-    for (const use of scopedUses(uses)) {
-      await db().secretScope.upsert({
-        where: { secretId_serverId: { secretId, serverId: use.id } },
-        create: { secretId, serverId: use.id },
-        update: {},
-      })
-    }
-  }
+  return new Map(
+    [...usage].map(([secretId, { uses }]) => [
+      secretId,
+      new Set(scopedUses(uses).map((use) => use.id)),
+    ]),
+  )
 }
 
 /**

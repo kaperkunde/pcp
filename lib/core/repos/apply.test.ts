@@ -232,6 +232,49 @@ describe("applying an item", () => {
     expect(await db().secret.count({ where: { kind: "text" } })).toBe(0)
   })
 
+  it("lets a wrapper's places use a secret outside its scope only with the owner's tick, and keeps only that (#162)", async () => {
+    const items = await populatedItems()
+    const ctx = await freshVault()
+    await createBrowserServer(ctx)
+    await applyItem(ctx, find(items, "endpoint", "pets"), {
+      id: null,
+      instance: {
+        name: "Pets",
+        url: "https://pets.example.com/v1",
+        readOnly: false,
+        authType: "none",
+      },
+    })
+    // Made for something else: not anywhere, and nothing uses it.
+    const key = await createSecret(ctx, { name: "Pets key", value: "k" })
+    const wrapper = find(items, "wrapper", "pet-tools")
+
+    const resolved = await resolveItem(ctx, wrapper)
+    expect(resolved.alsoAllows).toEqual([
+      {
+        key: `also:${key.id}:new`,
+        secretId: key.id,
+        secretName: "Pets key",
+        consumerId: null,
+        consumer: wrapper.displayName,
+      },
+    ])
+    await expect(applyItem(ctx, wrapper, { id: null })).rejects.toThrow(
+      /also lets .* use your secret "Pets key"/,
+    )
+    expect(await db().mcpServer.count({ where: { kind: "wrapper" } })).toBe(0)
+
+    const applied = await applyItem(ctx, wrapper, {
+      id: null,
+      alsoAllow: [`also:${key.id}:new`],
+    })
+    expect(
+      await db().secretScope.findMany({
+        select: { secretId: true, serverId: true },
+      }),
+    ).toEqual([{ secretId: key.id, serverId: applied.id }])
+  })
+
   it("fills a first instance in from a format-1 document, and never writes it over a server the vault has", async () => {
     const ctx = await freshVault()
     const secrets = await addSecrets(ctx)

@@ -122,13 +122,17 @@ export async function addSecrets(
   ctx: VaultContext,
   values: { pets?: string; client?: string } = {},
 ): Promise<{ pets: string; client: string }> {
+  // As the owner adds them on the Secrets page, with no site: anywhere
+  // (#162).
   const pets = await createSecret(ctx, {
     name: "Pets key",
     value: values.pets ?? PETS_KEY,
+    anywhere: true,
   })
   const client = await createSecret(ctx, {
     name: "Notes client secret",
     value: values.client ?? CLIENT_SECRET,
+    anywhere: true,
   })
 
   return { pets: pets.id, client: client.id }

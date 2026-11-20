@@ -268,6 +268,7 @@ import {
 import { readWrapperOperation } from "./wrappers/definition"
 import {
   applyRepoChange,
+  repoChangeAlsoAllows,
   describeRepoAsk,
   type RepoChangeAsk,
   type RepoShown,
@@ -303,8 +304,9 @@ import {
 } from "./secret-changes"
 import {
   alsoAllowsOf,
-  checkAlsoAllows,
-  keepAlsoAllowed,
+  beforeAllowing,
+  keepAllowed,
+  missingAlsoAllow,
   type AlsoAllow,
 } from "./secret-scope-asks"
 
@@ -1855,33 +1857,45 @@ async function toView(
               ? { ...decision, label: "Update it" }
               : decision,
           )
-        : kind === "secret_change"
-          ? decisionsFor(kind).map((decision) =>
-              decision.value === "allow_once"
-                ? {
-                    ...decision,
-                    label:
-                      SECRET_CHANGE_YES[
-                        (readArgs(ctx, row) as SecretChangeAsk).action
-                      ],
-                  }
-                : decision,
-            )
-          : kind === "secret_request" &&
-              (readArgs(ctx, row) as SecretRequestAsk).origins.length === 0
-            ? // No sites, so no uses to choose: it is saved, or not.
-              decisionsFor(kind)
-                .filter(
-                  (decision) =>
-                    decision.value === "allow_once" ||
-                    decision.value === "decline",
-                )
-                .map((decision) =>
-                  decision.value === "allow_once"
-                    ? { ...decision, label: "Save it" }
+        : kind === "secret_use" &&
+            (readArgs(ctx, row) as SecretUseAsk).outOfScope
+          ? // Outside its scope (#162): this use, or the site for good.
+            decisionsFor(kind)
+              .filter((decision) => decision.value !== "allow_for")
+              .map((decision) =>
+                decision.value === "allow_once"
+                  ? { ...decision, label: "Once" }
+                  : decision.value === "always"
+                    ? { ...decision, label: "Always at this site" }
                     : decision,
-                )
-            : decisionsFor(kind),
+              )
+          : kind === "secret_change"
+            ? decisionsFor(kind).map((decision) =>
+                decision.value === "allow_once"
+                  ? {
+                      ...decision,
+                      label:
+                        SECRET_CHANGE_YES[
+                          (readArgs(ctx, row) as SecretChangeAsk).action
+                        ],
+                    }
+                  : decision,
+              )
+            : kind === "secret_request" &&
+                (readArgs(ctx, row) as SecretRequestAsk).origins.length === 0
+              ? // No sites, so no uses to choose: it is saved, or not.
+                decisionsFor(kind)
+                  .filter(
+                    (decision) =>
+                      decision.value === "allow_once" ||
+                      decision.value === "decline",
+                  )
+                  .map((decision) =>
+                    decision.value === "allow_once"
+                      ? { ...decision, label: "Save it" }
+                      : decision,
+                  )
+              : decisionsFor(kind),
     connect:
       finished && row.server && needsConnecting(row.server)
         ? connectLinks(row.server, publicUrl)
@@ -1899,9 +1913,11 @@ async function toView(
         ? await showSecretChange(ctx, readArgs(ctx, row) as SecretChangeAsk)
         : null,
     alsoAllows:
-      status === "pending"
-        ? await alsoAllowsOf(ctx, kind, readArgs(ctx, row))
-        : [],
+      status !== "pending"
+        ? []
+        : kind === "repo_change"
+          ? await repoChangeAlsoAllows(ctx, readArgs(ctx, row) as RepoChangeAsk)
+          : await alsoAllowsOf(ctx, kind, readArgs(ctx, row)),
     offersPrivateAddresses:
       kind === "register" &&
       registersPrivateAddress(readArgs(ctx, row) as RegisterArgs),
@@ -2747,7 +2763,14 @@ export async function decidePermission(
           : decision
       : decision
 
-  if (!decisionsFor(kind).some((offered) => offered.value === choice)) {
+  if (
+    !decisionsFor(kind).some((offered) => offered.value === choice) ||
+    // A secret outside its scope is typed once, or its site added; never
+    // for a while (#162).
+    (kind === "secret_use" &&
+      choice === "allow_for" &&
+      (readArgs(ctx, row) as SecretUseAsk).outOfScope)
+  ) {
     return text("That is not one of the answers to this request.", true)
   }
 
@@ -2920,16 +2943,30 @@ export async function decidePermission(
   }
 
   // A proposal that names a secret outside its scope makes it allowed
-  // there only with the owner's tick beside the yes.
-  if (
+  // there only with the owner's tick beside the yes, and keeps only that.
+  const allowing =
     kind === "register" ||
     kind === "service_change" ||
     kind === "wrapper_change"
-  ) {
-    const problem = await checkAlsoAllows(
-      ctx,
-      kind,
-      readArgs(ctx, row),
+      ? await beforeAllowing(
+          ctx,
+          await alsoAllowsOf(ctx, kind, readArgs(ctx, row)),
+        )
+      : null
+
+  if (allowing) {
+    const problem = missingAlsoAllow(allowing.shown, alsoAllow)
+
+    if (problem) {
+      return text(problem, true)
+    }
+  }
+
+  // A repository's item the assistant merged: checked here, before the
+  // request is used up; applyItem keeps what was ticked.
+  if (kind === "repo_change") {
+    const problem = missingAlsoAllow(
+      await repoChangeAlsoAllows(ctx, readArgs(ctx, row) as RepoChangeAsk),
       alsoAllow,
     )
 
@@ -3081,6 +3118,7 @@ export async function decidePermission(
                       ctx,
                       row.tokenId,
                       readArgs(ctx, row) as RepoChangeAsk,
+                      alsoAllow,
                     ),
                   )
                 : kind === "note_change"
@@ -3254,15 +3292,10 @@ export async function decidePermission(
     )
   }
 
-  // What the owner's yes also allowed: the secrets it named stay in the
-  // scope of what uses them now (secret-scope-asks.ts).
-  if (
-    result.isError !== true &&
-    (kind === "register" ||
-      kind === "service_change" ||
-      kind === "wrapper_change")
-  ) {
-    await keepAlsoAllowed(ctx, kind, readArgs(ctx, row)).catch((error) => {
+  // What the owner's yes also allowed, and nothing more, stays in each
+  // secret's scope (secret-scope-asks.ts).
+  if (result.isError !== true && allowing) {
+    await keepAllowed(ctx, allowing, alsoAllow).catch((error) => {
       console.error("[permissions] keeping a secret's scope failed", {
         id: row.id,
         error,

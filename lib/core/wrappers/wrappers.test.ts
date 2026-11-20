@@ -33,6 +33,7 @@ import { serializeItem } from "../repos/documents"
 import { localItem } from "../repos/local"
 import { createSecret, readSecretValue } from "../secrets"
 import { resolveSecretRef } from "../secret-refs"
+import { grantSecretScope } from "../secret-scope"
 
 // Every secret named by name goes through the one resolver (#162): watched
 // here, as it is.
@@ -847,6 +848,70 @@ describe("another wrapper of a definition, a definition of its own, and the owne
     const second = await serverNamed(ctx, "Lookup two")
     return { first, second }
   }
+
+  it("asks to also allow a secret for every wrapper of the definition a change reaches, and keeps only those (#162)", async () => {
+    const { first, second } = await twoOfOne()
+    const other = await createSecret(ctx, { name: "Other key", value: "o" })
+    const thingsRows = () =>
+      db().secretScope.count({
+        where: { secret: { kind: "text" }, NOT: { secretId: other.id } },
+      })
+    const thingsBefore = await thingsRows()
+    // Granted for the first already: a scope that covers it by grant.
+    await grantSecretScope(ctx, other.id, first.id)
+
+    const asked = await call("update_wrapper", {
+      wrapper: first.slug,
+      tools: [ECHO_TOOL],
+      secrets: [
+        { secret: "Things key", tool: "things/echo", argument: "/key" },
+        { secret: "Other key", tool: "things/echo", argument: "/q" },
+      ],
+    })
+    expect(asked.text).toContain("Not done yet")
+    const row = await newestRequest()
+    const view = (await getPermissionView(ctx, row.id, {
+      publicUrl: PUBLIC_URL,
+    }))!
+
+    // The change is copied to the second too, which the scope does not cover.
+    expect(view.alsoAllows).toEqual([
+      {
+        key: `also:${other.id}:${second.id}`,
+        secretId: other.id,
+        secretName: "Other key",
+        consumerId: second.id,
+        consumer: "Lookup two",
+      },
+    ])
+
+    const unticked = await decidePermission(ctx, row.id, "allow_once", {
+      publicUrl: PUBLIC_URL,
+      alsoAllow: [],
+    })
+    expect(unticked.isError).toBe(true)
+    expect((unticked.content as Array<{ text?: string }>)[0]!.text).toMatch(
+      /also lets Lookup two use your secret "Other key"/,
+    )
+
+    const done = await decidePermission(ctx, row.id, "allow_once", {
+      publicUrl: PUBLIC_URL,
+      alsoAllow: [`also:${other.id}:${second.id}`],
+    })
+    expect(done.isError, JSON.stringify(done)).not.toBe(true)
+    expect(
+      (
+        await db().secretScope.findMany({
+          where: { secretId: other.id },
+          select: { serverId: true },
+        })
+      )
+        .map((each) => each.serverId)
+        .sort(),
+    ).toEqual([first.id, second.id].sort())
+    // The other secret the wrapper uses got no row it was not shown.
+    expect(await thingsRows()).toBe(thingsBefore)
+  })
 
   it("proposes another wrapper of a definition with its programs in full, and makes it as shown", async () => {
     const first = await approvedWrapper()

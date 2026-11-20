@@ -1556,9 +1556,10 @@ describe("proposing a service", () => {
     // yes needs the tick.
     expect(view.alsoAllows).toEqual([
       {
-        key: `also:${key.id}`,
+        key: `also:${key.id}:new`,
         secretId: key.id,
         secretName: "Docling key",
+        consumerId: null,
         consumer: "Docling",
       },
     ])
@@ -1566,7 +1567,7 @@ describe("proposing a service", () => {
     expect(refused.isError).toBe(true)
     expect(launched).toHaveLength(0)
 
-    await approve(undefined, [`also:${key.id}`])
+    await approve(undefined, [`also:${key.id}:new`])
     expect(launched[0]!.env).toEqual({ DOCLING_SERVE_API_KEY: key.id })
     // The service it made is in the secret's scope now.
     expect(await db().secretScope.count({ where: { secretId: key.id } })).toBe(

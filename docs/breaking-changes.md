@@ -17,12 +17,12 @@ and wrappers by short name). Beside it are `edit_secret`, `rotate_secret`
 (Write) and `delete_secret` (Destructive, through `execute_destructive`),
 each always asking the owner.
 
-A secret named for a server, service or wrapper outside its scope is
-refused, naming `change_secret_scope`; a proposal that names one
-(`register_server`, a service's `env_secrets`, a wrapper's `secrets`) asks
-the owner to also allow it there. A secret with no site that the owner has
-not let be used anywhere is no longer typed by the browser after an ask:
-propose a site for it first.
+A proposal that names a secret for a server, service or wrapper outside
+its scope (`register_server`, a service's `env_secrets`, a wrapper's
+`secrets`) asks the owner to also allow it there. A secret with no site
+that the owner has not let be used anywhere is still typed only after
+asking them, but their answer is Once or Always at this site (which adds
+the site), never for an hour.
 
 The browser's `update_secret_sites` still works for this release, as an
 alias: the same request, with a note before the link that names the new

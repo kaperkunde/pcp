@@ -1,12 +1,12 @@
 import { createHash } from "node:crypto"
 
 import {
-  bindOrigin,
   checkSecretSitesChange,
+  settleSites,
   showSecretSitesChange,
+  siteChangeWrites,
   siteLabel,
   sitesOf,
-  unbindOrigin,
   type SecretSiteChangeShown,
 } from "./browser-secrets"
 import type { ProposedSecretSite } from "./browser/types"
@@ -31,9 +31,9 @@ import {
   secretNameWhere,
 } from "./secret-meta"
 import {
-  grantSecretScope,
+  consumersNow,
+  ensureSecretScopes,
   readSecretScopes,
-  removeFromSecretScope,
   SCOPE_KINDS,
   type SecretScopeConsumer,
 } from "./secret-scope"
@@ -161,6 +161,10 @@ export async function secretBasis(
   ctx: VaultContext,
   secretId: string,
 ): Promise<string | null> {
+  // A secret from before the scope gets it first, so the basis taken when
+  // asked is the one read when answered.
+  await ensureSecretScopes(ctx)
+
   const row = await loadById(ctx, secretId)
 
   if (!row) {
@@ -1088,10 +1092,86 @@ export async function applySecretChange(
       const scopeAsk = ask.scope!
       const done: string[] = []
       const left: string[] = []
+      const removeSites = scopeAsk.removeSites.filter((origin) =>
+        chosen.has(`site:remove:${origin}`),
+      )
+      const addSites = scopeAsk.addSites.filter((site) =>
+        chosen.has(`site:add:${site.origin}`),
+      )
+      const removeServers = scopeAsk.removeServers.filter((server) =>
+        chosen.has(`server:remove:${server.id}`),
+      )
+      const addServers = scopeAsk.addServers.filter((server) =>
+        chosen.has(`server:add:${server.id}`),
+      )
+
+      // Everything checked before anything is written, then written in
+      // one transaction: what uses it now stays (a use is not in the
+      // basis), and each server to add is still one of the vault's.
+      const using = (await consumersNow(ctx, [row.id])).get(row.id)
+
+      for (const server of removeServers) {
+        if (using?.has(server.id)) {
+          throw new PcpError(
+            "conflict",
+            `${server.name} uses "${name}" now, so it stays in its scope: nothing was changed. Change ${server.name} first, then answer again.`,
+          )
+        }
+      }
+
+      const present = new Set(
+        (
+          await db().mcpServer.findMany({
+            where: {
+              vaultId: ctx.vaultId,
+              id: { in: addServers.map((server) => server.id) },
+              kind: { in: [...SCOPE_KINDS] },
+            },
+            select: { id: true },
+          })
+        ).map((server) => server.id),
+      )
+      const gone = addServers.find((server) => !present.has(server.id))
+
+      if (gone) {
+        throw new PcpError(
+          "conflict",
+          `${gone.name} is no longer in PCP, so nothing was changed.`,
+        )
+      }
+
+      const sitesChange =
+        removeSites.length + addSites.length > 0
+          ? await siteChangeWrites(ctx, row.id, {
+              add: addSites,
+              remove: removeSites,
+            })
+          : null
+
+      await db().$transaction([
+        ...(sitesChange?.writes ?? []),
+        ...removeServers.map((server) =>
+          db().secretScope.deleteMany({
+            where: { secretId: row.id, serverId: server.id },
+          }),
+        ),
+        ...addServers.map((server) =>
+          db().secretScope.upsert({
+            where: {
+              secretId_serverId: { secretId: row.id, serverId: server.id },
+            },
+            create: { secretId: row.id, serverId: server.id },
+            update: {},
+          }),
+        ),
+      ])
+
+      if (sitesChange) {
+        await settleSites(ctx, row.id, sitesChange.before)
+      }
 
       for (const origin of scopeAsk.removeSites) {
-        if (chosen.has(`site:remove:${origin}`)) {
-          await unbindOrigin(ctx, row.id, origin)
+        if (removeSites.includes(origin)) {
           done.push(`took away the site ${origin}`)
         } else {
           left.push(`taking away ${origin}`)
@@ -1099,10 +1179,7 @@ export async function applySecretChange(
       }
 
       for (const site of scopeAsk.addSites) {
-        if (chosen.has(`site:add:${site.origin}`)) {
-          await bindOrigin(ctx, row.id, site.origin, {
-            subdomains: site.subdomains,
-          })
+        if (addSites.includes(site)) {
           done.push(`added the site ${siteLabel(site)}`)
         } else {
           left.push(`adding ${siteLabel(site)}`)
@@ -1110,8 +1187,7 @@ export async function applySecretChange(
       }
 
       for (const server of scopeAsk.removeServers) {
-        if (chosen.has(`server:remove:${server.id}`)) {
-          await removeFromSecretScope(ctx, row.id, server.id)
+        if (removeServers.includes(server)) {
           done.push(`took away ${server.name}`)
         } else {
           left.push(`taking away ${server.name}`)
@@ -1119,8 +1195,7 @@ export async function applySecretChange(
       }
 
       for (const server of scopeAsk.addServers) {
-        if (chosen.has(`server:add:${server.id}`)) {
-          await grantSecretScope(ctx, row.id, server.id)
+        if (addServers.includes(server)) {
           done.push(`let ${server.name} use it`)
         } else {
           left.push(`letting ${server.name} use it`)

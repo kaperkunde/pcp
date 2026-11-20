@@ -101,7 +101,9 @@ export function describeSecretUseAsk(
       `In tab ${ask.tabId}`,
       bound
         ? `${ask.origin} is one of the sites of "${ask.secretName}".`
-        : `PCP has not typed "${ask.secretName}" at ${ask.origin} before: Always allow adds it to the secret's sites.`,
+        : ask.outOfScope
+          ? `"${ask.secretName}" has no site the browser types it at, and you have not let it be used anywhere: Once types it this one time and changes nothing, Always at this site adds ${ask.origin} to where it may be used.`
+          : `PCP has not typed "${ask.secretName}" at ${ask.origin} before: Always allow adds it to the secret's sites.`,
     ],
     warning: [
       ...(bound

@@ -3700,31 +3700,52 @@ Where one of the owner's secrets may be used is a property of the secret
 and the table and marks every existing secret's scope as not worked out
 (null): its uses are partly in sealed wrapper definitions and service
 specs that SQL cannot read. The first request that holds the vault's key
-(`ensureSecretScopes`, called before anything reads a scope) writes each
-one's uses as rows, or anywhere when nothing uses it, claiming each secret
-by the update of its mark so two requests never write it twice. Until then
+(`ensureSecretScopes`, called before anything reads a scope or takes a
+secret's basis) writes each one's uses as rows, or anywhere when nothing
+uses it, claiming each secret by the update of its mark so two requests
+never write it twice. "Nothing uses it" is only taken when every wrapper
+definition read (`secretUses`' `report`): otherwise such a secret stays
+unworked out until a request where they all do. PCP's own secrets (OAuth
+tokens, SSH keys, proxy passwords, values PCP made for a service) are never
+anywhere: a generated value's scope is its service. Until then
 a null scope reads as anywhere. An export carries the column and the rows;
 an older file's secrets come in null and are worked out the same way.
 
 **The one check.** `secret-refs.ts resolveSecretRef(ctx, name, use)` takes
 the consumer in `use` (`consumer`: its id, or null for one a proposal would
 make, and its name) and checks the scope (`scopeCovers`): in scope, it
-resolves; outside, `scope` decides: `"check"` (the default) refuses with a
-`forbidden` error naming `change_secret_scope`; `"ask"` (an assistant's
-proposal: `register_server` passes it) resolves with `inScope: false`;
-`"granted"` is the owner's yes. A proposal that names a secret outside its
-consumer's scope (`register`, a new service's variables, a wrapper's
-places: `secret-scope-asks.ts`, from the request's stored ids, at view and
-answer time) shows "Also allow <secret> for <consumer>", ticked, beside
-the approval; `decidePermission` refuses the yes unless each is still
-ticked (`alsoAllow`), and once what it proposed is made keeps what now
-uses those secrets in their scope as rows (`keepUsesInScope`), so the grant
-outlives the use. Nothing an assistant sends ticks it.
+resolves; outside, `scope` decides: `"check"` (the default, for a caller
+that says nothing) refuses with a `forbidden` error naming
+`change_secret_scope`; `"ask"` (an assistant's proposal: `register_server`
+passes it) resolves with `inScope: false`; `"granted"` is the owner's yes.
+Every way an assistant can name a secret today carries an "Also allow"
+instead: a proposal that names a secret outside its consumer's scope
+(`register`, a new service's variables, a wrapper's places on the wrapper
+and on every other instance of its definition, which `shareWrapper` copies
+them to: `secret-scope-asks.ts`, from the request's stored ids, at view
+and answer time) shows one "Also allow <secret> for <consumer>" per secret
+and consumer, ticked, beside the approval; `decidePermission` refuses the
+yes unless each is still ticked (`alsoAllow`), and once what it proposed
+is made keeps exactly those in the scope as rows (`keepAllowed`: a
+consumer named by id, or for the one the request makes, what uses the
+secret now that did not before), so the grant outlives the use and
+nothing else is widened. A linked repository's item does the same
+(`repos/apply.ts resolveItem`'s `alsoAllows`): its review (the add page,
+a waiting change, an assistant's `repo_change`) shows them ticked,
+`applyItem` refuses unless each is, and keeps only those; a change from a
+trusted repository that would let a secret be used further never applies
+by itself. Nothing an assistant sends ticks one.
 
 **The browser keeps its gate.** Sites are the scope for typing, and
-allowances stay per token. A secret with no site that is not anywhere is
-never typed (`admitSecretUse` refuses it, naming `change_secret_scope`);
-an anywhere one with no site is typed after a `secret_use` ask, as before.
+allowances stay per token. A secret typed through a wrapper's or flow's
+place for it at browser/type is in that wrapper's scope, and passes the
+gate per site as before. A secret with no site that is not anywhere and
+not typed through such a place is typed only on the owner's answer to that
+use: a `secret_use` ask (`outOfScope`) offering Once (a once allowance:
+that call, one sign-in, the scope unchanged) or Always at this site (adds
+the site); an allowance for a while does not count for it, and it is never
+typed without asking. An anywhere one with no site is typed after a
+`secret_use` ask, as before.
 A secret with sites is asked about at another site as before, Always allow
 adding that site. run_<tier> programs never reach a secret: a wrapper's
 bindings are the programs' way, through the wrapper's place in the scope.
