@@ -12,8 +12,10 @@ Asking the owner to store a secret is PCP's own `request_secret` now, run
 through `execute_write` (`{"tool": "request_secret", "arguments": {…}}`),
 no longer only the browser's. It takes the same arguments: `name`,
 `purpose`, `kind` (`text` or `totp`), `username`, `origins` and `generate`.
-`origins` is optional: with no sites yet, the browser types the secret only
-where the owner allows it, asking them each time, and it goes to a server,
+`origins` is optional: with no sites yet, the browser does not type the
+secret until the owner adds one (`change_secret_scope` proposes one; a secret
+the owner lets be used anywhere is typed after asking them each time), and it
+goes to a server,
 a service or a wrapper once the owner approves one that names it
 (`register_server`'s `secret`, `env_secrets`, a wrapper's `secrets`). `generate` takes a `format`:
 `password` (the default, as before), `alphanumeric`, `hex` or `base64url`,

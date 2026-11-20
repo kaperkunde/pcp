@@ -242,6 +242,7 @@ import { namesInWords, secretUses } from "./secret-uses"
 import {
   browserExitsFor,
   callServerTool,
+  restartServicesUsingSecret,
   launchService,
   needsConnecting,
   openExitForCall,
@@ -290,6 +291,22 @@ import {
   writeSiteAccess,
 } from "./web-fetch"
 import { TOKEN_NAME_SELECT, tokenName } from "./token-names"
+import {
+  applySecretChange,
+  checkSecretChangeAnswer,
+  describeSecretChangeAsk,
+  showSecretChange,
+  SECRET_CHANGE_YES,
+  type RemakeServices,
+  type SecretChangeAsk,
+  type SecretChangeShown,
+} from "./secret-changes"
+import {
+  alsoAllowsOf,
+  checkAlsoAllows,
+  keepAlsoAllowed,
+  type AlsoAllow,
+} from "./secret-scope-asks"
 
 /**
  * The owner's say before an assistant's call runs. A call to a tool the
@@ -410,6 +427,7 @@ export type PermissionAsk =
   | { kind: "secret_use"; input: SecretUseAsk }
   | { kind: "secret_request"; input: SecretRequestAsk }
   | { kind: "secret_sites_change"; input: SecretSitesChangeAsk }
+  | { kind: "secret_change"; input: SecretChangeAsk }
   | { kind: "exit_use"; input: ExitUseAsk }
   | { kind: "script_use"; input: ScriptUseAsk }
   | { kind: "tab_pace"; input: TabPaceAsk }
@@ -435,6 +453,11 @@ export type PermissionExecutor = {
   launchService?: typeof launchService
   /** An image update the owner agreed to; the real one when left out. */
   updateService?: typeof updateService
+  /**
+   * The services a secret's new value goes to, made again with it
+   * (rotate_secret); the real ones when left out.
+   */
+  remakeServices?: RemakeServices
 }
 
 export const defaultExecutor: PermissionExecutor = {
@@ -557,6 +580,20 @@ export type PermissionView = {
    * once answered.
    */
   secretSites: SecretSitesShown | null
+  /**
+   * edit_secret, rotate_secret, change_secret_scope, delete_secret: the
+   * secret before and after, what uses it and, for a scope, each change to
+   * tick (decidePermission's `sites`). Null for other requests and once
+   * answered.
+   */
+  secretChange: SecretChangeShown | null
+  /**
+   * A proposal that names one of the owner's secrets outside its scope
+   * (secret-scope.ts): "also allows <secret> for <consumer>", ticked; the
+   * yes needs each ticked (decidePermission's `alsoAllow`) and adds it.
+   * Empty for other requests and once answered.
+   */
+  alsoAllows: AlsoAllow[]
   /**
    * A new or changed server's levels and tiers the assistant proposed
    * (proposed-access.ts), for the page to show filled in and editable
@@ -997,6 +1034,11 @@ function describeAsk(ask: PermissionAsk): {
         target: `secret_sites:${ask.input.secretName}`,
         args: ask.input as Record<string, unknown>,
       }
+    case "secret_change":
+      return {
+        target: `secret_change:${ask.input.action}:${ask.input.secretId}\n${JSON.stringify([ask.input.edit ?? null, ask.input.generate ?? null, ask.input.scope ?? null])}`,
+        args: ask.input as Record<string, unknown>,
+      }
     case "script_use":
       return {
         target: `script_use:${ask.input.site}\n${ask.input.tabId}\n${scriptDigest(ask.input.script)}`,
@@ -1060,6 +1102,8 @@ function toolNameOf(ask: PermissionAsk): string {
       return "request_secret"
     case "secret_sites_change":
       return "update_secret_sites"
+    case "secret_change":
+      return ask.input.via
     case "exit_use":
       return ask.input.via === "web_fetch" ? "web_fetch" : "tabs"
     case "script_use":
@@ -1380,6 +1424,16 @@ async function summarizeRow(
 
   if (row.kind === "secret_request") {
     const asked = describeSecretRequestAsk(args as SecretRequestAsk)
+
+    return { ...asked, lines: [...asked.lines, asker] }
+  }
+
+  if (row.kind === "secret_change") {
+    const ask = args as SecretChangeAsk
+    const asked = describeSecretChangeAsk(
+      ask,
+      row.status === "pending" ? await showSecretChange(ctx, ask) : undefined,
+    )
 
     return { ...asked, lines: [...asked.lines, asker] }
   }
@@ -1800,21 +1854,33 @@ async function toView(
               ? { ...decision, label: "Update it" }
               : decision,
           )
-        : kind === "secret_request" &&
-            (readArgs(ctx, row) as SecretRequestAsk).origins.length === 0
-          ? // No sites, so no uses to choose: it is saved, or not.
-            decisionsFor(kind)
-              .filter(
-                (decision) =>
-                  decision.value === "allow_once" ||
-                  decision.value === "decline",
-              )
-              .map((decision) =>
-                decision.value === "allow_once"
-                  ? { ...decision, label: "Save it" }
-                  : decision,
-              )
-          : decisionsFor(kind),
+        : kind === "secret_change"
+          ? decisionsFor(kind).map((decision) =>
+              decision.value === "allow_once"
+                ? {
+                    ...decision,
+                    label:
+                      SECRET_CHANGE_YES[
+                        (readArgs(ctx, row) as SecretChangeAsk).action
+                      ],
+                  }
+                : decision,
+            )
+          : kind === "secret_request" &&
+              (readArgs(ctx, row) as SecretRequestAsk).origins.length === 0
+            ? // No sites, so no uses to choose: it is saved, or not.
+              decisionsFor(kind)
+                .filter(
+                  (decision) =>
+                    decision.value === "allow_once" ||
+                    decision.value === "decline",
+                )
+                .map((decision) =>
+                  decision.value === "allow_once"
+                    ? { ...decision, label: "Save it" }
+                    : decision,
+                )
+            : decisionsFor(kind),
     connect:
       finished && row.server && needsConnecting(row.server)
         ? connectLinks(row.server, publicUrl)
@@ -1827,6 +1893,14 @@ async function toView(
             readArgs(ctx, row) as SecretSitesChangeAsk,
           )
         : null,
+    secretChange:
+      kind === "secret_change" && status === "pending"
+        ? await showSecretChange(ctx, readArgs(ctx, row) as SecretChangeAsk)
+        : null,
+    alsoAllows:
+      status === "pending"
+        ? await alsoAllowsOf(ctx, kind, readArgs(ctx, row))
+        : [],
     offersPrivateAddresses:
       kind === "register" &&
       registersPrivateAddress(readArgs(ctx, row) as RegisterArgs),
@@ -2251,6 +2325,7 @@ export async function withPermission(
             ask.kind === "secret_use" ||
             ask.kind === "secret_request" ||
             ask.kind === "secret_sites_change" ||
+            ask.kind === "secret_change" ||
             ask.kind === "script_use" ||
             ask.kind === "tab_pace" ||
             ask.kind === "limits_change"
@@ -2567,6 +2642,7 @@ export async function decidePermission(
     loginName,
     generate,
     sites,
+    alsoAllow,
     revision,
     allowPrivate,
     access,
@@ -2602,6 +2678,11 @@ export async function decidePermission(
      * sites as the page showed them (SecretSitesShown `basis`).
      */
     sites?: { basis?: string; keep?: string[] }
+    /**
+     * A proposal that names a secret outside its scope: the "also allows"
+     * the owner left ticked, by key (PermissionView `alsoAllows`).
+     */
+    alsoAllow?: string[]
     /** A memory to share: read it in every conversation, ticked on the page. */
     always?: boolean
     /** "Allow for": how long, one of ALLOW_FOR_MINUTES. */
@@ -2822,6 +2903,37 @@ export async function decidePermission(
       }
 
       throw error
+    }
+  }
+
+  if (kind === "secret_change") {
+    const problem = await checkSecretChangeAnswer(
+      ctx,
+      readArgs(ctx, row) as SecretChangeAsk,
+      { keep: sites?.keep, value: secretValue, generate },
+    )
+
+    if (problem) {
+      return text(problem, true)
+    }
+  }
+
+  // A proposal that names a secret outside its scope makes it allowed
+  // there only with the owner's tick beside the yes.
+  if (
+    kind === "register" ||
+    kind === "service_change" ||
+    kind === "wrapper_change"
+  ) {
+    const problem = await checkAlsoAllows(
+      ctx,
+      kind,
+      readArgs(ctx, row),
+      alsoAllow,
+    )
+
+    if (problem) {
+      return text(problem, true)
     }
   }
 
@@ -3083,25 +3195,50 @@ export async function decidePermission(
                                                 sites ?? {},
                                               ),
                                             )
-                                          : kind === "pcp_update"
+                                          : kind === "secret_change"
                                             ? text(
-                                                await applyPcpUpdate(
+                                                await applySecretChange(
+                                                  ctx,
                                                   readArgs(
                                                     ctx,
                                                     row,
-                                                  ) as PcpUpdateAsk,
+                                                  ) as SecretChangeAsk,
+                                                  {
+                                                    keep: sites?.keep,
+                                                    value: secretValue,
+                                                    generate,
+                                                  },
+                                                  {
+                                                    remakeServices:
+                                                      executor.remakeServices ??
+                                                      ((remakeCtx, secretId) =>
+                                                        restartServicesUsingSecret(
+                                                          remakeCtx,
+                                                          secretId,
+                                                          { publicUrl },
+                                                        )),
+                                                  },
                                                 ),
                                               )
-                                            : await executeRegister(
-                                                ctx,
-                                                row,
-                                                publicUrl,
-                                                executor,
-                                                typedValue,
-                                                allowPrivate === true,
-                                                chosenAccess,
-                                                chosenLimits,
-                                              )
+                                            : kind === "pcp_update"
+                                              ? text(
+                                                  await applyPcpUpdate(
+                                                    readArgs(
+                                                      ctx,
+                                                      row,
+                                                    ) as PcpUpdateAsk,
+                                                  ),
+                                                )
+                                              : await executeRegister(
+                                                  ctx,
+                                                  row,
+                                                  publicUrl,
+                                                  executor,
+                                                  typedValue,
+                                                  allowPrivate === true,
+                                                  chosenAccess,
+                                                  chosenLimits,
+                                                )
   } catch (error) {
     if (!isPcpError(error)) {
       console.error("[permissions] running an allowed request failed", {
@@ -3114,6 +3251,22 @@ export async function decidePermission(
       isPcpError(error) ? error.message : "Something went wrong inside PCP.",
       true,
     )
+  }
+
+  // What the owner's yes also allowed: the secrets it named stay in the
+  // scope of what uses them now (secret-scope-asks.ts).
+  if (
+    result.isError !== true &&
+    (kind === "register" ||
+      kind === "service_change" ||
+      kind === "wrapper_change")
+  ) {
+    await keepAlsoAllowed(ctx, kind, readArgs(ctx, row)).catch((error) => {
+      console.error("[permissions] keeping a secret's scope failed", {
+        id: row.id,
+        error,
+      })
+    })
   }
 
   // A value PCP made for a new secret (not request_secret's, whose answer

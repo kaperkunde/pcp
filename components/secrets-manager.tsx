@@ -13,15 +13,19 @@ import { Field, Label } from "@kaperkunde/ui/label"
 import { List, ListRow, ListSection } from "@kaperkunde/ui/list"
 import {
   addSecretOriginAction,
+  addSecretScopeAction,
   deleteSecretAction,
   endSecretAllowanceAction,
   removeSecretOriginAction,
+  removeSecretScopeAction,
   revealSecretAction,
   revealTotpCodeAction,
+  setSecretAnywhereAction,
   updateSecretAction,
   type SecretActionResult,
 } from "@/lib/actions/secrets"
 import type { SecretSite } from "@/lib/core/browser-secrets"
+import type { SecretScopeState } from "@/lib/core/secret-scope"
 import type { SecretSummary } from "@/lib/core/secrets"
 
 /** A token's allowance to have the secret typed at a site. */
@@ -38,7 +42,12 @@ export type SecretItem = SecretSummary & {
   /** The sites the browser may type it at, each maybe with its subdomains. */
   browserOrigins: SecretSite[]
   allowances: SecretAllowanceItem[]
+  /** Where it may be used (#162): anywhere, or what is in its scope. */
+  scope: SecretScopeState
 }
+
+/** What can be added to a secret's scope: servers, services, wrappers. */
+export type ScopeCandidate = { id: string; name: string; kind: string }
 
 /**
  * The stored secrets, one row each: its name, what it is for, the servers
@@ -48,9 +57,18 @@ export type SecretItem = SecretSummary & {
  * one-time codes that go with it: what assistants see beside its name). A
  * one-time codes secret also shows its code of the moment (Code). Browser lists the
  * sites the browser may type one of the owner's secrets at, and the tokens
- * allowed to have it typed there, each with a way to take it back.
+ * allowed to have it typed there, each with a way to take it back. Scope
+ * lists where one of the owner's secrets may be used: anywhere, or the
+ * servers, services and wrappers in its scope (those that use it now stay
+ * while they do) and its sites, with ways to add and take away.
  */
-export function SecretsManager({ secrets }: { secrets: SecretItem[] }) {
+export function SecretsManager({
+  secrets,
+  candidates,
+}: {
+  secrets: SecretItem[]
+  candidates: ScopeCandidate[]
+}) {
   const codes = secrets
     .filter((secret) => secret.kind === "totp")
     .map((secret) => ({ id: secret.id, name: secret.name }))
@@ -70,7 +88,12 @@ export function SecretsManager({ secrets }: { secrets: SecretItem[] }) {
       ) : (
         <List as="ul">
           {secrets.map((secret) => (
-            <SecretRow key={secret.id} secret={secret} codes={codes} />
+            <SecretRow
+              key={secret.id}
+              secret={secret}
+              codes={codes}
+              candidates={candidates}
+            />
           ))}
         </List>
       )}
@@ -81,10 +104,12 @@ export function SecretsManager({ secrets }: { secrets: SecretItem[] }) {
 function SecretRow({
   secret,
   codes,
+  candidates,
 }: {
   secret: SecretItem
   /** The one-time code secrets a text secret can name as its companion. */
   codes: Array<{ id: string; name: string }>
+  candidates: ScopeCandidate[]
 }) {
   const [revealed, setRevealed] = useState<string | null>(null)
   const [code, setCode] = useState<{
@@ -92,6 +117,7 @@ function SecretRow({
     secondsLeft: number
   } | null>(null)
   const [browser, setBrowser] = useState(false)
+  const [scoping, setScoping] = useState(false)
   const [editing, setEditing] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [pending, startTransition] = useTransition()
@@ -172,7 +198,30 @@ function SecretRow({
   const totp = secret.kind === "totp"
   const managed = secret.kind !== "text" && !totp
   const open =
-    revealed !== null || code !== null || browser || editing || error !== null
+    revealed !== null ||
+    code !== null ||
+    browser ||
+    scoping ||
+    editing ||
+    error !== null
+
+  function removeFromScope(serverId: string) {
+    startTransition(async () => {
+      const result = await removeSecretScopeAction(secret.id, serverId)
+      if (result.status === "error") {
+        setError(result.error)
+      }
+    })
+  }
+
+  function setAnywhere(anywhere: boolean) {
+    startTransition(async () => {
+      const result = await setSecretAnywhereAction(secret.id, anywhere)
+      if (result.status === "error") {
+        setError(result.error)
+      }
+    })
+  }
 
   return (
     <ListRow
@@ -193,6 +242,9 @@ function SecretRow({
             </Badge>
           ) : null}
           {totp ? <Badge variant="secondary">One-time codes</Badge> : null}
+          {!managed && secret.scope.anywhere ? (
+            <Badge variant="secondary">Anywhere</Badge>
+          ) : null}
           {secret.browserOrigins.length > 0 ? (
             <Badge variant="secondary">
               Browser: {secret.browserOrigins.length}{" "}
@@ -251,6 +303,15 @@ function SecretRow({
             <Button
               variant="ghost"
               size="sm"
+              onClick={() => setScoping((value) => !value)}
+            >
+              {scoping ? "Close" : "Scope"}
+            </Button>
+          ) : null}
+          {!managed ? (
+            <Button
+              variant="ghost"
+              size="sm"
               onClick={() => setBrowser((value) => !value)}
             >
               {browser ? "Close" : "Browser"}
@@ -293,6 +354,15 @@ function SecretRow({
             <pre className="m-0 max-h-48 overflow-auto rounded-xl bg-field p-3.5 font-mono text-xs leading-relaxed break-all whitespace-pre-wrap ring-1 ring-separator">
               {revealed}
             </pre>
+          ) : null}
+          {scoping ? (
+            <SecretScope
+              secret={secret}
+              candidates={candidates}
+              pending={pending}
+              onRemove={removeFromScope}
+              onAnywhere={setAnywhere}
+            />
           ) : null}
           {browser ? (
             <SecretBrowser
@@ -437,7 +507,12 @@ function SecretBrowser({
       <p className="m-0 text-sm text-muted-foreground">
         An assistant can have PCP type this secret into a page with the
         browser&apos;s type tool, without seeing it: at these sites, and only
-        once you allow its token there. A use anywhere else asks you first.
+        once you allow its token there.{" "}
+        {secret.scope.anywhere
+          ? "A use anywhere else asks you first, since it may be used anywhere."
+          : secret.browserOrigins.length > 0
+            ? "A use at another site asks you first."
+            : "With no site, it is not typed anywhere."}
       </p>
       {secret.browserOrigins.length > 0 ? (
         <ul className="m-0 flex list-none flex-col gap-1.5 p-0">
@@ -528,6 +603,147 @@ function SecretBrowser({
           </ul>
         </div>
       ) : null}
+    </div>
+  )
+}
+
+/**
+ * Where one of the owner's secrets may be used (#162): anywhere, or the
+ * servers, services and wrappers in its scope and its sites. One that
+ * uses it now stays while it does; the others can be taken away, and any
+ * of the vault's added.
+ */
+function SecretScope({
+  secret,
+  candidates,
+  pending,
+  onRemove,
+  onAnywhere,
+}: {
+  secret: SecretItem
+  candidates: ScopeCandidate[]
+  pending: boolean
+  onRemove: (serverId: string) => void
+  onAnywhere: (anywhere: boolean) => void
+}) {
+  const [state, action] = useActionState<SecretActionResult, FormData>(
+    addSecretScopeAction,
+    { status: "idle" },
+  )
+  const consumers = secret.scope.consumers
+  const servers = consumers.filter((consumer) => !consumer.wrapper)
+  const wrappers = consumers.filter((consumer) => consumer.wrapper)
+  const addable = candidates.filter(
+    (candidate) => !consumers.some((consumer) => consumer.id === candidate.id),
+  )
+
+  const list = (title: string, items: typeof consumers, none: string) => (
+    <div className="flex flex-col gap-1.5">
+      <span className="text-sm font-medium">{title}</span>
+      {items.length > 0 ? (
+        <ul className="m-0 flex list-none flex-col gap-1.5 p-0">
+          {items.map((consumer) => (
+            <li key={consumer.id} className="flex items-center gap-2 text-sm">
+              <span className="min-w-0 flex-1 break-words">
+                {consumer.name}{" "}
+                <span className="text-muted-foreground">
+                  · {consumer.kind}
+                  {consumer.inUse ? " · uses it now" : ""}
+                </span>
+              </span>
+              {consumer.inUse ? null : (
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  disabled={pending}
+                  onClick={() => onRemove(consumer.id)}
+                >
+                  Remove
+                </Button>
+              )}
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <p className="m-0 text-sm text-muted-foreground">{none}</p>
+      )}
+    </div>
+  )
+
+  return (
+    <div
+      className="flex flex-col gap-4 rounded-xl bg-field p-4 ring-1 ring-separator"
+      data-testid="secret-scope"
+    >
+      <p className="m-0 text-sm text-muted-foreground">
+        Where this secret may be used. An assistant that names it for anything
+        else asks you first, and its request shows that it also allows it there;
+        it can also propose changes here, which you answer.
+      </p>
+      <Label className="items-start font-normal">
+        <Checkbox
+          className="mt-0.5"
+          checked={secret.scope.anywhere}
+          onChange={(event) => onAnywhere(event.target.checked)}
+          disabled={pending}
+        />
+        <span>
+          Anywhere: any server, service or wrapper you approve may use it, and
+          the browser may type it at any site after asking you, as before
+          secrets had a scope.
+        </span>
+      </Label>
+      {list(
+        "Servers and services",
+        servers,
+        secret.scope.anywhere ? "Any, since it may be used anywhere." : "None.",
+      )}
+      {list(
+        "Wrappers",
+        wrappers,
+        secret.scope.anywhere ? "Any, since it may be used anywhere." : "None.",
+      )}
+      <div className="flex flex-col gap-1.5">
+        <span className="text-sm font-medium">Sites</span>
+        <p className="m-0 text-sm">
+          {secret.browserOrigins.length > 0
+            ? secret.browserOrigins
+                .map((site) =>
+                  site.subdomains
+                    ? `${site.origin} and its subdomains`
+                    : site.origin,
+                )
+                .join(", ")
+            : "None."}{" "}
+          <span className="text-muted-foreground">
+            Add or take them away under Browser.
+          </span>
+        </p>
+      </div>
+      {addable.length > 0 ? (
+        <form action={action} className="flex flex-wrap items-end gap-2">
+          <input type="hidden" name="id" value={secret.id} />
+          <div className="min-w-48 flex-1">
+            <Field
+              label="Let it be used by"
+              htmlFor={`secret-${secret.id}-scope`}
+            >
+              <Select id={`secret-${secret.id}-scope`} name="serverId" required>
+                {addable.map((candidate) => (
+                  <option key={candidate.id} value={candidate.id}>
+                    {candidate.name} ({candidate.kind})
+                  </option>
+                ))}
+              </Select>
+            </Field>
+          </div>
+          <SubmitButton size="sm" pendingText="Adding…">
+            Add
+          </SubmitButton>
+        </form>
+      ) : null}
+      <FormError error={state.status === "error" ? state.error : null} />
     </div>
   )
 }

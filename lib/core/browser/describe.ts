@@ -143,7 +143,7 @@ export function describeSecretRequestAsk(ask: SecretRequestAsk): {
         : []),
       ask.origins.length > 0
         ? `Sites: ${ask.origins.join(", ")}`
-        : "No sites yet: the browser types it only where you allow it, asking you each time. It is sent to a server, a service or a wrapper only where you approve one that names it.",
+        : "No sites yet: the browser does not type it until you add one. It is sent to a server, a service or a wrapper only where you approve one that names it, which you are shown as also allowing it there.",
     ],
     warning:
       ask.origins.length > 0

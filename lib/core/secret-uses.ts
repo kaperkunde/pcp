@@ -73,7 +73,7 @@ const KIND_WORDS: Record<string, string> = {
   service: "service",
 }
 
-function kindWords(kind: string): string {
+export function kindWords(kind: string): string {
   return KIND_WORDS[kind] ?? "server"
 }
 

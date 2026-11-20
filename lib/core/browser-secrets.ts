@@ -33,6 +33,7 @@ import {
 } from "./secret-meta"
 import { openText, sealText, type Sealed } from "./sealed"
 import { resolveSecretRef, type ResolvedSecret } from "./secret-refs"
+import { isAnywhere } from "./secret-scope"
 import {
   checkLoginName,
   createSecret,
@@ -87,7 +88,7 @@ export const MAX_SECRET_PURPOSE = MAX_SECRET_PURPOSE_CHARS
 
 export type SecretUseLevel = "once" | "hour" | "always"
 
-export type TypableSecret = ResolvedSecret
+export type TypableSecret = Omit<ResolvedSecret, "inScope">
 
 /**
  * One of a secret's sites: an origin, and with `subdomains` every origin at
@@ -442,6 +443,15 @@ export async function isBoundOrigin(
 
 function byOrigin(a: SecretSite, b: SecretSite): number {
   return a.origin < b.origin ? -1 : a.origin > b.origin ? 1 : 0
+}
+
+/** Whether the secret has a site at all. */
+async function hasSites(ctx: VaultContext, secretId: string): Promise<boolean> {
+  return (
+    (await db().secretBrowserOrigin.count({
+      where: { secretId, secret: { vaultId: ctx.vaultId } },
+    })) > 0
+  )
 }
 
 /** A secret's sites, as they are now. */
@@ -989,6 +999,18 @@ export async function admitSecretUse(
     throw invalid("A secret is typed only into a page at an http(s) site.")
   }
 
+  // Its sites are where it may be typed (#162): one with none is typed
+  // only when the owner lets it be used anywhere, asking them each time.
+  if (
+    !(await hasSites(ctx, secret.id)) &&
+    !(await isAnywhere(ctx, secret.id))
+  ) {
+    throw new PcpError(
+      "forbidden",
+      `The secret "${secret.name}" has no sites the browser may type it at, so nothing was typed. change_secret_scope proposes a site for it, which the owner answers in PCP.`,
+    )
+  }
+
   const key = windowKey(tokenId, secret.id, use.origin, use.tabId)
 
   if (takeSignInWindow(key, part, now)) {
@@ -1031,9 +1053,10 @@ export async function admitSecretUse(
  * request_secret's arguments, checked before the owner is asked: a name
  * PCP holds already is refused (nothing an assistant asks for writes over
  * it), and so is a purpose with characters that do not show on screen.
- * Sites are optional: with none yet, the browser types it only where the
- * owner allows it, asking them each time (admitSecretUse), and a server,
- * service or wrapper is sent it only once the owner approves one naming it.
+ * Sites are optional: with none, the browser does not type it until the
+ * owner adds one (admitSecretUse; change_secret_scope proposes one), and a
+ * server, service or wrapper is sent it only once the owner approves one
+ * naming it, which adds that one to its scope (#162).
  * `serverId` is the browser whose request_secret asked (the alias), or null
  * for PCP's own tool.
  */
@@ -1244,7 +1267,7 @@ export async function applySecretRequest(
   }
 
   if (origins.length === 0) {
-    return `The owner saved the secret "${secret.name}". It has no sites yet: the browser types it only where the owner allows it, asking them each time. To send it to a server, a service or a wrapper, name it where a secret is taken (register_server's secret or env_secrets, a wrapper's secrets), which the owner approves. You never see its value.${generated ? " PCP made its value itself; the owner can see it on the Secrets page." : ""}`
+    return `The owner saved the secret "${secret.name}". It has no sites yet, so the browser does not type it until the owner adds one (change_secret_scope proposes one). To send it to a server, a service or a wrapper, name it where a secret is taken (register_server's secret or env_secrets, a wrapper's secrets), which the owner approves. You never see its value.${generated ? " PCP made its value itself; the owner can see it on the Secrets page." : ""}`
   }
 
   const made = generated

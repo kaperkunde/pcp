@@ -23,6 +23,8 @@ import { List } from "@kaperkunde/ui/list"
 import { SwitchRow } from "@kaperkunde/ui/switch"
 import { decidePermissionAction } from "@/lib/actions/permissions"
 import type { SecretSitesShown } from "@/lib/core/browser-secrets"
+import type { SecretScopeChangeShown } from "@/lib/core/secret-changes"
+import type { AlsoAllow } from "@/lib/core/secret-scope-asks"
 import {
   ALLOW_FOR_MINUTES,
   DEFAULT_ALLOW_FOR_MINUTES,
@@ -99,7 +101,14 @@ const QUIET: Decision[] = ["block", "discard"]
  * A change to a secret's sites (update_secret_sites, `sites`) lists the
  * sites it has and each change with a box, ticked unless it looks like one
  * of the sites without being it; the answer carries what was ticked and
- * the sites as shown, so it applies to nothing else.
+ * the sites as shown, so it applies to nothing else. A change to a
+ * secret's scope (change_secret_scope, `scopeChanges`) lists each change
+ * the same way, sites and servers alike. A new value for one
+ * (rotate_secret) is a `secret` with its own `label` and `hint`.
+ *
+ * A proposal that names one of your secrets for something outside its
+ * scope (`alsoAllows`) shows "Also allow <secret> for <consumer>", ticked;
+ * the yes sends what is left ticked, and needs each.
  *
  * The answer goes through the owner's queue (components/answer-queue.tsx):
  * the count drops at once, and the owner is taken on to the next request,
@@ -124,6 +133,8 @@ export function PermissionDecision({
   access = null,
   limits = null,
   sites = null,
+  scopeChanges = null,
+  alsoAllows = [],
 }: {
   advance?: boolean
   id: string
@@ -147,6 +158,9 @@ export function PermissionDecision({
     generate?: PasswordRecipe | null
     /** What PCP makes when the assistant asked for nothing; null for none. */
     defaultRecipe?: PasswordRecipe | null
+    /** The value field's own label and hint, in place of a new secret's. */
+    label?: string
+    hint?: string
   } | null
   every?: { asked: boolean } | null
   privateAddresses?: boolean
@@ -154,6 +168,12 @@ export function PermissionDecision({
   /** A server's limits the assistant proposed, editable (lib/core/gate/). */
   limits?: LimitsShown | null
   sites?: SecretSitesShown | null
+  scopeChanges?: {
+    secretName: string
+    changes: SecretScopeChangeShown[]
+    stale: boolean
+  } | null
+  alsoAllows?: AlsoAllow[]
 }) {
   const { submit, pending, error, setError, done } = useAnswer(
     { request: id },
@@ -187,9 +207,12 @@ export function PermissionDecision({
     secret?.generate ?? secret?.defaultRecipe ?? DEFAULT_PASSWORD_RECIPE,
   )
   const [siteKeep, setSiteKeep] = useState<string[]>(() =>
-    (sites?.changes ?? [])
+    [...(sites?.changes ?? []), ...(scopeChanges?.changes ?? [])]
       .filter((change) => !change.noop && !change.lookalike)
       .map((change) => change.key),
+  )
+  const [alsoKeep, setAlsoKeep] = useState<string[]>(() =>
+    alsoAllows.map((also) => also.key),
   )
   const [accessRows, setAccessRows] = useState<AccessRow[]>(() =>
     access ? initialAccessRows(access) : [],
@@ -222,7 +245,18 @@ export function PermissionDecision({
       return
     }
 
-    if (sites && agrees && siteKeep.length === 0) {
+    if (
+      alsoAllows.length > 0 &&
+      agrees &&
+      alsoKeep.length < alsoAllows.length
+    ) {
+      setError(
+        "Tick each Also allow to agree to it, or answer Not now: it cannot be made without them.",
+      )
+      return
+    }
+
+    if ((sites || scopeChanges) && agrees && siteKeep.length === 0) {
       setError("Tick at least one change, or answer Not now.")
       return
     }
@@ -258,13 +292,21 @@ export function PermissionDecision({
         revision,
         privateAddresses && agrees ? allowPrivate : undefined,
         access && agrees ? chosenAccess(accessRows) : undefined,
-        agrees && (credential || sites || (canMake && generate))
+        agrees &&
+          (credential ||
+            sites ||
+            scopeChanges ||
+            alsoAllows.length > 0 ||
+            (canMake && generate))
           ? {
               ...(credential ? { loginName: username } : {}),
               ...(canMake && generate ? { generate: recipe } : {}),
               ...(sites
                 ? { sites: { basis: sites.basis, keep: siteKeep } }
-                : {}),
+                : scopeChanges
+                  ? { sites: { keep: siteKeep } }
+                  : {}),
+              ...(alsoAllows.length > 0 ? { alsoAllow: alsoKeep } : {}),
             }
           : undefined,
         chosenLimits ? chosenLimits.limits : undefined,
@@ -321,17 +363,19 @@ export function PermissionDecision({
   const valueField = secret ? (
     <Field
       label={
-        secret.clientId
+        secret.label ??
+        (secret.clientId
           ? `Client secret of the OAuth client "${secret.clientId}"`
           : secret.login
             ? `Password for ${secret.login}`
             : secret.kind === "totp"
               ? `Seed of the one-time codes "${secret.name}"`
-              : `Value of the secret "${secret.name}"`
+              : `Value of the secret "${secret.name}"`)
       }
       htmlFor={`permission-${id}-secret`}
       hint={
-        secret.origins && secret.exists
+        secret.hint ??
+        (secret.origins && secret.exists
           ? `You have added a secret named "${secret.name}" since; leave this empty to use it. Nothing is written over it.`
           : secret.origins
             ? secret.kind === "totp"
@@ -343,7 +387,7 @@ export function PermissionDecision({
                 ? `From the provider's developer settings, where you created the client. It is saved under Secrets as "${secret.name}", encrypted, and sent only to the token address above; the assistant never sees it. Leave it empty for a client without a secret.`
                 : secret.login
                   ? `An app password, if the server offers them, rather than your own. It is saved under Secrets as "${secret.name}", encrypted, and sent only to the address above; the assistant never sees it.`
-                  : "The key or token itself. It is saved under Secrets, encrypted, and sent only to the address above; the assistant never sees it."
+                  : "The key or token itself. It is saved under Secrets, encrypted, and sent only to the address above; the assistant never sees it.")
       }
     >
       <Input
@@ -561,6 +605,78 @@ export function PermissionDecision({
                 </p>
               ) : null}
             </div>
+          ))}
+        </fieldset>
+      ) : null}
+      {scopeChanges ? (
+        <fieldset
+          className="m-0 flex flex-col gap-3 border-0 p-0"
+          data-1p-ignore
+          data-lpignore="true"
+        >
+          <legend className="mb-2 text-sm font-medium">
+            Changes to where &quot;{scopeChanges.secretName}&quot; may be used
+          </legend>
+          {scopeChanges.changes.map((change) => (
+            <div key={change.key} className="flex flex-col gap-1">
+              <Label className="items-start font-normal">
+                <Checkbox
+                  className="mt-0.5"
+                  checked={siteKeep.includes(change.key)}
+                  onChange={(event) =>
+                    setSiteKeep((current) =>
+                      event.target.checked
+                        ? [...current, change.key]
+                        : current.filter((key) => key !== change.key),
+                    )
+                  }
+                  disabled={pending || change.noop || scopeChanges.stale}
+                />
+                <span className="break-all">
+                  {change.label}
+                  {change.noop ? " (already so)" : null}
+                </span>
+              </Label>
+              {change.lookalike ? (
+                <p className="m-0 ml-6 text-sm text-destructive">
+                  {change.lookalike}
+                </p>
+              ) : change.newDomain ? (
+                <p className="m-0 ml-6 text-sm text-muted-foreground">
+                  Another domain than its sites so far.
+                </p>
+              ) : null}
+            </div>
+          ))}
+        </fieldset>
+      ) : null}
+      {alsoAllows.length > 0 ? (
+        <fieldset className="m-0 flex flex-col gap-3 border-0 p-0">
+          <legend className="mb-2 text-sm font-medium">
+            Your secrets this uses
+          </legend>
+          <p className="m-0 text-sm text-muted-foreground">
+            Each is outside where you let it be used so far. Agreeing adds it
+            there; you can change that under Secrets.
+          </p>
+          {alsoAllows.map((also) => (
+            <Label key={also.key} className="items-start font-normal">
+              <Checkbox
+                className="mt-0.5"
+                checked={alsoKeep.includes(also.key)}
+                onChange={(event) =>
+                  setAlsoKeep((current) =>
+                    event.target.checked
+                      ? [...current, also.key]
+                      : current.filter((key) => key !== also.key),
+                  )
+                }
+                disabled={pending}
+              />
+              <span className="break-words">
+                Also allow &quot;{also.secretName}&quot; for {also.consumer}
+              </span>
+            </Label>
           ))}
         </fieldset>
       ) : null}

@@ -226,6 +226,11 @@ async function readVault(vaultId: string): Promise<ExportPayloadJson> {
               where: { secret: { vaultId } },
             })
           ).map(rowJson),
+          secretScopes: (
+            await tx.secretScope.findMany({
+              where: { secret: { vaultId } },
+            })
+          ).map(rowJson),
           serverDefinitions: (await tx.serverDefinition.findMany(byVault)).map(
             rowJson,
           ),
@@ -594,6 +599,10 @@ async function writeExport(
         await inChunks(tables.servers, (data) =>
           tx.mcpServer.createMany({ data }),
         )
+        // After both the secrets and the servers it names.
+        await inChunks(tables.secretScopes, (data) =>
+          tx.secretScope.createMany({ data }),
+        )
         // A file from before definitions: each server its own. A sealed row
         // is opened only with the vault's own key (the same vault's file);
         // otherwise it gets one on its first use.
@@ -748,6 +757,7 @@ export async function wipeVault(
   await tx.exit.deleteMany(byVault)
   await tx.mcpTool.deleteMany(byServer)
   await tx.serverAuthHeader.deleteMany(byServer)
+  await tx.secretScope.deleteMany({ where: { secret: { vaultId } } })
   await tx.mcpServer.deleteMany(byVault)
   await tx.secretBrowserOrigin.deleteMany({ where: { secret: { vaultId } } })
   await tx.serverDefinition.deleteMany(byVault)

@@ -1,5 +1,6 @@
 import type { PasswordRecipe, ToolAccess } from "../constants"
 import type { FetchArgs } from "../fetch/request"
+import type { SecretChangeAsk } from "../secret-changes"
 import type { ServiceUpdateAsk } from "../services/updates"
 import type {
   BrowserPace,
@@ -193,6 +194,7 @@ export type BrowserAsk =
   | { kind: "secret_use"; input: SecretUseAsk }
   | { kind: "secret_request"; input: SecretRequestAsk }
   | { kind: "secret_sites_change"; input: SecretSitesChangeAsk }
+  | { kind: "secret_change"; input: SecretChangeAsk }
   | { kind: "exit_use"; input: ExitUseAsk }
   | { kind: "script_use"; input: ScriptUseAsk }
   | { kind: "tab_pace"; input: TabPaceAsk }

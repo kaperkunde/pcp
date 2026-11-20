@@ -17,6 +17,11 @@ import {
   revealTotpCode,
   updateSecret,
 } from "@/lib/core/secrets"
+import {
+  grantSecretScope,
+  removeFromSecretScope,
+  setSecretAnywhere,
+} from "@/lib/core/secret-scope"
 import { servicesUsingSecret } from "@/lib/core/services/services"
 import { restartServicesUsingSecret } from "@/lib/core/upstream"
 import { type ActionState, field, guarded } from "@/lib/server/action-state"
@@ -207,4 +212,62 @@ export async function revealSecretAction(
   const ctx = await requireContext()
 
   return guarded(async () => ({ value: await revealSecret(ctx, id) }))
+}
+
+/**
+ * Lets a server, endpoint, account, service or wrapper use the secret
+ * (#162): your pick here is the grant.
+ */
+export async function addSecretScopeAction(
+  _previous: SecretActionResult,
+  formData: FormData,
+): Promise<SecretActionResult> {
+  const ctx = await requireContext()
+
+  const result = await guarded(async () => {
+    await grantSecretScope(
+      ctx,
+      field(formData, "id"),
+      field(formData, "serverId"),
+    )
+    return {}
+  })
+
+  revalidatePath("/secrets")
+
+  return result
+}
+
+/** Takes one out of the secret's scope; refused while it uses it. */
+export async function removeSecretScopeAction(
+  id: string,
+  serverId: string,
+): Promise<SecretActionResult> {
+  const ctx = await requireContext()
+
+  const result = await guarded(async () => {
+    await removeFromSecretScope(ctx, String(id), String(serverId))
+    return {}
+  })
+
+  revalidatePath("/secrets")
+
+  return result
+}
+
+/** Lets the secret be used anywhere, or only within its scope. */
+export async function setSecretAnywhereAction(
+  id: string,
+  anywhere: boolean,
+): Promise<SecretActionResult> {
+  const ctx = await requireContext()
+
+  const result = await guarded(async () => {
+    await setSecretAnywhere(ctx, String(id), anywhere === true)
+    return {}
+  })
+
+  revalidatePath("/secrets")
+
+  return result
 }

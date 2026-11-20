@@ -86,13 +86,17 @@ export async function decidePermissionAction(
   access?: Array<{ pattern: string; access?: string; tier?: string }>,
   /**
    * A secret for the browser: the login name left on the page and the
-   * recipe of a password PCP makes (request_secret), or the site changes
-   * ticked and the sites as shown (update_secret_sites).
+   * recipe of a password PCP makes (request_secret, rotate_secret), the
+   * site or scope changes ticked and the sites as shown
+   * (update_secret_sites, change_secret_scope), and the "also allows" a
+   * proposal shows ticked.
    */
   browserSecret?: {
     loginName?: string
     generate?: Record<string, unknown>
     sites?: { basis?: string; keep?: string[] }
+    /** A proposal naming a secret outside its scope: the ticked "also allows". */
+    alsoAllow?: string[]
   },
   /**
    * A server's limits left beside the approval (PermissionView
@@ -145,6 +149,9 @@ export async function decidePermissionAction(
             typeof browserSecret.generate === "object"
               ? browserSecret.generate
               : undefined,
+          alsoAllow: Array.isArray(browserSecret?.alsoAllow)
+            ? browserSecret.alsoAllow.filter((key) => typeof key === "string")
+            : undefined,
           sites:
             browserSecret?.sites && typeof browserSecret.sites === "object"
               ? {

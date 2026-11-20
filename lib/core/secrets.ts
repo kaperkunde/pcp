@@ -528,24 +528,20 @@ export async function updateSecret(
   await db().secret.update({ where: { id }, data })
 
   // A new value is the fix for "rejected the credentials": those alerts of
-  // the servers that send it are over until a call says otherwise. Other
-  // alerts (unreachable, refused) say nothing about the credential.
+  // everything that uses it (servers, API endpoints, mail and calendar
+  // accounts, services and wrappers: secret-uses.ts) are over until a call
+  // says otherwise. Other alerts (unreachable, refused) say nothing about
+  // the credential.
   if (valueChanged) {
-    const users = await db().mcpServer.findMany({
-      where: {
-        vaultId: ctx.vaultId,
-        OR: [
-          { authSecretId: id },
-          { authHeaders: { some: { secretId: id } } },
-          { oauthClientSecretId: id },
-        ],
-      },
-      select: { id: true },
-    })
+    const uses = (await secretUses(ctx, [id])).get(id)?.uses ?? []
 
     await clearAlerts(
       ctx,
-      users.map((user) => user.id),
+      [
+        ...new Set(
+          uses.filter((use) => use.via !== "repo").map((use) => use.id),
+        ),
+      ],
       ["auth_required"],
     )
   }

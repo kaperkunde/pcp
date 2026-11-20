@@ -202,6 +202,7 @@ export type PermissionKind =
   | "secret_use"
   | "secret_request"
   | "secret_sites_change"
+  | "secret_change"
   | "exit_use"
   | "script_use"
   | "tab_pace"
