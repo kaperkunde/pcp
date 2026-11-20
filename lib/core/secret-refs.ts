@@ -1,11 +1,7 @@
 import type { VaultContext } from "./context"
 import { db } from "./db"
 import { SECRET_META_SELECT, secretName, secretNameWhere } from "./secret-meta"
-import {
-  requireInScope,
-  scopeCovers,
-  type SecretConsumer,
-} from "./secret-scope"
+import type { SecretConsumer } from "./secret-scope"
 import type { OwnerSecretKind } from "./secrets"
 
 /**
@@ -139,6 +135,10 @@ export async function resolveSecretRef(
   if (!use.consumer) {
     return { ...found, kind: row.kind as OwnerSecretKind, inScope: true }
   }
+
+  // Loaded here: the scope reads what uses a secret, which reads the
+  // browser's sites, which find a secret through this module.
+  const { requireInScope, scopeCovers } = await import("./secret-scope")
 
   if ((use.scope ?? "check") === "check") {
     await requireInScope(ctx, found, use.consumer)

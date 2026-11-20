@@ -117,6 +117,8 @@ beforeEach(async () => {
     }),
   )
   ;({ id: secretId } = await createSecret(ctx, {
+    // As one the owner adds with no site (#162).
+    anywhere: true,
     name: "Shop password",
     value: VALUE,
   }))
@@ -513,6 +515,8 @@ describe.skipIf(!executable)("typing a secret", { timeout: 90_000 }, () => {
 
   it("masks a value the page reformats, and repeats on a later page", async () => {
     const { id: bankId } = await createSecret(ctx, {
+      // As one the owner adds with no site (#162).
+      anywhere: true,
       name: "Bank",
       value: IBAN,
     })
@@ -562,7 +566,13 @@ describe.skipIf(!executable)("typing a secret", { timeout: 90_000 }, () => {
   })
 
   it("types a one-time code secret's code of the moment, never its seed", async () => {
-    await createSecret(ctx, { name: "Shop codes", value: SEED, kind: "totp" })
+    await createSecret(ctx, {
+      // As one the owner adds with no site (#162).
+      anywhere: true,
+      name: "Shop codes",
+      value: SEED,
+      kind: "totp",
+    })
     await always("Shop codes")
     const { tab, opened } = await open("/login")
 
@@ -694,6 +704,8 @@ describe.skipIf(!executable)(
   () => {
     it("are named on navigate, snapshot and tabs open there, louder at a password field, never elsewhere", async () => {
       const { id: codes } = await createSecret(ctx, {
+        // As one the owner adds with no site (#162).
+        anywhere: true,
         name: "Shop code",
         value: SEED,
         kind: "totp",

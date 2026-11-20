@@ -6,6 +6,28 @@ release, with a note in front of the answer ("addPatches was renamed to
 add_patches; use add_patches."); after that it is refused like any other
 unknown key.
 
+## `update_secret_sites` is PCP's own `change_secret_scope`
+
+Proposing where one of the owner's secrets may be used is PCP's own
+`change_secret_scope` now, run through `execute_write`
+(`{"tool": "change_secret_scope", "arguments": {…}}`). The browser's `add`
+is `add_sites` and its `remove` is `remove_sites`; it also takes
+`add_servers` and `remove_servers` (servers, endpoints, accounts, services
+and wrappers by short name). Beside it are `edit_secret`, `rotate_secret`
+(Write) and `delete_secret` (Destructive, through `execute_destructive`),
+each always asking the owner.
+
+A secret named for a server, service or wrapper outside its scope is
+refused, naming `change_secret_scope`; a proposal that names one
+(`register_server`, a service's `env_secrets`, a wrapper's `secrets`) asks
+the owner to also allow it there. A secret with no site that the owner has
+not let be used anywhere is no longer typed by the browser after an ask:
+propose a site for it first.
+
+The browser's `update_secret_sites` still works for this release, as an
+alias: the same request, with a note before the link that names the new
+tool. It goes in the next release.
+
 ## `request_secret` is PCP's own tool
 
 Asking the owner to store a secret is PCP's own `request_secret` now, run

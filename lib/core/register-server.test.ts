@@ -1383,7 +1383,7 @@ describe("proposing a service", () => {
     },
   }
 
-  async function approve(secretValue?: string) {
+  async function approve(secretValue?: string, alsoAllow?: string[]) {
     const row = await db().permissionRequest.findFirstOrThrow({
       orderBy: { createdAt: "desc" },
     })
@@ -1392,7 +1392,11 @@ describe("proposing a service", () => {
       ctx,
       row.id,
       "allow_once",
-      { publicUrl: PUBLIC_URL, ...(secretValue ? { secretValue } : {}) },
+      {
+        publicUrl: PUBLIC_URL,
+        ...(secretValue ? { secretValue } : {}),
+        ...(alsoAllow ? { alsoAllow } : {}),
+      },
       executor,
     )
   }
@@ -1544,11 +1548,30 @@ describe("proposing a service", () => {
       env_secrets: [{ name: "DOCLING_SERVE_API_KEY", secret: "Docling key" }],
     })
 
-    expect((await shown()).lines).toContain(
+    const view = await shown()
+    expect(view.lines).toContain(
       'Variable DOCLING_SERVE_API_KEY: your secret "Docling key"',
     )
-    await approve()
+    // Outside its scope (#162): shown as also allowing it, ticked, and the
+    // yes needs the tick.
+    expect(view.alsoAllows).toEqual([
+      {
+        key: `also:${key.id}`,
+        secretId: key.id,
+        secretName: "Docling key",
+        consumer: "Docling",
+      },
+    ])
+    const refused = await approve()
+    expect(refused.isError).toBe(true)
+    expect(launched).toHaveLength(0)
+
+    await approve(undefined, [`also:${key.id}`])
     expect(launched[0]!.env).toEqual({ DOCLING_SERVE_API_KEY: key.id })
+    // The service it made is in the secret's scope now.
+    expect(await db().secretScope.count({ where: { secretId: key.id } })).toBe(
+      1,
+    )
   })
 
   it("shows the header an MCP server it registers sends, and needs that variable's secret named", async () => {
@@ -1694,7 +1717,8 @@ describe("proposing a service", () => {
 
   it("launches another of a service definition it sees, only while that is as shown", async () => {
     const host = await sshServer()
-    await createSecret(ctx, { name: "Docling key", value: "k" })
+    // One the owner lets be used anywhere: no "also allows" to tick.
+    await createSecret(ctx, { name: "Docling key", value: "k", anywhere: true })
     await connectSeeing()
     await register({
       name: "Docling",

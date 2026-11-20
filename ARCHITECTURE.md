@@ -3376,20 +3376,19 @@ site away, or its flag, drops every token's allowance at the origins it no
 longer covers. The owner sets the flag on the secret's row ("And its
 subdomains").
 
-`update_secret_sites` (name, reason, `add` with `subdomains`, `remove`) is an
-assistant's way to fix a secret's sites (a misspelled domain, another
-subdomain): checked first (a secret the browser types, plain text, sites to
-remove that it has, something that changes), it always throws `OwnerNeeded`
-for a `secret_sites_change`, whatever the token's levels. Its page shows the
-sites now and each change with a box, a site under a registrable domain
-none of them has is noted, and a lookalike (`lookalike-sites.ts`: an IDN in
+`update_secret_sites` (name, reason, `add` with `subdomains`, `remove`) is,
+for one release, the browser's alias of PCP's own `change_secret_scope`
+(below): the same checks (a secret the browser types, plain text, sites to
+remove that it has, something that changes, `checkSecretSitesChange`), the
+same `secret_change` request with sites only, named after the alias, with a
+note in front of its answer naming the tool to use. Its page shows the sites
+now and each change with a box, a site under a registrable domain none of
+them has is noted, and a lookalike (`lookalike-sites.ts`: an IDN in
 punycode, the same name under another ending, a confusable spelling, one or
 two edits from a site's domain name, or a site's name inside another
-domain) is flagged and left unticked. The answer carries the keys ticked and
-the sites as shown (`sitesBasis`): `checkSecretSitesAnswer` refuses before
-anything is written when the sites changed since, and
-`applySecretSitesChange` makes only the ticked changes through `bindOrigin`
-and `unbindOrigin`. The value never changes, and is never shown.
+domain) is flagged and left unticked. A `secret_sites_change` request made
+before the alias still answers as it did (`sitesBasis`,
+`applySecretSitesChange`). The value never changes, and is never shown.
 
 **Sign-ins at a page's site** (`sign-in-hint.ts`). So an assistant types a
 password rather than asking the owner for it in the conversation, the
@@ -3674,6 +3673,102 @@ and the page follows its progress. The install is looked for by the
 revision `patchright-core` drives, so after an update to a newer one the
 page offers to install that, which removes the older build. Nothing runs
 until the owner clicks.
+
+## A secret's scope, and what an assistant may propose about one
+
+Where one of the owner's secrets may be used is a property of the secret
+(#162, `lib/core/secret-scope.ts`), granted only on the owner's pages:
+
+- **Consumers**: the servers, API endpoints, mail and calendar accounts,
+  services and wrappers that may name it (a header or sign-in, a variable,
+  a wrapper's place for a secret), as `secret_scope` rows (secret id,
+  server id; neither secret, both exported, cascading with either side).
+  Whatever uses a secret now (`secret-uses.ts secretUses`, linked
+  repositories aside) is in its scope too, row or not: a use is only ever
+  made by the owner's pick on their own pages or by their yes to a
+  proposal, and either is the grant. So the owner's own pages need no
+  extra step, and a consumer that uses a secret cannot be taken out of its
+  scope until it is changed.
+- **Sites**: `secret_browser_origin`, where the browser types it, as below.
+- **Anywhere** (`secret.scope_anywhere`): any consumer, and for the browser
+  any site after asking the owner, which is what every secret was before
+  the scope. A secret the owner adds on the Secrets page with no site
+  starts anywhere; one made for something (a new server's, a service's, a
+  wrapper's, `request_secret`'s) starts with only that.
+
+**Day one.** The migration (`20261120013000_secret_scope`) adds the column
+and the table and marks every existing secret's scope as not worked out
+(null): its uses are partly in sealed wrapper definitions and service
+specs that SQL cannot read. The first request that holds the vault's key
+(`ensureSecretScopes`, called before anything reads a scope) writes each
+one's uses as rows, or anywhere when nothing uses it, claiming each secret
+by the update of its mark so two requests never write it twice. Until then
+a null scope reads as anywhere. An export carries the column and the rows;
+an older file's secrets come in null and are worked out the same way.
+
+**The one check.** `secret-refs.ts resolveSecretRef(ctx, name, use)` takes
+the consumer in `use` (`consumer`: its id, or null for one a proposal would
+make, and its name) and checks the scope (`scopeCovers`): in scope, it
+resolves; outside, `scope` decides: `"check"` (the default) refuses with a
+`forbidden` error naming `change_secret_scope`; `"ask"` (an assistant's
+proposal: `register_server` passes it) resolves with `inScope: false`;
+`"granted"` is the owner's yes. A proposal that names a secret outside its
+consumer's scope (`register`, a new service's variables, a wrapper's
+places: `secret-scope-asks.ts`, from the request's stored ids, at view and
+answer time) shows "Also allow <secret> for <consumer>", ticked, beside
+the approval; `decidePermission` refuses the yes unless each is still
+ticked (`alsoAllow`), and once what it proposed is made keeps what now
+uses those secrets in their scope as rows (`keepUsesInScope`), so the grant
+outlives the use. Nothing an assistant sends ticks it.
+
+**The browser keeps its gate.** Sites are the scope for typing, and
+allowances stay per token. A secret with no site that is not anywhere is
+never typed (`admitSecretUse` refuses it, naming `change_secret_scope`);
+an anywhere one with no site is typed after a `secret_use` ask, as before.
+A secret with sites is asked about at another site as before, Always allow
+adding that site. run_<tier> programs never reach a secret: a wrapper's
+bindings are the programs' way, through the wrapper's place in the scope.
+
+**The owner's Secrets page** shows each secret's scope under Scope:
+anywhere (a box), the servers and services and the wrappers in it (one that
+uses it now marked so, with no Remove), its sites (changed under Browser),
+and a picker of the vault's servers, services and wrappers to add
+(`grantSecretScope`, `removeFromSecretScope`, `setSecretAnywhere`).
+
+**An assistant's proposals** (`lib/core/secret-changes.ts`), PCP's own
+tools behind execute: `edit_secret` (name, description, login name, note;
+never the value), `rotate_secret` (a new value the owner types, or PCP
+makes from a recipe on their yes: `generate-password.ts`), and
+`change_secret_scope` (sites to add or take away, with `subdomains`, and
+consumers by short name), all Write, and `delete_secret`, Destructive. Each
+is a `secret_change` request (`action` edit, rotate, scope or delete, `via`
+the tool) that always asks, whatever the token's levels, and carries the
+secret's `basis` when asked (`secretBasis`: hashes of its sealed name,
+description, login name and note, of its value's ciphertext, its kind,
+companion, anywhere, scope rows and sites; nothing opened): the answer is
+refused, writing nothing, once it differs, and asked again the request is
+a new one (the basis is in its target). Its page (`showSecretChange`,
+`components/secret-change-review.tsx`) shows each field before and after,
+what uses the secret (what a new value reaches, or what a deletion would
+break), its sites and scope, and for a rename or a deletion the wrappers
+and browser flows whose programs type it by its name (`secret-literals.ts`)
+or whose places name it, which would stop finding it. A scope change lists
+each change with a box, sites through `showSecretSitesChange` (lookalikes
+flagged and unticked, a new domain noted, subdomains only within a
+registrable domain), consumers by name; the yes makes only the ticked ones
+(`decidePermission`'s `sites.keep`). A rotation writes the value through
+`updateSecret`, which clears the "rejected the credentials" alerts of
+everything that uses it (servers, endpoints, mail and calendar accounts,
+services and wrappers), then remakes the services that take it
+(`restartServicesUsingSecret`, awaited, the result counted in the answer);
+the value goes nowhere else, not into the request, its outcome or the
+answer. A deletion is refused while a blocking use remains
+(`blockingUses`): the page names them, the owner changes them on their own
+pages and answers again; the yes never changes a server, service or
+wrapper itself, since each of those is content the owner approved on its
+own. Managed secrets (an OAuth sign-in, an SSH key, a proxy password, a
+value PCP made for a service) are refused by all four before the owner is
+asked, with what changes each.
 
 ## Search's embeddings
 

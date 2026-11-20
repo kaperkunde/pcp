@@ -55,7 +55,7 @@ describe("resolveSecretRef", () => {
 
     for (const use of EVERY_USE) {
       expect(await resolveSecretRef(ctx, "  Shop key ", use), use.kind).toEqual(
-        { id, name: "Shop key", kind: "text" },
+        { id, name: "Shop key", kind: "text", inScope: true },
       )
     }
 
@@ -82,7 +82,7 @@ describe("resolveSecretRef", () => {
     ])
     expect(
       await resolveSecretRef(ctx, "Shop codes", { kind: "browser_type" }),
-    ).toEqual({ id, name: "Shop codes", kind: "totp" })
+    ).toEqual({ id, name: "Shop codes", kind: "totp", inScope: true })
   })
 
   it("never names a managed secret, for any use", async () => {

@@ -336,6 +336,12 @@ export async function createSecret(
     loginName?: string | null
     note?: string | null
     totpCompanionId?: string | null
+    /**
+     * Where it may be used (#162, secret-scope.ts): anywhere, or (the
+     * default) only by what it is made for, its sites, and what the owner
+     * adds to its scope.
+     */
+    anywhere?: boolean
   },
 ): Promise<{ id: string }> {
   await checkNewSecret(ctx, input)
@@ -361,6 +367,7 @@ export async function createSecret(
       loginName: sealDetail(ctx, id, "login", loginName),
       note: sealDetail(ctx, id, "note", note),
       totpCompanionId,
+      scopeAnywhere: input.anywhere === true,
       ciphertext: asBytes(
         encryptString(
           ctx.dek,

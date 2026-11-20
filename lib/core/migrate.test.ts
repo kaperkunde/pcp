@@ -134,6 +134,59 @@ describe("applyMigrations", () => {
     }
   })
 
+  it("leaves every secret from before with no scope yet, for the first request to work out, and a new one in its scope only (#162)", () => {
+    scratch = mkdtempSync(path.join(tmpdir(), "pcp-migrate-"))
+    const file = path.join(scratch, "pcp.db")
+    const names = listMigrations()
+    const scope = names.indexOf("20261120013000_secret_scope")
+    expect(scope).toBeGreaterThan(0)
+    const before = path.join(scratch, "before")
+
+    for (const name of names.slice(0, scope)) {
+      cpSync(path.join(migrationsDir(), name), path.join(before, name), {
+        recursive: true,
+      })
+    }
+
+    applyMigrations({ file, dir: before })
+
+    const seed = new Database(file)
+    try {
+      seed.exec(`
+        INSERT INTO vault (id, name, updated_at) VALUES ('v', 'Ada', 0);
+        INSERT INTO secret (id, vault_id, name, ciphertext, updated_at)
+          VALUES ('old', 'v', '', x'00', 0);
+      `)
+    } finally {
+      seed.close()
+    }
+
+    expect(applyMigrations({ file }).applied).toEqual(names.slice(scope))
+
+    const sqlite = new Database(file)
+    try {
+      expect(
+        sqlite
+          .prepare(`SELECT scope_anywhere FROM secret WHERE id = 'old'`)
+          .get(),
+      ).toEqual({ scope_anywhere: null })
+      sqlite.exec(`
+        INSERT INTO secret (id, vault_id, name, ciphertext, updated_at)
+          VALUES ('new', 'v', '', x'00', 0);
+      `)
+      expect(
+        sqlite
+          .prepare(`SELECT scope_anywhere FROM secret WHERE id = 'new'`)
+          .get(),
+      ).toEqual({ scope_anywhere: 0 })
+      expect(
+        sqlite.prepare(`SELECT count(*) AS n FROM secret_scope`).get(),
+      ).toEqual({ n: 0 })
+    } finally {
+      sqlite.close()
+    }
+  })
+
   it("refuses a migration that was edited after it was applied", () => {
     scratch = mkdtempSync(path.join(tmpdir(), "pcp-migrate-"))
     const file = path.join(scratch, "pcp.db")

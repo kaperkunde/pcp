@@ -801,7 +801,12 @@ describe("changing a wrapper", () => {
   })
 
   it("uses a secret the owner holds by name, with nothing to type in", async () => {
-    await createSecret(ctx, { name: "Things key", value: KEY })
+    await createSecret(ctx, {
+      // As one the owner adds with no site (#162).
+      anywhere: true,
+      name: "Things key",
+      value: KEY,
+    })
     await call("create_wrapper", {
       name: "Lookup",
       tools: [ECHO_TOOL],
@@ -822,9 +827,15 @@ describe("changing a wrapper", () => {
 describe("another wrapper of a definition, a definition of its own, and the owner's note", () => {
   async function approveNewest(secretValue?: string) {
     const row = await newestRequest()
+    // Another wrapper of a definition names the first one's secret, outside
+    // its scope until the owner ticks "Also allow" (#162).
+    const view = await getPermissionView(ctx, row.id, {
+      publicUrl: PUBLIC_URL,
+    })
     return decidePermission(ctx, row.id, "allow_once", {
       publicUrl: PUBLIC_URL,
       ...(secretValue ? { secretValue } : {}),
+      alsoAllow: view!.alsoAllows.map((also) => also.key),
     })
   }
 
@@ -2000,10 +2011,14 @@ describe("a browser flow", () => {
 
   it("may type a secret with the browser's type, as its text and nowhere else", async () => {
     const { id } = await createSecret(ctx, {
+      // As one the owner adds with no site (#162).
+      anywhere: true,
       name: "Chat password",
       value: "hunter2-chat",
     })
     await createSecret(ctx, {
+      // As one the owner adds with no site (#162).
+      anywhere: true,
       name: "Chat codes",
       value: "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ",
       kind: "totp",
@@ -2070,7 +2085,12 @@ describe("a browser flow", () => {
   })
 
   it("names a secret it types through the resolver as one the browser types", async () => {
-    await createSecret(ctx, { name: "Chat password", value: "hunter2-chat" })
+    await createSecret(ctx, {
+      // As one the owner adds with no site (#162).
+      anywhere: true,
+      name: "Chat password",
+      value: "hunter2-chat",
+    })
     const flow = {
       ...FLOW_TOOL,
       program: FLOW_TOOL.program.replace(
@@ -2534,6 +2554,8 @@ describe("a wrapper whose calls no longer fit", () => {
 
     try {
       const { id: secretId } = await createSecret(ctx, {
+        // As one the owner adds with no site (#162).
+        anywhere: true,
         name: "Mail password",
         value: "mail-password-1",
       })

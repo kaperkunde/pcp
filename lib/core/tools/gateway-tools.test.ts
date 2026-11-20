@@ -69,6 +69,10 @@ const OWN_TOOLS = [
   "get_endpoint",
   "list_secrets",
   "request_secret",
+  "edit_secret",
+  "rotate_secret",
+  "change_secret_scope",
+  "delete_secret",
   "get_wrapper",
   "create_wrapper",
   "update_wrapper",
@@ -116,12 +120,19 @@ function described(tool: Tool): Described {
   }
 }
 
-/** Proposals: nothing happens until the owner agrees, and each is new. */
+/**
+ * Proposals: nothing happens until the owner agrees, and each is new.
+ * delete_secret's is Destructive all the same.
+ */
 const PROPOSALS = [
   "register_server",
   "propose_tool_access",
   "propose_server_limits",
   "request_secret",
+  "edit_secret",
+  "rotate_secret",
+  "change_secret_scope",
+  "delete_secret",
   "create_wrapper",
   "update_wrapper",
   "delete_wrapper",
@@ -238,7 +249,9 @@ describe("PCP's own tools", () => {
 
       expect(tool.annotations, name).toMatchObject({
         readOnlyHint: false,
-        destructiveHint: false,
+        // Deleting a secret is Destructive, so it runs only through
+        // execute_destructive, though it asks the owner first (#162).
+        destructiveHint: name === "delete_secret",
         idempotentHint: false,
       })
     }
@@ -257,13 +270,16 @@ describe("PCP's own tools", () => {
 
     expect(structured).toEqual(
       [
+        "change_secret_scope",
         "check_permission",
         "check_server",
         "check_upload",
         "convert_document",
         "create_upload_link",
         "create_wrapper",
+        "delete_secret",
         "delete_wrapper",
+        "edit_secret",
         "edit_pdf",
         "get_endpoint",
         "get_server_limits",
@@ -276,6 +292,7 @@ describe("PCP's own tools", () => {
         "receive_file",
         "register_server",
         "request_secret",
+        "rotate_secret",
         "share_result",
         "update_endpoint",
         "update_pcp",
@@ -313,6 +330,10 @@ describe("PCP's own tools", () => {
       "propose_tool_access",
       "propose_server_limits",
       "request_secret",
+      "edit_secret",
+      "rotate_secret",
+      "change_secret_scope",
+      "delete_secret",
       "update_endpoint",
       "create_wrapper",
       "update_wrapper",
@@ -337,7 +358,7 @@ describe("PCP's own tools", () => {
       const first = tool.description!.slice(0, 25)
 
       expect(first, tool.name).toMatch(
-        /^(Check first: |(Search|List|Get|Execute|Run|Check|Withdraw|Read|Share|Receive|Request|Propose|Change|Fetch|Save|Edit|Convert|Find|Make|Move|Delete|View|Update) )/,
+        /^(Check first: |(Search|List|Get|Execute|Run|Check|Withdraw|Read|Share|Receive|Request|Propose|Change|Fetch|Save|Edit|Convert|Find|Make|Move|Delete|View|Update|Rotate) )/,
       )
       // A verb and an object, not a verb alone.
       expect(first.trim().split(/\s+/).length, tool.name).toBeGreaterThan(2)
@@ -370,6 +391,10 @@ describe("PCP's own tools", () => {
       register_server: /server/,
       list_secrets: /secret/,
       request_secret: /^Request a new secret/,
+      edit_secret: /^Edit a secret's details/,
+      rotate_secret: /^Rotate a secret's value/,
+      change_secret_scope: /^Change a secret's scope/,
+      delete_secret: /^Delete a secret from/,
       get_endpoint: /endpoint/,
       get_wrapper: /wrapper/,
       create_wrapper: /wrapper/,

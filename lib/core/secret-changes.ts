@@ -557,7 +557,7 @@ function scopeWords(
 
   return consumers.length > 0
     ? `it may be used by ${namesInWords(consumers.map((each) => each.name))}`
-    : "it may be used by no server yet"
+    : "no server, service or wrapper may use it yet"
 }
 
 // ---- delete_secret --------------------------------------------------------

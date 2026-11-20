@@ -497,8 +497,9 @@ test("a secret for the browser: its login name, a password PCP makes, and its si
     toolText(await callTool(baseURL!, token, "check_permission", { id })),
   ).toContain('"part": "username"')
 
-  // Its sites, on the assistant's proposal: a lookalike is flagged and left
-  // unticked, the rest made as ticked.
+  // Its sites, on the assistant's proposal (the browser's alias of
+  // change_secret_scope, #162): a lookalike is flagged and left unticked,
+  // the rest made as ticked.
   const proposed = toolText(
     await browse(baseURL!, "update_secret_sites", {
       name,
@@ -510,6 +511,7 @@ test("a secret for the browser: its login name, a password PCP makes, and its si
     }),
   )
   expect(proposed).toContain("Not done yet")
+  expect(proposed).toContain("now PCP's own change_secret_scope")
   const sitesId = proposed.match(/\/permissions\/([\w-]+)/)?.[1]
   expect(sitesId, proposed).toBeTruthy()
 
@@ -527,7 +529,7 @@ test("a secret for the browser: its login name, a password PCP makes, and its si
     page.getByRole("button", { name: "Apply ticked changes" }),
   )
   await expect(page.getByTestId("permission-outcome")).toContainText(
-    "Added: https://frankenergie.nl and its subdomains.",
+    "added the site https://frankenergie.nl and its subdomains.",
   )
   await expect(page.getByTestId("permission-outcome")).toContainText(
     "Not done: adding https://www.frankenergy.nl.",

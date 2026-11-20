@@ -1036,7 +1036,8 @@ function describeAsk(ask: PermissionAsk): {
       }
     case "secret_change":
       return {
-        target: `secret_change:${ask.input.action}:${ask.input.secretId}\n${JSON.stringify([ask.input.edit ?? null, ask.input.generate ?? null, ask.input.scope ?? null])}`,
+        // The secret as it was: asked again once it changed, a new request.
+        target: `secret_change:${ask.input.action}:${ask.input.secretId}:${ask.input.basis}\n${JSON.stringify([ask.input.edit ?? null, ask.input.generate ?? null, ask.input.scope ?? null])}`,
         args: ask.input as Record<string, unknown>,
       }
     case "script_use":

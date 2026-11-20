@@ -237,7 +237,11 @@ import {
   MAX_SECRET_QUERY,
 } from "./secret-uses"
 import { validateSecretName } from "./secrets"
-import { credentialUse, resolveSecretRef } from "./secret-refs"
+import {
+  credentialUse,
+  resolveSecretRef,
+  type SecretRefUse,
+} from "./secret-refs"
 import {
   prepareSecretRequest,
   recipeArg,
@@ -5777,12 +5781,18 @@ export function buildGatewayServer(
       let authValueTemplate: string | null = null
       const authExtraHeaders: NonNullable<RegisterArgs["authExtraHeaders"]> = []
 
-      // Which of the vault's secrets its fields may name (secret-refs.ts).
-      const credential = credentialUse({
-        authType,
-        mail: kind === "jmap" || kind === "imap",
-        calendar: kind === "caldav",
-      })
+      // Which of the vault's secrets its fields may name (secret-refs.ts),
+      // for what it proposes: one outside a secret's scope is shown to the
+      // owner as also allowing it there (secret-scope-asks.ts).
+      const credential: SecretRefUse = {
+        ...credentialUse({
+          authType,
+          mail: kind === "jmap" || kind === "imap",
+          calendar: kind === "caldav",
+        }),
+        consumer: { id: null, name: args.name.trim() },
+        scope: "ask",
+      }
 
       if (authType === "header" || authType === "basic") {
         const named = args.secret!.trim()

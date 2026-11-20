@@ -46,6 +46,9 @@ export async function createSecretAction(
       description: field(formData, "description"),
       kind,
       loginName: field(formData, "loginName"),
+      // One added here with no site may be used anywhere, as every secret
+      // was before scopes (#162); the owner narrows it under Scope.
+      anywhere: origins.length === 0,
     })
 
     for (const origin of origins) {
