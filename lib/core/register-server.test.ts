@@ -1470,7 +1470,7 @@ describe("proposing a service", () => {
     expect(view.lines).toEqual(
       expect.arrayContaining([
         "Variable DOCLING_SERVE_API_KEY: a random value PCP makes when it launches, kept as a secret of yours; nobody types or sees it",
-        "It signs in to an account of yours: on PCP's sign-in page, PCP calls its login_start for the provider's address and its login_finish with the code you paste (as code), and reads login_status to say who is signed in. An assistant only gets the link to that page",
+        "It signs in to an account of yours: on PCP's sign-in page, PCP calls its login_start for the provider's address and its login_finish with the code you paste (as code), whatever their tiers, on your own action only; it reads login_status by itself, for any token, only while that tool's tier is Read (its tiers are known once its tools are read). An assistant only gets the link to that page",
       ]),
     )
     expect(view.secretToEnter ?? null).toBeNull()

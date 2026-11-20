@@ -22,7 +22,9 @@ import { startFakeSsh, type FakeSsh } from "../ssh/fake-server"
 import { createSshServer } from "../ssh/hosts"
 import { scratchDatabase } from "../test-db"
 import { entryCall, withCallHandle } from "../test-handles"
+import { activityLog } from "../activity"
 import { setToolAccess } from "../tool-access"
+import { setToolTier } from "../tool-tiers"
 import {
   finishServiceSignin,
   launchService,
@@ -74,6 +76,8 @@ let httpPort: number
 let account: string | null
 /** What login_start answers with as its url. */
 let startUrl: string
+/** What login_start answers with as its expires_at; by default 15 minutes on. */
+let startExpires: unknown
 /** The Authorization each request came with, and each call's arguments. */
 let seen: Array<{ authorization: string | null; body: string }>
 
@@ -82,6 +86,7 @@ const TOOLS = [
   { name: "login_start", annotations: { readOnlyHint: false } },
   { name: "login_finish", annotations: { readOnlyHint: false } },
   { name: "list_sessions", annotations: { readOnlyHint: true } },
+  { name: "fail_always", annotations: { readOnlyHint: true } },
 ]
 
 function toolAnswer(name: string, args: Record<string, unknown>) {
@@ -100,9 +105,17 @@ function toolAnswer(name: string, args: Record<string, unknown>) {
     case "login_start":
       return json({
         url: startUrl,
-        expires_at: "2030-01-01T00:15:00Z",
+        expires_at:
+          startExpires === undefined
+            ? new Date(Date.now() + 15 * 60_000).toISOString()
+            : startExpires,
         next: "Have the owner paste the code into login_finish.",
       })
+    case "fail_always":
+      return {
+        content: [{ type: "text", text: "Boom: the service failed." }],
+        isError: true,
+      }
     case "login_finish":
       if (args.code === GOOD_CODE) {
         account = "ada@example.com"
@@ -153,6 +166,26 @@ function answerMcp(request: IncomingMessage, response: ServerResponse) {
       return
     }
 
+    // A sign-in tool that fails as the protocol does, quoting its input.
+    if (
+      message.method === "tools/call" &&
+      typeof message.params?.arguments?.code === "string" &&
+      message.params.arguments.code.startsWith("rpc-")
+    ) {
+      response.writeHead(200, { "content-type": "application/json" })
+      response.end(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          id: message.id,
+          error: {
+            code: -32000,
+            message: `Bad code ${message.params.arguments.code}`,
+          },
+        }),
+      )
+      return
+    }
+
     const result =
       message.method === "initialize"
         ? {
@@ -190,6 +223,7 @@ beforeEach(async () => {
   authorized = null
   account = null
   startUrl = PROVIDER
+  startExpires = undefined
   seen = []
   docker = startFakeDocker({ engine: "docker" })
   ssh = await startFakeSsh({
@@ -338,11 +372,12 @@ describe("the owner's sign-in page", { timeout: 30_000 }, () => {
       who: null,
     })
     // The service's own id finds it too.
-    expect(await startServiceSignin(ctx, serviceId, PUBLIC)).toEqual({
-      url: PROVIDER,
-      host: "claude.ai",
-      expiresAt: "2030-01-01T00:15:00.000Z",
-    })
+    const started = await startServiceSignin(ctx, serviceId, PUBLIC)
+    expect(started).toMatchObject({ url: PROVIDER, host: "claude.ai" })
+    // Worked out on PCP's machine: the page counts from it, not its clock.
+    expect(started.msLeft).toBeGreaterThan(14 * 60_000)
+    expect(started.msLeft).toBeLessThanOrEqual(15 * 60_000)
+    expect(Date.parse(started.expiresAt!)).toBeGreaterThan(Date.now())
     expect(
       await finishServiceSignin(ctx, serverId, `  ${GOOD_CODE}\n`, PUBLIC),
     ).toEqual({ signedIn: true, who: "ada@example.com" })
@@ -422,6 +457,22 @@ describe("the owner's sign-in page", { timeout: 30_000 }, () => {
     const kept = everythingKept()
     expect(kept).not.toContain(GOOD_CODE)
     expect(kept).not.toContain(BAD_CODE)
+    // Read through the vault's key: the servers' status lines and the Log
+    // page's lines.
+    for (const id of [
+      serverId,
+      (await db().serviceSpec.findFirstOrThrow()).serverId,
+    ]) {
+      const row = await getServer(ctx, id)
+      expect(JSON.stringify([row.status, row.statusMessage])).not.toMatch(
+        new RegExp(`${GOOD_CODE}|${BAD_CODE}`),
+      )
+    }
+    const log = await activityLog(ctx, { limit: 200 })
+    expect(log.entries.length).toBeGreaterThan(0)
+    expect(JSON.stringify(log)).not.toMatch(
+      new RegExp(`${GOOD_CODE}|${BAD_CODE}`),
+    )
     for (const table of [
       "permissionRequest",
       "callRecord",
@@ -444,6 +495,34 @@ describe("the owner's sign-in page", { timeout: 30_000 }, () => {
       ).rejects.toThrow(/code/)
     }
     expect(seen.length).toBe(before)
+  })
+
+  it("calls an end it cannot believe unknown: no time left to count down", async () => {
+    const { serverId } = await launched()
+
+    for (const expires of [
+      600,
+      "1970-01-01T00:10:00Z",
+      "2099-01-01T00:00:00Z",
+    ]) {
+      startExpires = expires
+      expect(await startServiceSignin(ctx, serverId, PUBLIC)).toMatchObject({
+        expiresAt: null,
+        msLeft: null,
+      })
+    }
+  })
+
+  it("scrubs the code from a sign-in tool's own failure", async () => {
+    const { serverId } = await launched()
+    const code = "rpc-5be81c7a40d2"
+
+    const failed = await finishServiceSignin(ctx, serverId, code, PUBLIC).catch(
+      (error: Error) => error,
+    )
+    expect(failed).toBeInstanceOf(Error)
+    expect((failed as Error).message).not.toContain(code)
+    expect(seen.some((each) => each.body.includes(code))).toBe(true)
   })
 
   it("shows only an https address the service hands back", async () => {
@@ -616,6 +695,125 @@ describe("an assistant and the sign-in", { timeout: 30_000 }, () => {
   })
 })
 
+describe(
+  "what an assistant may learn, and when PCP reads",
+  {
+    timeout: 30_000,
+  },
+  () => {
+    it("never calls a status tool that is not a Read tool: no offer, and connect_account says it cannot read it", async () => {
+      const { serverId } = await launched()
+      const server = await getServer(ctx, serverId)
+      await setToolTier(ctx, serverId, "login_status", "write")
+      const { client } = await assistant((tokenId) =>
+        setToolAccess(ctx, tokenId, serverId, "list_sessions", "allowed"),
+      )
+      const statusCalls = () =>
+        seen.filter((each) => each.body.includes('"login_status"')).length
+      const before = statusCalls()
+
+      const asked = await client.callTool(
+        entryCall("connect_account", { server: server.slug }),
+      )
+      expect(asked.isError).toBe(true)
+      expect(textOf(asked)).toMatch(
+        /cannot read whether Claude sessions is signed in: its status tool login_status is not a Read tool/,
+      )
+
+      const failed = await client.callTool({
+        name: "execute_read",
+        arguments: await withCallHandle(client, {
+          server: server.slug,
+          tool: "list_sessions",
+          arguments: {},
+        }),
+      })
+      expect(failed.isError).toBe(true)
+      expect(failed.structuredContent ?? {}).not.toMatchObject({
+        reason: "signin",
+      })
+      expect(textOf(failed)).toContain("Not signed in to Claude.")
+      expect(statusCalls()).toBe(before)
+      await client.close()
+    })
+
+    it("leaves what the service said out of the sign-in link when the call keeps a part", async () => {
+      const { serverId } = await launched()
+      const server = await getServer(ctx, serverId)
+      const { client } = await assistant((tokenId) =>
+        setToolAccess(ctx, tokenId, serverId, "list_sessions", "allowed"),
+      )
+
+      const out = await client.callTool({
+        name: "execute_read",
+        arguments: {
+          ...(await withCallHandle(client, {
+            server: server.slug,
+            tool: "list_sessions",
+            arguments: {},
+          })),
+          keep: ["sessions"],
+        },
+      })
+      expect(out.structuredContent).toMatchObject({ reason: "signin" })
+      expect(textOf(out)).not.toContain("Not signed in to Claude.")
+      await client.close()
+    })
+
+    it("passes a signed-in service's own error on as it came", async () => {
+      const { serverId } = await launched()
+      const server = await getServer(ctx, serverId)
+      await finishServiceSignin(ctx, serverId, GOOD_CODE, PUBLIC)
+      const { client } = await assistant((tokenId) =>
+        setToolAccess(ctx, tokenId, serverId, "fail_always", "allowed"),
+      )
+
+      const out = await client.callTool({
+        name: "execute_read",
+        arguments: await withCallHandle(client, {
+          server: server.slug,
+          tool: "fail_always",
+          arguments: {},
+        }),
+      })
+      expect(out.isError).toBe(true)
+      expect(textOf(out)).toContain("Boom: the service failed.")
+      expect(out.structuredContent ?? {}).not.toMatchObject({
+        kind: "needs_owner",
+      })
+      await client.close()
+    })
+
+    it("tells a token with every tool of the server blocked only whether it is signed in", async () => {
+      const { serverId, serviceId } = await launched()
+      const service = await getServer(ctx, serviceId)
+      await finishServiceSignin(ctx, serverId, GOOD_CODE, PUBLIC)
+      const { client } = await assistant(async (tokenId) => {
+        for (const tool of TOOLS) {
+          await setToolAccess(ctx, tokenId, serverId, tool.name, "blocked")
+        }
+      })
+
+      const out = await client.callTool(
+        entryCall("connect_account", { server: service.slug }),
+      )
+      expect(out.structuredContent).toMatchObject({
+        kind: "done",
+        signed_in: true,
+        who: null,
+      })
+      expect(textOf(out)).not.toContain("ada@example.com")
+
+      const checked = await client.callTool(
+        entryCall("check_server", { server: service.slug }),
+      )
+      expect(textOf(checked)).toContain("It is signed in to its account.")
+      expect(textOf(checked)).not.toContain("ada@example.com")
+      await client.close()
+    })
+  },
+)
+
 describe("signinCheck", { timeout: 30_000 }, () => {
   it("hands the sign-in link back when it is still not signed in after the wait", async () => {
     const { serverId } = await launched()
@@ -662,11 +860,21 @@ describe("the sign-in's own checks", () => {
   })
 
   it("reads when a sign-in ends as a time or an epoch", () => {
-    expect(readExpiry("2030-01-01T00:00:00Z")).toBe("2030-01-01T00:00:00.000Z")
-    expect(readExpiry(1_893_456_000)).toBe("2030-01-01T00:00:00.000Z")
-    expect(readExpiry(1_893_456_000_000)).toBe("2030-01-01T00:00:00.000Z")
-    expect(readExpiry("soon")).toBeNull()
-    expect(readExpiry(undefined)).toBeNull()
+    const now = Date.parse("2030-01-01T00:00:00Z")
+    const later = now + 15 * 60_000
+
+    expect(readExpiry("2030-01-01T00:15:00Z", now)).toBe(later)
+    expect(readExpiry(later / 1000, now)).toBe(later)
+    expect(readExpiry(later, now)).toBe(later)
+    // A duration (expires_in: 600) reads as 1970: past, so unknown.
+    expect(readExpiry(600, now)).toBeNull()
+    expect(readExpiry("600", now)).toBeNull()
+    // Now or past, or more than a day ahead: unknown.
+    expect(readExpiry(now, now)).toBeNull()
+    expect(readExpiry("2029-12-31T23:00:00Z", now)).toBeNull()
+    expect(readExpiry(now + 25 * 60 * 60_000, now)).toBeNull()
+    expect(readExpiry("soon", now)).toBeNull()
+    expect(readExpiry(undefined, now)).toBeNull()
   })
 
   it("hands over PCP's page last, labelled, with check_server for later", () => {

@@ -359,7 +359,7 @@ export function describeServiceAsk(ask: ServiceChangeAsk): {
         : "PCP adds no server for it",
     ...(definition.signin
       ? [
-          `It signs in to an account of yours: on PCP's sign-in page, PCP calls its ${definition.signin.start.tool} for the provider's address and its ${definition.signin.finish.tool} with the code you paste (as ${definition.signin.finish.argument}), and reads ${definition.signin.status.tool} to say who is signed in. An assistant only gets the link to that page`,
+          `It signs in to an account of yours: on PCP's sign-in page, PCP calls its ${definition.signin.start.tool} for the provider's address and its ${definition.signin.finish.tool} with the code you paste (as ${definition.signin.finish.argument}), whatever their tiers, on your own action only; it reads ${definition.signin.status.tool} by itself, for any token, only while that tool's tier is Read (its tiers are known once its tools are read). An assistant only gets the link to that page`,
         ]
       : []),
     ...(ask.instanceOf

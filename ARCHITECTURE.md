@@ -1640,10 +1640,17 @@ random value for each generated variable the owner bound no secret to
 definition's length and symbols), keeps it as a text secret named after
 the service and binds it as if the owner had chosen it, so it reaches the
 container over standard input and is what the server it registers sends
-when the variable is its header's (`registers.auth`). Nobody types it; a
-launch that fails takes it back; a settings save that leaves the variable
-to PCP keeps it; changing it on the Secrets page remakes the service, as
-for any secret it takes. (The secrets' own `createGeneratedSecret`, once
+when the variable is its header's (`registers.auth`). Nobody types it.
+Each secret is named in the launch's list as soon as it exists, so a
+launch that fails, even part way through making them, takes back exactly
+those; the service keeps the list (`service_spec.generated_secrets`), and
+removing it removes them, except one the server it registered still sends
+(kept on the owner's choice) or another service takes. A variable its
+definition gains later (an update, a repository's change) gets its value
+the next time PCP reaches the service (`bindGeneratedEnv` in
+`upstream.ts serviceAccess`), before the container is made again. A
+settings save that leaves the variable to PCP keeps it; changing it on the
+Secrets page remakes the service, as for any secret it takes. (The secrets' own `createGeneratedSecret`, once
 there, takes the place of the helper.)
 
 **Connecting an account** (`signin`, format 6, `services/signin.ts`): a
@@ -1654,9 +1661,24 @@ provider's address, and when the sign-in ends) and `finish` (the argument
 the pasted code goes in), style `paste_code`. Signing in is then PCP's
 own step, not a wrapper, a blocked tool and a secret the owner makes up:
 
+- PCP calls the status tool by itself (for the owner's page, for
+  connect_account, check_server and a failed call) only while that tool's
+  tier is Read (`statusReadable`, `tool-tiers.ts`, the owner's choice
+  included): the definition names the tool, so one that names a tool that
+  changes things gets no call, its status reads as unknown, and
+  connect_account says so. The start and finish tools are called only on
+  the owner's own action on their page, whatever their tiers; the page,
+  the launch request, the launch form, a repository's review and the
+  service's page (with each tool's tier) say so.
 - The owner's page `/servers/<id>/sign-in` (either the service's id or its
-  server's) reads the status, starts a sign-in when it is signed out (and
-  again by itself once the start's time has passed), shows the provider's
+  server's) reads the status and, signed out, offers Start signing in: it
+  never starts one by itself on opening, as a reload or a second tab would
+  end the one in progress. A started sign-in runs out after the time PCP's
+  machine worked out from the service's end (`readExpiry`: an ISO time or
+  an epoch; one in the past, such as a duration read as 1970, or more than
+  a day ahead is unknown), at least 30 seconds, never by the browser's
+  clock; the page starts it again by itself once, then leaves it to the
+  owner. It shows the provider's
   address with its host plainly (`checkSigninUrl`: https only, no user
   name or password in it, within `MAX_SIGNIN_URL_CHARS`: it is the
   service's text), and takes the code. Its server action
@@ -1670,7 +1692,8 @@ own step, not a wrapper, a blocked tool and a secret the owner makes up:
   apply (so the finish tool's level for tokens can stay blocked) and the
   request log, a token's calls, has no line for them.
 - An assistant calls `connect_account` (Write: it starts what the owner
-  finishes) with the service or its server: signed in, it says as whom;
+  finishes) with the service or its server: signed in, it says as whom
+  (to a token with every tool of that server blocked, only that it is);
   signed out, `needs_owner` reason `signin`, `signin: {serverId, slug,
 name, pageUrl}`, the page's link last labelled "Sign in to <name> in
   PCP", and check_server to call on the owner's next message, which reads
@@ -1680,8 +1703,11 @@ name, pageUrl}`, the page's link last labelled "Sign in to <name> in
 - A call to the server that comes back an error is checked against the
   status (`signinOffer`, in `permissions.ts runCall`, so execute and a
   call the owner allowed alike): signed out, the answer is the same
-  `signin` link, with what the service said, so signing in again is
-  offered by itself. The sign-in's own tools are left as they answered.
+  `signin` link, so signing in again is offered by itself, with what the
+  service said only when the call shapes nothing of its answer (no `keep`,
+  `fields` or `decode`: a part kept as a handle never reaches the
+  assistant unshaped). A signed-in service's error, and the sign-in's own
+  tools' answers, are left as they came.
 - The launch says which of the three tools the server it registered does
   not serve, if any; the launch form, the launch request, a repository's
   review and the service's page (an Account row) show the sign-in.

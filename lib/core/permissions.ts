@@ -638,9 +638,12 @@ export async function runCall(
       deadline,
     })
     // A service that signs in, signed out: its sign-in link instead of the
-    // bare error (services/signin.ts), its status read the same way.
+    // bare error (services/signin.ts), its status read the same way. What
+    // the service said goes with it only when nothing of the answer is to
+    // be shaped (a part kept as a handle, or picked).
     const signin = await signinOffer(ctx, server, toolName, answer, {
       publicUrl,
+      quote: !fields?.length && !decode?.length && !keep?.length,
       call: (target, tool, callArgs) =>
         executor.callTool(ctx, target, tool, callArgs, {
           publicUrl,

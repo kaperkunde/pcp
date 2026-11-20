@@ -301,6 +301,11 @@ test("a service that signs in to an account: PCP's own sign-in page takes the co
   await card.getByTestId("service-account").click()
   await expect(page).toHaveURL(/\/servers\/[0-9a-f-]+\/sign-in$/)
   const signIn = page.getByTestId("service-sign-in")
+  // Nothing starts by itself: a reload or a second tab would end the sign-in
+  // in progress.
+  await expect(signIn).toContainText("Not signed in")
+  await expect(signIn.getByTestId("sign-in-link")).toHaveCount(0)
+  await clickHydrated(signIn.getByRole("button", { name: "Start signing in" }))
   await expect(signIn).toContainText("Open claude.ai")
   await expect(signIn.getByTestId("sign-in-link")).toHaveAttribute(
     "href",

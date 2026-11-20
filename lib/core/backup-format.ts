@@ -597,6 +597,8 @@ export const ServiceSpecRow = renamedFrom(
     // demand: absent from older files, whose services are reached directly.
     reach: str.default("direct"),
     intendedState: str.default("running"),
+    // Added with generated variables (#163): absent from older files.
+    generatedSecrets: str.default("[]"),
     createdAt: date,
     updatedAt: date,
   }),

@@ -571,17 +571,24 @@ storageConnect`), never in the background, and SFTP for nothing else;
   container's first and last lines in the error; a secret the owner typed
   for it is kept and the error names it. A failed remake marks the service
   failed and says that Start makes it again. A variable marked `generated`
-  gets a random value at launch (`services/generated.ts`), a secret bound
-  like one the owner chose, kept when a settings save leaves it to PCP. A
-  definition's `signin` (`services/signin.ts`) is PCP's own sign-in step:
-  `/servers/<id>/sign-in`, the owner's page, calls its start tool (an
-  https address only, its host shown), then its finish tool with the code
-  the owner pastes, from `upstream.ts finishServiceSignin`: never stored,
-  in no request-log line or answer, scrubbed from errors; no token's levels
-  apply to the page's calls. An assistant gets `connect_account` (Write)
-  and, when a call fails while the status says signed out, the same
-  `needs_owner` reason `signin` with the page's link last and check_server
-  on the next message. Limits go in
+  gets a random value at launch, or when its definition gains it, before
+  the next remake (`services/generated.ts`): a secret bound like one the
+  owner chose, taken back with a launch that fails, removed with its
+  service unless something still sends it (`service_spec.generated_secrets`
+  lists only those PCP made), kept when a settings save leaves it to PCP.
+  A definition's `signin` (`services/signin.ts`) is PCP's own sign-in step:
+  PCP calls its status tool by itself only while that tool's tier is Read;
+  `/servers/<id>/sign-in`, the owner's page, starts a sign-in only on the
+  owner's press (and once more by itself when it runs out, by the time
+  left PCP worked out), calls its start tool (an https address only, its
+  host shown), then its finish tool with the code the owner pastes, from
+  `upstream.ts finishServiceSignin`: never stored, in no request-log line
+  or answer, scrubbed from errors; no token's levels apply to the page's
+  calls. An assistant gets `connect_account` (Write; who is signed in only
+  for a token with a tool of that server not blocked) and, when a call
+  fails while the status says signed out, the same `needs_owner` reason
+  `signin`, quoting the service only for an unshaped answer, with the
+  page's link last and check_server on the next message. Limits go in
   `services/limits.ts`; a new command, tool or argument gets a test against
   the fake engine (`services/fake-docker.ts`, `services.test.ts`).
 - Capabilities (`lib/core/capabilities/`): `read_image`, `edit_pdf` and

@@ -208,7 +208,7 @@ export function ServiceCard({ view }: { view: ServiceView }) {
           <ListRow
             href={`/servers/${view.registered.id}/sign-in`}
             title="Account"
-            description={`It works under an account of yours: sign in, or see who is signed in. PCP calls ${view.definition.signin.start.tool} and ${view.definition.signin.finish.tool} of ${view.registered.name} for you there, with the code you paste.`}
+            description={`It works under an account of yours: sign in, or see who is signed in. PCP calls ${view.definition.signin.start.tool} (${view.signinTiers?.start ?? "unknown"}) and ${view.definition.signin.finish.tool} (${view.signinTiers?.finish ?? "unknown"}) of ${view.registered.name} for you there, with the code you paste, and reads ${view.definition.signin.status.tool} (${view.signinTiers?.status ?? "unknown"}) ${view.signinTiers?.status === "read" ? "to say who is signed in" : "only while it is a Read tool, which it is not now: set its tier to Read on the server's page if it only reads"}.`}
             data-testid="service-account"
           />
         ) : null}

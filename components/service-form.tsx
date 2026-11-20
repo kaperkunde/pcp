@@ -613,7 +613,10 @@ export function ServiceLaunchForm({
             It works under an account of yours. Once it runs, you sign in on
             PCP&apos;s sign-in page for it (its page links there): PCP calls its{" "}
             {shape.signin} for the provider&apos;s address and hands it the code
-            you paste back. An assistant only gets the link.
+            you paste back, on your own action only. It reads the sign-in&apos;s
+            status tool by itself only while that tool&apos;s tier is Read (its
+            tiers show on the service&apos;s page once it runs). An assistant
+            only gets the link.
           </p>
         </FormSection>
       ) : null}

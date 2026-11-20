@@ -31,6 +31,8 @@ export type SigninStartResult = ActionState<{
   url: string
   host: string
   expiresAt: string | null
+  /** Its time left as PCP's machine worked it out; null: unknown. */
+  msLeft: number | null
 }>
 
 export async function signinStatusAction(

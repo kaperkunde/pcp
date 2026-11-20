@@ -138,6 +138,7 @@ import {
   type OpenServiceOwn,
 } from "./own-values"
 import { SECRET_META_SELECT, secretName } from "../secret-meta"
+import { toolTier } from "../tool-tiers"
 import {
   findServer,
   openServer,
@@ -2567,6 +2568,11 @@ export type ServiceView = {
   /** The exit it added, for an exit's service. */
   exit: { id: string; name: string; label: string } | null
   registered: { id: string; name: string; slug: string; kind: string } | null
+  /**
+   * Each sign-in tool's tier on the server it registered (signin): PCP
+   * reads the status itself only while its tool is Read.
+   */
+  signinTiers: { status: string; start: string; finish: string } | null
 }
 
 export async function serviceView(
@@ -2633,6 +2639,26 @@ export async function serviceView(
           kind: registered.kind,
         }
       : null,
+    signinTiers:
+      loaded.definition.signin && registered
+        ? {
+            status: await toolTier(
+              ctx,
+              registered.id,
+              loaded.definition.signin.status.tool,
+            ),
+            start: await toolTier(
+              ctx,
+              registered.id,
+              loaded.definition.signin.start.tool,
+            ),
+            finish: await toolTier(
+              ctx,
+              registered.id,
+              loaded.definition.signin.finish.tool,
+            ),
+          }
+        : null,
   }
 }
 

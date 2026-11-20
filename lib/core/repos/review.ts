@@ -392,7 +392,7 @@ function serviceFlags(
     flag(
       "service",
       signin
-        ? `It signs in to an account of yours on PCP's sign-in page: PCP calls ${signin.start.tool} for the provider's address, ${signin.finish.tool} with the code you paste and ${signin.status.tool} to say who is signed in.`
+        ? `It signs in to an account of yours on PCP's sign-in page: PCP calls ${signin.start.tool} for the provider's address and ${signin.finish.tool} with the code you paste, whatever their tiers, on your own action only, and reads ${signin.status.tool} by itself, for any token, only while that tool's tier is Read.`
         : "It signs in to no account through PCP.",
     )
   }

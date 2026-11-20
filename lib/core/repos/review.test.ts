@@ -432,7 +432,7 @@ describe("reviewing a service", () => {
     expect(signin.textOnly).toBe(false)
     expect(signin.flags.map((flag) => flag.message)).toEqual([
       "Its variables: DOCLING_SERVE_API_KEY (a random value PCP makes at launch).",
-      "It signs in to an account of yours on PCP's sign-in page: PCP calls login_start for the provider's address, login_finish with the code you paste and login_status to say who is signed in.",
+      "It signs in to an account of yours on PCP's sign-in page: PCP calls login_start for the provider's address and login_finish with the code you paste, whatever their tiers, on your own action only, and reads login_status by itself, for any token, only while that tool's tier is Read.",
     ])
 
     const described = reviewItem(SERVICE, {

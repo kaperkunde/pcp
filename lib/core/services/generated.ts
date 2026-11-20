@@ -3,13 +3,16 @@ import type { VaultContext } from "../context"
 import { db } from "../db"
 import { generatePassword } from "../generate-password"
 import { createSecretNamedAfter } from "../secrets"
+import { setMcpHeaderCredential } from "../servers"
 import {
   generatedEnv,
+  registerAuth,
   type ServiceDefinition,
   type ServiceEnvBindings,
   type ServiceGenerated,
 } from "./definition"
 import { GENERATED_VALUE_LENGTH } from "./limits"
+import type { LoadedService } from "./services"
 
 /**
  * The variables a service's definition marks `generated` (format 6): PCP
@@ -48,8 +51,9 @@ export function generatedRecipe(generated: ServiceGenerated): PasswordRecipe {
 
 /**
  * Makes the secrets for the generated variables the bindings leave unbound,
- * and answers the bindings with them, and the secrets made (for a launch
- * that fails to take back).
+ * and answers the bindings with them. Each secret's id goes into `made` as
+ * soon as it exists, so a caller that fails part way (here or after) takes
+ * back exactly what it made.
  */
 export async function makeGeneratedSecrets(
   ctx: VaultContext,
@@ -57,14 +61,15 @@ export async function makeGeneratedSecrets(
     service,
     definition,
     bindings,
+    made,
   }: {
     service: string
     definition: ServiceDefinition
     bindings: ServiceEnvBindings
+    made: string[]
   },
-): Promise<{ bindings: ServiceEnvBindings; made: string[] }> {
+): Promise<ServiceEnvBindings> {
   const bound = { ...bindings }
-  const made: string[] = []
 
   for (const entry of generatedEnv(definition)) {
     if (bound[entry.name]) {
@@ -80,7 +85,111 @@ export async function makeGeneratedSecrets(
     made.push(id)
   }
 
-  return { bindings: bound, made }
+  return bound
+}
+
+/** The secrets a service made for its generated variables, as stored. */
+export function readGeneratedSecrets(json: string): string[] {
+  try {
+    const value = JSON.parse(json) as unknown
+    return Array.isArray(value)
+      ? value.filter((id): id is string => typeof id === "string")
+      : []
+  } catch {
+    return []
+  }
+}
+
+/**
+ * A service whose definition gained a generated variable since it was
+ * launched (an update, a repository's change, a definition saved): its
+ * value is made now, before the container is made again with its
+ * variables, and kept on the service as at launch. The server it
+ * registered sends it when it is that server's header. Nothing happens
+ * when every generated variable has a secret already.
+ */
+export async function bindGeneratedEnv(
+  ctx: VaultContext,
+  loaded: LoadedService,
+): Promise<LoadedService> {
+  const missing = generatedEnv(loaded.definition).filter(
+    (entry) => !loaded.env[entry.name],
+  )
+
+  if (missing.length === 0) {
+    return loaded
+  }
+
+  const made: string[] = []
+  let env: ServiceEnvBindings
+
+  try {
+    env = await makeGeneratedSecrets(ctx, {
+      service: loaded.server.name,
+      definition: loaded.definition,
+      bindings: loaded.env,
+      made,
+    })
+    const spec = await db().serviceSpec.findUniqueOrThrow({
+      where: { serverId: loaded.server.id },
+      select: { generatedSecrets: true },
+    })
+    await db().serviceSpec.update({
+      where: { serverId: loaded.server.id },
+      data: {
+        env: JSON.stringify(env),
+        generatedSecrets: JSON.stringify([
+          ...readGeneratedSecrets(spec.generatedSecrets),
+          ...made,
+        ]),
+      },
+    })
+  } catch (error) {
+    await dropGeneratedSecrets(ctx, made)
+    throw error
+  }
+
+  const auth = registerAuth(loaded.definition.registers)
+
+  if (
+    auth &&
+    loaded.definition.registers.kind === "mcp" &&
+    loaded.spec.registeredId &&
+    missing.some((entry) => entry.name === auth.env)
+  ) {
+    await setMcpHeaderCredential(ctx, loaded.spec.registeredId, {
+      headerName: auth.header,
+      valueTemplate: auth.template,
+      secretId: env[auth.env]!,
+    })
+  }
+
+  return { ...loaded, env }
+}
+
+/**
+ * After a service is removed: the secrets it made for its generated
+ * variables go too, unless something still sends them (the server it
+ * registered, kept, or another service's variable).
+ */
+export async function dropUnusedGeneratedSecrets(
+  ctx: VaultContext,
+  ids: string[],
+): Promise<void> {
+  for (const id of ids) {
+    const [servers, specs] = await Promise.all([
+      db().mcpServer.count({
+        where: { vaultId: ctx.vaultId, authSecretId: id },
+      }),
+      db().serviceSpec.count({
+        where: { server: { vaultId: ctx.vaultId }, env: { contains: id } },
+      }),
+    ])
+
+    if (servers === 0 && specs === 0) {
+      await dropGeneratedSecrets(ctx, [id])
+    }
+  }
 }
 
 /** Takes back the secrets a launch that failed made for its variables. */

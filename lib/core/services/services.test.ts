@@ -573,6 +573,104 @@ describe("launching a service", { timeout: 30_000 }, () => {
     ).toEqual(bound)
   })
 
+  it("makes a value for a generated variable the definition gained since launch, before the container is made again", async () => {
+    const hostId = await pinnedHost()
+    const launched = await launchService(ctx, await launchInput(hostId), FAST)
+    await writeServiceDefinition(
+      ctx,
+      launched.id,
+      parseServiceDefinition(
+        definition({
+          env: [
+            { name: "API_KEY", required: true },
+            { name: "LOG_LEVEL", value: "info" },
+            { name: "SESSION_KEY", generated: true },
+          ],
+        }),
+      ),
+    )
+    await recreateService(ctx, launched.id, FAST)
+
+    const spec = await db().serviceSpec.findUniqueOrThrow({
+      where: { serverId: launched.id },
+    })
+    const bound = JSON.parse(spec.env) as Record<string, string>
+    expect(bound.SESSION_KEY).toBeTruthy()
+    expect(JSON.parse(spec.generatedSecrets)).toEqual([bound.SESSION_KEY])
+    const value = await readSecretValue(ctx, bound.SESSION_KEY!)
+    expect(docker.state().containers["pcp-docs"]!.env).toContain(
+      `SESSION_KEY=${value}\n`,
+    )
+
+    // Made once: the next remake keeps it.
+    await recreateService(ctx, launched.id, FAST)
+    expect(
+      (
+        await db().serviceSpec.findUniqueOrThrow({
+          where: { serverId: launched.id },
+        })
+      ).env,
+    ).toBe(spec.env)
+  })
+
+  it("removes the secrets it made with the service, unless the server it registered is kept and sends one", async () => {
+    const hostId = await pinnedHost()
+    const generated = {
+      definition: definition({
+        env: [{ name: "API_KEY", required: true, generated: true }],
+        registers: MCP_WITH_AUTH,
+      }),
+      env: {},
+    }
+    const first = await launchService(
+      ctx,
+      await launchInput(hostId, generated),
+      FAST,
+    )
+    const madeFirst = JSON.parse(
+      (
+        await db().serviceSpec.findUniqueOrThrow({
+          where: { serverId: first.id },
+        })
+      ).generatedSecrets,
+    ) as string[]
+    expect(madeFirst).toHaveLength(1)
+    const ownerSecret = await db().secret.findFirstOrThrow({
+      where: secretNameWhere(ctx, "docs-key"),
+    })
+
+    await removeService(
+      ctx,
+      first.id,
+      { volumes: true, registered: true },
+      PUBLIC,
+    )
+    expect(await db().secret.count({ where: { id: madeFirst[0] } })).toBe(0)
+    // The owner's own secret stays.
+    expect(await db().secret.count({ where: { id: ownerSecret.id } })).toBe(1)
+
+    const second = await launchService(
+      ctx,
+      await launchInput(hostId, generated),
+      FAST,
+    )
+    const madeSecond = JSON.parse(
+      (
+        await db().serviceSpec.findUniqueOrThrow({
+          where: { serverId: second.id },
+        })
+      ).generatedSecrets,
+    ) as string[]
+    await removeService(
+      ctx,
+      second.id,
+      { volumes: true, registered: false },
+      PUBLIC,
+    )
+    // The MCP server it registered is kept, and still sends it.
+    expect(await db().secret.count({ where: { id: madeSecond[0] } })).toBe(1)
+  })
+
   it("takes back the value it made when the launch fails", async () => {
     const hostId = await pinnedHost()
     forwarding = false

@@ -4149,6 +4149,16 @@ export function buildGatewayServer(
       passOn(await withdrawPermission(scope, args.id)),
   })
 
+  /**
+   * Whether this token is told who a service is signed in as (its account's
+   * name): not when every tool of that server is blocked for it, which
+   * learns signed in or not only.
+   */
+  const accountShown = (serverId: string) => {
+    const server = servers.find((entry) => entry.id === serverId)
+    return server !== undefined && visibleTools(server).length > 0
+  }
+
   register({
     name: "check_server",
     title: "Check a server",
@@ -4247,6 +4257,7 @@ export function buildGatewayServer(
         wait: (ready) =>
           waitForOwner(ready, { signal: ctx.signal, pollMs: SIGNIN_POLL_MS }),
         state,
+        showsWho: accountShown,
       })
 
       if (signin && "result" in signin) {
@@ -4308,6 +4319,7 @@ export function buildGatewayServer(
       const answer = await connectAccount(scope.ctx, row, {
         publicUrl: scope.publicUrl,
         call: signinCaller(scope.ctx, scope.publicUrl),
+        showsWho: accountShown,
       })
 
       if ("result" in answer) {

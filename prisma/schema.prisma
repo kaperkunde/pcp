@@ -1171,6 +1171,10 @@ model ServiceSpec {
   /// "running" or "stopped". A call that finds it down starts it again, and
   /// the reconcile pass brings it back up, only while it is "running".
   intendedState      String     @default("running") @map("intended_state")
+  /// The secrets PCP made for the definition's generated variables
+  /// (services/generated.ts), as a JSON list of ids: the only ones removing
+  /// the service removes with it. A secret the owner chose is never listed.
+  generatedSecrets   String     @default("[]") @map("generated_secrets")
   createdAt          DateTime   @default(now()) @map("created_at")
   updatedAt          DateTime   @updatedAt @map("updated_at")
 

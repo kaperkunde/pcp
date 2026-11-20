@@ -107,8 +107,11 @@ import {
 } from "./services/services"
 import { newerImageOn, type NewerImage } from "./services/updates"
 import {
+  bindGeneratedEnv,
   dropGeneratedSecrets,
+  dropUnusedGeneratedSecrets,
   makeGeneratedSecrets,
+  readGeneratedSecrets,
 } from "./services/generated"
 import { SIGNIN_CALL_TIMEOUT_MS } from "./services/limits"
 import {
@@ -3072,16 +3075,21 @@ async function serviceEnv(
 /** What the services module needs for a service; null once its SSH server is gone. */
 async function serviceAccess(
   ctx: VaultContext,
-  loaded: LoadedService,
+  given: LoadedService,
   { publicUrl, timing, byOwner = false }: ServiceOptions,
+  { bindGenerated = true }: { bindGenerated?: boolean } = {},
 ): Promise<ServiceAccess | null> {
-  if (!loaded.host) {
+  if (!given.host) {
     return null
   }
 
+  // A generated variable its definition gained since it launched gets its
+  // value before the container is made again with its variables.
+  const loaded = bindGenerated ? await bindGeneratedEnv(ctx, given) : given
+
   const registers = loaded.definition.registers
 
-  const connection = await serviceConnection(ctx, loaded.host, { publicUrl })
+  const connection = await serviceConnection(ctx, given.host, { publicUrl })
   const exitAuth =
     loaded.definition.registers.kind === "exit" &&
     loaded.definition.registers.auth
@@ -3222,15 +3230,7 @@ export async function launchService(
 ): Promise<LaunchResult & { message: string }> {
   const asked = await prepareLaunch(ctx, input)
   const connection = await serviceConnection(ctx, asked.host, options)
-  // The variables PCP makes a value for (generated): a secret each, bound
-  // like one the owner chose; taken back when the launch fails.
-  const generated = await makeGeneratedSecrets(ctx, {
-    service: asked.name,
-    definition: asked.definition,
-    bindings: asked.env,
-  })
-  const prepared = { ...asked, env: generated.bindings }
-  const registers = prepared.definition.registers
+  const registers = asked.definition.registers
   // An exit's proxy gets a login of its own, made here for this instance:
   // a random password the container reads among its variables and the
   // exit signs in with; launchServiceOn keeps it as a managed secret.
@@ -3242,8 +3242,23 @@ export async function launchService(
         }
       : undefined
   let result: LaunchResult
+  let prepared = asked
+  // The secrets made for its generated variables: taken back, every one
+  // made so far, when anything after fails.
+  const made: string[] = []
 
   try {
+    // The variables PCP makes a value for (generated): a secret each,
+    // bound like one the owner chose.
+    prepared = {
+      ...asked,
+      env: await makeGeneratedSecrets(ctx, {
+        service: asked.name,
+        definition: asked.definition,
+        bindings: asked.env,
+        made,
+      }),
+    }
     const access: ServiceAccess = {
       host: connection.host,
       forward: connection.forward,
@@ -3261,8 +3276,16 @@ export async function launchService(
     }
     result = await launchServiceOn(ctx, prepared, access)
   } catch (error) {
-    await dropGeneratedSecrets(ctx, generated.made)
+    await dropGeneratedSecrets(ctx, made)
     throw error
+  }
+
+  // Kept on the service, so removing it removes them (and only them).
+  if (made.length > 0) {
+    await db().serviceSpec.update({
+      where: { serverId: result.id },
+      data: { generatedSecrets: JSON.stringify(made) },
+    })
   }
 
   let message = `${prepared.name} is running on ${prepared.host.name}.`
@@ -3347,7 +3370,7 @@ export async function readServiceSignin(
   { publicUrl }: { publicUrl: string },
 ): Promise<SigninState> {
   const target = await requireSigninTarget(ctx, serverId)
-  return readSignin(target, signinCaller(ctx, publicUrl))
+  return readSignin(ctx, target, signinCaller(ctx, publicUrl))
 }
 
 /** Starts a sign-in, for the owner's sign-in page: the provider's address. */
@@ -3394,7 +3417,7 @@ export async function finishServiceSignin(
     throw new PcpError("upstream", problem)
   }
 
-  return readSignin(target, call)
+  return readSignin(ctx, target, call)
 }
 
 /** The service's state now, read on its SSH server for the owner's page. */
@@ -3500,12 +3523,26 @@ export async function removeService(
   options: ServiceOptions,
 ): Promise<string> {
   const loaded = await loadService(ctx, id)
-  return removeServiceOn(
+  const made = readGeneratedSecrets(
+    (
+      await db().serviceSpec.findUniqueOrThrow({
+        where: { serverId: id },
+        select: { generatedSecrets: true },
+      })
+    ).generatedSecrets,
+  )
+  const said = await removeServiceOn(
     ctx,
     loaded,
-    await serviceAccess(ctx, loaded, options),
+    await serviceAccess(ctx, loaded, options, { bindGenerated: false }),
     choices,
   )
+
+  // The secrets it made for its generated variables, unless the server it
+  // registered (kept) still sends one.
+  await dropUnusedGeneratedSecrets(ctx, made)
+
+  return said
 }
 
 /**

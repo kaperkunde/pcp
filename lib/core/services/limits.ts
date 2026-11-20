@@ -95,3 +95,5 @@ export const MAX_SIGNIN_CODE_CHARS = 2000
 export const SIGNIN_CALL_TIMEOUT_MS = 60_000
 /** How often check_server reads a service's sign-in while the owner is on it. */
 export const SIGNIN_POLL_MS = 3_000
+/** The furthest ahead a sign-in's end is believed; past it, it is unknown. */
+export const MAX_SIGNIN_EXPIRY_MS = 24 * 60 * 60_000

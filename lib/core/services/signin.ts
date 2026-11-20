@@ -6,9 +6,14 @@ import { makeRedactor } from "../openapi/redact"
 import { linkLabel, linkLastText, nextMessageCheck } from "../owner-link"
 import { noteOwnerAsked } from "../request-log"
 import { findServer, type OpenServer } from "../server-meta"
+import { toolTier } from "../tool-tiers"
 import type { NeedsOwner, ServerState } from "../tools/outcome"
 import type { ServiceSignin } from "./definition"
-import { MAX_SIGNIN_CODE_CHARS, MAX_SIGNIN_URL_CHARS } from "./limits"
+import {
+  MAX_SIGNIN_CODE_CHARS,
+  MAX_SIGNIN_EXPIRY_MS,
+  MAX_SIGNIN_URL_CHARS,
+} from "./limits"
 import { loadService, serviceBehind, type LoadedService } from "./services"
 
 /**
@@ -58,8 +63,14 @@ export type SigninStart = {
   url: string
   /** The address's host, shown to the owner as it is. */
   host: string
-  /** When the sign-in ends (ISO), when the service says. */
+  /** When the sign-in ends (ISO), when the service says one PCP believes. */
   expiresAt: string | null
+  /**
+   * How long it has left, worked out on PCP's machine when it started: the
+   * page counts from that, never from its own clock. Null when the service
+   * named no end, or one in the past or more than a day ahead.
+   */
+  msLeft: number | null
 }
 
 /**
@@ -183,11 +194,38 @@ export function readSigninState(
   }
 }
 
-/** Reads whether it is signed in, through its status tool. */
+/**
+ * Whether its status tool may be called by PCP itself, at no token's
+ * level: only while its tier (tool-tiers.ts effectiveTier, the owner's
+ * choice included) is Read. The definition names the tool, so a definition
+ * that names one that changes things is never called this way.
+ */
+export async function statusReadable(
+  ctx: VaultContext,
+  target: SigninTarget,
+): Promise<boolean> {
+  return (
+    (await toolTier(ctx, target.server.id, target.signin.status.tool)) ===
+    "read"
+  )
+}
+
+/**
+ * Reads whether it is signed in, through its status tool: refused (and
+ * never called) unless that tool is a Read tool.
+ */
 export async function readSignin(
+  ctx: VaultContext,
   target: SigninTarget,
   call: SigninCall,
 ): Promise<SigninState> {
+  if (!(await statusReadable(ctx, target))) {
+    throw new PcpError(
+      "state",
+      `PCP cannot read whether ${target.server.name} is signed in: its status tool ${target.signin.status.tool} is not a Read tool, so PCP does not call it for its sign-in.`,
+    )
+  }
+
   const answer = await call(target.server, target.signin.status.tool, {})
 
   if (answer.isError === true) {
@@ -240,10 +278,15 @@ export function checkSigninUrl(value: unknown, service: string): URL {
   return url
 }
 
-/** When a sign-in ends, as the service said it: an ISO time or epoch. */
-export function readExpiry(value: unknown): string | null {
+/**
+ * When a sign-in ends, as the service said it (an ISO time, or seconds or
+ * milliseconds since the epoch), in milliseconds since the epoch: null
+ * when it is not one, or it is at or before `now` (a duration such as 600
+ * reads as 1970), or more than MAX_SIGNIN_EXPIRY_MS ahead.
+ */
+export function readExpiry(value: unknown, now = Date.now()): number | null {
   const at =
-    typeof value === "string"
+    typeof value === "string" && value.trim() !== "" && !/^\d+$/.test(value)
       ? Date.parse(value)
       : typeof value === "number" && Number.isFinite(value)
         ? // Seconds or milliseconds since the epoch.
@@ -252,7 +295,9 @@ export function readExpiry(value: unknown): string | null {
           : value
         : Number.NaN
 
-  return Number.isFinite(at) ? new Date(at).toISOString() : null
+  return Number.isFinite(at) && at > now && at - now <= MAX_SIGNIN_EXPIRY_MS
+    ? at
+    : null
 }
 
 /** Starts a sign-in: the provider's page for the owner, and until when. */
@@ -274,11 +319,17 @@ export async function startSignin(
     fields?.[target.signin.start.url],
     target.server.name,
   )
+  const now = Date.now()
   const expires = target.signin.start.expires
-    ? readExpiry(fields?.[target.signin.start.expires])
+    ? readExpiry(fields?.[target.signin.start.expires], now)
     : null
 
-  return { url: url.href, host: url.host, expiresAt: expires }
+  return {
+    url: url.href,
+    host: url.host,
+    expiresAt: expires === null ? null : new Date(expires).toISOString(),
+    msLeft: expires === null ? null : expires - now,
+  }
 }
 
 /**
@@ -371,17 +422,23 @@ export function signinResult(
 /**
  * A call to a service that signs in came back an error: when its status
  * tool says it is signed out, the answer becomes the sign-in link
- * (signinResult), with what the service said, so signing in again is
- * offered by itself. Null otherwise (the error stands): a call that did
- * not fail, one of the sign-in's own tools, a status that says it is
- * signed in or that cannot be read.
+ * (signinResult), so signing in again is offered by itself. What the
+ * service said goes with it only when `quote` (the caller shapes no part of
+ * the answer: a kept or picked part must never reach the assistant
+ * unshaped). Null otherwise (the error stands): a call that did not fail,
+ * one of the sign-in's own tools, a status that says it is signed in or
+ * that cannot be read (its tool not a Read tool, or failing).
  */
 export async function signinOffer(
   ctx: VaultContext,
   server: OpenServer,
   toolName: string,
   answer: CallToolResult,
-  { call, publicUrl }: { call: SigninCall; publicUrl: string },
+  {
+    call,
+    publicUrl,
+    quote = false,
+  }: { call: SigninCall; publicUrl: string; quote?: boolean },
 ): Promise<CallToolResult | null> {
   if (answer.isError !== true) {
     return null
@@ -397,12 +454,13 @@ export async function signinOffer(
     return null
   }
 
-  const state = await readSignin(target, call).catch(() => null)
+  const state = await readSignin(ctx, target, call).catch(() => null)
+  const detail = quote ? answerText(answer, 300) : ""
 
   return state && !state.signedIn
     ? signinResult(server, publicUrl, {
         lead: "Not done",
-        detail: answerText(answer, 300) || undefined,
+        ...(detail ? { detail } : {}),
       })
     : null
 }
@@ -414,7 +472,19 @@ export async function signinOffer(
 export async function connectAccount(
   ctx: VaultContext,
   server: Pick<OpenServer, "id" | "kind" | "name">,
-  { publicUrl, call }: { publicUrl: string; call: SigninCall },
+  {
+    publicUrl,
+    call,
+    showsWho,
+  }: {
+    publicUrl: string
+    call: SigninCall
+    /**
+     * Whether the asking token may be told who is signed in: not one with
+     * every tool of that server blocked, which learns signed in or not only.
+     */
+    showsWho: (serverId: string) => boolean
+  },
 ): Promise<
   | { signedIn: true; who: string | null; server: Named; said: string }
   | { result: CallToolResult }
@@ -427,17 +497,19 @@ export async function connectAccount(
     )
   }
 
-  const state = await readSignin(target, call)
+  const state = await readSignin(ctx, target, call)
 
   if (!state.signedIn) {
     return { result: signinResult(target.server, publicUrl) }
   }
 
+  const who = showsWho(target.server.id) ? state.who : null
+
   return {
     signedIn: true,
-    who: state.who,
+    who,
     server: target.server,
-    said: `${target.server.name} is signed in${state.who ? ` as ${state.who}` : ""}: its tools can be used.`,
+    said: `${target.server.name} is signed in${who ? ` as ${who}` : ""}: its tools can be used.`,
   }
 }
 
@@ -456,9 +528,12 @@ export async function signinCheck(
     call,
     wait,
     state,
+    showsWho = () => true,
   }: {
     publicUrl: string
     call: SigninCall
+    /** As connectAccount's: whether the token may be told who. */
+    showsWho?: (serverId: string) => boolean
     /** Holds the check while the owner may still be signing in. */
     wait: (
       ready: () => Promise<SigninState | null>,
@@ -475,12 +550,12 @@ export async function signinCheck(
   let read: SigninState | Error
 
   try {
-    read = await readSignin(target, call)
+    read = await readSignin(ctx, target, call)
 
     if (!read.signedIn) {
       read =
         (await wait(async () => {
-          const now = await readSignin(target, call).catch(() => null)
+          const now = await readSignin(ctx, target, call).catch(() => null)
           return now?.signedIn ? now : null
         })) ?? read
     }
@@ -503,7 +578,9 @@ export async function signinCheck(
     }
   }
 
+  const who = showsWho(target.server.id) ? read.who : null
+
   return {
-    line: `It is signed in to its account${read.who ? ` as ${read.who}` : ""}.`,
+    line: `It is signed in to its account${who ? ` as ${who}` : ""}.`,
   }
 }

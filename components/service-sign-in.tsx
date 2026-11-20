@@ -17,22 +17,36 @@ import {
 } from "@/lib/actions/service-sign-in"
 
 type SignedState = { signedIn: boolean; who: string | null }
-type Started = { url: string; host: string; expiresAt: string | null }
+type Started = {
+  url: string
+  host: string
+  expiresAt: string | null
+  msLeft: number | null
+}
 
-/** The longest a browser's timer waits (about 24 days). */
-const LONGEST_TIMER_MS = 2 ** 31 - 1
+/**
+ * The least a sign-in is waited on before the page starts another: a
+ * service that says its sign-in ends sooner (or a clock that runs ahead)
+ * never makes the page start one after another.
+ */
+const MIN_RESTART_MS = 30_000
 
 /**
  * The sign-in itself: whether the service is signed in (read when the page
- * opens, inside this request), and when it is not, a sign-in started at
- * once: the provider's address, shown with its host, and the code field.
- * A sign-in that runs out is started again by itself. The code goes to the
- * server action only; nothing here keeps it once it is sent.
+ * opens, inside this request); when it is not, Start signing in starts one
+ * (never the page by itself: a reload or a second tab would end the one in
+ * progress), then the provider's address, shown with its host, and the code
+ * field. A sign-in that runs out is started again once by itself, counted
+ * from the time left PCP's machine worked out, never this browser's clock;
+ * after that the owner starts it again. The code goes to the server action
+ * only; nothing here keeps it once it is sent.
  */
 export function ServiceSignIn({ id, name }: { id: string; name: string }) {
   const [pending, startTransition] = useTransition()
   const [state, setState] = useState<SignedState | null>(null)
   const [started, setStarted] = useState<Started | null>(null)
+  /** Started again by itself once already: the next time is the owner's. */
+  const [restarted, setRestarted] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [note, setNote] = useState<string | null>(null)
   const [finished, finish] = useActionState<SigninStateResult, FormData>(
@@ -48,6 +62,7 @@ export function ServiceSignIn({ id, name }: { id: string; name: string }) {
         url: result.url,
         host: result.host,
         expiresAt: result.expiresAt,
+        msLeft: result.msLeft,
       })
       setError(null)
       setNote(why)
@@ -63,15 +78,10 @@ export function ServiceSignIn({ id, name }: { id: string; name: string }) {
 
       if (read.status === "ok") {
         setState({ signedIn: read.signedIn, who: read.who })
-
-        if (!read.signedIn) {
-          await begin(null)
-        }
       } else if (read.status === "error") {
         setError(read.error)
       }
     })
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id])
 
   // Signed in by the code just pasted.
@@ -83,31 +93,33 @@ export function ServiceSignIn({ id, name }: { id: string; name: string }) {
     }
   }, [finished])
 
-  // A sign-in that runs out is started again, with a new address.
+  // A sign-in that runs out: started again once by itself, then the
+  // owner's to start.
   useEffect(() => {
-    if (!started?.expiresAt) {
-      return
-    }
-
-    const left = Date.parse(started.expiresAt) - Date.now()
-
-    if (left > LONGEST_TIMER_MS) {
+    if (started?.msLeft === null || started?.msLeft === undefined) {
       return
     }
 
     const timer = setTimeout(
       () => {
+        if (restarted) {
+          setStarted(null)
+          setNote("That sign-in ran out. Start it again when you are ready.")
+          return
+        }
+
+        setRestarted(true)
         startTransition(() =>
           begin("The last sign-in ran out, so PCP started a new one."),
         )
       },
-      Math.max(0, left),
+      Math.max(MIN_RESTART_MS, started.msLeft),
     )
     return () => clearTimeout(timer)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [started])
 
-  const again = () => startTransition(() => begin(null))
+  const start = () => startTransition(() => begin(null))
 
   if (state?.signedIn && !started) {
     return (
@@ -121,7 +133,7 @@ export function ServiceSignIn({ id, name }: { id: string; name: string }) {
                 variant="secondary"
                 size="sm"
                 disabled={pending}
-                onClick={again}
+                onClick={start}
               >
                 Sign in again
               </Button>
@@ -132,6 +144,7 @@ export function ServiceSignIn({ id, name }: { id: string; name: string }) {
           className="px-1"
           message={finished.status === "ok" ? "Signed in." : null}
         />
+        <FormError className="px-1" error={error} />
       </ListSection>
     )
   }
@@ -196,18 +209,12 @@ export function ServiceSignIn({ id, name }: { id: string; name: string }) {
       ) : (
         <List>
           <ListRow
-            title={error ? "No sign-in started" : "Starting a sign-in…"}
+            title={state ? "Not signed in" : "Reading…"}
+            description="Starting a sign-in ends one still waiting for its code, here or in another tab."
             trailing={
-              error ? (
-                <Button
-                  variant="secondary"
-                  size="sm"
-                  disabled={pending}
-                  onClick={again}
-                >
-                  Try again
-                </Button>
-              ) : null
+              <Button size="sm" disabled={pending || !state} onClick={start}>
+                Start signing in
+              </Button>
             }
           />
         </List>
@@ -219,7 +226,7 @@ export function ServiceSignIn({ id, name }: { id: string; name: string }) {
       />
       {started && finished.status === "error" ? (
         <div className="px-1">
-          <Button variant="plain" size="sm" disabled={pending} onClick={again}>
+          <Button variant="plain" size="sm" disabled={pending} onClick={start}>
             Start the sign-in again
           </Button>
         </div>
