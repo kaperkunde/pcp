@@ -105,6 +105,7 @@ import { connectResult, type ServerState } from "./connect"
 import {
   CHECK_PERMISSION_NEXT,
   linkLastText,
+  markdownLink,
   nextMessageCheck,
   OWNER_LINK_RULE,
 } from "./owner-link"
@@ -264,6 +265,12 @@ import {
   capabilityOfTool,
   type CapabilityId,
 } from "./capabilities/list"
+import {
+  CATALOGUE,
+  canSetUpLine,
+  catalogueNamed,
+} from "./capabilities/catalogue"
+import { setUpEntries } from "./capabilities/catalogue-state"
 import {
   MAX_ANSWER_CHARS as MAX_CAPABILITY_ANSWER_CHARS,
   MAX_MERGED_FILES,
@@ -512,6 +519,14 @@ const HANDLE_INVALID =
   "That call_handle is not one search gave this token, or it was changed, so nothing was run or asked. Call search with the tool's ref and pass its call_handle as it is."
 const HANDLE_GONE =
   "That call_handle is for a tool this token can no longer reach: it was removed, or the owner took its server away. Nothing was run or asked; search finds what there is now."
+
+/**
+ * Talking to an assistant is a way to use PCP of its own (#163): what PCP
+ * could do but has not been set up is found by search, said in a
+ * sentence, and set up with the owner's approval.
+ */
+export const SET_UP_RULE =
+  'When the owner asks for something PCP has not set up yet (their mail, a printer, a server to host things on), search for it in their words: a "can set up" line says what it takes. Tell them in a sentence, and that you can set it up with their approval.'
 
 /** The rule behind the gateway's tools, in one sentence. */
 export const CORE_RULE =
@@ -772,6 +787,7 @@ export function buildInstructions(
     return [
       ...lead,
       "PCP is a gateway to the owner's MCP servers, APIs, mail and calendar accounts, but this token has no servers to reach yet. Ask the owner to add one in PCP, or propose one with register_server (an MCP server by its address, an API from its OpenAPI document, a mail account over JMAP or IMAP, or a calendar account over CalDAV).",
+      SET_UP_RULE,
       ...(hasSkills || memories
         ? [
             `search finds ${hasSkills && memories ? "the owner's skills and memories" : hasSkills ? "the owner's skills" : "memories"} by a few words, and reads one with its ref. PCP's own tools (search with kind pcp lists them) run by name: execute_<tier> with {"tool": "<name>", "arguments": {…}}.`,
@@ -801,7 +817,7 @@ export function buildInstructions(
   return [
     ...lead,
     `PCP is a gateway to the owner's MCP servers, APIs, mail and calendar accounts. Tool names are not listed here: ${discovery(hasSkills, memories !== null)} For the owner's tools execute_* take no server or tool name, only the call_handle, and check the arguments before anything runs. Refer to tools as server/tool.`,
-    `The owner decides per tool what you may run. A tool they have not allowed yet answers "Not done yet" with a link. ${OWNER_LINK_RULE} ${nextMessageCheck("check_permission with the id it gave")} withdraw_request takes back a request you no longer need. A server that needs them to sign in answers with a link to connect it, handed over the same way; check_server, called on their next message the same way, says whether it is connected. register_server proposes something new, which the owner agrees to in PCP: an MCP server by its address, an API from its OpenAPI document, a mail account (JMAP, or IMAP with SMTP), or a calendar account (CalDAV: calendars and reminders, as iCloud's). A mailbox is always a mail account and a calendar a calendar account, never an API written around their servers. It takes no authentication, a secret in a header, a user name and password, or OAuth, naming secrets by name only: a new secret is typed in by the owner on PCP's page, and PCP finds out itself whether an OAuth provider lets it register. propose_tool_access proposes which tools you may run, many at once; the owner reviews and saves it in PCP.`,
+    `The owner decides per tool what you may run. A tool they have not allowed yet answers "Not done yet" with a link. ${OWNER_LINK_RULE} ${nextMessageCheck("check_permission with the id it gave")} withdraw_request takes back a request you no longer need. A server that needs them to sign in answers with a link to connect it, handed over the same way; check_server, called on their next message the same way, says whether it is connected. register_server proposes something new, which the owner agrees to in PCP: an MCP server by its address, an API from its OpenAPI document, a mail account (JMAP, or IMAP with SMTP), or a calendar account (CalDAV: calendars and reminders, as iCloud's). A mailbox is always a mail account and a calendar a calendar account, never an API written around their servers. It takes no authentication, a secret in a header, a user name and password, or OAuth, naming secrets by name only: a new secret is typed in by the owner on PCP's page, and PCP finds out itself whether an OAuth provider lets it register. propose_tool_access proposes which tools you may run, many at once; the owner reviews and saves it in PCP. ${SET_UP_RULE}`,
     'An answer too long to pass on whole ends with a result id: read_result reads all of it, a slice at a time. Files and long values in an answer come back as handles, {"$result": "<id>", …}: pass one as it is in any later call\'s arguments, or as a send_email or create_draft attachment, and PCP puts the value there, so it never has to pass through you.',
     "Servers:",
     ...lines,
@@ -847,6 +863,7 @@ export function keyRules({
     `- To use the owner's tools, ${discovery(skills, memories)}`,
     `- The owner decides per tool what you may run. A tool they have not allowed yet answers "Not done yet" with a link. ${OWNER_LINK_RULE} ${nextMessageCheck("check_permission with the id it gave")}`,
     "- An answer too long to pass on whole ends with a result id: read_result reads the rest, a slice at a time.",
+    `- ${SET_UP_RULE}`,
     `- ${CORE_RULE}`,
   ]
 }
@@ -1608,6 +1625,7 @@ export function buildGatewayServer(
     }
 
     const skillLines = skillInstructions(skills)
+    const offered = await notSetUp()
 
     if (client) {
       noteMemoryRead(client.sessionKey)
@@ -1618,6 +1636,12 @@ export function buildGatewayServer(
       [
         ...rules,
         ...(skillLines.length > 0 ? ["", ...skillLines] : []),
+        ...(offered.length > 0
+          ? [
+              "",
+              `What PCP can set up when the owner asks, which this token does not have: ${offered.map((entry) => entry.title).join(", ")}. search with their words says what each takes.${limitedToken ? " The owner chose which servers this token reaches, so some may be set up already: ask them before setting up another." : ""}`,
+            ]
+          : []),
         "",
         STANDING_LEAD,
         ...keyRules({ skills: hasSkills, memories: scope.keepMemories }),
@@ -1723,20 +1747,77 @@ export function buildGatewayServer(
    * search's line for each capability the query names that has no
    * provider among this token's tools (capabilities/list.ts).
    */
-  async function missingCapabilities(query: string): Promise<string[]> {
+  async function missingCapabilities(
+    query: string,
+  ): Promise<{ lines: string[]; ids: Set<CapabilityId> }> {
     const lines: string[] = []
+    const ids = new Set<CapabilityId>()
 
     for (const cap of capabilitiesNamed(query)) {
       const found = await providersFor(cap.id)
 
       if (!Object.values(found).some((list) => (list?.length ?? 0) > 0)) {
+        ids.add(cap.id)
         lines.push(
           `not installed: ${cap.title} (pcp ${cap.tool}) — ${cap.summary} No tool of this token provides it yet: calling ${cap.tool} answers with the owner's link, "${cap.label}", to set one up.`,
         )
       }
     }
 
-    return lines
+    return { lines, ids }
+  }
+
+  /**
+   * The catalogue's entries this token has (catalogue-state.ts): from the
+   * servers and services it reaches and the providers among its tools,
+   * never from the rest of the vault.
+   */
+  function tokenHas() {
+    return setUpEntries(scope.ctx, currentServers(), async (id) =>
+      Object.values(await providersFor(id)).some(
+        (list) => (list?.length ?? 0) > 0,
+      ),
+    )
+  }
+
+  /** The catalogue's entries this token has not got (catalogue.ts). */
+  async function notSetUp() {
+    const done = await tokenHas()
+
+    return CATALOGUE.filter((entry) => !done.has(entry.id))
+  }
+
+  /** A token the owner limited to servers they chose: it sees no others. */
+  const limitedToken = Boolean(scope.serverIds)
+
+  /**
+   * search's "can set up" line for each catalogue entry the query names
+   * that this token has not got, but for one whose capability already has
+   * its "not installed" line. A token limited to some servers is told the
+   * owner may have it already, out of its reach.
+   */
+  async function canSetUp(
+    query: string,
+    reported: Set<CapabilityId>,
+  ): Promise<string[]> {
+    const named = catalogueNamed(query).filter(
+      (entry) => !entry.capability || !reported.has(entry.capability),
+    )
+
+    if (named.length === 0) {
+      return []
+    }
+
+    const done = await tokenHas()
+    const base = scope.publicUrl.replace(/\/+$/, "")
+
+    return named
+      .filter((entry) => !done.has(entry.id))
+      .map((entry) =>
+        canSetUpLine(entry, markdownLink(entry.label, `${base}${entry.page}`), {
+          limited: limitedToken,
+        }),
+      )
   }
 
   /** search's answer, before what it says once a session. */
@@ -1809,15 +1890,18 @@ export function buildGatewayServer(
 
     // A capability the query names that no tool of this token provides:
     // its tool is there all the same, and answers with the owner's link.
-    const missing =
-      args.server || (args.kind && args.kind !== "pcp")
-        ? []
-        : await missingCapabilities(args.query)
+    const narrowed = Boolean(args.server || (args.kind && args.kind !== "pcp"))
+    const { lines: missing, ids: reported } = narrowed
+      ? { lines: [], ids: new Set<CapabilityId>() }
+      : await missingCapabilities(args.query)
+    // What PCP could set up for it that the vault has not (#163).
+    const settable = narrowed ? [] : await canSetUp(args.query, reported)
 
     if (
       results.length === 0 &&
       repoResults.length === 0 &&
-      missing.length === 0
+      missing.length === 0 &&
+      settable.length === 0
     ) {
       return text(
         `Nothing matches "${args.query}". Try other words, or list_tools for every tool on a server.`,
@@ -1851,6 +1935,7 @@ export function buildGatewayServer(
         ),
         ...(notes.length ? ["", ...notes] : []),
         ...(missing.length ? ["", ...missing] : []),
+        ...(settable.length ? ["", ...settable] : []),
         ...(args.kind
           ? []
           : repoResults.map(

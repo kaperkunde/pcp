@@ -2264,6 +2264,11 @@ version of PCP's suggested instructions they were copied or merged from.
   memory, and so is text still holding a merge's conflict markers. Only the
   owner writes them; no gateway tool does, and `updateApiToken` leaves them
   alone.
+- **What PCP can set up.** Version 8 adds one line: when the owner asks
+  for something PCP has not set up, search for it, say what it takes and
+  offer to set it up with their approval (the gateway's own instructions
+  and key rules say the same, `SET_UP_RULE`; see
+  [What PCP can set up](#what-pcp-can-set-up-the-catalogue)).
 - **When the suggestion changes.** A token whose base is older than the
   latest version is a notice for the owner (`lib/core/owner-notices.ts`,
   worked out when the bell is read; nothing is stored for it). The notice's
@@ -5441,6 +5446,59 @@ or a link to the service they have. Search adds a "not installed" line for a
 capability its query names (`capabilitiesNamed`) with no provider, search's ref
 of a capability tool lists its providers or says there is none, and
 read_result's answer for a picture or a PDF names the tool that reads it.
+
+### What PCP can set up: the catalogue
+
+**The principle.** Talking to an assistant is a way to use PCP of its own
+(#163). The owner's pages stay fully capable, but anything PCP can do should
+be found from the conversation: when the owner asks for something PCP could
+do but has not been set up ("I'd like to add my Gmail", "Can you connect to my
+printer?"), the assistant says in a sentence what it takes and then does the
+work, only ever proposing it: the owner agrees or launches on PCP's page,
+asked by link as always.
+
+**The catalogue** (`lib/core/capabilities/catalogue.ts`, pure and static)
+lists it beside `CAPABILITIES`: per entry an id, a title, what it does, what
+it takes (one sentence, the owner's words), query words, its kind (`builtin`:
+the browser, mail and calendar accounts, SSH servers; `common_item`: PDF
+tools, Docling, Claude Code sessions, Text Embeddings Inference, Gluetun,
+bunq, and Whisper transcription, which has no common item yet), how an
+assistant goes about it and the owner's page. Search never reads PCP's common
+items from GitHub to find one. Whether a token has an entry is read inside the
+request from what that token reaches, never from the rest of the vault
+(`catalogue-state.ts setUpEntries`, nothing stored), so a token limited to
+some servers learns nothing of the others, and only the service definitions
+it reaches are opened: a server of a builtin's kind among its servers (the
+browser also needs Chromium on this machine); a service among them, or one
+that registered a server among them, whose image or source tag is the
+item's (`imageName`: the repository's last path part, without tag or digest,
+matched whole against the entry's `images`, so `gluetun-webui` is not
+Gluetun); for an entry that provides a capability, any provider of it among
+the token's tools (`capabilityProviders`), whoever's server it is; and for
+search by meaning only a provider the owner chose on Settings → Search, never
+a Text Embeddings Inference service that merely runs.
+
+`search` with a query adds a "can set up" line for each entry the query names
+(`catalogueNamed`, every word of a phrase by stem) that the token has not got,
+but for one whose capability already has its "not installed" line: what it
+does, what it takes, how, and the page as a markdown link. How is
+`register_server` for a mail or calendar account; for a common item, the link
+to its page, where the owner reads the item and launches it as it is (an
+assistant never retypes a common item's definition into `register_server`,
+which could drift from it: digest, sign-in, files); the owner's own page for
+the browser, an SSH server and a VPN exit, which an assistant never proposes
+(`ownerOnly`). A token the owner limited to some servers gets the same line
+with `LIMITED_TOKEN_NOTE`, whether or not the vault has it: the owner may have
+it already, so ask whether to give this token access before setting up
+another. `search` with no arguments lists, per token, the titles of what it
+has not got, with the same caution for a limited token, and the instructions
+and key rules carry the rule
+(`SET_UP_RULE`), as PCP's suggested instructions do from version 8. A common
+item that is no capability has its page at `/plugins/<id>` (`itemOffers`,
+the capability pages' offers), Whisper's saying there is none yet. After
+setup, Home shows three things to say to an assistant until the vault holds
+more than PCP's own store and the browser, and so does the sheet that adds
+PCP to Claude.
 
 ### Descriptions read in a few words, and client profiles
 

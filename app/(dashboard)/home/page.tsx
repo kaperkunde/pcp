@@ -15,6 +15,7 @@ import { List, ListRow, ListSection } from "@kaperkunde/ui/list"
 import { listApiTokens } from "@/lib/core/api-tokens"
 import { listPendingRequests } from "@/lib/core/permissions"
 import { listServers } from "@/lib/core/servers"
+import { findOwnStore } from "@/lib/core/storage/roots"
 import { publicUrlFor } from "@/lib/server/public-url"
 import { requireContext } from "@/lib/server/session"
 
@@ -30,11 +31,17 @@ const ASSISTANTS_SHOWN = 3
 export default async function HomePage() {
   const ctx = await requireContext()
   const publicUrl = await publicUrlFor(ctx)
-  const [pending, tokens, servers] = await Promise.all([
+  const [pending, tokens, servers, ownStore] = await Promise.all([
     listPendingRequests(ctx, publicUrl),
     listApiTokens(ctx),
     listServers(ctx),
+    findOwnStore(ctx),
   ])
+  // Only what PCP comes with (its own store, the browser): the first steps
+  // end here, with what to say to an assistant (#163).
+  const onlyOwn = servers.every(
+    (server) => server.id === ownStore || server.kind === "browser",
+  )
   const now = new Date()
   const live = tokens
     .filter(
@@ -58,7 +65,7 @@ export default async function HomePage() {
         }
       />
 
-      {servers.length === 0 ? <GetStarted hasToken={live.length > 0} /> : null}
+      {onlyOwn ? <GetStarted hasToken={live.length > 0} /> : null}
 
       {pending.total > 0 ? (
         <ListSection

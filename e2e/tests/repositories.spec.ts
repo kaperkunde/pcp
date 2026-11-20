@@ -228,3 +228,29 @@ test("pushes a skill of the owner's to a public repository, after its review", a
     .click()
   await expect(page.getByTestId("repo-table")).toContainText(OWN_SKILL)
 })
+
+test("a common item that is no capability has a page of its own (#163)", async ({
+  page,
+}) => {
+  // PCP's common items are not linked here: the page offers them first.
+  await page.goto("/plugins/claude_sessions")
+  await expect(
+    page.getByRole("heading", { name: "Claude Code sessions", level: 1 }),
+  ).toBeVisible()
+  await expect(page.getByText("What it takes:")).toBeVisible()
+  await expect(page.getByText("Start from PCP's common items")).toBeVisible()
+  await expect(page.getByTestId("plugin-offer")).toContainText(
+    "Claude Code sessions",
+  )
+
+  // One with no common item yet says so, and offers a service of your own.
+  await page.goto("/plugins/whisper")
+  await expect(page.getByTestId("plugin-none")).toContainText(
+    "Not available as a common item yet",
+  )
+  await expect(page.getByTestId("plugin-offer")).toHaveCount(0)
+
+  // An id that is neither a capability nor an entry with a page.
+  const missing = await page.goto("/plugins/mail")
+  expect(missing?.status()).toBe(404)
+})

@@ -114,6 +114,31 @@ easier, but it would put your keys back in someone else's cloud.
 Then add your servers, APIs, mail and calendars under **Servers**, or ask your
 assistant to find one and propose it.
 
+## Talking to Claude
+
+Talking to your assistant is a way to use PCP of its own. Every page in PCP
+still does everything, but anything PCP can do can also be found from the
+conversation: ask for it in your own words, and the assistant says what it
+takes ("you just have to sign in here", "I'd launch the Whisper service on your
+server; approve it here"), then does the work once you agree on PCP's page.
+
+The first run is short:
+
+1. **Sign up**: set PCP up with a password and save the recovery key.
+2. **Add PCP to Claude**: **Connect an assistant** under Assistants shows how
+   (a custom connector in Claude's apps, one command for Claude Code).
+3. **Say what you want**, for example:
+   - "I'd like to add my Gmail"
+   - "Can you connect to my printer?"
+   - "I'd like to set up an SSH connection to my server so I can host things"
+
+The assistant finds what PCP can set up with `search`, which names each thing
+PCP has but the assistant cannot use yet (the browser, PDF tools, document
+conversion, Claude Code sessions, search by meaning, a VPN exit, bunq, mail and
+calendar accounts, SSH servers) with what it takes. It only ever proposes or
+hands you a link: a ready-made service you launch on its page in PCP, a password
+goes in on PCP's own page, and nothing changes until you agree.
+
 ## Learn more
 
 - [Install guide](docs/install.md): desktop apps, Linux servers, running
