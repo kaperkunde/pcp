@@ -58,6 +58,10 @@ so in the summary; the bump itself waits for the request.
   `lib/core/upstream.ts` (headers, a wrapper's bound placeholders, and a
   secret the browser types). Nothing returns a secret value to an assistant;
   `revealSecret` and `revealTotpCode` are for the owner's own screen. A
+  field that takes a secret by name finds it only through
+  `secret-refs.ts resolveSecretRef` with its use (text everywhere, one-time
+  codes only where the browser types, managed kinds never), and what uses
+  a secret is `secret-uses.ts secretUses` alone. A
   `totp` secret's seed never leaves `secrets.ts`: only the code of the
   moment is typed, and only by the browser. An API endpoint's calls
   (`lib/core/endpoints.ts`, `lib/core/openapi/`) are handed their finished
@@ -572,10 +576,14 @@ storageConnect`), never in the background, and SFTP for nothing else;
   for it is kept and the error names it. A failed remake marks the service
   failed and says that Start makes it again. A variable marked `generated`
   gets a random value at launch, or when its definition gains it, before
-  the next remake (`services/generated.ts`): a secret bound like one the
-  owner chose, taken back with a launch that fails, removed with its
-  service unless something still sends it (`service_spec.generated_secrets`
-  lists only those PCP made), kept when a settings save leaves it to PCP.
+  the next remake (`services/generated.ts`): a managed `generated` secret
+  (`secrets.ts createGeneratedSecret`, named `generatedSecretName`, made
+  once, kept by a remake), bound only where PCP bound it (`generatedEnv`),
+  never a choice among the owner's secrets on any form or proposal
+  (`env_secrets` naming one is refused), taken back with a launch that
+  fails (`takeBackGenerated`), removed with its service unless something
+  still sends it, and kept as it is when the owner saves the service or
+  the server it registered.
   A definition's `signin` (`services/signin.ts`) is PCP's own sign-in step:
   PCP calls its status tool by itself only while that tool's tier is Read;
   `/servers/<id>/sign-in`, the owner's page, starts a sign-in only on the
@@ -613,6 +621,13 @@ storageConnect`), never in the background, and SFTP for nothing else;
   the import page at the common repository's head). A new capability is a
   row in `list.ts`, its operations in `providers.ts`, and a test against
   fake providers (`capabilities.test.ts`).
+  What PCP can set up when the owner asks in a conversation is the
+  catalogue (`catalogue.ts`, static: search never reads the common items
+  from GitHub), set up or not as what the token reaches says, never the
+  rest of the vault (`catalogue-state.ts`); search names what it has not
+  got, a common item by the link to its page (never retyped into
+  `register_server`), and an assistant never proposes an SSH server or an
+  exit. A new entry gets a test in `catalogue.test.ts`.
 - Search (`lib/core/search.ts`, pure) finds a tool by keywords with no
   provider: stems, a short synonym table, and for PCP's own tools what
   their description's lead says they are for (task phrases there, in a
@@ -1064,7 +1079,11 @@ embeddingProvider`, which hands `embeddings/provider.ts` the header;
   installer read out of the image it pulled (`/app/install.sh`), never out
   of the running container; PCP never addresses the host. A build of develop (`X.Y.Z-dev.N`, a pre-release that
   `.github/workflows/develop.yml` makes on every push to develop) is never
-  offered on the stable channel.
+  offered on the stable channel. An assistant reads it through `get_version`
+  (the last check's answer, never a new request) and asks for an install only
+  through `update_pcp`, a `pcp_update` request whose yes is the owner's
+  button's `installNewest` (`updates/install.ts`) after a fresh check that
+  the newest is still the version shown, every time, never a standing allow.
 - `desktop/` is a host for the production build, not part of the app. It
   imports nothing from `lib/`, `app/` or `components/`; the app knows it only
   as `PCP_DESKTOP=1` and `PCP_DESKTOP_UPDATER` (`lib/server/desktop.ts`), for

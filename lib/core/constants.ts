@@ -122,11 +122,29 @@ export const DEFAULT_ALLOW_FOR_MINUTES: AllowForMinutes = 60
 export const SECRET_ALLOW_MINUTES = 60
 
 /**
- * A password PCP makes for a secret (lib/core/generate-password.ts), from
- * request_secret's `generate` or the Generate switch on its page: how long,
- * which kinds of character, and which characters to leave out.
+ * What a value PCP makes looks like (lib/core/generate-password.ts):
+ * `password`, from the kinds of character a recipe turns on; or a token of
+ * letters and digits, hex digits, or base64url characters. A recipe's
+ * length is in characters whatever the format.
+ */
+export const SECRET_FORMATS = [
+  "password",
+  "alphanumeric",
+  "hex",
+  "base64url",
+] as const
+
+export type SecretFormat = (typeof SECRET_FORMATS)[number]
+
+/**
+ * A value PCP makes for a secret (lib/core/generate-password.ts), from
+ * request_secret's `generate`, a proposal's, or the "Have PCP make it"
+ * switch on a request's page: its format, how long, and for a password
+ * which kinds of character; and which characters to leave out.
  */
 export type PasswordRecipe = {
+  /** password when left out: a recipe saved before formats reads as one. */
+  format?: SecretFormat
   length: number
   lowercase: boolean
   uppercase: boolean
@@ -143,12 +161,24 @@ export const MAX_GENERATE_EXCLUDE = 64
 export const PASSWORD_SYMBOLS = "!#$%&()*+,-./:;<=>?@[]^_{|}~"
 
 export const DEFAULT_PASSWORD_RECIPE: PasswordRecipe = {
+  format: "password",
   length: 24,
   lowercase: true,
   uppercase: true,
   digits: true,
   symbols: true,
   exclude: "",
+}
+
+/**
+ * What PCP makes by default for a secret sent to a server in a header, a
+ * service's variable or a wrapper's place: a long token of letters and
+ * digits, which no header, shell or URL mangles.
+ */
+export const DEFAULT_TOKEN_RECIPE: PasswordRecipe = {
+  ...DEFAULT_PASSWORD_RECIPE,
+  format: "alphanumeric",
+  length: 48,
 }
 
 export function allowForLabel(minutes: number): string {
@@ -176,6 +206,7 @@ export type PermissionKind =
   | "script_use"
   | "tab_pace"
   | "limits_change"
+  | "pcp_update"
   | "wrapper_change"
   | "skill_change"
   | "repo_change"

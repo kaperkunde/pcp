@@ -1635,23 +1635,30 @@ with a `build` is refused: a build is the owner's alone.
 
 **A value PCP makes** (`generated` on a variable, format 6,
 `services/generated.ts`): at launch, `upstream.ts launchService` makes a
-random value for each generated variable the owner bound no secret to
-(`generate-password.ts`, letters and digits, 40 by default, or the
-definition's length and symbols), keeps it as a text secret named after
-the service and binds it as if the owner had chosen it, so it reaches the
-container over standard input and is what the server it registers sends
-when the variable is its header's (`registers.auth`). Nobody types it.
-Each secret is named in the launch's list as soon as it exists, so a
-launch that fails, even part way through making them, takes back exactly
-those; the service keeps the list (`service_spec.generated_secrets`), and
-removing it removes them, except one the server it registered still sends
-(kept on the owner's choice) or another service takes. A variable its
-definition gains later (an update, a repository's change) gets its value
-the next time PCP reaches the service (`bindGeneratedEnv` in
-`upstream.ts serviceAccess`), before the container is made again. A
-settings save that leaves the variable to PCP keeps it; changing it on the
-Secrets page remakes the service, as for any secret it takes. (The secrets' own `createGeneratedSecret`, once
-there, takes the place of the helper.)
+value for each generated variable with `secrets.ts createGeneratedSecret`
+(a managed `generated` secret: the CSPRNG, 48 letters and digits by
+default or the definition's length and symbols, stored at once, never
+revealed, renamed or named by an assistant), named
+`generatedSecretName(<service>, <VARIABLE>)`, and binds it, naming the
+variable in the launch's `generatedEnv`: `services.ts prepareLaunch`
+takes a generated secret for those variables only, a text secret of the
+owner's for every other, and the server it registers sends it when the
+variable is its header's (`registers.auth`, `authSecretGenerated`). It
+reaches the container over standard input as any bound secret does.
+Nobody types or chooses it: the launch form, the settings form, the
+launch request, a repository's review and the service's page show it as
+made by PCP, and `register_server`'s `env_secrets` naming it (with
+`generate` or without) is refused. Made once per name: a remake, or a
+variable its definition gains later (an update, a repository's change),
+gets its value the next time PCP reaches the service (`bindGeneratedEnv`
+in `upstream.ts serviceAccess`), and one made before is kept
+(`created: false`). Each is named in the launch's list as soon as it
+exists, so a launch that fails, even part way through making them, takes
+back exactly what it made (`takeBackGenerated`). Removing the service
+removes its generated secrets (`deleteManagedSecret`), except one the
+server it registered (kept on the owner's choice) or another service
+still sends. Saving the service, or the server it registered, with it
+unchanged keeps it (`normalizeHeaderAuth`'s `kept`).
 
 **Connecting an account** (`signin`, format 6, `services/signin.ts`): a
 service that works under an account of the owner's (an app signed in as
@@ -2344,6 +2351,11 @@ version of PCP's suggested instructions they were copied or merged from.
   memory, and so is text still holding a merge's conflict markers. Only the
   owner writes them; no gateway tool does, and `updateApiToken` leaves them
   alone.
+- **What PCP can set up.** Version 8 adds one line: when the owner asks
+  for something PCP has not set up, search for it, say what it takes and
+  offer to set it up with their approval (the gateway's own instructions
+  and key rules say the same, `SET_UP_RULE`; see
+  [What PCP can set up](#what-pcp-can-set-up-the-catalogue)).
 - **When the suggestion changes.** A token whose base is older than the
   latest version is a notice for the owner (`lib/core/owner-notices.ts`,
   worked out when the bell is read; nothing is stored for it). The notice's
@@ -4595,6 +4607,39 @@ update to the copy with a note. With no copy (no timer of PCP's) nothing is
 read, and the unit changes when the installer next runs. `write_unit` leaves drop-ins in `pcp.container.d/` alone
 and names them, since one may do what the unit now does itself.
 
+**Assistants read the version and ask for an install** (#161). Two of
+PCP's own tools, behind `execute_read` and `execute_write`
+(`updates/tools.ts`): `get_version` answers the version, the commit and the
+time of the build (`PCP_COMMIT`, `PCP_BUILT_AT` in `lib/core/version.ts`,
+written into the build by `next.config.ts` from the Dockerfile's build
+arguments and `build-desktop.yml`, which both take the tag's commit; null in
+a checkout or the dev server), whether it is a build of develop, the owner's
+channel and check, the newest version the last check found (never a new
+request; with the check off, `latest` and `up_to_date` are null), the
+release notes as untrusted text without characters that do not show with a link built from `releasePageUrl`, whether this PCP can
+install an update itself, and the last install. `update_pcp` is a
+`pcp_update` request, always, whatever the levels (own tools have none, and
+its only answers are **Install and restart** and **Not now**: an "always" or
+"allow for" is refused, never read as a yes): the page shows both versions,
+the notes as text and that the restart may drop the assistant's connection.
+The yes runs `installNewest` (`updates/install.ts`), the same check and
+request as the owner's button: one function says whether this PCP installs
+itself (the desktop app's own updater, or the installer that watches its
+container, `PCP_HOST_UPDATER`; a checkout's only in a build for the e2e
+suite, `PCP_TEST_BUILD`) and why not, with the steps Settings shows
+(`lib/update-steps.ts`). Neither installer installs a named version
+(`install.sh watch` pulls the channel's tag, the desktop app reads the latest
+release), so the yes first checks again (the owner's click, as Check now is,
+even with the check off) and goes ahead only while the newest on the channel
+the owner was asked on is still the version they were shown; a newer one,
+another channel or a check that fails installs nothing. Pinning an exact
+version would need the installers to take one. Where PCP cannot, or the
+check is off, or nothing newer is known, `update_pcp` refuses at once with
+those steps and a link to Settings → Updates, and asks nothing.
+`update.status` keeps `lastInstall` (from, to, when) past the restart that
+clears the request, so `get_version` says whether it finished: it did once
+the running version is the one asked for or a later one.
+
 ## Cleanup and the log
 
 **The request log** (`lib/core/request-log.ts`) is what assistants did with
@@ -5488,6 +5533,59 @@ or a link to the service they have. Search adds a "not installed" line for a
 capability its query names (`capabilitiesNamed`) with no provider, search's ref
 of a capability tool lists its providers or says there is none, and
 read_result's answer for a picture or a PDF names the tool that reads it.
+
+### What PCP can set up: the catalogue
+
+**The principle.** Talking to an assistant is a way to use PCP of its own
+(#163). The owner's pages stay fully capable, but anything PCP can do should
+be found from the conversation: when the owner asks for something PCP could
+do but has not been set up ("I'd like to add my Gmail", "Can you connect to my
+printer?"), the assistant says in a sentence what it takes and then does the
+work, only ever proposing it: the owner agrees or launches on PCP's page,
+asked by link as always.
+
+**The catalogue** (`lib/core/capabilities/catalogue.ts`, pure and static)
+lists it beside `CAPABILITIES`: per entry an id, a title, what it does, what
+it takes (one sentence, the owner's words), query words, its kind (`builtin`:
+the browser, mail and calendar accounts, SSH servers; `common_item`: PDF
+tools, Docling, Claude Code sessions, Text Embeddings Inference, Gluetun,
+bunq, and Whisper transcription, which has no common item yet), how an
+assistant goes about it and the owner's page. Search never reads PCP's common
+items from GitHub to find one. Whether a token has an entry is read inside the
+request from what that token reaches, never from the rest of the vault
+(`catalogue-state.ts setUpEntries`, nothing stored), so a token limited to
+some servers learns nothing of the others, and only the service definitions
+it reaches are opened: a server of a builtin's kind among its servers (the
+browser also needs Chromium on this machine); a service among them, or one
+that registered a server among them, whose image or source tag is the
+item's (`imageName`: the repository's last path part, without tag or digest,
+matched whole against the entry's `images`, so `gluetun-webui` is not
+Gluetun); for an entry that provides a capability, any provider of it among
+the token's tools (`capabilityProviders`), whoever's server it is; and for
+search by meaning only a provider the owner chose on Settings → Search, never
+a Text Embeddings Inference service that merely runs.
+
+`search` with a query adds a "can set up" line for each entry the query names
+(`catalogueNamed`, every word of a phrase by stem) that the token has not got,
+but for one whose capability already has its "not installed" line: what it
+does, what it takes, how, and the page as a markdown link. How is
+`register_server` for a mail or calendar account; for a common item, the link
+to its page, where the owner reads the item and launches it as it is (an
+assistant never retypes a common item's definition into `register_server`,
+which could drift from it: digest, sign-in, files); the owner's own page for
+the browser, an SSH server and a VPN exit, which an assistant never proposes
+(`ownerOnly`). A token the owner limited to some servers gets the same line
+with `LIMITED_TOKEN_NOTE`, whether or not the vault has it: the owner may have
+it already, so ask whether to give this token access before setting up
+another. `search` with no arguments lists, per token, the titles of what it
+has not got, with the same caution for a limited token, and the instructions
+and key rules carry the rule
+(`SET_UP_RULE`), as PCP's suggested instructions do from version 8. A common
+item that is no capability has its page at `/plugins/<id>` (`itemOffers`,
+the capability pages' offers), Whisper's saying there is none yet. After
+setup, Home shows three things to say to an assistant until the vault holds
+more than PCP's own store and the browser, and so does the sheet that adds
+PCP to Claude.
 
 ### Descriptions read in a few words, and client profiles
 

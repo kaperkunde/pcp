@@ -1,5 +1,5 @@
 import { openServiceOwn } from "../services/own-values"
-import { afterEach, describe, expect, it } from "vitest"
+import { afterEach, describe, expect, it, vi } from "vitest"
 
 import { readServerLimits, writeServerLimits } from "../gate/store"
 import { openServiceSpec } from "../spec-rows"
@@ -38,6 +38,15 @@ import { readServiceDefinition } from "../services/definition"
 import type { ServiceLaunchInput } from "../services/services"
 import { openServer } from "../server-meta"
 import { toolNamed } from "../test-servers"
+import { resolveSecretRef } from "../secret-refs"
+import { createSecret } from "../secrets"
+
+// Every secret named by name goes through the one resolver (#162): watched
+// here, as it is.
+vi.mock("../secret-refs", async (importOriginal) => {
+  const real = await importOriginal<typeof import("../secret-refs")>()
+  return { ...real, resolveSecretRef: vi.fn(real.resolveSecretRef) }
+})
 
 // Applying what the owner approved: names resolved against this vault and
 // never guessed, a secret the vault lacks left out with a note, the owner's
@@ -111,6 +120,35 @@ function formatOnePets(overrides: Record<string, unknown> = {}): RepoFiles {
     }),
   }
 }
+
+describe("the secrets an item names (#162)", () => {
+  it("are found through the resolver: a server's sign-in as its kind, a wrapper's places as a wrapper's", async () => {
+    const items = await populatedItems()
+    const ctx = await freshVault()
+    await createSecret(ctx, {
+      name: "Pets key",
+      value: "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ",
+      kind: "totp",
+    })
+    const [pets] = (await readRepo(formatOnePets())).items as [EndpointDocument]
+    vi.mocked(resolveSecretRef).mockClear()
+
+    // One-time codes are not a key an endpoint sends: still missing.
+    expect((await resolveItem(ctx, pets)).missingSecrets).toEqual(["Pets key"])
+    expect(
+      (await resolveItem(ctx, find(items, "wrapper", "pet-tools")))
+        .missingSecrets,
+    ).toEqual(["Pets key"])
+    expect(
+      vi
+        .mocked(resolveSecretRef)
+        .mock.calls.map(([, name, use]) => [name, use]),
+    ).toEqual([
+      ["Pets key", { kind: "header" }],
+      ["Pets key", { kind: "wrapper_binding" }],
+    ])
+  })
+})
 
 describe("applying an item", () => {
   it("asks for a new server's own address, and takes the one the owner gives", async () => {

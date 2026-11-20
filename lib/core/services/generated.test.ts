@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
+import { DEFAULT_TOKEN_RECIPE } from "../constants"
 import type { VaultContext } from "../context"
 import { db } from "../db"
 import { scratchDatabase } from "../test-db"
@@ -9,11 +10,13 @@ import {
   dropGeneratedSecrets,
   generatedRecipe,
   makeGeneratedSecrets,
+  type MadeSecret,
 } from "./generated"
 
-// The values PCP makes for a service's generated variables: each secret is
-// named in `made` as soon as it exists, so a launch that fails part way
-// takes back exactly what it made.
+// The values PCP makes for a service's generated variables, through the
+// secrets' own createGeneratedSecret: each is named in `made` as soon as it
+// exists, so a launch that fails part way takes back exactly what it made,
+// and a value made before (a remake) is kept.
 
 const failing = vi.hoisted(() => ({ on: 0, calls: 0 }))
 
@@ -22,15 +25,15 @@ vi.mock("../secrets", async (importOriginal) => {
 
   return {
     ...original,
-    createSecretNamedAfter: vi.fn(
-      async (...args: Parameters<typeof original.createSecretNamedAfter>) => {
+    createGeneratedSecret: vi.fn(
+      async (...args: Parameters<typeof original.createGeneratedSecret>) => {
         failing.calls += 1
 
         if (failing.calls === failing.on) {
           throw new Error("The disk is full.")
         }
 
-        return original.createSecretNamedAfter(...args)
+        return original.createGeneratedSecret(...args)
       },
     ),
   }
@@ -63,28 +66,61 @@ const DEFINITION = parseServiceDefinition({
 })
 
 describe("makeGeneratedSecrets", () => {
-  it("makes one secret for each unbound generated variable, by its recipe", async () => {
-    const made: string[] = []
-    const bound = await makeGeneratedSecrets(ctx, {
+  it("makes a managed generated secret for each unbound generated variable, named for the service", async () => {
+    const made: MadeSecret[] = []
+    const { bindings, generated } = await makeGeneratedSecrets(ctx, {
       service: "Sessions",
       definition: DEFINITION,
       bindings: { THIRD: "the-owners-own" },
       made,
     })
 
-    expect(Object.keys(bound).sort()).toEqual(["FIRST", "SECOND", "THIRD"])
-    expect(bound.THIRD).toBe("the-owners-own")
-    expect(made).toEqual([bound.FIRST, bound.SECOND])
-    expect(generatedRecipe(true)).toMatchObject({ length: 40, symbols: false })
+    expect(bindings.THIRD).toBe("the-owners-own")
+    expect(generated).toEqual(["FIRST", "SECOND"])
+    expect(made).toEqual([
+      { id: bindings.FIRST, created: true },
+      { id: bindings.SECOND, created: true },
+    ])
+    expect(
+      await db().secret.count({
+        where: { id: { in: made.map((each) => each.id) }, kind: "generated" },
+      }),
+    ).toBe(2)
+    expect(generatedRecipe(true)).toEqual(DEFAULT_TOKEN_RECIPE)
     expect(generatedRecipe({ length: 64, symbols: true })).toMatchObject({
+      format: "password",
       length: 64,
       symbols: true,
     })
   })
 
+  it("keeps a value made before: a remake does not change it, nor takes it back", async () => {
+    const first: MadeSecret[] = []
+    const before = await makeGeneratedSecrets(ctx, {
+      service: "Sessions",
+      definition: DEFINITION,
+      bindings: {},
+      made: first,
+    })
+    const again: MadeSecret[] = []
+    const after = await makeGeneratedSecrets(ctx, {
+      service: "Sessions",
+      definition: DEFINITION,
+      bindings: {},
+      made: again,
+    })
+
+    expect(after.bindings).toEqual(before.bindings)
+    expect(again.every((each) => !each.created)).toBe(true)
+    await dropGeneratedSecrets(ctx, again)
+    expect(
+      await db().secret.count({ where: { id: before.bindings.FIRST } }),
+    ).toBe(1)
+  })
+
   it("names each secret as it is made, so one that fails part way is taken back whole", async () => {
     failing.on = 2
-    const made: string[] = []
+    const made: MadeSecret[] = []
 
     await expect(
       makeGeneratedSecrets(ctx, {
@@ -95,9 +131,9 @@ describe("makeGeneratedSecrets", () => {
       }),
     ).rejects.toThrow(/disk is full/)
     expect(made).toHaveLength(1)
-    expect(await db().secret.count({ where: { id: made[0] } })).toBe(1)
+    expect(await db().secret.count({ where: { id: made[0]!.id } })).toBe(1)
 
     await dropGeneratedSecrets(ctx, made)
-    expect(await db().secret.count({ where: { id: made[0] } })).toBe(0)
+    expect(await db().secret.count({ where: { id: made[0]!.id } })).toBe(0)
   })
 })

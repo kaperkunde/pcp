@@ -11,7 +11,6 @@ import { clientFor } from "../repos/store"
 import { readServiceDefinition } from "../services/definition"
 import {
   capability,
-  itemOfImage,
   type Capability,
   type CapabilityId,
   type CommonItem,
@@ -47,12 +46,13 @@ export type CapabilityOffers = {
   problem: string | null
 }
 
-/** The services in the vault running one of these items, however launched. */
-async function runningItems(
+/**
+ * The vault's services with the words their image and source tag carry,
+ * which is how a common item is known wherever it was launched from.
+ */
+export async function vaultServices(
   ctx: VaultContext,
-  items: CommonItem[],
-): Promise<CapabilityOffers["running"]> {
-  const names = new Set(items.map((item) => item.name))
+): Promise<Array<{ id: string; name: string; image: string }>> {
   const specs = await db().serviceSpec.findMany({
     where: { server: { vaultId: ctx.vaultId } },
     select: { ...SERVICE_SPEC_SELECT, server: { select: SERVER_META_SELECT } },
@@ -64,22 +64,34 @@ async function runningItems(
       const definition = readServiceDefinition(
         openServiceSpec(ctx, spec).definition,
       )
-      const item = itemOfImage(
-        `${definition.image ?? ""} ${definition.source ?? ""}`,
-      )
 
-      return item && names.has(item.name)
-        ? [
-            {
-              id: spec.server.id,
-              name: serverName(ctx, spec.server),
-              item: item.title,
-            },
-          ]
-        : []
+      return [
+        {
+          id: spec.server.id,
+          name: serverName(ctx, spec.server),
+          image:
+            `${definition.image ?? ""} ${definition.source ?? ""}`.toLowerCase(),
+        },
+      ]
     } catch {
       return []
     }
+  })
+}
+
+/** The services in the vault running one of these items, however launched. */
+async function runningItems(
+  ctx: VaultContext,
+  items: CommonItem[],
+): Promise<CapabilityOffers["running"]> {
+  return (await vaultServices(ctx)).flatMap((service) => {
+    const item = items.find((candidate) =>
+      candidate.sources.some((source) => service.image.includes(source)),
+    )
+
+    return item
+      ? [{ id: service.id, name: service.name, item: item.title }]
+      : []
   })
 }
 
@@ -88,15 +100,27 @@ export async function capabilityOffers(
   id: CapabilityId,
 ): Promise<CapabilityOffers> {
   const cap = capability(id)
-  const running = await runningItems(ctx, cap.items)
+
+  return { capability: cap, ...(await itemOffers(ctx, cap.items)) }
+}
+
+/**
+ * What a page offers for these common items: each one's launch at the
+ * common repository's head, or the service the vault has, and the services
+ * that run one of them already.
+ */
+export async function itemOffers(
+  ctx: VaultContext,
+  items: CommonItem[],
+): Promise<Omit<CapabilityOffers, "capability">> {
+  const running = await runningItems(ctx, items)
   const repo = await commonRepository(ctx)
 
   if (!repo) {
     return {
-      capability: cap,
       repoId: null,
       commit: null,
-      offers: cap.items.map((item) => ({ item, href: null, state: "launch" })),
+      offers: items.map((item) => ({ item, href: null, state: "launch" })),
       running,
       problem: null,
     }
@@ -109,7 +133,7 @@ export async function capabilityOffers(
       repo.branch,
     )
     const offers = await Promise.all(
-      cap.items.map(async (item): Promise<ItemOffer> => {
+      items.map(async (item): Promise<ItemOffer> => {
         const ref = { kind: "service" as const, name: item.name }
         const root = itemRoot(ref)
 
@@ -134,7 +158,6 @@ export async function capabilityOffers(
     )
 
     return {
-      capability: cap,
       repoId: repo.id,
       commit: listing.head.commit,
       offers,
@@ -147,10 +170,9 @@ export async function capabilityOffers(
     }
 
     return {
-      capability: cap,
       repoId: repo.id,
       commit: null,
-      offers: cap.items.map((item) => ({ item, href: null, state: "absent" })),
+      offers: items.map((item) => ({ item, href: null, state: "absent" })),
       running,
       problem: error.message,
     }

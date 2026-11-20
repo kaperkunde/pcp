@@ -1,5 +1,41 @@
 # Using PCP
 
+## Talking to Claude
+
+Talking to your assistant is a way to use PCP of its own. Every page in PCP
+still does everything, but anything PCP can do can also be found from the
+conversation: when you ask for something PCP could do but you have not set up,
+the assistant says what it takes ("you just have to sign in here", "I'd launch
+the Whisper service on your server; approve it here") and then does the work,
+asking you first on PCP's page.
+
+1. **Sign up.** Set PCP up with a password, and save the recovery key.
+2. **Add PCP to Claude.** **Connect an assistant** under Assistants: in
+   Claude's apps it is a custom connector with PCP's address, which signs in at
+   PCP; in Claude Code, one command.
+3. **Say what you want.** PCP's Home shows a few things to try:
+   - "I'd like to add my Gmail"
+   - "Can you connect to my printer?"
+   - "I'd like to set up an SSH connection to my server so I can host things"
+
+How it knows: PCP keeps a short list of what it can set up (the browser, PDF
+tools, document conversion, Claude Code sessions, search by meaning, a VPN
+exit, bunq, mail accounts, calendar accounts and SSH servers; Whisper
+transcription is not a ready-made item yet). When the assistant searches with
+your words and it has not got one of them, the answer says what it does, what
+it takes from you and how to go about it, with a link to its page in PCP (the
+common items' are under `/plugins/<name>`). For a mail or calendar account the
+assistant proposes it, a request you approve. For one of PCP's common items it
+hands you the link to its page, where you read it and launch it on your SSH
+server in one click ("I'd launch it on your server; approve it here"). Where
+only you can do it (installing the browser, adding an SSH server, a VPN exit) it
+hands you the link too. What counts as set up is what that assistant can reach:
+one you gave only some servers is told you may have it already, and asks
+whether to give it access rather than set up another. Search by meaning counts
+once you chose a provider on Settings → Search. Its instructions say so too.
+
+## In PCP
+
 1. **Secrets.** Add the API keys and personal access tokens your servers
    need. Each is stored encrypted and can be revealed, rotated or deleted.
 2. **Servers.** Add an MCP server by URL, describe what it is for in a
@@ -192,17 +228,19 @@ Behind them are PCP's own tools, which `search` finds and the `execute`
 tool of each one's tier runs by name, `{"tool": "check_permission",
 "arguments": {…}}`:
 
-| Tool                    | What it does                                                                                                                                                                                                                                                                                                           |
-| ----------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `list_tools`            | Lists every tool on one server, with whether it runs at once or asks you first, a page of 200 at a time.                                                                                                                                                                                                               |
-| `check_permission`      | Says how a request went once you have answered it; waits a little if you are still on it. With `ids` (up to 20) and a `mode`, `any` (the default, as soon as one is answered) or `all`, it waits on several together and lists each one's status. Without an id, lists the token's own requests still waiting for you. |
-| `withdraw_request`      | Takes back one of the token's own requests while it still waits for you: it leaves your list, and nothing runs.                                                                                                                                                                                                        |
-| `check_server`          | Says whether a server is connected; waits a little if you are still signing in.                                                                                                                                                                                                                                        |
-| `get_server_limits`     | Reads a server's limits (calls at once, pause, calls a minute, time per call, bytes a day, cool-downs), which are yours and which are PCP's defaults, whether it is cooling down and why, and its calls, errors and answer times over the last minute, hour and day.                                                   |
-| `propose_server_limits` | Proposes new limits for a server, with a note on why; you see them against the ones it has, may change them, and save them.                                                                                                                                                                                            |
-| `read_result`           | Reads a long answer or a kept value, a slice at a time from any offset or from where a text appears; a file is described, not shown.                                                                                                                                                                                   |
-| `register_server`       | Proposes a new MCP server, an API from an OpenAPI 3 schema, a mail account (JMAP or IMAP) or a calendar account (CalDAV), with no auth, a secret by name, a user name and password, or OAuth; or another server of one it sees (`definition`), with a note for you to keep and limits on how PCP calls it.             |
-| `propose_tool_access`   | Proposes which tools its token may run, many at once and across servers, and hears which tools would change; you review and save it in PCP.                                                                                                                                                                            |
+| Tool                    | What it does                                                                                                                                                                                                                                                                                                                                                                   |
+| ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `list_tools`            | Lists every tool on one server, with whether it runs at once or asks you first, a page of 200 at a time.                                                                                                                                                                                                                                                                       |
+| `check_permission`      | Says how a request went once you have answered it; waits a little if you are still on it. With `ids` (up to 20) and a `mode`, `any` (the default, as soon as one is answered) or `all`, it waits on several together and lists each one's status. Without an id, lists the token's own requests still waiting for you.                                                         |
+| `withdraw_request`      | Takes back one of the token's own requests while it still waits for you: it leaves your list, and nothing runs.                                                                                                                                                                                                                                                                |
+| `check_server`          | Says whether a server is connected; waits a little if you are still signing in.                                                                                                                                                                                                                                                                                                |
+| `get_server_limits`     | Reads a server's limits (calls at once, pause, calls a minute, time per call, bytes a day, cool-downs), which are yours and which are PCP's defaults, whether it is cooling down and why, and its calls, errors and answer times over the last minute, hour and day.                                                                                                           |
+| `propose_server_limits` | Proposes new limits for a server, with a note on why; you see them against the ones it has, may change them, and save them.                                                                                                                                                                                                                                                    |
+| `get_version`           | Says which version this PCP runs, its commit and build date, whether a newer one is out on your channel (from the last check, asking GitHub nothing), what changed, whether this PCP can install an update itself, and how the last install went.                                                                                                                              |
+| `update_pcp`            | Asks you to install the newer version the last check found and restart; you see the version and its release notes, and answer Install and restart or Not now, every time; PCP checks again when you agree and installs nothing if a newer one came out since. Where this PCP cannot install it itself, or nothing newer is known, it says so with your steps and asks nothing. |
+| `read_result`           | Reads a long answer or a kept value, a slice at a time from any offset or from where a text appears; a file is described, not shown.                                                                                                                                                                                                                                           |
+| `register_server`       | Proposes a new MCP server, an API from an OpenAPI 3 schema, a mail account (JMAP or IMAP) or a calendar account (CalDAV), with no auth, a secret by name, a user name and password, or OAuth; or another server of one it sees (`definition`), with a note for you to keep and limits on how PCP calls it.                                                                     |
+| `propose_tool_access`   | Proposes which tools its token may run, many at once and across servers, and hears which tools would change; you review and save it in PCP.                                                                                                                                                                                                                                    |
 
 A Write or Destructive call an assistant makes again with the same
 arguments within a while (from `execute_*`, a program's `pcp.call` or a

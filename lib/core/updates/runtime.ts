@@ -163,7 +163,7 @@ export function reconcileUpdates(): Promise<void> {
  * The owner picks a channel. What the last check found was for the other
  * one, so it is forgotten, between rounds (a round out now would otherwise
  * write the old channel's answer back), and the next round is due at once.
- * An install the owner already asked for stays.
+ * An install the owner already asked for stays, and the last one's record.
  */
 export function setUpdateChannel(channel: UpdateChannel): Promise<void> {
   return chain(async () => {
@@ -172,8 +172,11 @@ export function setUpdateChannel(channel: UpdateChannel): Promise<void> {
     }
 
     await saveUpdateConfig({ channel })
-    const { installRequest } = await getUpdateStatus()
-    await saveUpdateStatus(installRequest ? { installRequest } : {})
+    const { installRequest, lastInstall } = await getUpdateStatus()
+    await saveUpdateStatus({
+      ...(installRequest ? { installRequest } : {}),
+      ...(lastInstall ? { lastInstall } : {}),
+    })
   })
 }
 

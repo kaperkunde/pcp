@@ -137,6 +137,9 @@ jobs:
               --notes-file "$RUNNER_TEMP/notes.md" --prerelease --draft
           fi
 
+  # Both builds below carry the tag's commit and the time they were built
+  # (PCP_COMMIT, PCP_BUILT_AT: build-desktop.yml's Build step and
+  # build-images.yml's build arguments), from the tag they check out.
   desktop:
     name: desktop apps
     needs: release

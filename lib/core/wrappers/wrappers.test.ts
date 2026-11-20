@@ -31,7 +31,26 @@ import {
 import { readServerNote, setPersonalNote } from "../personal-notes"
 import { serializeItem } from "../repos/documents"
 import { localItem } from "../repos/local"
-import { createSecret } from "../secrets"
+import { createSecret, readSecretValue } from "../secrets"
+import { resolveSecretRef } from "../secret-refs"
+
+// Every secret named by name goes through the one resolver (#162): watched
+// here, as it is.
+vi.mock("../secret-refs", async (importOriginal) => {
+  const real = await importOriginal<typeof import("../secret-refs")>()
+  return { ...real, resolveSecretRef: vi.fn(real.resolveSecretRef) }
+})
+
+/** The uses the resolver was asked for since the last look. */
+function resolvedUses(): Set<string> {
+  const uses = vi
+    .mocked(resolveSecretRef)
+    .mock.calls.map(([, , use]) =>
+      use.kind === "wrapper_binding" && use.typed ? "typed" : use.kind,
+    )
+  vi.mocked(resolveSecretRef).mockClear()
+  return new Set(uses)
+}
 import { createMailAccount } from "../mail/accounts"
 import { getServer } from "../servers"
 import { syncServerTools } from "../upstream"
@@ -382,6 +401,46 @@ describe("proposing a wrapper", () => {
 
     expect(result.isError).toBe(true)
     expect(result.text).toContain("never a wrapper's")
+  })
+})
+
+describe("a wrapper's new secret (#162)", () => {
+  it("is named through the resolver as a wrapper's place, and made by PCP on the owner's Have PCP make it", async () => {
+    resolvedUses()
+    const asked = await call("create_wrapper", {
+      name: "Lookup",
+      description: "Things, simpler.",
+      tools: [ECHO_TOOL],
+      secrets: [
+        { secret: "Things key", tool: "things/echo", argument: "/key" },
+      ],
+    })
+    expect(asked.text).toContain("Not done yet")
+    const row = await newestRequest()
+    const view = (await getPermissionView(ctx, row.id, {
+      publicUrl: PUBLIC_URL,
+    }))!
+    expect(view.secretToEnter).toMatchObject({
+      name: "Things key",
+      exists: false,
+      defaultRecipe: { format: "alphanumeric", length: 48 },
+    })
+
+    const done = await decidePermission(ctx, row.id, "allow_once", {
+      publicUrl: PUBLIC_URL,
+      generate: view.secretToEnter!.defaultRecipe,
+    })
+
+    expect(done.isError).not.toBe(true)
+    expect(resolvedUses()).toEqual(new Set(["wrapper_binding"]))
+    const definition = readDefinition(
+      openWrapperSpec(ctx, await db().wrapperSpec.findFirstOrThrow())
+        .definition,
+    )
+    const value = await readSecretValue(ctx, definition.secrets[0]!.secretId!)
+    expect(value).toMatch(/^[A-Za-z0-9]{48}$/)
+    expect(JSON.stringify(done)).toContain("PCP made the value")
+    expect(JSON.stringify(done)).not.toContain(value)
   })
 })
 
@@ -2008,6 +2067,26 @@ describe("a browser flow", () => {
         template: "{{secret}}",
       }),
     ])
+  })
+
+  it("names a secret it types through the resolver as one the browser types", async () => {
+    await createSecret(ctx, { name: "Chat password", value: "hunter2-chat" })
+    const flow = {
+      ...FLOW_TOOL,
+      program: FLOW_TOOL.program.replace(
+        "text: args.text",
+        'text: { $secret: "Chat password" }',
+      ),
+    }
+    resolvedUses()
+
+    await approved([flow], {
+      secrets: [
+        { secret: "Chat password", tool: "browser/type", argument: "/text" },
+      ],
+    })
+
+    expect(resolvedUses().has("typed")).toBe(true)
   })
 
   it("takes a secret from an assistant only as the browser's type text", async () => {

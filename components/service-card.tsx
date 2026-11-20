@@ -218,7 +218,7 @@ export function ServiceCard({ view }: { view: ServiceView }) {
             description={view.env
               .map(
                 (entry) =>
-                  `${entry.name}: ${entry.secretName ?? entry.value ?? "its fixed value or none"}${generated.has(entry.name) && entry.secretName ? " (made by PCP)" : ""}`,
+                  `${entry.name}: ${generated.has(entry.name) && entry.secretName ? "made by PCP" : (entry.secretName ?? entry.value ?? "its fixed value or none")}`,
               )
               .join(" · ")}
           />

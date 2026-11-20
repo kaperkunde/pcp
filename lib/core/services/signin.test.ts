@@ -384,12 +384,12 @@ describe("the owner's sign-in page", { timeout: 30_000 }, () => {
 
     // The calls went with the token PCP made for the service.
     const token = await db().secret.findFirstOrThrow({
-      where: { kind: "text" },
+      where: { kind: "generated" },
       select: { id: true },
     })
     expect(token.id).toBeTruthy()
     expect(new Set(seen.map((each) => each.authorization)).size).toBe(1)
-    expect(seen[0]!.authorization).toMatch(/^Bearer [A-Za-z0-9]{40}$/)
+    expect(seen[0]!.authorization).toMatch(/^Bearer [A-Za-z0-9]{48}$/)
   })
 
   it("says at launch to sign in, or which sign-in tool the server does not serve", async () => {

@@ -1,11 +1,7 @@
 import { z } from "zod"
 
 import type { CatalogueTool } from "../catalogue"
-import {
-  MAX_GENERATE_EXCLUDE,
-  MAX_GENERATED_LENGTH,
-  MIN_GENERATED_LENGTH,
-} from "../constants"
+import { recipeArg } from "../secret-request"
 import { nextMessageCheck, OWNER_LINK_RULE } from "../owner-link"
 import type { ToolAnnotations } from "../tools/define"
 import {
@@ -850,7 +846,7 @@ const INPUTS: readonly BrowserToolInput[] = [
   {
     name: "request_secret",
     title: "Ask the owner for a secret",
-    description: `Asks the owner to store a secret for the browser to type into pages at the sites you name (a password, or the seed of a sign-in's one-time codes), so it never passes through you or the conversation. Answers "Not done yet" with a link. ${OWNER_LINK_RULE} The owner types the value on PCP's page, or has PCP make a new password there (generate, for a sign-up or a new password: nobody but the owner sees it), checks the login name and the sites, and chooses whether this token may use it once, for an hour, or always without asking. Never ask them for the value in the conversation. ${nextMessageCheck("check_permission with the id it gave")} Once they stored it, type it with type's text {"$secret": "<name>"}, and its login name with {"$secret": "<name>", "part": "username"}. A name PCP already holds is refused: type that one instead, or propose other sites for it with update_secret_sites.`,
+    description: `Asks the owner to store a secret for the browser to type into pages at the sites you name (a password, or the seed of a sign-in's one-time codes), so it never passes through you or the conversation; renamed to PCP's own request_secret (through execute_write, sites optional), and this one goes in the next release. Answers "Not done yet" with a link. ${OWNER_LINK_RULE} The owner types the value on PCP's page, or has PCP make a new password there (generate, for a sign-up or a new password: nobody but the owner sees it), checks the login name and the sites, and chooses whether this token may use it once, for an hour, or always without asking. Never ask them for the value in the conversation. ${nextMessageCheck("check_permission with the id it gave")} Once they stored it, type it with type's text {"$secret": "<name>"}, and its login name with {"$secret": "<name>", "part": "username"}. A name PCP already holds is refused: type that one instead, or propose other sites for it with update_secret_sites.`,
     input: z.strictObject({
       name: z
         .string()
@@ -885,42 +881,9 @@ const INPUTS: readonly BrowserToolInput[] = [
         .describe(
           'The login name (user name or email address) it goes with, kept with the secret for the owner to check: typed with {"$secret": name, "part": "username"}. Not for totp.',
         ),
-      generate: z
-        .strictObject({
-          length: z
-            .number()
-            .int()
-            .min(MIN_GENERATED_LENGTH)
-            .max(MAX_GENERATED_LENGTH)
-            .optional()
-            .describe(
-              `How many characters, ${MIN_GENERATED_LENGTH} to ${MAX_GENERATED_LENGTH}: 24 by default. Keep within the site's maximum.`,
-            ),
-          lowercase: z
-            .boolean()
-            .optional()
-            .describe("Lower-case letters: true by default."),
-          uppercase: z
-            .boolean()
-            .optional()
-            .describe("Capital letters: true by default."),
-          digits: z.boolean().optional().describe("Digits: true by default."),
-          symbols: z
-            .boolean()
-            .optional()
-            .describe(
-              "Symbols such as !#$%&*+-.:;<=>?@^_~: true by default. false for a site that refuses them.",
-            ),
-          exclude: z
-            .string()
-            .max(MAX_GENERATE_EXCLUDE)
-            .optional()
-            .describe("Characters the site refuses, to leave out: <>&."),
-        })
-        .optional()
-        .describe(
-          "Ask PCP to make a new password rather than the owner typing one, for a sign-up or a password change: made on PCP's machine and stored at once; the owner can change the recipe on the page and see the password under Secrets, and you never get it. A password always has a character of every kind it allows. Not for totp.",
-        ),
+      generate: recipeArg(
+        "Ask PCP to make a new password rather than the owner typing one, for a sign-up or a password change: made on PCP's machine and stored at once; the owner can change the recipe on the page and see the password under Secrets, and you never get it. A password always has a character of every kind it allows. Not for totp.",
+      ).optional(),
     }),
     rules: [
       {

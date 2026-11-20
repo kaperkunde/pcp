@@ -290,7 +290,10 @@ test("a service that signs in to an account: PCP's own sign-in page takes the co
     .getByLabel("The SSH server's port for 8080")
     .fill(String(sessionsPort))
   // Its token is PCP's to make: nothing to choose, and the form says so.
-  await expect(page.getByLabel("MCP_AUTH_TOKEN")).toHaveValue("")
+  await expect(page.getByLabel("MCP_AUTH_TOKEN")).toHaveCount(0)
+  await expect(page.getByTestId("service-made-by-pcp")).toContainText(
+    "MCP_AUTH_TOKEN: made by PCP",
+  )
   await expect(page.getByTestId("service-form-signin")).toContainText(
     "login_start",
   )
@@ -299,8 +302,7 @@ test("a service that signs in to an account: PCP's own sign-in page takes the co
   await expect(page).toHaveURL(/\/servers\/[0-9a-f-]+$/)
   const card = page.getByTestId("service-card")
   await expect(card).toContainText("Running and healthy")
-  await expect(card).toContainText("MCP_AUTH_TOKEN")
-  await expect(card).toContainText("(made by PCP)")
+  await expect(card).toContainText("MCP_AUTH_TOKEN: made by PCP")
 
   // Its account, on PCP's own sign-in page.
   await card.getByTestId("service-account").click()

@@ -1,8 +1,11 @@
 import "server-only"
 
-import { isDesktopApp } from "./desktop"
+import { installHost } from "@/lib/core/updates/install"
 
 /**
+ * These read lib/core/updates/install.ts installHost, which decides with the
+ * same values whether this PCP installs an update itself.
+ *
  * How this PCP was installed, for the Settings page to say how to update it:
  * the desktop app, the container image (the Dockerfile sets PCP_CONTAINER,
  * which a deploy tool building from it keeps), or a checkout run with
@@ -11,11 +14,7 @@ import { isDesktopApp } from "./desktop"
 export type InstallKind = "desktop" | "container" | "source"
 
 export function installKind(): InstallKind {
-  if (isDesktopApp()) {
-    return "desktop"
-  }
-
-  return process.env.PCP_CONTAINER === "1" ? "container" : "source"
+  return installHost().kind
 }
 
 /**
@@ -23,7 +22,7 @@ export function installKind(): InstallKind {
  * day (`PCP_AUTO_UPDATE=1`, which install.sh also passes into the container).
  */
 export function autoUpdated(): boolean {
-  return process.env.PCP_AUTO_UPDATE === "1"
+  return installHost().autoUpdated
 }
 
 /**
@@ -34,9 +33,7 @@ export function autoUpdated(): boolean {
  * restarts nothing itself.
  */
 export function hostUpdater(): boolean {
-  const value = process.env.PCP_HOST_UPDATER
-
-  return value === "1" || value === "2"
+  return installHost().hostUpdater
 }
 
 /**
@@ -45,5 +42,5 @@ export function hostUpdater(): boolean {
  * image, and would ignore a request that names one.
  */
 export function hostUpdaterFollowsChannel(): boolean {
-  return process.env.PCP_HOST_UPDATER === "2"
+  return installHost().hostUpdaterFollowsChannel
 }

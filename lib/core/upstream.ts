@@ -22,7 +22,7 @@ import { storeTools, type SyncResult } from "./catalogue"
 import type { VaultContext } from "./context"
 import { asBytes, decryptString, encryptString } from "./crypto"
 import { db } from "./db"
-import { admitSecretUse, findTypableSecret } from "./browser-secrets"
+import { admitSecretUse } from "./browser-secrets"
 import { callBrowserTool } from "./browser/call"
 import { syncBrowserTools } from "./browser/server"
 import { isOwnerNeeded, type SecretTyper } from "./browser/types"
@@ -110,8 +110,9 @@ import {
   bindGeneratedEnv,
   dropGeneratedSecrets,
   dropUnusedGeneratedSecrets,
+  generatedSecretsOf,
   makeGeneratedSecrets,
-  readGeneratedSecrets,
+  type MadeSecret,
 } from "./services/generated"
 import { SIGNIN_CALL_TIMEOUT_MS } from "./services/limits"
 import {
@@ -200,6 +201,7 @@ import {
   type SecretGrant,
 } from "./wrappers/placeholders"
 import { SECRET_META_SELECT, secretName } from "./secret-meta"
+import { resolveSecretRef } from "./secret-refs"
 import { findServer, type OpenServer, writeServer } from "./server-meta"
 
 /**
@@ -2376,7 +2378,9 @@ async function callBrowser(
     async value(use) {
       if (part === "username") {
         // Refused before the owner is asked when there is none to type.
-        const named = await findTypableSecret(ctx, name)
+        const named = await resolveSecretRef(ctx, name, {
+          kind: "browser_type",
+        })
         if (named) await readTypedLogin(ctx, named.id)
       }
 
@@ -3244,21 +3248,28 @@ export async function launchService(
       : undefined
   let result: LaunchResult
   let prepared = asked
-  // The secrets made for its generated variables: taken back, every one
-  // made so far, when anything after fails.
-  const made: string[] = []
+  // The values made for its generated variables: taken back, every one
+  // this launch made so far, when anything after fails.
+  const made: MadeSecret[] = []
 
   try {
     // The variables PCP makes a value for (generated): a secret each,
     // bound like one the owner chose.
+    // services.ts takes a generated secret only for the variables named in
+    // generatedEnv (its launch checks), and the server it registers sends
+    // it as such.
+    const generated = await makeGeneratedSecrets(ctx, {
+      service: asked.name,
+      definition: asked.definition,
+      bindings: asked.env,
+      made,
+    })
     prepared = {
       ...asked,
-      env: await makeGeneratedSecrets(ctx, {
-        service: asked.name,
-        definition: asked.definition,
-        bindings: asked.env,
-        made,
-      }),
+      env: generated.bindings,
+      generatedEnv: [
+        ...new Set([...asked.generatedEnv, ...generated.generated]),
+      ],
     }
     const access: ServiceAccess = {
       host: connection.host,
@@ -3279,14 +3290,6 @@ export async function launchService(
   } catch (error) {
     await dropGeneratedSecrets(ctx, made)
     throw error
-  }
-
-  // Kept on the service, so removing it removes them (and only them).
-  if (made.length > 0) {
-    await db().serviceSpec.update({
-      where: { serverId: result.id },
-      data: { generatedSecrets: JSON.stringify(made) },
-    })
   }
 
   let message = `${prepared.name} is running on ${prepared.host.name}.`
@@ -3530,14 +3533,7 @@ export async function removeService(
   options: ServiceOptions,
 ): Promise<string> {
   const loaded = await loadService(ctx, id)
-  const made = readGeneratedSecrets(
-    (
-      await db().serviceSpec.findUniqueOrThrow({
-        where: { serverId: id },
-        select: { generatedSecrets: true },
-      })
-    ).generatedSecrets,
-  )
+  const made = await generatedSecretsOf(ctx, loaded.env)
   const said = await removeServiceOn(
     ctx,
     loaded,

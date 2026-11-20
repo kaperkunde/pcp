@@ -123,7 +123,11 @@ export type SecretPart = "password" | "username"
  * nothing of it comes back but the name.
  */
 export type SecretRequestAsk = {
-  serverId: string
+  /**
+   * The browser that asked (its request_secret, an alias for one release),
+   * or null for PCP's own request_secret.
+   */
+  serverId: string | null
   name: string
   purpose: string
   origins: string[]
@@ -230,7 +234,14 @@ export type OwnerAsk =
  * it into a permission request, so neither imports the permission flow.
  */
 export class OwnerNeeded extends Error {
-  constructor(readonly ask: OwnerAsk) {
+  /**
+   * `note`: said before the link in the answer (an alias's new name), never
+   * after it, since the link ends the reply.
+   */
+  constructor(
+    readonly ask: OwnerAsk,
+    readonly note?: string,
+  ) {
     super("The owner's answer is needed first.")
     this.name = "OwnerNeeded"
   }

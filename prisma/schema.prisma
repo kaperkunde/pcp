@@ -442,6 +442,7 @@ model PermissionRequest {
   /// call | register | memory_share | memory_change | access | endpoint_change
   /// | fetch | browse | browser_handover | wrapper_change | skill_change
   /// | repo_change | secret_use | secret_request | note_change | repo_share
+  /// | pcp_update (and the other PermissionKind values, lib/core/constants.ts)
   kind                 String
   serverId             String?    @map("server_id")
   server               McpServer? @relation(fields: [serverId], references: [id], onDelete: Cascade)
@@ -604,6 +605,7 @@ model Secret {
   /// the vault.
   nameKey          String?   @map("name_key")
   /// text | totp | oauth | ssh_key (PCP's own private key for an SSH server)
+  /// | proxy_password | generated (a value PCP made for a service's variable)
   kind             String    @default("text")
   /// nonce || ciphertext || tag, AES-256-GCM under the vault's data key
   /// with the secret id as associated data.
@@ -1171,10 +1173,6 @@ model ServiceSpec {
   /// "running" or "stopped". A call that finds it down starts it again, and
   /// the reconcile pass brings it back up, only while it is "running".
   intendedState      String     @default("running") @map("intended_state")
-  /// The secrets PCP made for the definition's generated variables
-  /// (services/generated.ts), as a JSON list of ids: the only ones removing
-  /// the service removes with it. A secret the owner chose is never listed.
-  generatedSecrets   String     @default("[]") @map("generated_secrets")
   createdAt          DateTime   @default(now()) @map("created_at")
   updatedAt          DateTime   @updatedAt @map("updated_at")
 

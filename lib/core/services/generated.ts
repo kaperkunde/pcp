@@ -1,8 +1,13 @@
 import type { PasswordRecipe } from "../constants"
+import { DEFAULT_TOKEN_RECIPE } from "../constants"
 import type { VaultContext } from "../context"
 import { db } from "../db"
-import { generatePassword } from "../generate-password"
-import { createSecretNamedAfter } from "../secrets"
+import {
+  createGeneratedSecret,
+  deleteManagedSecret,
+  generatedSecretName,
+  takeBackGenerated,
+} from "../secrets"
 import { setMcpHeaderCredential } from "../servers"
 import {
   generatedEnv,
@@ -11,49 +16,48 @@ import {
   type ServiceEnvBindings,
   type ServiceGenerated,
 } from "./definition"
-import { GENERATED_VALUE_LENGTH } from "./limits"
 import type { LoadedService } from "./services"
 
 /**
  * The variables a service's definition marks `generated` (format 6): PCP
- * makes each one's value at launch, a random one from Node's CSPRNG
- * (generate-password.ts), and keeps it as a secret of the vault named after
- * the service, bound to the variable like a secret the owner chose. From
- * there it goes as every bound secret does: decrypted only in upstream.ts,
- * handed to the container over standard input, and sent by the server the
- * service registers when the variable is its header's (registers.auth). No
- * step of the owner's, and the value is never handed back to anyone; the
- * owner sees the secret under Secrets, and a change to it there remakes the
- * service with the new one, as a change to any secret it takes does.
+ * makes each one's value, a managed `generated` secret of the vault
+ * (secrets.ts createGeneratedSecret: the CSPRNG, stored at once, never
+ * revealed or renamed, never named by an assistant), named
+ * "<service>/<VARIABLE>" (generatedSecretName) and bound to the variable.
+ * From there it goes as every bound secret does: decrypted only in
+ * upstream.ts, handed to the container over standard input, and sent by
+ * the server the service registers when the variable is its header's
+ * (registers.auth). No step of the owner's, and no choice of theirs: the
+ * launch form, the review and the service's page show it as made by PCP.
  *
- * A variable the owner bound a secret of their own to keeps theirs.
- *
- * (A helper for this belongs with the secrets, `createGeneratedSecret`;
- * until it is there, this makes one the way request_secret's `generate`
- * does: a text secret whose value PCP made.)
+ * Made once per name: a remake, or a variable already bound, keeps it
+ * (`created: false`); only what this call made is taken back when a launch
+ * fails (takeBackGenerated). Removing the service removes them, unless
+ * something still sends one.
  */
+
+/** A value made for a variable, and whether this call made it. */
+export type MadeSecret = { id: string; created: boolean }
 
 /** The recipe a `generated` variable's value is made by. */
 export function generatedRecipe(generated: ServiceGenerated): PasswordRecipe {
-  const own = generated === true ? {} : generated
+  if (generated === true) {
+    return DEFAULT_TOKEN_RECIPE
+  }
 
   return {
-    length: own.length ?? GENERATED_VALUE_LENGTH,
-    lowercase: true,
-    uppercase: true,
-    digits: true,
-    // Letters and digits by default: what a header or an env file takes
-    // as it is.
-    symbols: own.symbols ?? false,
-    exclude: "",
+    ...DEFAULT_TOKEN_RECIPE,
+    ...(generated.length !== undefined ? { length: generated.length } : {}),
+    // Letters and digits, unless the definition asks for symbols.
+    ...(generated.symbols ? { format: "password", symbols: true } : {}),
   }
 }
 
 /**
- * Makes the secrets for the generated variables the bindings leave unbound,
- * and answers the bindings with them. Each secret's id goes into `made` as
- * soon as it exists, so a caller that fails part way (here or after) takes
- * back exactly what it made.
+ * Makes (or finds) the value for each generated variable the bindings leave
+ * unbound, and answers the bindings with them and the variables so bound.
+ * Each secret goes into `made` as soon as it exists, so a caller that fails
+ * part way (here or after) takes back exactly what it made.
  */
 export async function makeGeneratedSecrets(
   ctx: VaultContext,
@@ -66,45 +70,43 @@ export async function makeGeneratedSecrets(
     service: string
     definition: ServiceDefinition
     bindings: ServiceEnvBindings
-    made: string[]
+    made: MadeSecret[]
   },
-): Promise<ServiceEnvBindings> {
+): Promise<{ bindings: ServiceEnvBindings; generated: string[] }> {
   const bound = { ...bindings }
+  const generated: string[] = []
 
   for (const entry of generatedEnv(definition)) {
     if (bound[entry.name]) {
       continue
     }
 
-    const { id } = await createSecretNamedAfter(ctx, {
-      base: `${service} ${entry.name}`,
-      value: generatePassword(generatedRecipe(entry.generated)),
-      description: `PCP made this value for ${entry.name} of the service ${service} when it was launched.`,
+    const secret = await createGeneratedSecret(ctx, {
+      name: generatedSecretName(service, entry.name),
+      recipe: generatedRecipe(entry.generated),
+      description: `PCP made this value for ${entry.name} of the service ${service}.`,
     })
-    bound[entry.name] = id
-    made.push(id)
+    made.push({ id: secret.id, created: secret.created })
+    bound[entry.name] = secret.id
+    generated.push(entry.name)
   }
 
-  return bound
+  return { bindings: bound, generated }
 }
 
-/** The secrets a service made for its generated variables, as stored. */
-export function readGeneratedSecrets(json: string): string[] {
-  try {
-    const value = JSON.parse(json) as unknown
-    return Array.isArray(value)
-      ? value.filter((id): id is string => typeof id === "string")
-      : []
-  } catch {
-    return []
-  }
+/** Takes back what a launch that failed made for its variables. */
+export async function dropGeneratedSecrets(
+  ctx: VaultContext,
+  made: MadeSecret[],
+): Promise<void> {
+  await takeBackGenerated(ctx, made).catch(() => {})
 }
 
 /**
  * A service whose definition gained a generated variable since it was
  * launched (an update, a repository's change, a definition saved): its
  * value is made now, before the container is made again with its
- * variables, and kept on the service as at launch. The server it
+ * variables, and bound on the service as at launch. The server it
  * registered sends it when it is that server's header. Nothing happens
  * when every generated variable has a secret already.
  */
@@ -120,29 +122,21 @@ export async function bindGeneratedEnv(
     return loaded
   }
 
-  const made: string[] = []
+  const made: MadeSecret[] = []
   let env: ServiceEnvBindings
 
   try {
-    env = await makeGeneratedSecrets(ctx, {
-      service: loaded.server.name,
-      definition: loaded.definition,
-      bindings: loaded.env,
-      made,
-    })
-    const spec = await db().serviceSpec.findUniqueOrThrow({
-      where: { serverId: loaded.server.id },
-      select: { generatedSecrets: true },
-    })
+    env = (
+      await makeGeneratedSecrets(ctx, {
+        service: loaded.server.name.replace(/ service$/, ""),
+        definition: loaded.definition,
+        bindings: loaded.env,
+        made,
+      })
+    ).bindings
     await db().serviceSpec.update({
       where: { serverId: loaded.server.id },
-      data: {
-        env: JSON.stringify(env),
-        generatedSecrets: JSON.stringify([
-          ...readGeneratedSecrets(spec.generatedSecrets),
-          ...made,
-        ]),
-      },
+      data: { env: JSON.stringify(env) },
     })
   } catch (error) {
     await dropGeneratedSecrets(ctx, made)
@@ -167,10 +161,25 @@ export async function bindGeneratedEnv(
   return { ...loaded, env }
 }
 
+/** The values PCP made that a service's variables take: its generated ones. */
+export async function generatedSecretsOf(
+  ctx: VaultContext,
+  bindings: ServiceEnvBindings,
+): Promise<string[]> {
+  const ids = [...new Set(Object.values(bindings))]
+
+  return (
+    await db().secret.findMany({
+      where: { vaultId: ctx.vaultId, id: { in: ids }, kind: "generated" },
+      select: { id: true },
+    })
+  ).map((secret) => secret.id)
+}
+
 /**
- * After a service is removed: the secrets it made for its generated
- * variables go too, unless something still sends them (the server it
- * registered, kept, or another service's variable).
+ * After a service is removed: the values PCP made for its variables go too
+ * (deleteManagedSecret), unless something still sends one (the server it
+ * registered, kept, or another service of the same name's variable).
  */
 export async function dropUnusedGeneratedSecrets(
   ctx: VaultContext,
@@ -187,19 +196,7 @@ export async function dropUnusedGeneratedSecrets(
     ])
 
     if (servers === 0 && specs === 0) {
-      await dropGeneratedSecrets(ctx, [id])
+      await deleteManagedSecret(ctx, id)
     }
-  }
-}
-
-/** Takes back the secrets a launch that failed made for its variables. */
-export async function dropGeneratedSecrets(
-  ctx: VaultContext,
-  ids: string[],
-): Promise<void> {
-  if (ids.length > 0) {
-    await db()
-      .secret.deleteMany({ where: { vaultId: ctx.vaultId, id: { in: ids } } })
-      .catch(() => {})
   }
 }

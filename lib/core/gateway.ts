@@ -36,6 +36,7 @@ import {
   TOOL_ACCESS_LEVELS,
   TOOL_TIER_LABELS,
   TOOL_TIERS,
+  type PasswordRecipe,
   type ToolTier,
 } from "./constants"
 import { MB, RESOURCE_BOUNDS } from "./resources/limits"
@@ -107,6 +108,7 @@ import { connectAccount, signinCheck } from "./services/signin"
 import {
   CHECK_PERMISSION_NEXT,
   linkLastText,
+  markdownLink,
   nextMessageCheck,
   OWNER_LINK_RULE,
 } from "./owner-link"
@@ -236,7 +238,19 @@ import {
   MAX_LISTED_SECRETS,
   MAX_SECRET_QUERY,
 } from "./secret-uses"
-import { findTextSecretByName, validateSecretName } from "./secrets"
+import { validateSecretName } from "./secrets"
+import { credentialUse, resolveSecretRef } from "./secret-refs"
+import {
+  prepareSecretRequest,
+  recipeArg,
+  type SecretRequestArgs,
+} from "./secret-request"
+import {
+  MAX_SECRET_PURPOSE_CHARS,
+  MAX_SECRET_REQUEST_ORIGINS,
+  MAX_URL_LENGTH,
+} from "./browser/limits"
+import { checkPasswordRecipe } from "./generate-password"
 import {
   isStorageKind,
   normalizeNameAndDescription,
@@ -266,6 +280,12 @@ import {
   capabilityOfTool,
   type CapabilityId,
 } from "./capabilities/list"
+import {
+  CATALOGUE,
+  canSetUpLine,
+  catalogueNamed,
+} from "./capabilities/catalogue"
+import { setUpEntries } from "./capabilities/catalogue-state"
 import {
   MAX_ANSWER_CHARS as MAX_CAPABILITY_ANSWER_CHARS,
   MAX_MERGED_FILES,
@@ -328,6 +348,7 @@ import {
 } from "./gate/config"
 import { gateClassOf } from "./gate/limits"
 import { limitsLine, MAX_LIMITS_NOTE, proposeLimits } from "./gate/proposals"
+import { proposePcpUpdate, versionReport, versionText } from "./updates/tools"
 import type { WindowCounts } from "./gate/places"
 import { readServerLimits } from "./gate/store"
 import { mailDiagnostics } from "./mail/diagnostics"
@@ -514,6 +535,14 @@ const HANDLE_INVALID =
   "That call_handle is not one search gave this token, or it was changed, so nothing was run or asked. Call search with the tool's ref and pass its call_handle as it is."
 const HANDLE_GONE =
   "That call_handle is for a tool this token can no longer reach: it was removed, or the owner took its server away. Nothing was run or asked; search finds what there is now."
+
+/**
+ * Talking to an assistant is a way to use PCP of its own (#163): what PCP
+ * could do but has not been set up is found by search, said in a
+ * sentence, and set up with the owner's approval.
+ */
+export const SET_UP_RULE =
+  'When the owner asks for something PCP has not set up yet (their mail, a printer, a server to host things on), search for it in their words: a "can set up" line says what it takes. Tell them in a sentence, and that you can set it up with their approval.'
 
 /** The rule behind the gateway's tools, in one sentence. */
 export const CORE_RULE =
@@ -774,6 +803,7 @@ export function buildInstructions(
     return [
       ...lead,
       "PCP is a gateway to the owner's MCP servers, APIs, mail and calendar accounts, but this token has no servers to reach yet. Ask the owner to add one in PCP, or propose one with register_server (an MCP server by its address, an API from its OpenAPI document, a mail account over JMAP or IMAP, or a calendar account over CalDAV).",
+      SET_UP_RULE,
       ...(hasSkills || memories
         ? [
             `search finds ${hasSkills && memories ? "the owner's skills and memories" : hasSkills ? "the owner's skills" : "memories"} by a few words, and reads one with its ref. PCP's own tools (search with kind pcp lists them) run by name: execute_<tier> with {"tool": "<name>", "arguments": {…}}.`,
@@ -803,7 +833,7 @@ export function buildInstructions(
   return [
     ...lead,
     `PCP is a gateway to the owner's MCP servers, APIs, mail and calendar accounts. Tool names are not listed here: ${discovery(hasSkills, memories !== null)} For the owner's tools execute_* take no server or tool name, only the call_handle, and check the arguments before anything runs. Refer to tools as server/tool.`,
-    `The owner decides per tool what you may run. A tool they have not allowed yet answers "Not done yet" with a link. ${OWNER_LINK_RULE} ${nextMessageCheck("check_permission with the id it gave")} withdraw_request takes back a request you no longer need. A server that needs them to sign in answers with a link to connect it, handed over the same way; check_server, called on their next message the same way, says whether it is connected. register_server proposes something new, which the owner agrees to in PCP: an MCP server by its address, an API from its OpenAPI document, a mail account (JMAP, or IMAP with SMTP), or a calendar account (CalDAV: calendars and reminders, as iCloud's). A mailbox is always a mail account and a calendar a calendar account, never an API written around their servers. It takes no authentication, a secret in a header, a user name and password, or OAuth, naming secrets by name only: a new secret is typed in by the owner on PCP's page, and PCP finds out itself whether an OAuth provider lets it register. propose_tool_access proposes which tools you may run, many at once; the owner reviews and saves it in PCP.`,
+    `The owner decides per tool what you may run. A tool they have not allowed yet answers "Not done yet" with a link. ${OWNER_LINK_RULE} ${nextMessageCheck("check_permission with the id it gave")} withdraw_request takes back a request you no longer need. A server that needs them to sign in answers with a link to connect it, handed over the same way; check_server, called on their next message the same way, says whether it is connected. register_server proposes something new, which the owner agrees to in PCP: an MCP server by its address, an API from its OpenAPI document, a mail account (JMAP, or IMAP with SMTP), or a calendar account (CalDAV: calendars and reminders, as iCloud's). A mailbox is always a mail account and a calendar a calendar account, never an API written around their servers. It takes no authentication, a secret in a header, a user name and password, or OAuth, naming secrets by name only: a new secret is typed in by the owner on PCP's page, and PCP finds out itself whether an OAuth provider lets it register. propose_tool_access proposes which tools you may run, many at once; the owner reviews and saves it in PCP. ${SET_UP_RULE}`,
     'An answer too long to pass on whole ends with a result id: read_result reads all of it, a slice at a time. Files and long values in an answer come back as handles, {"$result": "<id>", …}: pass one as it is in any later call\'s arguments, or as a send_email or create_draft attachment, and PCP puts the value there, so it never has to pass through you.',
     "Servers:",
     ...lines,
@@ -849,6 +879,7 @@ export function keyRules({
     `- To use the owner's tools, ${discovery(skills, memories)}`,
     `- The owner decides per tool what you may run. A tool they have not allowed yet answers "Not done yet" with a link. ${OWNER_LINK_RULE} ${nextMessageCheck("check_permission with the id it gave")}`,
     "- An answer too long to pass on whole ends with a result id: read_result reads the rest, a slice at a time.",
+    `- ${SET_UP_RULE}`,
     `- ${CORE_RULE}`,
   ]
 }
@@ -1610,6 +1641,7 @@ export function buildGatewayServer(
     }
 
     const skillLines = skillInstructions(skills)
+    const offered = await notSetUp()
 
     if (client) {
       noteMemoryRead(client.sessionKey)
@@ -1620,6 +1652,12 @@ export function buildGatewayServer(
       [
         ...rules,
         ...(skillLines.length > 0 ? ["", ...skillLines] : []),
+        ...(offered.length > 0
+          ? [
+              "",
+              `What PCP can set up when the owner asks, which this token does not have: ${offered.map((entry) => entry.title).join(", ")}. search with their words says what each takes.${limitedToken ? " The owner chose which servers this token reaches, so some may be set up already: ask them before setting up another." : ""}`,
+            ]
+          : []),
         "",
         STANDING_LEAD,
         ...keyRules({ skills: hasSkills, memories: scope.keepMemories }),
@@ -1725,20 +1763,77 @@ export function buildGatewayServer(
    * search's line for each capability the query names that has no
    * provider among this token's tools (capabilities/list.ts).
    */
-  async function missingCapabilities(query: string): Promise<string[]> {
+  async function missingCapabilities(
+    query: string,
+  ): Promise<{ lines: string[]; ids: Set<CapabilityId> }> {
     const lines: string[] = []
+    const ids = new Set<CapabilityId>()
 
     for (const cap of capabilitiesNamed(query)) {
       const found = await providersFor(cap.id)
 
       if (!Object.values(found).some((list) => (list?.length ?? 0) > 0)) {
+        ids.add(cap.id)
         lines.push(
           `not installed: ${cap.title} (pcp ${cap.tool}) — ${cap.summary} No tool of this token provides it yet: calling ${cap.tool} answers with the owner's link, "${cap.label}", to set one up.`,
         )
       }
     }
 
-    return lines
+    return { lines, ids }
+  }
+
+  /**
+   * The catalogue's entries this token has (catalogue-state.ts): from the
+   * servers and services it reaches and the providers among its tools,
+   * never from the rest of the vault.
+   */
+  function tokenHas() {
+    return setUpEntries(scope.ctx, currentServers(), async (id) =>
+      Object.values(await providersFor(id)).some(
+        (list) => (list?.length ?? 0) > 0,
+      ),
+    )
+  }
+
+  /** The catalogue's entries this token has not got (catalogue.ts). */
+  async function notSetUp() {
+    const done = await tokenHas()
+
+    return CATALOGUE.filter((entry) => !done.has(entry.id))
+  }
+
+  /** A token the owner limited to servers they chose: it sees no others. */
+  const limitedToken = Boolean(scope.serverIds)
+
+  /**
+   * search's "can set up" line for each catalogue entry the query names
+   * that this token has not got, but for one whose capability already has
+   * its "not installed" line. A token limited to some servers is told the
+   * owner may have it already, out of its reach.
+   */
+  async function canSetUp(
+    query: string,
+    reported: Set<CapabilityId>,
+  ): Promise<string[]> {
+    const named = catalogueNamed(query).filter(
+      (entry) => !entry.capability || !reported.has(entry.capability),
+    )
+
+    if (named.length === 0) {
+      return []
+    }
+
+    const done = await tokenHas()
+    const base = scope.publicUrl.replace(/\/+$/, "")
+
+    return named
+      .filter((entry) => !done.has(entry.id))
+      .map((entry) =>
+        canSetUpLine(entry, markdownLink(entry.label, `${base}${entry.page}`), {
+          limited: limitedToken,
+        }),
+      )
   }
 
   /** search's answer, before what it says once a session. */
@@ -1811,15 +1906,18 @@ export function buildGatewayServer(
 
     // A capability the query names that no tool of this token provides:
     // its tool is there all the same, and answers with the owner's link.
-    const missing =
-      args.server || (args.kind && args.kind !== "pcp")
-        ? []
-        : await missingCapabilities(args.query)
+    const narrowed = Boolean(args.server || (args.kind && args.kind !== "pcp"))
+    const { lines: missing, ids: reported } = narrowed
+      ? { lines: [], ids: new Set<CapabilityId>() }
+      : await missingCapabilities(args.query)
+    // What PCP could set up for it that the vault has not (#163).
+    const settable = narrowed ? [] : await canSetUp(args.query, reported)
 
     if (
       results.length === 0 &&
       repoResults.length === 0 &&
-      missing.length === 0
+      missing.length === 0 &&
+      settable.length === 0
     ) {
       return text(
         `Nothing matches "${args.query}". Try other words, or list_tools for every tool on a server.`,
@@ -1853,6 +1951,7 @@ export function buildGatewayServer(
         ),
         ...(notes.length ? ["", ...notes] : []),
         ...(missing.length ? ["", ...missing] : []),
+        ...(settable.length ? ["", ...settable] : []),
         ...(args.kind
           ? []
           : repoResults.map(
@@ -4545,6 +4644,151 @@ export function buildGatewayServer(
     },
   })
 
+  // PCP's own version and its update (lib/core/updates/tools.ts): read from
+  // what the update check already holds, never a request to GitHub; the
+  // install is always the owner's, on PCP's page.
+  register({
+    name: "get_version",
+    title: "Read PCP's version",
+    description:
+      "Get PCP's version and build: the version this PCP runs, its commit and build date, whether a newer one is out on the owner's channel (from PCP's last update check; this never asks GitHub), what changed (GitHub's release notes, as untrusted text), whether this PCP can install an update itself and how the owner updates it if not, and how the last install went. For questions about updates and upgrades, and after update_pcp.",
+    input: z.object({}),
+    output: z.object({
+      version: z.string(),
+      commit: z.string().nullable(),
+      built_at: z.string().nullable(),
+      dev_build: z.boolean(),
+      channel: z.enum(["stable", "develop"]),
+      check: z.boolean(),
+      latest: z.string().nullable(),
+      checked_at: z.string().nullable(),
+      up_to_date: z.boolean().nullable(),
+      changelog: z
+        .object({
+          version: z.string(),
+          published_at: z.string().nullable(),
+          url: z.string(),
+          notes_untrusted: z.string(),
+        })
+        .nullable(),
+      can_update_itself: z.boolean(),
+      cannot_update: z
+        .object({ reason: z.string(), steps: z.string() })
+        .nullable(),
+      last_install: z
+        .object({
+          from: z.string(),
+          to: z.string(),
+          asked_at: z.string(),
+          state: z.enum(["finished", "installing", "not_finished"]),
+          finished: z.boolean(),
+        })
+        .nullable(),
+    }),
+    annotations: READS,
+    async run() {
+      const report = await versionReport()
+
+      return ok(report, { text: versionText(report) })
+    },
+  })
+
+  register({
+    name: "update_pcp",
+    title: "Install a newer PCP",
+    description: `Update PCP to the newest version (upgrade), with the owner's yes: asks them to install the newer version PCP's last update check found and restart. They see the version, its release notes and a warning; nothing installs until they agree, whatever your levels. The restart may drop your connection: afterwards check_permission or get_version says how it went. Where this PCP cannot install an update itself, or no newer version is known (checking is off, or nothing newer was found), it says so at once with the owner's steps, and asks nothing. ${OWNER_LINK_RULE} ${nextMessageCheck("check_permission with its id")}`,
+    input: z.object({}),
+    output: z.discriminatedUnion("kind", [NEEDS_OWNER]),
+    annotations: PROPOSES,
+    guard: {
+      never:
+        "Asks the owner each time; the same request asked again finds the one waiting.",
+    },
+    async run() {
+      const proposed = await proposePcpUpdate()
+
+      if ("refused" in proposed) {
+        return failure(
+          `${proposed.refused}\n\n${linkLastText(`${scope.publicUrl}/settings#updates`, "Open Settings → Updates")}`,
+          "state",
+        )
+      }
+
+      return asked({ kind: "pcp_update", input: proposed.ask })
+    },
+  })
+
+  // A secret the owner stores on PCP's page, typed in or made by PCP there
+  // (#162; the browser's request_secret is its alias for one release).
+  register({
+    name: "request_secret",
+    title: "Ask the owner for a secret",
+    description: `Request a new secret from the owner: a password, an API key or token, or a sign-in's one-time codes, stored on PCP's page so its value never passes through you or the conversation. They type it in, or have PCP make it (generate: a password, or a token of letters and digits, hex or base64url, for a key a server or service is to be given), and check the login name and the sites. origins, optional, are the sites the browser may type it at without asking again; with none, each site asks the owner. Name it in register_server's secret or env_secrets, or a wrapper's secrets, to have it sent there once the owner approves. Answers "Not done yet" with a link. ${OWNER_LINK_RULE} ${nextMessageCheck("check_permission with the id it gave")} Never ask for the value in the conversation. A name PCP already holds is refused: name that one instead.`,
+    input: z
+      .object({
+        name: z
+          .string()
+          .min(1)
+          .max(100)
+          .describe(
+            "The secret's name, as the owner sees it under Secrets: Example password, Docling API key.",
+          ),
+        purpose: z
+          .string()
+          .min(1)
+          .max(MAX_SECRET_PURPOSE_CHARS)
+          .describe("What it is for, in a sentence, for the owner."),
+        kind: z
+          .enum(["text", "totp"])
+          .optional()
+          .describe(
+            "text (the default): a password, key or token. totp: a sign-in's one-time codes, from the seed the site showed (base32 or an otpauth:// link), typed by the browser only, so it needs origins.",
+          ),
+        username: z
+          .string()
+          .min(1)
+          .max(200)
+          .optional()
+          .describe(
+            'The login name (user name or email address) it goes with, kept with the secret for the owner to check: the browser types it with {"$secret": name, "part": "username"}. Not for totp.',
+          ),
+        origins: z
+          .array(z.string().min(1).max(MAX_URL_LENGTH))
+          .max(MAX_SECRET_REQUEST_ORIGINS)
+          .optional()
+          .describe(
+            "The sites the browser may type it at, like https://example.com (an address there will do). Leave out for a secret only a server, service or wrapper is sent.",
+          ),
+        generate: recipeArg(
+          "Ask PCP to make the value rather than the owner typing one: a password for a sign-up or a password change, or a token (format alphanumeric, hex or base64url) for a key a server or service is to be set up with. Made on PCP's machine and stored at once; the owner can change the recipe on the page and see the value under Secrets, and you never get it. Not for totp.",
+        ).optional(),
+      })
+      .meta({
+        allOf: [
+          {
+            if: { properties: { kind: { const: "totp" } }, required: ["kind"] },
+            then: {
+              required: ["origins"],
+              not: {
+                anyOf: [{ required: ["username"] }, { required: ["generate"] }],
+              },
+            },
+          },
+        ],
+      }),
+    output: NEEDS_OWNER,
+    annotations: PROPOSES,
+    async run(args: SecretRequestArgs) {
+      const prepared = await prepareSecretRequest(scope.ctx, args)
+
+      if ("refused" in prepared) {
+        return failure(prepared.refused)
+      }
+
+      return asked({ kind: "secret_request", input: prepared.ask })
+    },
+  })
+
   // The values a token's answers handed back as handles, for a client that
   // reads resources (each answer links them). Only the token's own results
   // resolve; none are listed, and nothing kept is logged.
@@ -5152,6 +5396,9 @@ export function buildGatewayServer(
         .describe(
           'For header and basic: the name of a secret the owner stored in PCP (the key, token or password), which is then reused, or a name for a new one (say "Linear API key" or "Personal mail app password"), which the owner types in on PCP\'s page when they agree; that request can only be answered there. For oauth with client_id: the name of the secret holding that client\'s secret, or leave it out and the owner enters it on PCP\'s page. Its name, never its value.',
         ),
+      generate: recipeArg(
+        "With a new secret's name in secret: propose that PCP makes its value (a key the server is to be given, a password for an account being made) rather than the owner typing one. The owner sees the recipe on PCP's page, may change it or type a value instead, and PCP stores what it makes at once; you never get it. Not for a key or password the server already issued.",
+      ).optional(),
       username: z
         .string()
         .max(320)
@@ -5278,6 +5525,9 @@ export function buildGatewayServer(
               .describe(
                 "The NAME of the secret it takes: one the owner stored, or one new name they type in on PCP's page.",
               ),
+            generate: recipeArg(
+              "With a new secret's name: propose that PCP makes its value (a key or password the service is to be set up with) rather than the owner typing one; shown on PCP's page, where the owner may change it. You never get the value.",
+            ).optional(),
           }),
         )
         .max(64)
@@ -5320,7 +5570,8 @@ export function buildGatewayServer(
       ssh_server?: string
       publish_address?: string
       publish_ports?: Array<{ container: number; host: number }>
-      env_secrets?: Array<{ name: string; secret: string }>
+      env_secrets?: Array<{ name: string; secret: string; generate?: unknown }>
+      generate?: unknown
       tool_access?: ToolAccessArg
       limits?: LimitsArg
     }) {
@@ -5434,9 +5685,16 @@ export function buildGatewayServer(
       let authValueTemplate: string | null = null
       const authExtraHeaders: NonNullable<RegisterArgs["authExtraHeaders"]> = []
 
+      // Which of the vault's secrets its fields may name (secret-refs.ts).
+      const credential = credentialUse({
+        authType,
+        mail: kind === "jmap" || kind === "imap",
+        calendar: kind === "caldav",
+      })
+
       if (authType === "header" || authType === "basic") {
         const named = args.secret!.trim()
-        const secret = await findTextSecretByName(scope.ctx, named)
+        const secret = await resolveSecretRef(scope.ctx, named, credential)
 
         if (secret) {
           authSecretId = secret.id
@@ -5503,7 +5761,11 @@ export function buildGatewayServer(
             )
           }
 
-          const found = await findTextSecretByName(scope.ctx, extra.secret)
+          const found = await resolveSecretRef(
+            scope.ctx,
+            extra.secret,
+            credential,
+          )
 
           // Only the first header's secret can be typed in on PCP's page.
           if (!found) {
@@ -5537,7 +5799,7 @@ export function buildGatewayServer(
         // leave it empty).
         const named = args.secret?.trim()
         const stored = named
-          ? await findTextSecretByName(scope.ctx, named)
+          ? await resolveSecretRef(scope.ctx, named, credential)
           : null
 
         if (stored) {
@@ -5557,6 +5819,29 @@ export function buildGatewayServer(
         }
       }
 
+      // A value PCP is to make for the new secret: proposed, shown to the
+      // owner, and made only when they save.
+      let newSecretGenerate: PasswordRecipe | null = null
+
+      if (args.generate !== undefined) {
+        // The shape check made sure a secret is named: one PCP holds.
+        if (!newSecretName) {
+          return failure(
+            `generate is for a new secret, and "${secretName ?? ""}" is one the owner holds: leave it out to reuse that one, or name a new secret.`,
+          )
+        }
+
+        try {
+          newSecretGenerate = checkPasswordRecipe(args.generate)
+        } catch (error) {
+          if (isPcpError(error)) {
+            return failure(`generate: ${error.message}`)
+          }
+
+          throw error
+        }
+      }
+
       const common = {
         description: args.description?.trim() ?? "",
         authType,
@@ -5570,6 +5855,7 @@ export function buildGatewayServer(
         oauthClientSecretId,
         ...(newSecretName ? { newSecretName } : {}),
         ...(newSecretOptional ? { newSecretOptional } : {}),
+        ...(newSecretGenerate ? { newSecretGenerate } : {}),
         ...(note ? { note } : {}),
         ...(bound
           ? {

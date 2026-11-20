@@ -258,6 +258,18 @@ describe("decisions", () => {
     expect(() => parseDecision("skill_change", "always")).toThrow()
   })
 
+  it("offers a PCP update this install or not, never a standing yes (#161)", () => {
+    expect(decisionsFor("pcp_update")).toEqual([
+      { value: "allow_once", label: "Install and restart" },
+      { value: "decline", label: "Not now" },
+    ])
+    for (const standing of ["always", "allow_for", "block"]) {
+      expect(() => parseDecision("pcp_update", standing)).toThrow(
+        /allow_once, decline/,
+      )
+    }
+  })
+
   it("offers proposed tool levels no answer but no", () => {
     expect(decisionsFor("access").map((decision) => decision.value)).toEqual([
       "decline",

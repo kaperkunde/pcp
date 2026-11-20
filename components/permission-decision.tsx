@@ -32,6 +32,7 @@ import {
   MIN_GENERATED_LENGTH,
   allowForLabel,
   type PasswordRecipe,
+  type SecretFormat,
   type PermissionDecision as Decision,
 } from "@/lib/core/constants"
 import type { ProposedAccessShown } from "@/lib/core/proposed-access"
@@ -84,7 +85,16 @@ const QUIET: Decision[] = ["block", "discard"]
  * as `username`, the value as `new-password`, so one they suggest is saved
  * with the right login. Generate (on when the assistant asked, `generate`)
  * has PCP make the password instead, from the recipe shown, on its own
- * machine: nothing typed here, and the assistant never gets it.
+ * machine: nothing typed here, and the assistant never gets it. A request
+ * for a secret with no sites (PCP's own request_secret) shows no sites.
+ *
+ * Every other new secret (a new server's, a service's variable, a
+ * wrapper's place; never an OAuth client's, which the provider issues)
+ * offers "Have PCP make it" too, with
+ * the recipe the assistant proposed or the one for its use
+ * (`defaultRecipe`: a long token for a header, a variable or a place, a
+ * password for a basic login): a format, a length, and for a password the
+ * kinds of character.
  *
  * A change to a secret's sites (update_secret_sites, `sites`) lists the
  * sites it has and each change with a box, ticked unless it looks like one
@@ -133,8 +143,10 @@ export function PermissionDecision({
     origins?: string[]
     /** A secret for the browser: the login name it goes with. */
     username?: string | null
-    /** A secret for the browser: the password PCP was asked to make. */
+    /** The value PCP was asked to make, which the switch starts on with. */
     generate?: PasswordRecipe | null
+    /** What PCP makes when the assistant asked for nothing; null for none. */
+    defaultRecipe?: PasswordRecipe | null
   } | null
   every?: { asked: boolean } | null
   privateAddresses?: boolean
@@ -152,17 +164,27 @@ export function PermissionDecision({
   const [always, setAlways] = useState(every?.asked === true)
   const [allowPrivate, setAllowPrivate] = useState(false)
   const [minutes, setMinutes] = useState<number>(DEFAULT_ALLOW_FOR_MINUTES)
-  const browserSecret = secret?.origins !== undefined
-  // A new text secret for the browser: its login name and Generate.
-  const credential = browserSecret && secret?.kind !== "totp" && !secret?.exists
+  // request_secret: a secret the owner stores, with its sites if it has
+  // any (the browser types it there).
+  const requested = secret?.origins !== undefined
+  const browserSecret = requested && (secret?.origins?.length ?? 0) > 0
+  // A new text secret request_secret asks for: its login name and Generate.
+  const credential = requested && secret?.kind !== "totp" && !secret?.exists
+  // A new secret PCP can make: not one-time codes (the site's seed), nor
+  // an OAuth client's secret (the provider issues it).
+  const canMake = Boolean(
+    secret &&
+    !secret.exists &&
+    secret.kind !== "totp" &&
+    !secret.clientId &&
+    secret.defaultRecipe !== null,
+  )
   const [kept, setKept] = useState<string[]>(secret?.origins ?? [])
   const [moreOrigins, setMoreOrigins] = useState("")
   const [username, setUsername] = useState(secret?.username ?? "")
-  const [generate, setGenerate] = useState(
-    credential && Boolean(secret?.generate),
-  )
+  const [generate, setGenerate] = useState(canMake && Boolean(secret?.generate))
   const [recipe, setRecipe] = useState<PasswordRecipe>(
-    secret?.generate ?? DEFAULT_PASSWORD_RECIPE,
+    secret?.generate ?? secret?.defaultRecipe ?? DEFAULT_PASSWORD_RECIPE,
   )
   const [siteKeep, setSiteKeep] = useState<string[]>(() =>
     (sites?.changes ?? [])
@@ -188,7 +210,7 @@ export function PermissionDecision({
       !secret.exists &&
       !secret.optional &&
       !secretValue &&
-      !(credential && generate)
+      !(canMake && generate)
     ) {
       setError(
         secret.login
@@ -219,7 +241,7 @@ export function PermissionDecision({
       const result = await decidePermissionAction(
         id,
         value,
-        secret && agrees && secretValue && !(credential && generate)
+        secret && agrees && secretValue && !(canMake && generate)
           ? secretValue
           : undefined,
         every ? always : undefined,
@@ -236,10 +258,10 @@ export function PermissionDecision({
         revision,
         privateAddresses && agrees ? allowPrivate : undefined,
         access && agrees ? chosenAccess(accessRows) : undefined,
-        agrees && (credential || sites)
+        agrees && (credential || sites || (canMake && generate))
           ? {
               ...(credential ? { loginName: username } : {}),
-              ...(credential && generate ? { generate: recipe } : {}),
+              ...(canMake && generate ? { generate: recipe } : {}),
               ...(sites
                 ? { sites: { basis: sites.basis, keep: siteKeep } }
                 : {}),
@@ -410,68 +432,44 @@ export function PermissionDecision({
             />
           </List>
           {generate ? (
-            <fieldset className="m-0 flex flex-col gap-3 border-0 p-0">
-              <legend className="mb-2 text-sm font-medium">
-                The password PCP makes
-              </legend>
-              <Field label="Length" htmlFor={`permission-${id}-length`}>
-                <Input
-                  id={`permission-${id}-length`}
-                  type="number"
-                  inputMode="numeric"
-                  autoComplete="off"
-                  min={MIN_GENERATED_LENGTH}
-                  max={MAX_GENERATED_LENGTH}
-                  value={recipe.length}
-                  onChange={(event) =>
-                    setRecipeField("length", Number(event.target.value))
-                  }
-                  className="w-28"
-                  disabled={pending}
-                />
-              </Field>
-              <div className="flex flex-wrap gap-x-5 gap-y-2">
-                {(
-                  [
-                    ["lowercase", "Lower-case letters"],
-                    ["uppercase", "Capital letters"],
-                    ["digits", "Digits"],
-                    ["symbols", "Symbols"],
-                  ] as const
-                ).map(([key, label]) => (
-                  <Label key={key} className="font-normal">
-                    <Checkbox
-                      checked={recipe[key]}
-                      onChange={(event) =>
-                        setRecipeField(key, event.target.checked)
-                      }
-                      disabled={pending}
-                    />
-                    {label}
-                  </Label>
-                ))}
-              </div>
-              <Field
-                label="Leave out"
-                htmlFor={`permission-${id}-exclude`}
-                hint="Characters the site refuses, if any."
-              >
-                <Input
-                  id={`permission-${id}-exclude`}
-                  autoComplete="off"
-                  spellCheck={false}
-                  maxLength={MAX_GENERATE_EXCLUDE}
-                  value={recipe.exclude}
-                  onChange={(event) =>
-                    setRecipeField("exclude", event.target.value)
-                  }
-                  className="font-mono"
-                  disabled={pending}
-                />
-              </Field>
-            </fieldset>
+            <RecipeFields
+              id={id}
+              recipe={recipe}
+              onChange={setRecipeField}
+              disabled={pending}
+            />
           ) : null}
         </form>
+      ) : canMake ? (
+        // A new secret PCP can make: typed in, or made by PCP when saved.
+        <div className="flex flex-col gap-5">
+          {generate ? null : valueField}
+          <List>
+            <SwitchRow
+              id={`permission-${id}-generate`}
+              label="Have PCP make it"
+              description={
+                <>
+                  {secret?.generate ? "The assistant asked for this. " : null}
+                  For a key or password that something is to be set up with: PCP
+                  makes it when you agree, nobody sees it on the way, and you
+                  can reveal it under Secrets. Not for one a provider gave you.
+                </>
+              }
+              checked={generate}
+              onChange={(event) => setGenerate(event.target.checked)}
+              disabled={pending}
+            />
+          </List>
+          {generate ? (
+            <RecipeFields
+              id={id}
+              recipe={recipe}
+              onChange={setRecipeField}
+              disabled={pending}
+            />
+          ) : null}
+        </div>
       ) : (
         valueField
       )}
@@ -698,5 +696,118 @@ export function PermissionDecision({
         ))}
       />
     </div>
+  )
+}
+
+const FORMAT_LABELS: Record<SecretFormat, string> = {
+  password: "A password",
+  alphanumeric: "Letters and digits",
+  hex: "Hex digits",
+  base64url: "Base64url",
+}
+
+/**
+ * The recipe of a value PCP makes: its format, its length in characters,
+ * a password's kinds of character, and what to leave out of a password or
+ * of letters and digits.
+ */
+function RecipeFields({
+  id,
+  recipe,
+  onChange,
+  disabled,
+}: {
+  id: string
+  recipe: PasswordRecipe
+  onChange: <K extends keyof PasswordRecipe>(
+    key: K,
+    value: PasswordRecipe[K],
+  ) => void
+  disabled: boolean
+}) {
+  const format = recipe.format ?? "password"
+
+  return (
+    <fieldset className="m-0 flex flex-col gap-3 border-0 p-0">
+      <legend className="mb-2 text-sm font-medium">What PCP makes</legend>
+      <div className="flex flex-wrap gap-3">
+        <Field label="Kind" htmlFor={`permission-${id}-format`}>
+          <Select
+            id={`permission-${id}-format`}
+            value={format}
+            onChange={(event) => {
+              const next = event.target.value as SecretFormat
+
+              onChange("format", next)
+              // hex and base64url are encodings: nothing is left out.
+              if (next === "hex" || next === "base64url") {
+                onChange("exclude", "")
+              }
+            }}
+            className="w-auto"
+            disabled={disabled}
+          >
+            {(Object.keys(FORMAT_LABELS) as SecretFormat[]).map((value) => (
+              <option key={value} value={value}>
+                {FORMAT_LABELS[value]}
+              </option>
+            ))}
+          </Select>
+        </Field>
+        <Field label="Length" htmlFor={`permission-${id}-length`}>
+          <Input
+            id={`permission-${id}-length`}
+            type="number"
+            inputMode="numeric"
+            autoComplete="off"
+            min={MIN_GENERATED_LENGTH}
+            max={MAX_GENERATED_LENGTH}
+            value={recipe.length}
+            onChange={(event) => onChange("length", Number(event.target.value))}
+            className="w-28"
+            disabled={disabled}
+          />
+        </Field>
+      </div>
+      {format === "password" ? (
+        <div className="flex flex-wrap gap-x-5 gap-y-2">
+          {(
+            [
+              ["lowercase", "Lower-case letters"],
+              ["uppercase", "Capital letters"],
+              ["digits", "Digits"],
+              ["symbols", "Symbols"],
+            ] as const
+          ).map(([key, label]) => (
+            <Label key={key} className="font-normal">
+              <Checkbox
+                checked={recipe[key]}
+                onChange={(event) => onChange(key, event.target.checked)}
+                disabled={disabled}
+              />
+              {label}
+            </Label>
+          ))}
+        </div>
+      ) : null}
+      {format === "password" || format === "alphanumeric" ? (
+        <Field
+          label="Leave out"
+          htmlFor={`permission-${id}-exclude`}
+          hint="Characters it may not have, if any."
+        >
+          <Input
+            id={`permission-${id}-exclude`}
+            autoComplete="off"
+            spellCheck={false}
+            maxLength={MAX_GENERATE_EXCLUDE}
+            value={recipe.exclude}
+            onChange={(event) => onChange("exclude", event.target.value)}
+            className="font-mono"
+            disabled={disabled}
+          />
+        </Field>
+      ) : null}
+    </fieldset>
   )
 }

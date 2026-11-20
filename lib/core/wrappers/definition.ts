@@ -23,11 +23,8 @@ import {
 import type { WrapperPace } from "../pacing/limits"
 import { browserToolSpec } from "../browser/tools"
 import { canonicalJson } from "../permission-rules"
-import {
-  findOwnerSecretByName,
-  findTextSecretByName,
-  validateSecretName,
-} from "../secrets"
+import { resolveSecretRef } from "../secret-refs"
+import { secretNameTaken, validateSecretName } from "../secrets"
 import { normalizeNameAndDescription } from "../servers"
 import type { CatalogueTool } from "../catalogue"
 
@@ -44,7 +41,6 @@ import {
 import type { SecretPart } from "./placeholders"
 import { hasReference } from "./schema-check"
 import { secretLiterals } from "./secret-literals"
-import { secretNameWhere } from "../secret-meta"
 
 /**
  * What a wrapper is: its tools, each a program over the vault's other tools
@@ -821,20 +817,14 @@ export async function resolveDefinition(
 
     visible(template, `How the secret "${secretName}" is written`)
 
-    const existing =
-      server.kind === "browser"
-        ? await findOwnerSecretByName(ctx, secretName)
-        : await findTextSecretByName(ctx, secretName)
+    const existing = await resolveSecretRef(ctx, secretName, {
+      kind: "wrapper_binding",
+      typed: server.kind === "browser",
+    })
 
     // A name taken by a secret that goes nowhere but the browser (one-time
     // codes) or PCP's own: never sent, and never typed in anew over it.
-    if (
-      !existing &&
-      (await db().secret.findFirst({
-        where: secretNameWhere(ctx, secretName),
-        select: { id: true },
-      }))
-    ) {
+    if (!existing && (await secretNameTaken(ctx, secretName))) {
       throw invalid(
         `The secret "${secretName}" is not one PCP sends to ${binding.tool}: it is one-time codes, which only the browser types, or one PCP keeps for a server.`,
       )
@@ -920,7 +910,10 @@ export async function secretsTypedByName(
       }
 
       if (!held.has(name)) {
-        const existing = await findOwnerSecretByName(ctx, name)
+        const existing = await resolveSecretRef(ctx, name, {
+          kind: "wrapper_binding",
+          typed: true,
+        })
         // By its exact name, as the call will name it.
         held.set(name, existing?.name === name ? existing.id : null)
       }

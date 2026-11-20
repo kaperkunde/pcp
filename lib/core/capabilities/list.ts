@@ -56,7 +56,7 @@ export type Capability = {
   items: CommonItem[]
 }
 
-const DOCLING: CommonItem = {
+export const DOCLING: CommonItem = {
   name: "docling",
   title: "Docling",
   about:
@@ -64,7 +64,7 @@ const DOCLING: CommonItem = {
   sources: ["docling-serve"],
 }
 
-const PDF_MCP: CommonItem = {
+export const PDF_MCP: CommonItem = {
   name: "pdf-mcp-server",
   title: "PDF MCP Server",
   about:

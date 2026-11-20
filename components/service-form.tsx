@@ -181,6 +181,49 @@ function readShape(text: string): {
   }
 }
 
+/**
+ * The variables PCP makes a value for (generated): nothing to choose or
+ * type, shown as made by PCP. Their values are secrets PCP keeps, never
+ * shown and never one of yours to pick.
+ */
+function MadeByPcp({
+  variables,
+  launched = false,
+}: {
+  variables: Variable[]
+  launched?: boolean
+}) {
+  if (variables.length === 0) {
+    return null
+  }
+
+  return (
+    <FormSection title="Made by PCP">
+      <ul
+        className="flex flex-col gap-1 text-sm"
+        data-testid="service-made-by-pcp"
+      >
+        {variables.map((variable) => (
+          <li key={variable.name}>
+            <span className="font-mono">{variable.name}</span>: made by PCP
+            {variable.description ? (
+              <span className="text-muted-foreground">
+                {" "}
+                ({variable.description})
+              </span>
+            ) : null}
+          </li>
+        ))}
+      </ul>
+      <p className="text-xs leading-relaxed text-muted-foreground">
+        {launched
+          ? "PCP made a random value for each when the service was launched, and keeps it: the service and what it registers use it, and nobody sees it."
+          : "PCP makes a random value for each when it launches the service, and keeps it: the service and what it registers use it, and nobody types or sees it."}
+      </p>
+    </FormSection>
+  )
+}
+
 /** A plain variable's value, typed here: no secret. */
 function PlainField({
   variable,
@@ -235,10 +278,8 @@ function SecretSelect({
         label={variable.name}
         htmlFor={`service-env-${variable.name}`}
         hint={
-          variable.generated
-            ? `${variable.description ? `${variable.description} ` : ""}PCP makes a random value for it when the service is launched, kept as a secret; choose one of yours only if you want your own.`
-            : variable.description ||
-              (variable.required ? "The service needs it." : undefined)
+          variable.description ||
+          (variable.required ? "The service needs it." : undefined)
         }
       >
         <Select
@@ -246,14 +287,12 @@ function SecretSelect({
           name={`env.${variable.name}`}
           value={value}
           onChange={(event) => onChange(event.target.value)}
-          required={variable.required && !variable.generated}
+          required={variable.required}
         >
           <option value="">
-            {variable.generated
-              ? "PCP makes one (recommended)"
-              : variable.required
-                ? "Choose a secret"
-                : "None (or its fixed value)"}
+            {variable.required
+              ? "Choose a secret"
+              : "None (or its fixed value)"}
           </option>
           {secrets.map((secret) => (
             <option key={secret.id} value={secret.id}>
@@ -357,7 +396,10 @@ export function ServiceLaunchForm({
   const [exitLabel, setExitLabel] = useState("")
   const shape = useMemo(() => readShape(definition), [definition])
   const plain = shape.env.filter((variable) => variable.plain)
-  const secretVariables = shape.env.filter((variable) => !variable.plain)
+  const made = shape.env.filter((variable) => variable.generated)
+  const secretVariables = shape.env.filter(
+    (variable) => !variable.plain && !variable.generated,
+  )
 
   return (
     <ServerFormFrame editing={false} action={action}>
@@ -604,6 +646,7 @@ export function ServiceLaunchForm({
           ))}
         </FormSection>
       ) : null}
+      <MadeByPcp variables={made} />
       {shape.signin ? (
         <FormSection title="Its account">
           <p
@@ -657,7 +700,10 @@ export function ServiceSettingsForm({
   const [env, setEnv] = useState(initial.env)
   const [values, setValues] = useState(initial.values ?? {})
   const plain = variables.filter((variable) => variable.plain)
-  const secretVariables = variables.filter((variable) => !variable.plain)
+  const made = variables.filter((variable) => variable.generated)
+  const secretVariables = variables.filter(
+    (variable) => !variable.plain && !variable.generated,
+  )
 
   return (
     <ServerFormFrame editing action={action}>
@@ -711,6 +757,7 @@ export function ServiceSettingsForm({
           ))}
         </FormSection>
       ) : null}
+      <MadeByPcp variables={made} launched />
       <FormFooter
         editing
         state={state}

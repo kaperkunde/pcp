@@ -170,7 +170,12 @@ function sendsCredential(authType: string): boolean {
   return authType === "header" || authType === "basic" || authType === "oauth"
 }
 
-async function normalizeEndpoint(ctx: VaultContext, input: EndpointInput) {
+async function normalizeEndpoint(
+  ctx: VaultContext,
+  input: EndpointInput,
+  /** The secret it sends now, on an update: kept as it is (servers.ts). */
+  kept: string | null = null,
+) {
   const { name, description } = normalizeNameAndDescription(input)
 
   if (!["none", "header", "basic", "oauth"].includes(input.authType)) {
@@ -190,7 +195,7 @@ async function normalizeEndpoint(ctx: VaultContext, input: EndpointInput) {
       ? {
           authType: "header",
           authUsername: null,
-          ...(await normalizeHeaderAuth(ctx, input, { name })),
+          ...(await normalizeHeaderAuth(ctx, input, { name }, kept)),
           ...noClient,
         }
       : input.authType === "basic"
@@ -1097,7 +1102,7 @@ export async function updateEndpoint(
     )
   }
 
-  const data = await normalizeEndpoint(ctx, input)
+  const data = await normalizeEndpoint(ctx, input, existing.authSecretId)
   // The page's switch sets it (setServerPublicOnly); the form leaves it out.
   const publicOnly = input.publicOnly ?? existing.publicOnly
   const stored = await storedSpec(ctx, id)

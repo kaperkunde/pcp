@@ -156,6 +156,45 @@ describe("the compose file's /tmp", () => {
   })
 })
 
+// #161: a build knows the commit it was made from and when it was built
+// (lib/core/version.ts), written in by next.config.ts from PCP_COMMIT and
+// PCP_BUILT_AT. The image's build arguments carry them, the workflows set
+// them, and the desktop app's build (stage.mjs copies its output) too.
+describe("the build's commit and date", () => {
+  it("are build arguments of the image's build, set by the workflow that builds it", () => {
+    const dockerfile = readFileSync(path.join(root, "Dockerfile"), "utf8")
+    const builder = dockerfile.slice(
+      dockerfile.indexOf("FROM base AS builder"),
+      dockerfile.indexOf("FROM base AS runner"),
+    )
+    const images = readFileSync(
+      path.join(root, ".github/workflows/build-images.yml"),
+      "utf8",
+    )
+
+    expect(builder).toMatch(/^ARG PCP_COMMIT=$/m)
+    expect(builder).toMatch(/^ARG PCP_BUILT_AT=$/m)
+    expect(builder.indexOf("ARG PCP_COMMIT")).toBeLessThan(
+      builder.indexOf("pnpm build"),
+    )
+    expect(images).toContain("PCP_COMMIT=${{ steps.stamp.outputs.commit }}")
+    expect(images).toContain("PCP_BUILT_AT=${{ steps.stamp.outputs.built-at }}")
+  })
+
+  it("are set for the desktop app's build, and written in by next.config.ts", () => {
+    const desktop = readFileSync(
+      path.join(root, ".github/workflows/build-desktop.yml"),
+      "utf8",
+    )
+    const config = readFileSync(path.join(root, "next.config.ts"), "utf8")
+
+    expect(desktop).toMatch(/PCP_COMMIT="\$\(git rev-parse HEAD\)"/)
+    expect(desktop).toMatch(/PCP_BUILT_AT="\$\(date -u/)
+    expect(config).toContain("PCP_COMMIT: process.env.PCP_COMMIT")
+    expect(config).toContain("PCP_BUILT_AT: process.env.PCP_BUILT_AT")
+  })
+})
+
 // install.sh's update reads the installer out of the image it pulled and runs
 // it in place of the copy it saved at install time, so an existing install
 // gets the unit the new version's installer writes (kaperkunde/pcp#38: the
