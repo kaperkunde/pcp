@@ -15,9 +15,11 @@ import {
   createGeneratedSecret,
   createSecret,
   deleteManagedSecret,
+  generatedSecretName,
   deleteSecret,
   listSecrets,
   readSecretValue,
+  takeBackGenerated,
   writeManagedSecret,
 } from "./secrets"
 import { scratchDatabase } from "./test-db"
@@ -179,6 +181,33 @@ describe("createGeneratedSecret", () => {
     await expect(createGeneratedSecret(ctx, { name: "" })).rejects.toThrow(
       /Enter a name/,
     )
+  })
+
+  it("makes one value for calls at the same time, and hands each the same secret", async () => {
+    const name = generatedSecretName("Docs", "API_KEY")
+    const made = await Promise.all(
+      Array.from({ length: 4 }, () => createGeneratedSecret(ctx, { name })),
+    )
+
+    expect(new Set(made.map((secret) => secret.id)).size).toBe(1)
+    expect(made.filter((secret) => secret.created)).toHaveLength(1)
+    expect(await db().secret.count({ where: { kind: "generated" } })).toBe(1)
+  })
+
+  it("names a value after the thing and the use it is for", () => {
+    expect(generatedSecretName("Docs", "API_KEY")).toBe("Docs/API_KEY")
+    expect(generatedSecretName("Ada's: docs", "KEY")).toBe("Ada s docs/KEY")
+  })
+
+  it("takes back only what a call made", async () => {
+    const before = await createGeneratedSecret(ctx, { name: "Was there" })
+    const again = await createGeneratedSecret(ctx, { name: "Was there" })
+    const made = await createGeneratedSecret(ctx, { name: "Made now" })
+
+    await takeBackGenerated(ctx, [again, made])
+
+    expect(await db().secret.count({ where: { id: before.id } })).toBe(1)
+    expect(await db().secret.count({ where: { id: made.id } })).toBe(0)
   })
 
   it("is listed as PCP's own and removed as a managed secret", async () => {

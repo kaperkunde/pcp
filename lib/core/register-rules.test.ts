@@ -489,7 +489,7 @@ describe("a service (kind service)", () => {
 describe("generate (#162)", () => {
   const mcp = { url: "https://mcp.example.com/mcp" }
 
-  it("goes with a new secret named in secret, or an OAuth client's", () => {
+  it("goes with a new secret named in secret", () => {
     expect(
       checkRegisterShape("mcp", {
         ...mcp,
@@ -507,14 +507,20 @@ describe("generate (#162)", () => {
         generate: {},
       }),
     ).toBeNull()
-    expect(
-      checkRegisterShape("mcp", {
-        ...mcp,
-        auth_type: "oauth",
-        client_id: "pcp",
-        generate: {},
-      }),
-    ).toBeNull()
+  })
+
+  it("is refused for an OAuth client's secret, which the provider issues", () => {
+    for (const secret of [undefined, "Client secret"]) {
+      expect(
+        checkRegisterShape("mcp", {
+          ...mcp,
+          auth_type: "oauth",
+          client_id: "pcp",
+          ...(secret ? { secret } : {}),
+          generate: {},
+        }),
+      ).toMatch(/the provider issues it/)
+    }
   })
 
   it("is refused with nothing to make, and for a service, whose variables take it", () => {
@@ -523,7 +529,7 @@ describe("generate (#162)", () => {
     )
     expect(
       checkRegisterShape("mcp", { ...mcp, auth_type: "oauth", generate: {} }),
-    ).toMatch(/generate makes the value/)
+    ).toMatch(/the provider issues it/)
     expect(
       checkRegisterShape("service", {
         service: {},

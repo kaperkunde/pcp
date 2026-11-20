@@ -498,7 +498,7 @@ export async function applyServiceChange(
     if (saved) {
       throw new PcpError(
         isPcpError(error) ? error.code : "upstream",
-        `${isPcpError(error) ? error.message : "Something went wrong inside PCP while launching it."}\nThe secret you entered is kept in PCP as "${saved.name}": an assistant that asks again can name it, and you can choose it when you launch the service yourself, or delete it on the Secrets page.`,
+        `${isPcpError(error) ? error.message : "Something went wrong inside PCP while launching it."}\nThe new secret is kept in PCP as "${saved.name}": an assistant that asks again can name it, and you can choose it when you launch the service yourself, or delete it on the Secrets page.`,
       )
     }
 
@@ -540,7 +540,7 @@ export async function applyServiceChange(
     ? await getServer(ctx, launched.registeredId).catch(() => null)
     : null
   const keptAs = saved
-    ? ` The secret the owner entered is saved in PCP as "${saved.name}".`
+    ? ` The new secret is saved in PCP as "${saved.name}".`
     : ""
 
   return `${launched.message} The service is "${service.slug}" (status, logs, start, stop, restart${service.tools.some((tool) => tool.name === "put_file") ? ", put_file, get_file" : ""})${registered ? `, and what it serves is "${registered.slug}" with ${registered.tools.length} tool${registered.tools.length === 1 ? "" : "s"}` : ""}. ${levels ? `${levels} The service's own tools ask the owner the first time they are used` : "Its tools ask the owner the first time they are used"}; search finds them.${keptAs}`

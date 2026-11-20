@@ -1523,7 +1523,7 @@ describe("proposing a service", () => {
       expect(done.isError).toBe(true)
       expect(JSON.stringify(done)).toContain("port is already allocated")
       expect(JSON.stringify(done)).toContain(
-        'The secret you entered is kept in PCP as \\"Docling key\\"',
+        'The new secret is kept in PCP as \\"Docling key\\"',
       )
       expect(
         await db().secret.count({ where: secretNameWhere(ctx, "Docling key") }),
@@ -2511,6 +2511,120 @@ describe("secrets named by name (#162)", () => {
     expect(value).toMatch(/^[A-Za-z0-9_-]{32}$/)
     expect(JSON.stringify(done)).toContain("PCP made the value")
     expect(JSON.stringify(done)).not.toContain(value)
+  })
+
+  it("never makes an OAuth client's secret: the provider issues it", async () => {
+    const refused = await register({
+      name: "Calendar",
+      url: "https://mcp.linear.example/mcp",
+      auth_type: "oauth",
+      client_id: "pcp",
+      secret: "Calendar client secret",
+      generate: {},
+    })
+    expect(refused.isError).toBe(true)
+    expect(refused.text).toMatch(/the provider issues it/)
+
+    // Nor on the owner's page: no recipe offered, and none taken.
+    await register({
+      name: "Calendar",
+      url: "https://mcp.linear.example/mcp",
+      auth_type: "oauth",
+      client_id: "pcp",
+    })
+    const view = await shown()
+    expect(view.secretToEnter).toMatchObject({ clientId: "pcp" })
+    expect(view.secretToEnter?.defaultRecipe).toBeNull()
+    const done = await approve({ generate: {} })
+    expect(done.isError).toBe(true)
+    expect(JSON.stringify(done)).toMatch(/the provider issues it/)
+    expect(await db().secret.count()).toBe(0)
+  })
+
+  it("keeps an answer's link last when PCP made the value, as check_permission replays it", async () => {
+    // A server on the owner's network, left public-only: its answer ends
+    // with the link to allow private addresses.
+    const asked = await register({
+      name: "Home tools",
+      url: "https://mcp.home.example/mcp",
+      auth_type: "header",
+      secret: "Home key",
+      generate: {},
+    })
+    expect(asked.isError).toBe(false)
+    const row = await db().permissionRequest.findFirstOrThrow({
+      orderBy: { createdAt: "desc" },
+    })
+
+    const done = await decidePermission(
+      ctx,
+      row.id,
+      "allow_once",
+      { publicUrl: PUBLIC_URL, generate: {} },
+      {
+        ...NO_SYNC,
+        syncTools: async () => ({
+          status: "error" as const,
+          message: "Its address is private.",
+          toolCount: 0,
+        }),
+      },
+    )
+    const checked = await client.callTool(
+      entryCall("check_permission", { id: row.id }),
+    )
+    const replayed = (checked.content as Array<{ text?: string }>)
+      .map((part) => part.text ?? "")
+      .join("\n")
+
+    for (const answer of [
+      done.content.map((part) => ("text" in part ? part.text : "")).join("\n"),
+      replayed,
+    ]) {
+      expect(answer).toContain("PCP made the value")
+      expect(answer.trimEnd()).toMatch(
+        /\[Allow private addresses for Home tools\]\([^)]+\)$/,
+      )
+      expect(answer.indexOf("PCP made the value")).toBeLessThan(
+        answer.indexOf("[Allow private addresses"),
+      )
+    }
+  })
+
+  it("makes a numbered new secret when one of that name was added since, never showing its value", async () => {
+    await register({
+      name: "Linear",
+      url: "https://mcp.linear.example/mcp",
+      auth_type: "header",
+      secret: "Linear key",
+      generate: { format: "hex", length: 32 },
+    })
+    // The owner added one by that name since the request was made.
+    const theirs = await createSecret(ctx, {
+      name: "Linear key",
+      value: "typed-by-the-owner",
+    })
+
+    const done = await approve({ generate: { format: "hex", length: 32 } })
+
+    expect(done.isError).not.toBe(true)
+    const made = await serverNamed(ctx, "Linear")
+    expect(made.authSecretId).not.toBe(theirs.id)
+    const value = await readSecretValue(ctx, made.authSecretId!)
+    expect(value).toMatch(/^[0-9a-f]{32}$/)
+    expect(
+      await db().secret.findFirst({
+        where: {
+          ...secretNameWhere(ctx, "Linear key 2"),
+          id: made.authSecretId!,
+        },
+      }),
+    ).not.toBeNull()
+    expect(await readSecretValue(ctx, theirs.id)).toBe("typed-by-the-owner")
+    const said = JSON.stringify(done)
+    expect(said).toContain('saved in PCP as \\"Linear key 2\\"')
+    expect(said).not.toContain(value)
+    expect(JSON.stringify(await shown())).not.toContain(value)
   })
 
   it("makes a value on the owner's own Have PCP make it, though the assistant proposed none", async () => {

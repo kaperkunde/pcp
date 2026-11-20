@@ -62,7 +62,7 @@ export type WaitingRequest = {
     origins?: string[]
     username?: string | null
     generate?: PasswordRecipe | null
-    defaultRecipe?: PasswordRecipe
+    defaultRecipe?: PasswordRecipe | null
   } | null
   /** "Allow for" has one length (a secret the browser types: an hour). */
   allowForFixed?: boolean

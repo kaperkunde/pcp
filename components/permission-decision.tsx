@@ -89,7 +89,8 @@ const QUIET: Decision[] = ["block", "discard"]
  * for a secret with no sites (PCP's own request_secret) shows no sites.
  *
  * Every other new secret (a new server's, a service's variable, a
- * wrapper's place, an OAuth client's) offers "Have PCP make it" too, with
+ * wrapper's place; never an OAuth client's, which the provider issues)
+ * offers "Have PCP make it" too, with
  * the recipe the assistant proposed or the one for its use
  * (`defaultRecipe`: a long token for a header, a variable or a place, a
  * password for a basic login): a format, a length, and for a password the
@@ -144,8 +145,8 @@ export function PermissionDecision({
     username?: string | null
     /** The value PCP was asked to make, which the switch starts on with. */
     generate?: PasswordRecipe | null
-    /** What PCP makes when the assistant asked for nothing. */
-    defaultRecipe?: PasswordRecipe
+    /** What PCP makes when the assistant asked for nothing; null for none. */
+    defaultRecipe?: PasswordRecipe | null
   } | null
   every?: { asked: boolean } | null
   privateAddresses?: boolean
@@ -169,8 +170,15 @@ export function PermissionDecision({
   const browserSecret = requested && (secret?.origins?.length ?? 0) > 0
   // A new text secret request_secret asks for: its login name and Generate.
   const credential = requested && secret?.kind !== "totp" && !secret?.exists
-  // Any new secret but one-time codes PCP can make.
-  const canMake = Boolean(secret && !secret.exists && secret.kind !== "totp")
+  // A new secret PCP can make: not one-time codes (the site's seed), nor
+  // an OAuth client's secret (the provider issues it).
+  const canMake = Boolean(
+    secret &&
+    !secret.exists &&
+    secret.kind !== "totp" &&
+    !secret.clientId &&
+    secret.defaultRecipe !== null,
+  )
   const [kept, setKept] = useState<string[]>(secret?.origins ?? [])
   const [moreOrigins, setMoreOrigins] = useState("")
   const [username, setUsername] = useState(secret?.username ?? "")

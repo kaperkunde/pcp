@@ -537,8 +537,12 @@ export type PermissionView = {
      * proposal's `generate`), which the page starts from.
      */
     generate?: PasswordRecipe | null
-    /** What the page offers to make when the assistant asked for nothing. */
-    defaultRecipe: PasswordRecipe
+    /**
+     * What the page offers to make when the assistant asked for nothing;
+     * null where PCP makes none (an OAuth client's secret, which the
+     * provider issues; one-time codes, from the site's seed).
+     */
+    defaultRecipe: PasswordRecipe | null
   } | null
   /**
    * update_secret_sites: the secret's sites now and each change asked for,
@@ -717,6 +721,22 @@ export async function runCall(
 }
 
 /**
+ * A result with `note` in front of its own text, never after it: an answer
+ * that ends with a link keeps it last (linkLastText), and a client that
+ * reads only the first part reads the note too.
+ */
+function withLeadNote(result: CallToolResult, note: string): CallToolResult {
+  const [first, ...rest] = result.content
+
+  return first?.type === "text"
+    ? {
+        ...result,
+        content: [{ ...first, text: `${note}\n\n${first.text}` }, ...rest],
+      }
+    : { ...result, content: [{ type: "text", text: note }, ...result.content] }
+}
+
+/**
  * What the owner has to do before a call that failed this way can run, as
  * the result that hands them the link; null for any other failure.
  */
@@ -729,19 +749,7 @@ async function ownerFirst(
   if (isOwnerNeeded(error)) {
     const asked = await withPermission({ ctx, tokenId, publicUrl }, error.ask)
 
-    const [first, ...rest] = asked.content
-
-    // In the answer's own text, before the link: a client that reads only
-    // the first part reads it too.
-    return error.note && first?.type === "text"
-      ? {
-          ...asked,
-          content: [
-            { ...first, text: `${error.note}\n\n${first.text}` },
-            ...rest,
-          ],
-        }
-      : asked
+    return error.note ? withLeadNote(asked, error.note) : asked
   }
 
   if (
@@ -1946,7 +1954,8 @@ type NewSecret = {
   origins?: string[]
   username?: string | null
   generate?: PasswordRecipe | null
-  defaultRecipe: PasswordRecipe
+  /** Null where PCP makes none: an OAuth client's secret, one-time codes. */
+  defaultRecipe: PasswordRecipe | null
 }
 
 function newSecretOf(
@@ -1966,7 +1975,7 @@ function newSecretOf(
       origins: asked.origins,
       username: asked.username ?? null,
       generate: asked.generate ?? null,
-      defaultRecipe: DEFAULT_PASSWORD_RECIPE,
+      defaultRecipe: asked.kind === "totp" ? null : DEFAULT_PASSWORD_RECIPE,
     }
   }
 
@@ -2019,10 +2028,13 @@ function newSecretOf(
         login: args.authType === "basic" ? (args.authUsername ?? null) : null,
         use: registerSecretUse(args),
         generate: args.newSecretGenerate ?? null,
+        // An OAuth client's secret is the provider's to issue.
         defaultRecipe:
-          args.authType === "basic"
-            ? DEFAULT_PASSWORD_RECIPE
-            : DEFAULT_TOKEN_RECIPE,
+          args.authType === "oauth"
+            ? null
+            : args.authType === "basic"
+              ? DEFAULT_PASSWORD_RECIPE
+              : DEFAULT_TOKEN_RECIPE,
       }
     : null
 }
@@ -2770,9 +2782,11 @@ export async function decidePermission(
   let typedValue = secretValue
 
   if (newSecret && generate !== undefined && generate !== null) {
-    if (newSecret.kind === "totp") {
+    if (newSecret.defaultRecipe === null) {
       return text(
-        "One-time codes come from the site's seed: PCP does not make one.",
+        newSecret.kind === "totp"
+          ? "One-time codes come from the site's seed: PCP does not make one."
+          : "PCP does not make an OAuth client's secret: the provider issues it. Type it in, or leave it empty for a client without one.",
         true,
       )
     }
@@ -3078,16 +3092,12 @@ export async function decidePermission(
     typedValue !== secretValue &&
     result.isError !== true
   ) {
-    result = {
-      ...result,
-      content: [
-        ...result.content,
-        {
-          type: "text",
-          text: `PCP made the value of the new secret "${newSecret.name}" itself (${describeRecipe(checkPasswordRecipe(generate))}); the owner can see it under Secrets. You never get it.`,
-        },
-      ],
-    }
+    // In front: an answer that ends with a link (a server to connect, its
+    // private addresses to allow) keeps it last.
+    result = withLeadNote(
+      result,
+      `PCP made the value of the new secret "${newSecret.name}" itself (${describeRecipe(checkPasswordRecipe(generate))}); the owner can see it under Secrets. You never get it.`,
+    )
   }
 
   // A call that reached an unconnected server did not run; a new server that
@@ -3856,7 +3866,7 @@ async function executeRegister(
   const added = `Added ${server.name} as "${server.slug}"`
   // Its name, which the owner chose to keep; never its value.
   const saved = secret.saved
-    ? ` The secret the owner entered is saved in PCP as "${secret.saved.name}".`
+    ? ` The new secret is saved in PCP as "${secret.saved.name}".`
     : ""
 
   if (server.authType === "oauth") {

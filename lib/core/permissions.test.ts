@@ -2522,7 +2522,8 @@ describe("an API that signs in with OAuth", () => {
       clientId: "owner-client",
       login: null,
       generate: null,
-      defaultRecipe: expect.objectContaining({ format: "alphanumeric" }),
+      // The provider issues it: PCP offers to make none.
+      defaultRecipe: null,
     })
     expect(view?.lines).toEqual(
       expect.arrayContaining([

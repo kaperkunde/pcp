@@ -18,7 +18,14 @@ import { exportVault, readExport, restoreExport } from "../backup"
 import type { VaultContext } from "../context"
 import { db } from "../db"
 import { downloadSpec } from "../endpoints"
-import { createSecret, deleteSecret, updateSecret } from "../secrets"
+import {
+  createGeneratedSecret,
+  createSecret,
+  generatedSecretName,
+  deleteSecret,
+  readSecretValue,
+  updateSecret,
+} from "../secrets"
 import { secretUses } from "../secret-uses"
 import { deleteServer, getServer } from "../servers"
 import { startFakeSsh, type FakeSsh } from "../ssh/fake-server"
@@ -307,6 +314,52 @@ async function launchInput(
 function everythingSent(): string {
   return JSON.stringify([docker.commands, docker.state().calls])
 }
+
+describe(
+  "a variable bound to a value PCP made (#162)",
+  { timeout: 30_000 },
+  () => {
+    beforeEach(() => setup())
+
+    it("launches with it only where PCP bound it, and keeps it on the owner's save", async () => {
+      const hostId = await pinnedHost()
+      const made = await createGeneratedSecret(ctx, {
+        name: generatedSecretName("Docs", "API_KEY"),
+      })
+      const input = await launchInput(hostId, { env: { API_KEY: made.id } })
+
+      // A variable the owner chose takes a text secret of theirs only.
+      await expect(launchService(ctx, input, FAST)).rejects.toThrow(
+        /not a text secret/,
+      )
+
+      const launched = await launchService(
+        ctx,
+        { ...input, generatedEnv: ["API_KEY"] },
+        FAST,
+      )
+      expect(docker.state().calls.join("\n")).not.toContain(
+        await readSecretValue(ctx, made.id),
+      )
+
+      // The owner's save keeps PCP's binding as it is…
+      await saveServiceSettings(ctx, launched.id, {
+        name: (await getServer(ctx, launched.id)).name,
+        env: { API_KEY: made.id },
+      })
+      // …but never takes another value PCP made for something else.
+      const other = await createGeneratedSecret(ctx, {
+        name: generatedSecretName("Other", "KEY"),
+      })
+      await expect(
+        saveServiceSettings(ctx, launched.id, {
+          name: (await getServer(ctx, launched.id)).name,
+          env: { API_KEY: other.id },
+        }),
+      ).rejects.toThrow(/text secrets of yours/)
+    })
+  },
+)
 
 describe("launching a service", { timeout: 30_000 }, () => {
   beforeEach(() => setup())

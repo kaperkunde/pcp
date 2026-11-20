@@ -800,14 +800,37 @@ export async function deleteManagedSecret(
 }
 
 /**
+ * The name of a value PCP makes for one use of one thing, as
+ * createGeneratedSecret keys it: "<thing>/<use>", like "Docs/API_KEY" for
+ * the variable API_KEY of the service Docs. Trimmed to a valid name.
+ */
+export function generatedSecretName(thing: string, use: string): string {
+  const clean = (part: string) =>
+    part
+      .replace(/[^\p{L}\p{N} ._\-/]+/gu, " ")
+      .replace(/\s+/g, " ")
+      .trim()
+  const name = `${clean(thing)}/${clean(use)}`.replace(/^[^\p{L}\p{N}]+/u, "")
+
+  return name.slice(0, MAX_NAME)
+}
+
+/**
  * A value PCP makes and keeps for something of its own, with no step of the
  * owner's (a service's variable its definition marks as generated): a
  * managed `generated` secret named `name`, made from `recipe` (a 48
  * character token of letters and digits by default) with the CSPRNG and
- * stored at once. Made once: when a generated secret of that name exists it
- * is kept as it is and returned (`created: false`), so a remake never
- * changes it; a secret of another kind by that name is refused. The value
- * is never returned: it goes out only as upstream.ts hands it on.
+ * stored at once. The value is never returned: it goes out only as
+ * upstream.ts hands it on.
+ *
+ * It is keyed by its name, so a caller passes a name unique to the one use
+ * it is for (generatedSecretName: "<service name>/<VARIABLE>"); two uses
+ * sharing a name share the value. Made once: when a generated secret of
+ * that name exists, it is kept as it is and returned (`created: false`),
+ * so a remake never changes it, and so is the one a call made at the same
+ * time made; a secret of another kind by that name is refused. Only what a
+ * call made (`created: true`) is the caller's to take back, with
+ * deleteManagedSecret (takeBackGenerated).
  */
 export async function createGeneratedSecret(
   ctx: VaultContext,
@@ -820,28 +843,73 @@ export async function createGeneratedSecret(
     throw invalid(problem)
   }
 
-  const existing = await db().secret.findFirst({
-    where: secretNameWhere(ctx, name),
-    select: { id: true, kind: true },
-  })
+  const found = async () => {
+    const existing = await db().secret.findFirst({
+      where: secretNameWhere(ctx, name),
+      select: { id: true, kind: true },
+    })
 
-  if (existing) {
-    if (existing.kind !== "generated") {
+    if (existing && existing.kind !== "generated") {
       throw new PcpError("conflict", `A secret named "${name}" already exists.`)
     }
 
-    return { id: existing.id, name, created: false }
+    return existing ? { id: existing.id, name, created: false } : null
+  }
+  const existing = await found()
+
+  if (existing) {
+    return existing
   }
 
-  const value = generatePassword(
-    checkPasswordRecipe(input.recipe ?? DEFAULT_TOKEN_RECIPE),
-  )
-  const { id } = await writeManagedSecret(ctx, {
-    name,
-    description: (input.description ?? "").trim().slice(0, MAX_DESCRIPTION),
-    value,
-    kind: "generated",
-  })
+  const recipe = checkPasswordRecipe(input.recipe ?? DEFAULT_TOKEN_RECIPE)
+  const id = newId()
+
+  try {
+    // Never through writeManagedSecret, which writes over one of the name.
+    await db().secret.create({
+      data: {
+        id,
+        vaultId: ctx.vaultId,
+        ...sealedSecretMeta(ctx, id, {
+          name,
+          description: (input.description ?? "")
+            .trim()
+            .slice(0, MAX_DESCRIPTION),
+        }),
+        kind: "generated",
+        ciphertext: asBytes(
+          encryptString(ctx.dek, generatePassword(recipe), aad(id)),
+        ),
+      },
+    })
+  } catch (error) {
+    // Made by a call at the same time: that one is the value.
+    if ((error as { code?: unknown } | null)?.code === "P2002") {
+      const made = await found()
+
+      if (made) {
+        return made
+      }
+    }
+
+    throw error
+  }
 
   return { id, name, created: true }
+}
+
+/**
+ * Takes back what createGeneratedSecret made for a launch that failed or a
+ * thing removed: only the ones it made (`created: true`), never one that
+ * was there before.
+ */
+export async function takeBackGenerated(
+  ctx: VaultContext,
+  made: Array<{ id: string; created: boolean }>,
+): Promise<void> {
+  for (const secret of made) {
+    if (secret.created) {
+      await deleteManagedSecret(ctx, secret.id)
+    }
+  }
 }

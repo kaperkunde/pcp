@@ -266,13 +266,12 @@ export function checkRegisterShape(
     return "Header authentication needs the name of a secret the owner stored in PCP, in secret."
   }
 
-  // An OAuth client's secret may be new without a name (PCP names it).
-  if (
-    args.generate !== undefined &&
-    !args.secret?.trim() &&
-    !(authType === "oauth" && args.client_id?.trim())
-  ) {
-    return "generate makes the value of the new secret named in secret: name one there, with auth_type header or basic (or oauth with client_id)."
+  if (args.generate !== undefined && authType === "oauth") {
+    return "generate is not for an OAuth client's secret: the provider issues it, and the owner types it in on PCP's page."
+  }
+
+  if (args.generate !== undefined && !args.secret?.trim()) {
+    return "generate makes the value of the new secret named in secret: name one there, with auth_type header or basic."
   }
 
   return null

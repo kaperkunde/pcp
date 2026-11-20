@@ -81,7 +81,7 @@ describe("request_secret, PCP's own", () => {
     expect(row.serverId).toBeNull()
     expect(view.title).toBe('Store the secret "Docling key"?')
     expect(view.lines).toContain(
-      "No sites: the browser does not type it. It is sent only where you later name it: a server, a service or a wrapper you approve.",
+      "No sites yet: the browser types it only where you allow it, asking you each time. It is sent to a server, a service or a wrapper only where you approve one that names it.",
     )
     expect(view.secretToEnter).toMatchObject({
       name: "Docling key",
@@ -104,7 +104,9 @@ describe("request_secret, PCP's own", () => {
     })
     const value = await readSecretValue(ctx, secret.id)
     expect(value).toMatch(/^[A-Za-z0-9]{40}$/)
-    expect(JSON.stringify(done)).toContain("It has no sites")
+    expect(JSON.stringify(done)).toContain(
+      "It has no sites yet: the browser types it only where the owner allows it, asking them each time",
+    )
     expect(JSON.stringify(done)).toContain("PCP made its value itself")
     expect(JSON.stringify(done)).not.toContain(value)
     expect(JSON.stringify(await newest())).not.toContain(value)
