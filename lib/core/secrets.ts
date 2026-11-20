@@ -1,8 +1,13 @@
 import type { VaultContext } from "./context"
 import { asBytes, decryptString, encryptString } from "./crypto"
 import { db } from "./db"
-import { MAX_PERSONAL_NOTE } from "./constants"
+import {
+  DEFAULT_TOKEN_RECIPE,
+  MAX_PERSONAL_NOTE,
+  type PasswordRecipe,
+} from "./constants"
 import { invalid, notFound, PcpError } from "./errors"
+import { checkPasswordRecipe, generatePassword } from "./generate-password"
 import { newId } from "./ids"
 import { hiddenCharacter } from "./memories"
 import {
@@ -13,13 +18,8 @@ import {
   secretName,
   secretNameWhere,
 } from "./secret-meta"
-import {
-  clearAlerts,
-  SERVER_META_SELECT,
-  serverName,
-  writeServer,
-} from "./server-meta"
-import { readEnvBindings } from "./services/definition"
+import { clearAlerts, writeServer } from "./server-meta"
+import { blockingUses, namesInWords, secretUses } from "./secret-uses"
 import { parseTotpSeed, totpCode, totpSeedProblem } from "./totp"
 
 /**
@@ -30,11 +30,13 @@ import { parseTotpSeed, totpCode, totpSeedProblem } from "./totp"
  * server needs to be sent. `totp` secrets are the owner's too: the seed of
  * a site's one-time codes, of which only the code of the moment ever goes
  * anywhere (typed into a page by the browser, lib/core/browser-secrets.ts).
- * `oauth`, `ssh_key` and `proxy_password` secrets are managed: the
- * token set PCP obtained for a server through OAuth, the private key PCP
- * made for an SSH server (lib/core/ssh/), or the password PCP made for a
- * VPN service's proxy (an exit, lib/core/exits/), kept here so they are
- * encrypted like everything else and show up in the same list.
+ * `oauth`, `ssh_key`, `proxy_password` and `generated` secrets are
+ * managed: the token set PCP obtained for a server through OAuth, the
+ * private key PCP made for an SSH server (lib/core/ssh/), the password PCP
+ * made for a VPN service's proxy (an exit, lib/core/exits/), or a value PCP
+ * made for a service's variable with no step of the owner's
+ * (createGeneratedSecret), kept here so they are encrypted like everything
+ * else and show up in the same list.
  *
  * One of the owner's secrets can also say what sign-in it belongs to: a
  * login name (the email or user name it is the password of) and a one-line
@@ -45,7 +47,15 @@ import { parseTotpSeed, totpCode, totpSeedProblem } from "./totp"
  */
 
 export type SecretKind =
-  "text" | "totp" | "oauth" | "ssh_key" | "proxy_password"
+  "text" | "totp" | "oauth" | "ssh_key" | "proxy_password" | "generated"
+
+/** The managed kinds: PCP's own, for one thing each, never named by name. */
+export const MANAGED_SECRET_KINDS = [
+  "oauth",
+  "ssh_key",
+  "proxy_password",
+  "generated",
+] as const
 
 /** The kinds the owner enters themselves. */
 export type OwnerSecretKind = "text" | "totp"
@@ -62,7 +72,10 @@ export type SecretSummary = {
   createdAt: Date
   updatedAt: Date
   lastUsedAt: Date | null
-  /** Servers that send this secret, or hold their OAuth tokens in it. */
+  /**
+   * What uses it (secret-uses.ts): servers that send it or hold their
+   * OAuth tokens in it, services, wrappers and linked repositories.
+   */
   usedBy: Array<{ id: string; name: string }>
 } & SecretSignIn
 
@@ -223,29 +236,16 @@ export function validateSecretName(name: string): string | null {
 export async function listSecrets(ctx: VaultContext): Promise<SecretSummary[]> {
   const rows = await db().secret.findMany({
     where: { vaultId: ctx.vaultId },
-    include: {
-      authFor: { select: SERVER_META_SELECT },
-      authHeaderFor: {
-        select: { server: { select: SERVER_META_SELECT } },
-      },
-      oauthClientFor: { select: SERVER_META_SELECT },
-      oauthTokensFor: { select: SERVER_META_SELECT },
-      totpCompanion: { select: SECRET_META_SELECT },
-    },
+    include: { totpCompanion: { select: SECRET_META_SELECT } },
     orderBy: { kind: "asc" },
   })
+  const uses = await secretUses(ctx)
 
   const summaries = rows.map((row) => {
-    const usedBy = new Map<string, { id: string; name: string }>()
-
-    for (const server of [
-      ...row.authFor,
-      ...row.authHeaderFor.map((header) => header.server),
-      ...row.oauthClientFor,
-      ...row.oauthTokensFor,
-    ]) {
-      usedBy.set(server.id, { id: server.id, name: serverName(ctx, server) })
-    }
+    const usedBy = (uses.get(row.id)?.uses ?? []).map(({ id, name }) => ({
+      id,
+      name,
+    }))
 
     return {
       id: row.id,
@@ -254,7 +254,7 @@ export async function listSecrets(ctx: VaultContext): Promise<SecretSummary[]> {
       createdAt: row.createdAt,
       updatedAt: row.updatedAt,
       lastUsedAt: row.lastUsedAt,
-      usedBy: [...usedBy.values()],
+      usedBy,
       ...openSecretDetails(ctx, row),
       totpCompanion: row.totpCompanion
         ? {
@@ -269,37 +269,6 @@ export async function listSecrets(ctx: VaultContext): Promise<SecretSummary[]> {
   return summaries.sort((a, b) =>
     a.kind === b.kind ? byName(a, b) : a.kind < b.kind ? -1 : 1,
   )
-}
-
-/** A secret the owner entered, found by its name (for register_server). */
-export async function findTextSecretByName(
-  ctx: VaultContext,
-  name: string,
-): Promise<{ id: string; name: string } | null> {
-  const row = await db().secret.findFirst({
-    where: { ...secretNameWhere(ctx, name.trim()), kind: "text" },
-    select: SECRET_META_SELECT,
-  })
-
-  return row ? { id: row.id, name: secretName(ctx, row) } : null
-}
-
-/**
- * One of the owner's own secrets (text or TOTP) by its name: what the
- * browser types (lib/core/browser-secrets.ts).
- */
-export async function findOwnerSecretByName(
-  ctx: VaultContext,
-  name: string,
-): Promise<{ id: string; name: string; kind: OwnerSecretKind } | null> {
-  const row = await db().secret.findFirst({
-    where: secretNameWhere(ctx, name.trim()),
-    select: { ...SECRET_META_SELECT, kind: true },
-  })
-
-  return row && isOwnerSecretKind(row.kind)
-    ? { id: row.id, name: secretName(ctx, row), kind: row.kind }
-    : null
 }
 
 export function validateSecretValue(
@@ -585,40 +554,23 @@ export async function updateSecret(
 export async function deleteSecret(ctx: VaultContext, id: string) {
   const row = await db().secret.findFirst({
     where: { id, vaultId: ctx.vaultId },
-    include: {
-      authFor: { select: SERVER_META_SELECT },
-      authHeaderFor: { select: { server: { select: SERVER_META_SELECT } } },
-      oauthClientFor: { select: SERVER_META_SELECT },
-      oauthTokensFor: { select: SERVER_META_SELECT },
-    },
+    select: { id: true, kind: true },
   })
 
   if (!row) {
     throw notFound("That secret")
   }
 
-  // A service's variables name secrets in its spec, by id.
-  const services = (
-    await db().serviceSpec.findMany({
-      where: { server: { vaultId: ctx.vaultId }, env: { contains: id } },
-      select: { env: true, server: { select: SERVER_META_SELECT } },
-    })
-  ).filter((spec) => Object.values(readEnvBindings(spec.env)).includes(id))
-  const users = [
-    ...new Set(
-      [
-        ...row.authFor,
-        ...row.authHeaderFor.map((header) => header.server),
-        ...row.oauthClientFor,
-        ...services.map((spec) => spec.server),
-      ].map((server) => serverName(ctx, server)),
-    ),
-  ]
+  // Everything that sends it, whatever way (secret-uses.ts), but the
+  // server whose sign-in it holds, which deleting it disconnects.
+  const users = blockingUses((await secretUses(ctx, [id])).get(id), row.kind)
 
   if (users.length > 0) {
     throw new PcpError(
       "conflict",
-      `This secret is used by ${users.join(", ")}. Change those servers first.`,
+      `This secret is used by ${namesInWords(
+        users.map((use) => use.name),
+      )}. Change those first.`,
     )
   }
 
@@ -842,7 +794,122 @@ export async function deleteManagedSecret(
     where: {
       id,
       vaultId: ctx.vaultId,
-      kind: { in: ["oauth", "ssh_key", "proxy_password"] },
+      kind: { in: [...MANAGED_SECRET_KINDS] },
     },
   })
+}
+
+/**
+ * The name of a value PCP makes for one use of one thing, as
+ * createGeneratedSecret keys it: "<thing>/<use>", like "Docs/API_KEY" for
+ * the variable API_KEY of the service Docs. Trimmed to a valid name.
+ */
+export function generatedSecretName(thing: string, use: string): string {
+  const clean = (part: string) =>
+    part
+      .replace(/[^\p{L}\p{N} ._\-/]+/gu, " ")
+      .replace(/\s+/g, " ")
+      .trim()
+  const name = `${clean(thing)}/${clean(use)}`.replace(/^[^\p{L}\p{N}]+/u, "")
+
+  return name.slice(0, MAX_NAME)
+}
+
+/**
+ * A value PCP makes and keeps for something of its own, with no step of the
+ * owner's (a service's variable its definition marks as generated): a
+ * managed `generated` secret named `name`, made from `recipe` (a 48
+ * character token of letters and digits by default) with the CSPRNG and
+ * stored at once. The value is never returned: it goes out only as
+ * upstream.ts hands it on.
+ *
+ * It is keyed by its name, so a caller passes a name unique to the one use
+ * it is for (generatedSecretName: "<service name>/<VARIABLE>"); two uses
+ * sharing a name share the value. Made once: when a generated secret of
+ * that name exists, it is kept as it is and returned (`created: false`),
+ * so a remake never changes it, and so is the one a call made at the same
+ * time made; a secret of another kind by that name is refused. Only what a
+ * call made (`created: true`) is the caller's to take back, with
+ * deleteManagedSecret (takeBackGenerated).
+ */
+export async function createGeneratedSecret(
+  ctx: VaultContext,
+  input: { name: string; recipe?: PasswordRecipe; description?: string },
+): Promise<{ id: string; name: string; created: boolean }> {
+  const name = input.name.trim()
+  const problem = validateSecretName(name)
+
+  if (problem) {
+    throw invalid(problem)
+  }
+
+  const found = async () => {
+    const existing = await db().secret.findFirst({
+      where: secretNameWhere(ctx, name),
+      select: { id: true, kind: true },
+    })
+
+    if (existing && existing.kind !== "generated") {
+      throw new PcpError("conflict", `A secret named "${name}" already exists.`)
+    }
+
+    return existing ? { id: existing.id, name, created: false } : null
+  }
+  const existing = await found()
+
+  if (existing) {
+    return existing
+  }
+
+  const recipe = checkPasswordRecipe(input.recipe ?? DEFAULT_TOKEN_RECIPE)
+  const id = newId()
+
+  try {
+    // Never through writeManagedSecret, which writes over one of the name.
+    await db().secret.create({
+      data: {
+        id,
+        vaultId: ctx.vaultId,
+        ...sealedSecretMeta(ctx, id, {
+          name,
+          description: (input.description ?? "")
+            .trim()
+            .slice(0, MAX_DESCRIPTION),
+        }),
+        kind: "generated",
+        ciphertext: asBytes(
+          encryptString(ctx.dek, generatePassword(recipe), aad(id)),
+        ),
+      },
+    })
+  } catch (error) {
+    // Made by a call at the same time: that one is the value.
+    if ((error as { code?: unknown } | null)?.code === "P2002") {
+      const made = await found()
+
+      if (made) {
+        return made
+      }
+    }
+
+    throw error
+  }
+
+  return { id, name, created: true }
+}
+
+/**
+ * Takes back what createGeneratedSecret made for a launch that failed or a
+ * thing removed: only the ones it made (`created: true`), never one that
+ * was there before.
+ */
+export async function takeBackGenerated(
+  ctx: VaultContext,
+  made: Array<{ id: string; created: boolean }>,
+): Promise<void> {
+  for (const secret of made) {
+    if (secret.created) {
+      await deleteManagedSecret(ctx, secret.id)
+    }
+  }
 }

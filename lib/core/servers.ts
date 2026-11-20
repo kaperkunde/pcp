@@ -217,6 +217,12 @@ export type ServerInput = {
   authValueTemplate?: string | null
   /** A secret's id, or NEW_SECRET for one typed into the form. */
   authSecretId?: string | null
+  /**
+   * authSecretId is a value PCP made for the variable of a service that
+   * registers this server (secrets.ts createGeneratedSecret): set only by
+   * PCP's own launch (services.ts), never from a form or an assistant.
+   */
+  authSecretGenerated?: boolean
   /** With NEW_SECRET: what to call it; empty names it after the server. */
   authSecretName?: string | null
   /** With NEW_SECRET: its value, saved as a new secret. */
@@ -435,6 +441,7 @@ export async function normalizeHeaderAuth(
     | "authSecretName"
     | "authSecretValue"
     | "authExtraHeaders"
+    | "authSecretGenerated"
   >,
   sender: { name: string },
 ): Promise<HeaderAuth> {
@@ -473,7 +480,7 @@ export async function normalizeHeaderAuth(
 
     newSecret = { name, base: `${sender.name} key`, value, description }
   } else {
-    await requireTextSecret(ctx, input.authSecretId)
+    await requireTextSecret(ctx, input.authSecretId, input.authSecretGenerated)
   }
 
   return {
@@ -861,9 +868,17 @@ async function normalizeInput(ctx: VaultContext, input: ServerInput) {
   return { data, authExtraHeaders, newSecret }
 }
 
-async function requireTextSecret(ctx: VaultContext, id: string) {
+/**
+ * A text secret of the owner's, or with `generated`, a value PCP made for
+ * the service variable that registers the server (createGeneratedSecret).
+ */
+async function requireTextSecret(
+  ctx: VaultContext,
+  id: string,
+  generated = false,
+) {
   const secret = await db().secret.findFirst({
-    where: { id, vaultId: ctx.vaultId, kind: "text" },
+    where: { id, vaultId: ctx.vaultId, kind: generated ? "generated" : "text" },
     select: { id: true },
   })
 
@@ -1083,6 +1098,8 @@ export async function setMcpHeaderCredential(
   id: string,
   credential: { headerName: string; valueTemplate: string; secretId: string },
 ): Promise<boolean> {
+  // The service's own binding, checked when it was made or saved: a text
+  // secret of the owner's, or the value PCP made for that variable.
   const vaultId = ctx.vaultId
   const found = await db().mcpServer.findFirst({
     where: { id, vaultId, kind: "mcp" },
@@ -1106,7 +1123,11 @@ export async function setMcpHeaderCredential(
   }
 
   const secret = await db().secret.findFirst({
-    where: { id: credential.secretId, vaultId, kind: "text" },
+    where: {
+      id: credential.secretId,
+      vaultId,
+      kind: { in: ["text", "generated"] },
+    },
     select: { id: true },
   })
 

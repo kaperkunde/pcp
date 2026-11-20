@@ -6,6 +6,7 @@ import { SERVER_META_SELECT, serverName, serverSlug } from "./server-meta"
 import { openSecretDetails, type SecretKind } from "./secrets"
 import { readEnvBindings } from "./services/definition"
 import { readDefinition } from "./wrappers/definition"
+import { readRepoState } from "./repos/store"
 import {
   byName,
   openSecretMeta,
@@ -14,22 +15,51 @@ import {
 } from "./secret-meta"
 
 /**
- * What uses each secret, by name, and the secrets' names for a token that
- * manages endpoints (list_secrets), with the sign-in each belongs to (the
- * owner's login name and note, opened by secrets.ts, its TOTP companion and
- * the sites the browser types it at). Never a value: nothing here selects
- * a value's ciphertext or decrypts one.
+ * What uses each secret, the one reading of it (#162): the owner's Secrets
+ * page (secrets.ts listSecrets), list_secrets (listSecretNames), what a
+ * register request says a reused secret is already used by, and what
+ * deleteSecret refuses under. Never a value: nothing here selects a value's
+ * ciphertext or decrypts one.
  */
+
+/** How something uses a secret. */
+export type SecretUseVia =
+  /** A server's own header or basic login (a mail or calendar account's too). */
+  | "auth"
+  /** A server's further header. */
+  | "header"
+  /** Its OAuth client's secret. */
+  | "oauth_client"
+  /** Its OAuth tokens, which PCP keeps for it. */
+  | "oauth_tokens"
+  /** A service's variable. */
+  | "service_env"
+  /** A wrapper's place for a secret. */
+  | "wrapper_binding"
+  /** A linked repository's sign-in to GitHub. */
+  | "repo"
 
 /**
  * Something that uses a secret: a server that sends it, a wrapper with a
- * place for it, or a service whose variable takes it.
+ * place for it, a service whose variable takes it, or a linked repository
+ * that signs in with it.
  */
 export type SecretUse = {
+  /** The server's id, or the linked repository's. */
+  id: string
   name: string
+  /** A server's short name, or a repository's owner/name. */
   slug: string
   /** In plain words: "server", "API endpoint", "mail account", … */
   kind: string
+  via: SecretUseVia
+}
+
+/** Everything that uses one secret, and the sites the browser types it at. */
+export type SecretUsage = {
+  uses: SecretUse[]
+  /** "<origin>", or "<origin> and its subdomains", sorted. */
+  sites: string[]
 }
 
 const KIND_WORDS: Record<string, string> = {
@@ -50,15 +80,17 @@ function kindWords(kind: string): string {
 const SERVER = { ...SERVER_META_SELECT, kind: true } as const
 
 /**
- * Every server that sends one of these secrets or keeps its OAuth tokens or
- * client secret in it (the same relations listSecrets reads), and every
- * wrapper whose definition has a place for it, by secret id. All of the
+ * What uses each of these secrets, by secret id: every server that sends
+ * one or keeps its OAuth tokens or client secret in it (mail and calendar
+ * accounts included), every service whose variable takes it, every
+ * wrapper whose definition has a place for it, every linked repository
+ * that signs in with it; and the sites the browser types it at. All of the
  * vault's secrets when `ids` is left out.
  */
 export async function secretUses(
   ctx: VaultContext,
   ids?: string[],
-): Promise<Map<string, SecretUse[]>> {
+): Promise<Map<string, SecretUsage>> {
   const rows = await db().secret.findMany({
     where: { vaultId: ctx.vaultId, ...(ids ? { id: { in: ids } } : {}) },
     select: {
@@ -67,31 +99,70 @@ export async function secretUses(
       authHeaderFor: { select: { server: { select: SERVER } } },
       oauthClientFor: { select: SERVER },
       oauthTokensFor: { select: SERVER },
+      repos: true,
+      browserOrigins: {
+        select: {
+          secretId: true,
+          origin: true,
+          sealed: true,
+          includeSubdomains: true,
+        },
+      },
     },
   })
-  // By secret, then by server id, so a server that uses one twice (a header
-  // and its OAuth client) is named once.
+  // By secret, then by what uses it, so a server that uses one twice (a
+  // header and its OAuth client) is named once.
   const uses = new Map<string, Map<string, SecretUse>>(
     rows.map((row) => [row.id, new Map()]),
   )
-  const add = (
-    secretId: string,
+  const add = (secretId: string, use: SecretUse) => {
+    const found = uses.get(secretId)
+    const key = `${use.via === "repo" ? "repo" : "server"}:${use.id}`
+
+    if (found && !found.has(key)) {
+      found.set(key, use)
+    }
+  }
+  const server = (
     row: Parameters<typeof serverName>[1] & { kind: string },
-  ) =>
-    uses.get(secretId)?.set(row.id, {
-      name: serverName(ctx, row),
-      slug: serverSlug(ctx, row),
-      kind: kindWords(row.kind),
-    })
+    via: SecretUseVia,
+  ): SecretUse => ({
+    id: row.id,
+    name: serverName(ctx, row),
+    slug: serverSlug(ctx, row),
+    kind: kindWords(row.kind),
+    via,
+  })
 
   for (const row of rows) {
-    for (const server of [
-      ...row.authFor,
-      ...row.authHeaderFor.map((header) => header.server),
-      ...row.oauthClientFor,
-      ...row.oauthTokensFor,
-    ]) {
-      add(row.id, server)
+    for (const each of row.authFor) add(row.id, server(each, "auth"))
+    for (const each of row.authHeaderFor) {
+      add(row.id, server(each.server, "header"))
+    }
+    for (const each of row.oauthClientFor) {
+      add(row.id, server(each, "oauth_client"))
+    }
+    for (const each of row.oauthTokensFor) {
+      add(row.id, server(each, "oauth_tokens"))
+    }
+    for (const repo of row.repos) {
+      let slug: string
+
+      try {
+        const state = readRepoState(ctx, repo)
+        slug = `${state.owner}/${state.name}`
+      } catch {
+        // One that does not open is still a use, by no name.
+        slug = "a linked repository"
+      }
+
+      add(row.id, {
+        id: repo.id,
+        name: slug,
+        slug,
+        kind: "linked repository",
+        via: "repo",
+      })
     }
   }
 
@@ -118,7 +189,7 @@ export async function secretUses(
 
     for (const secretId of bound) {
       if (secretId) {
-        add(secretId, wrapper)
+        add(secretId, server(wrapper, "wrapper_binding"))
       }
     }
   }
@@ -130,15 +201,44 @@ export async function secretUses(
 
   for (const service of services) {
     for (const secretId of Object.values(readEnvBindings(service.env))) {
-      add(secretId, service.server)
+      add(secretId, server(service.server, "service_env"))
     }
   }
 
   return new Map(
-    [...uses].map(([id, found]) => [
-      id,
-      [...found.values()].sort((a, b) => a.name.localeCompare(b.name)),
+    rows.map((row) => [
+      row.id,
+      {
+        uses: [...uses.get(row.id)!.values()].sort((a, b) =>
+          a.name.localeCompare(b.name),
+        ),
+        sites: row.browserOrigins
+          .map((site) => ({
+            origin: openOrigin(ctx, site),
+            subdomains: site.includeSubdomains,
+          }))
+          .sort((a, b) =>
+            a.origin < b.origin ? -1 : a.origin > b.origin ? 1 : 0,
+          )
+          .map(siteLabel),
+      },
     ]),
+  )
+}
+
+/**
+ * The uses a secret cannot be deleted under: all of them but the server
+ * whose OAuth tokens it holds (deleting it disconnects that server), and
+ * for PCP's GitHub sign-in, the linked repositories that use it (they read
+ * without it, as public ones).
+ */
+export function blockingUses(
+  usage: SecretUsage | undefined,
+  kind: string,
+): SecretUse[] {
+  return (usage?.uses ?? []).filter(
+    (use) =>
+      use.via !== "oauth_tokens" && !(kind === "oauth" && use.via === "repo"),
   )
 }
 
@@ -166,6 +266,7 @@ const KIND_SHOWN: Record<SecretKind, string> = {
   oauth: "OAuth sign-in (kept by PCP for a server)",
   ssh_key: "SSH key (PCP's own, for an SSH server)",
   proxy_password: "proxy password (PCP's own, for a VPN service's exit)",
+  generated: "a value PCP made for a service (PCP's own)",
 }
 
 export type ListedSecret = {
@@ -174,7 +275,7 @@ export type ListedSecret = {
   kind: string
   /** Whether naming it in register_server sends it rather than a new one. */
   reusable: boolean
-  usedBy: SecretUse[]
+  usedBy: Array<Pick<SecretUse, "name" | "slug" | "kind">>
   /** Further uses past MAX_LISTED_USES. */
   moreUses?: number
   /**
@@ -209,14 +310,6 @@ export async function listSecretNames(
         loginName: true,
         note: true,
         totpCompanion: { select: SECRET_META_SELECT },
-        browserOrigins: {
-          select: {
-            secretId: true,
-            origin: true,
-            sealed: true,
-            includeSubdomains: true,
-          },
-        },
       },
     })
   )
@@ -239,18 +332,16 @@ export async function listSecretNames(
 
   return {
     secrets: shown.map((row) => {
-      const usedBy = uses.get(row.id) ?? []
+      const usage = uses.get(row.id)
+      // As list_secrets has always named them: by name, short name and kind.
+      const usedBy = (usage?.uses ?? []).map(({ name, slug, kind }) => ({
+        name,
+        slug,
+        kind,
+      }))
       const kind = (row.kind in KIND_SHOWN ? row.kind : "text") as SecretKind
       const { loginName, note } = openSecretDetails(ctx, row)
-      const sites = row.browserOrigins
-        .map((site) => ({
-          origin: openOrigin(ctx, site),
-          subdomains: site.includeSubdomains,
-        }))
-        .sort((a, b) =>
-          a.origin < b.origin ? -1 : a.origin > b.origin ? 1 : 0,
-        )
-        .map(siteLabel)
+      const sites = usage?.sites ?? []
 
       return {
         name: row.name,

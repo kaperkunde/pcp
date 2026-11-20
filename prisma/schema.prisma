@@ -605,6 +605,7 @@ model Secret {
   /// the vault.
   nameKey          String?   @map("name_key")
   /// text | totp | oauth | ssh_key (PCP's own private key for an SSH server)
+  /// | proxy_password | generated (a value PCP made for a service's variable)
   kind             String    @default("text")
   /// nonce || ciphertext || tag, AES-256-GCM under the vault's data key
   /// with the secret id as associated data.

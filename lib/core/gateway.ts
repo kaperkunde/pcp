@@ -36,6 +36,7 @@ import {
   TOOL_ACCESS_LEVELS,
   TOOL_TIER_LABELS,
   TOOL_TIERS,
+  type PasswordRecipe,
   type ToolTier,
 } from "./constants"
 import { MB, RESOURCE_BOUNDS } from "./resources/limits"
@@ -235,7 +236,19 @@ import {
   MAX_LISTED_SECRETS,
   MAX_SECRET_QUERY,
 } from "./secret-uses"
-import { findTextSecretByName, validateSecretName } from "./secrets"
+import { validateSecretName } from "./secrets"
+import { credentialUse, resolveSecretRef } from "./secret-refs"
+import {
+  prepareSecretRequest,
+  recipeArg,
+  type SecretRequestArgs,
+} from "./secret-request"
+import {
+  MAX_SECRET_PURPOSE_CHARS,
+  MAX_SECRET_REQUEST_ORIGINS,
+  MAX_URL_LENGTH,
+} from "./browser/limits"
+import { checkPasswordRecipe } from "./generate-password"
 import {
   isStorageKind,
   normalizeNameAndDescription,
@@ -4604,6 +4617,77 @@ export function buildGatewayServer(
     },
   })
 
+  // A secret the owner stores on PCP's page, typed in or made by PCP there
+  // (#162; the browser's request_secret is its alias for one release).
+  register({
+    name: "request_secret",
+    title: "Ask the owner for a secret",
+    description: `Request a new secret from the owner: a password, an API key or token, or a sign-in's one-time codes, stored on PCP's page so its value never passes through you or the conversation. They type it in, or have PCP make it (generate: a password, or a token of letters and digits, hex or base64url, for a key a server or service is to be given), and check the login name and the sites. origins, optional, are the sites the browser may type it at without asking again; with none, each site asks the owner. Name it in register_server's secret or env_secrets, or a wrapper's secrets, to have it sent there once the owner approves. Answers "Not done yet" with a link. ${OWNER_LINK_RULE} ${nextMessageCheck("check_permission with the id it gave")} Never ask for the value in the conversation. A name PCP already holds is refused: name that one instead.`,
+    input: z
+      .object({
+        name: z
+          .string()
+          .min(1)
+          .max(100)
+          .describe(
+            "The secret's name, as the owner sees it under Secrets: Example password, Docling API key.",
+          ),
+        purpose: z
+          .string()
+          .min(1)
+          .max(MAX_SECRET_PURPOSE_CHARS)
+          .describe("What it is for, in a sentence, for the owner."),
+        kind: z
+          .enum(["text", "totp"])
+          .optional()
+          .describe(
+            "text (the default): a password, key or token. totp: a sign-in's one-time codes, from the seed the site showed (base32 or an otpauth:// link), typed by the browser only, so it needs origins.",
+          ),
+        username: z
+          .string()
+          .min(1)
+          .max(200)
+          .optional()
+          .describe(
+            'The login name (user name or email address) it goes with, kept with the secret for the owner to check: the browser types it with {"$secret": name, "part": "username"}. Not for totp.',
+          ),
+        origins: z
+          .array(z.string().min(1).max(MAX_URL_LENGTH))
+          .max(MAX_SECRET_REQUEST_ORIGINS)
+          .optional()
+          .describe(
+            "The sites the browser may type it at, like https://example.com (an address there will do). Leave out for a secret only a server, service or wrapper is sent.",
+          ),
+        generate: recipeArg(
+          "Ask PCP to make the value rather than the owner typing one: a password for a sign-up or a password change, or a token (format alphanumeric, hex or base64url) for a key a server or service is to be set up with. Made on PCP's machine and stored at once; the owner can change the recipe on the page and see the value under Secrets, and you never get it. Not for totp.",
+        ).optional(),
+      })
+      .meta({
+        allOf: [
+          {
+            if: { properties: { kind: { const: "totp" } }, required: ["kind"] },
+            then: {
+              required: ["origins"],
+              not: {
+                anyOf: [{ required: ["username"] }, { required: ["generate"] }],
+              },
+            },
+          },
+        ],
+      }),
+    output: NEEDS_OWNER,
+    annotations: PROPOSES,
+    async run(args: SecretRequestArgs) {
+      const prepared = await prepareSecretRequest(scope.ctx, args)
+
+      if ("refused" in prepared) {
+        return failure(prepared.refused)
+      }
+
+      return asked({ kind: "secret_request", input: prepared.ask })
+    },
+  })
+
   // The values a token's answers handed back as handles, for a client that
   // reads resources (each answer links them). Only the token's own results
   // resolve; none are listed, and nothing kept is logged.
@@ -5211,6 +5295,9 @@ export function buildGatewayServer(
         .describe(
           'For header and basic: the name of a secret the owner stored in PCP (the key, token or password), which is then reused, or a name for a new one (say "Linear API key" or "Personal mail app password"), which the owner types in on PCP\'s page when they agree; that request can only be answered there. For oauth with client_id: the name of the secret holding that client\'s secret, or leave it out and the owner enters it on PCP\'s page. Its name, never its value.',
         ),
+      generate: recipeArg(
+        "With a new secret's name in secret: propose that PCP makes its value (a key the server is to be given, a password for an account being made) rather than the owner typing one. The owner sees the recipe on PCP's page, may change it or type a value instead, and PCP stores what it makes at once; you never get it. Not for a key or password the server already issued.",
+      ).optional(),
       username: z
         .string()
         .max(320)
@@ -5337,6 +5424,9 @@ export function buildGatewayServer(
               .describe(
                 "The NAME of the secret it takes: one the owner stored, or one new name they type in on PCP's page.",
               ),
+            generate: recipeArg(
+              "With a new secret's name: propose that PCP makes its value (a key or password the service is to be set up with) rather than the owner typing one; shown on PCP's page, where the owner may change it. You never get the value.",
+            ).optional(),
           }),
         )
         .max(64)
@@ -5379,7 +5469,8 @@ export function buildGatewayServer(
       ssh_server?: string
       publish_address?: string
       publish_ports?: Array<{ container: number; host: number }>
-      env_secrets?: Array<{ name: string; secret: string }>
+      env_secrets?: Array<{ name: string; secret: string; generate?: unknown }>
+      generate?: unknown
       tool_access?: ToolAccessArg
       limits?: LimitsArg
     }) {
@@ -5493,9 +5584,16 @@ export function buildGatewayServer(
       let authValueTemplate: string | null = null
       const authExtraHeaders: NonNullable<RegisterArgs["authExtraHeaders"]> = []
 
+      // Which of the vault's secrets its fields may name (secret-refs.ts).
+      const credential = credentialUse({
+        authType,
+        mail: kind === "jmap" || kind === "imap",
+        calendar: kind === "caldav",
+      })
+
       if (authType === "header" || authType === "basic") {
         const named = args.secret!.trim()
-        const secret = await findTextSecretByName(scope.ctx, named)
+        const secret = await resolveSecretRef(scope.ctx, named, credential)
 
         if (secret) {
           authSecretId = secret.id
@@ -5562,7 +5660,11 @@ export function buildGatewayServer(
             )
           }
 
-          const found = await findTextSecretByName(scope.ctx, extra.secret)
+          const found = await resolveSecretRef(
+            scope.ctx,
+            extra.secret,
+            credential,
+          )
 
           // Only the first header's secret can be typed in on PCP's page.
           if (!found) {
@@ -5596,7 +5698,7 @@ export function buildGatewayServer(
         // leave it empty).
         const named = args.secret?.trim()
         const stored = named
-          ? await findTextSecretByName(scope.ctx, named)
+          ? await resolveSecretRef(scope.ctx, named, credential)
           : null
 
         if (stored) {
@@ -5616,6 +5718,29 @@ export function buildGatewayServer(
         }
       }
 
+      // A value PCP is to make for the new secret: proposed, shown to the
+      // owner, and made only when they save.
+      let newSecretGenerate: PasswordRecipe | null = null
+
+      if (args.generate !== undefined) {
+        // The shape check made sure a secret is named: one PCP holds.
+        if (!newSecretName) {
+          return failure(
+            `generate is for a new secret, and "${secretName ?? ""}" is one the owner holds: leave it out to reuse that one, or name a new secret.`,
+          )
+        }
+
+        try {
+          newSecretGenerate = checkPasswordRecipe(args.generate)
+        } catch (error) {
+          if (isPcpError(error)) {
+            return failure(`generate: ${error.message}`)
+          }
+
+          throw error
+        }
+      }
+
       const common = {
         description: args.description?.trim() ?? "",
         authType,
@@ -5629,6 +5754,7 @@ export function buildGatewayServer(
         oauthClientSecretId,
         ...(newSecretName ? { newSecretName } : {}),
         ...(newSecretOptional ? { newSecretOptional } : {}),
+        ...(newSecretGenerate ? { newSecretGenerate } : {}),
         ...(note ? { note } : {}),
         ...(bound
           ? {

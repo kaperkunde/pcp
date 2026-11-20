@@ -8,7 +8,7 @@ import { db } from "./db"
 import { buildGatewayServer, type GatewayScope } from "./gateway"
 import { newId } from "./ids"
 import { MAX_LISTED_SECRETS, secretUses } from "./secret-uses"
-import { createSecret, writeManagedSecret } from "./secrets"
+import { createSecret, deleteSecret, writeManagedSecret } from "./secrets"
 import { createServer } from "./servers"
 import { serverCreateData } from "./server-meta"
 import { scratchDatabase } from "./test-db"
@@ -264,14 +264,40 @@ describe("secretUses", () => {
 
     const uses = await secretUses(ctx)
 
-    expect(uses.get(key.id)?.map((use) => use.name)).toEqual([
+    expect(uses.get(key.id)?.uses.map((use) => use.name)).toEqual([
       "Linear lookup",
       "Tools",
     ])
-    expect(uses.get(second.id)?.map((use) => use.name)).toEqual(["Tools"])
-    expect(uses.get(client.id)?.map((use) => use.name)).toEqual(["Calendar"])
+    expect(uses.get(second.id)?.uses.map((use) => use.name)).toEqual(["Tools"])
+    expect(uses.get(client.id)?.uses.map((use) => use.name)).toEqual([
+      "Calendar",
+    ])
     expect([...(await secretUses(ctx, [second.id])).keys()]).toEqual([
       second.id,
     ])
+  })
+
+  it("keeps a secret a wrapper has a place for from being deleted, and names its sites", async () => {
+    const key = await createSecret(ctx, { name: "Key", value: "k" })
+    const { id: tools } = await createServer(ctx, {
+      name: "Tools",
+      url: "https://tools.example.com/mcp",
+      authType: "none",
+    })
+    await wrapperBinding(key.id, tools)
+    await bindOrigin(ctx, key.id, "https://shop.example")
+
+    const usage = (await secretUses(ctx, [key.id])).get(key.id)!
+    expect(usage.uses).toEqual([
+      expect.objectContaining({
+        name: "Linear lookup",
+        kind: "wrapper",
+        via: "wrapper_binding",
+      }),
+    ])
+    expect(usage.sites).toEqual(["https://shop.example"])
+    await expect(deleteSecret(ctx, key.id)).rejects.toThrow(
+      /used by Linear lookup/,
+    )
   })
 })
