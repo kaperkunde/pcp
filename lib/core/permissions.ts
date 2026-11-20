@@ -729,10 +729,17 @@ async function ownerFirst(
   if (isOwnerNeeded(error)) {
     const asked = await withPermission({ ctx, tokenId, publicUrl }, error.ask)
 
-    return error.note
+    const [first, ...rest] = asked.content
+
+    // In the answer's own text, before the link: a client that reads only
+    // the first part reads it too.
+    return error.note && first?.type === "text"
       ? {
           ...asked,
-          content: [{ type: "text", text: error.note }, ...asked.content],
+          content: [
+            { ...first, text: `${error.note}\n\n${first.text}` },
+            ...rest,
+          ],
         }
       : asked
   }
@@ -2554,8 +2561,9 @@ export async function decidePermission(
     /** request_secret: the login name the owner left on PCP's page. */
     loginName?: string
     /**
-     * request_secret: the owner's Generate, a password PCP makes here in
-     * place of a typed value (generate-password.ts); never sent back.
+     * Any request that names a new secret: the owner's "Have PCP make it",
+     * the recipe of a value PCP makes here in place of a typed one
+     * (generate-password.ts); stored at once, never sent back.
      */
     generate?: unknown
     /**

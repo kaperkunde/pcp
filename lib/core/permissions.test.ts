@@ -2296,6 +2296,8 @@ describe("a new secret the owner types in", () => {
       optional: false,
       clientId: null,
       login: null,
+      generate: null,
+      defaultRecipe: expect.objectContaining({ format: "alphanumeric" }),
     })
     expect(view?.lines).toContain(
       'Authentication: sends a new secret, saved as "Pets API key", in the X-API-Key header; you enter its value here when you agree',
@@ -2519,6 +2521,8 @@ describe("an API that signs in with OAuth", () => {
       optional: true,
       clientId: "owner-client",
       login: null,
+      generate: null,
+      defaultRecipe: expect.objectContaining({ format: "alphanumeric" }),
     })
     expect(view?.lines).toEqual(
       expect.arrayContaining([
@@ -3323,6 +3327,9 @@ describe("an API with a user name and password", () => {
       optional: false,
       clientId: null,
       login: "ada",
+      generate: null,
+      // A basic login's password: a password, if PCP makes it.
+      defaultRecipe: expect.objectContaining({ format: "password" }),
     })
     expect(view?.lines).toContain(
       'Authentication: sends a new secret, saved as "Pets password", as the password for ada (HTTP Basic); you enter its value here when you agree',
@@ -3502,6 +3509,8 @@ describe("a mail account an assistant proposes", () => {
       optional: false,
       clientId: null,
       login: "ada@example.com",
+      generate: null,
+      defaultRecipe: expect.objectContaining({ format: "password" }),
     })
     expect(view?.lines).toEqual(
       expect.arrayContaining([

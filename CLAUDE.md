@@ -58,6 +58,10 @@ so in the summary; the bump itself waits for the request.
   `lib/core/upstream.ts` (headers, a wrapper's bound placeholders, and a
   secret the browser types). Nothing returns a secret value to an assistant;
   `revealSecret` and `revealTotpCode` are for the owner's own screen. A
+  field that takes a secret by name finds it only through
+  `secret-refs.ts resolveSecretRef` with its use (text everywhere, one-time
+  codes only where the browser types, managed kinds never), and what uses
+  a secret is `secret-uses.ts secretUses` alone. A
   `totp` secret's seed never leaves `secrets.ts`: only the code of the
   moment is typed, and only by the browser. An API endpoint's calls
   (`lib/core/endpoints.ts`, `lib/core/openapi/`) are handed their finished
