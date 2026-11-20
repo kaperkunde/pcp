@@ -480,7 +480,13 @@ describe("an assistant and the sign-in", { timeout: 30_000 }, () => {
   it("connect_account: the link to PCP's page while signed out, who once signed in", async () => {
     const { serverId } = await launched()
     const server = await getServer(ctx, serverId)
-    const { client } = await assistant()
+    // The token may not call the sign-in's tools itself: PCP's page calls
+    // them as the owner's own action, by no token's levels.
+    const { client } = await assistant(async (tokenId) => {
+      for (const tool of ["login_start", "login_finish"]) {
+        await setToolAccess(ctx, tokenId, serverId, tool, "blocked")
+      }
+    })
 
     const out = await client.callTool({
       name: "execute_write",
@@ -595,12 +601,13 @@ describe("an assistant and the sign-in", { timeout: 30_000 }, () => {
     const { client } = await assistant()
 
     // The owner pastes the code while the check waits.
-    setTimeout(() => {
-      void finishServiceSignin(ctx, serverId, GOOD_CODE, PUBLIC)
-    }, 500)
+    const pasted = new Promise((resolve) => setTimeout(resolve, 500)).then(() =>
+      finishServiceSignin(ctx, serverId, GOOD_CODE, PUBLIC),
+    )
     const out = await client.callTool(
       entryCall("check_server", { server: server.slug }),
     )
+    await pasted
     expect(out.structuredContent).toMatchObject({ kind: "done" })
     expect(textOf(out)).toContain(
       "It is signed in to its account as ada@example.com.",
