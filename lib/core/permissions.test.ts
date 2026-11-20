@@ -3874,7 +3874,7 @@ describe("a PCP update an assistant asked for (#161)", () => {
 
     expect(answer.isError).toBe(true)
     expect(textOf(answer)).toMatch(
-      /^PCP could not check which version is the newest just now/,
+      /^PCP could not [^(]+\([^)]*\)\. So nothing was installed: /,
     )
     expect((await getUpdateStatus()).installRequest).toBeUndefined()
   })

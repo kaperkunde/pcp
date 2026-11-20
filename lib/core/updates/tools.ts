@@ -291,7 +291,7 @@ export async function applyPcpUpdate(
   if (checked.lastError) {
     throw new PcpError(
       "upstream",
-      `PCP could not check which version is the newest just now (${checked.lastError}), so nothing was installed. Try again in a while.`,
+      `${checked.lastError} So nothing was installed: PCP installs only the newest version it has just checked. Try again in a while.`,
     )
   }
 
