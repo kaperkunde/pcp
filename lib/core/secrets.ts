@@ -880,6 +880,9 @@ export async function createGeneratedSecret(
             .slice(0, MAX_DESCRIPTION),
         }),
         kind: "generated",
+        // Its scope is what it was made for, its service, never anywhere
+        // (#162, secret-scope.ts); nothing names it by name.
+        scopeAnywhere: false,
         ciphertext: asBytes(
           encryptString(ctx.dek, generatePassword(recipe), aad(id)),
         ),

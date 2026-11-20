@@ -1633,6 +1633,98 @@ With `definition` it is another of a service definition the token sees,
 its own part only, launched while `definitionBasis` holds. A definition
 with a `build` is refused: a build is the owner's alone.
 
+**A value PCP makes** (`generated` on a variable, format 6,
+`services/generated.ts`): at launch, `upstream.ts launchService` makes a
+value for each generated variable with `secrets.ts createGeneratedSecret`
+(a managed `generated` secret: the CSPRNG, 48 letters and digits by
+default or the definition's length and symbols, stored at once, never
+revealed, renamed or named by an assistant), named
+`generatedSecretName(<service>, <VARIABLE>)`, and binds it, naming the
+variable in the launch's `generatedEnv`: `services.ts prepareLaunch`
+takes a generated secret for those variables only, a text secret of the
+owner's for every other, and the server it registers sends it when the
+variable is its header's (`registers.auth`, `authSecretGenerated`). It
+reaches the container over standard input as any bound secret does.
+Nobody types or chooses it: the launch form, the settings form, the
+launch request, a repository's review and the service's page show it as
+made by PCP, and `register_server`'s `env_secrets` naming it (with
+`generate` or without) is refused. Each is its service's own: a bound variable keeps its value (a remake),
+and a value made now is always a new secret, its name getting "-2", "-3",
+… when taken (a service of that name renamed since, or removed with the
+server it registered kept, which still sends its value), so two services
+never share a token. A variable its definition gains later (an update, a
+repository's change) gets its value only on a way in that may make the
+container again (start, restart, remake, update, start on demand, the
+reconcile pass; never a status, logs or image read, or a removal:
+`ServiceOptions.bindGenerated`), and the server it registered moves to it
+only once the container is made with it (`followRegisteredAuth`). Each is named in the launch's list as soon as it
+exists, so a launch that fails, even part way through making them, takes
+back exactly what it made (`takeBackGenerated`). Removing the service
+removes its generated secrets (`deleteManagedSecret`), except one the
+server it registered (kept on the owner's choice) or another service
+still sends. Saving the service, or the server it registered, with it
+unchanged keeps it (`normalizeHeaderAuth`'s `kept`).
+
+**Connecting an account** (`signin`, format 6, `services/signin.ts`): a
+service that works under an account of the owner's (an app signed in as
+them) names the three tools of the server it registers that sign it in:
+`status` (a true or false field, and who), `start` (a field with the
+provider's address, and when the sign-in ends) and `finish` (the argument
+the pasted code goes in), style `paste_code`. Signing in is then PCP's
+own step, not a wrapper, a blocked tool and a secret the owner makes up:
+
+- PCP calls the status tool by itself (for the owner's page, for
+  connect_account, check_server and a failed call) only while that tool's
+  tier is Read (`statusReadable`, `tool-tiers.ts`, the owner's choice
+  included): the definition names the tool, so one that names a tool that
+  changes things gets no call, its status reads as unknown, and
+  connect_account says so; the owner's page still offers the sign-in, and
+  a finish its tool took reads as signed in, as whom unknown. The start and finish tools are called only on
+  the owner's own action on their page, whatever their tiers; the page,
+  the launch request, the launch form, a repository's review and the
+  service's page (with each tool's tier) say so.
+- The owner's page `/servers/<id>/sign-in` (either the service's id or its
+  server's) reads the status and, signed out, offers Start signing in: it
+  never starts one by itself on opening, as a reload or a second tab would
+  end the one in progress. A started sign-in runs out after the time PCP's
+  machine worked out from the service's end (`readExpiry`: an ISO time or
+  an epoch; one in the past, such as a duration read as 1970, or more than
+  a day ahead is unknown), at least 30 seconds, never by the browser's
+  clock; the page starts it again by itself once, then leaves it to the
+  owner. It shows the provider's
+  address with its host plainly (`checkSigninUrl`: https only, no user
+  name or password in it, within `MAX_SIGNIN_URL_CHARS`: it is the
+  service's text), and takes the code. Its server action
+  (`lib/actions/service-sign-in.ts`) hands the code to
+  `upstream.ts finishServiceSignin`, which checks it (one line, within
+  `MAX_SIGNIN_CODE_CHARS`) before anything is sent, puts it in the finish
+  tool's arguments for that one call through `callServerTool` (paced and
+  through the service's tunnel), scrubs it from the answer's error and
+  anything thrown, and reads the status. The code is never stored or in an
+  answer, and the page's calls are the owner's own: no token's levels
+  apply (so the finish tool's level for tokens can stay blocked) and the
+  request log, a token's calls, has no line for them.
+- An assistant calls `connect_account` (Write: it starts what the owner
+  finishes) with the service or its server: signed in, it says as whom
+  (to a token with every tool of that server blocked, only that it is);
+  signed out, `needs_owner` reason `signin`, `signin: {serverId, slug,
+name, pageUrl}`, the page's link last labelled "Sign in to <name> in
+  PCP", and check_server to call on the owner's next message, which reads
+  the status (waiting up to its usual time while it is still signed out,
+  `SIGNIN_POLL_MS` apart) and says who is signed in, or hands the link
+  again.
+- A call to the server that comes back an error is checked against the
+  status (`signinOffer`, in `permissions.ts runCall`, so execute and a
+  call the owner allowed alike): signed out, the answer is the same
+  `signin` link, so signing in again is offered by itself, with what the
+  service said only when the call shapes nothing of its answer (no `keep`,
+  `fields` or `decode`: a part kept as a handle never reaches the
+  assistant unshaped). A signed-in service's error, and the sign-in's own
+  tools' answers, are left as they came.
+- The launch says which of the three tools the server it registered does
+  not serve, if any; the launch form, the launch request, a repository's
+  review and the service's page (an Account row) show the sign-in.
+
 The test engine (`services/fake-docker.ts`) is a Node program on the PATH of
 a real sh that the test SSH server runs each command in, recording the
 words it got and the env file it read; it keeps named volumes (as folders

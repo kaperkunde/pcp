@@ -1452,6 +1452,89 @@ describe("proposing a service", () => {
     expect(await db().mcpServer.count({ where: { kind: "service" } })).toBe(0)
   })
 
+  it("asks to launch one that signs in and makes its own token, showing both, and needs no secret named for it", async () => {
+    const host = await sshServer()
+    await connectSeeing()
+
+    const asked = await register({
+      name: "Sessions",
+      kind: "service",
+      description: "Claude Code sessions.",
+      service: {
+        ...DEFINITION,
+        env: [
+          {
+            name: "DOCLING_SERVE_API_KEY",
+            required: true,
+            generated: true,
+          },
+        ],
+        registers: {
+          kind: "mcp",
+          port: 5001,
+          path: "/mcp",
+          auth: {
+            env: "DOCLING_SERVE_API_KEY",
+            header: "Authorization",
+            template: "Bearer {{secret}}",
+          },
+        },
+        signin: {
+          style: "paste_code",
+          status: { tool: "login_status", signed_in: "signed_in" },
+          start: { tool: "login_start", url: "url" },
+          finish: { tool: "login_finish", argument: "code" },
+        },
+      },
+      ssh_server: host.slug,
+    })
+
+    expect(asked.isError).toBe(false)
+    const view = await shown()
+    expect(view.lines).toEqual(
+      expect.arrayContaining([
+        "Variable DOCLING_SERVE_API_KEY: a random value PCP makes when it launches and keeps itself; nobody types, chooses or sees it",
+        "It signs in to an account of yours: on PCP's sign-in page, PCP calls its login_start for the provider's address and its login_finish with the code you paste (as code), whatever their tiers, on your own action only; it reads login_status by itself, for any token, only while that tool's tier is Read (its tiers are known once its tools are read). An assistant only gets the link to that page",
+      ]),
+    )
+    expect(view.secretToEnter ?? null).toBeNull()
+
+    await approve()
+    expect(launched[0]?.env).toEqual({})
+  })
+
+  it("refuses a secret named for a variable PCP makes itself, with generate or without", async () => {
+    const host = await sshServer()
+    await connectSeeing()
+    const service = {
+      ...DEFINITION,
+      env: [{ name: "DOCLING_SERVE_API_KEY", required: true, generated: true }],
+    }
+
+    for (const entry of [
+      { name: "DOCLING_SERVE_API_KEY", secret: "Docling key" },
+      {
+        name: "DOCLING_SERVE_API_KEY",
+        secret: "Docling key",
+        generate: { length: 32 },
+      },
+    ]) {
+      const asked = await register({
+        name: "Docling",
+        kind: "service",
+        service,
+        ssh_server: host.slug,
+        env_secrets: [entry],
+      })
+
+      expect(asked.isError).toBe(true)
+      expect(asked.text).toMatch(
+        /DOCLING_SERVE_API_KEY takes a value PCP makes itself when it launches the service \(generated\): leave it out of env_secrets/,
+      )
+    }
+    expect(await db().permissionRequest.count()).toBe(0)
+  })
+
   it("shows a publish address on the SSH server's network as reaching the service", async () => {
     const host = await sshServer()
     await connectSeeing()

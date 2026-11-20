@@ -34,6 +34,8 @@ type Variable = {
   plain: boolean
   /** Its fixed value, or a plain one's when none is typed. */
   value: string | null
+  /** PCP makes its value at launch, unless a secret is chosen for it. */
+  generated?: boolean
 }
 
 /** The select's choice that types a new secret in on this form. */
@@ -127,6 +129,8 @@ function readShape(text: string): {
   env: Variable[]
   /** It registers an exit: a VPN's proxy, on the SSH server's loopback. */
   exit: boolean
+  /** The tool its account's sign-in starts with, when it signs in to one. */
+  signin: string | null
   problem: string | null
 } {
   try {
@@ -138,8 +142,10 @@ function readShape(text: string): {
         description?: unknown
         plain?: unknown
         value?: unknown
+        generated?: unknown
       }>
       registers?: { kind?: unknown }
+      signin?: { start?: { tool?: unknown } }
     }
 
     return {
@@ -155,8 +161,13 @@ function readShape(text: string): {
             typeof entry.description === "string" ? entry.description : "",
           plain: entry.plain === true,
           value: typeof entry.value === "string" ? entry.value : null,
+          generated: entry.generated !== undefined && entry.generated !== false,
         })),
       exit: value.registers?.kind === "exit",
+      signin:
+        typeof value.signin?.start?.tool === "string"
+          ? value.signin.start.tool
+          : null,
       problem: null,
     }
   } catch {
@@ -164,9 +175,53 @@ function readShape(text: string): {
       ports: [],
       env: [],
       exit: false,
+      signin: null,
       problem: "The definition is not JSON yet.",
     }
   }
+}
+
+/**
+ * The variables PCP makes a value for (generated): nothing to choose or
+ * type, shown as made by PCP. Their values are secrets PCP keeps, never
+ * shown and never one of yours to pick.
+ */
+function MadeByPcp({
+  variables,
+  launched = false,
+}: {
+  variables: Variable[]
+  launched?: boolean
+}) {
+  if (variables.length === 0) {
+    return null
+  }
+
+  return (
+    <FormSection title="Made by PCP">
+      <ul
+        className="flex flex-col gap-1 text-sm"
+        data-testid="service-made-by-pcp"
+      >
+        {variables.map((variable) => (
+          <li key={variable.name}>
+            <span className="font-mono">{variable.name}</span>: made by PCP
+            {variable.description ? (
+              <span className="text-muted-foreground">
+                {" "}
+                ({variable.description})
+              </span>
+            ) : null}
+          </li>
+        ))}
+      </ul>
+      <p className="text-xs leading-relaxed text-muted-foreground">
+        {launched
+          ? "PCP made a random value for each when the service was launched, and keeps it: the service and what it registers use it, and nobody sees it."
+          : "PCP makes a random value for each when it launches the service, and keeps it: the service and what it registers use it, and nobody types or sees it."}
+      </p>
+    </FormSection>
+  )
 }
 
 /** A plain variable's value, typed here: no secret. */
@@ -341,7 +396,10 @@ export function ServiceLaunchForm({
   const [exitLabel, setExitLabel] = useState("")
   const shape = useMemo(() => readShape(definition), [definition])
   const plain = shape.env.filter((variable) => variable.plain)
-  const secretVariables = shape.env.filter((variable) => !variable.plain)
+  const made = shape.env.filter((variable) => variable.generated)
+  const secretVariables = shape.env.filter(
+    (variable) => !variable.plain && !variable.generated,
+  )
 
   return (
     <ServerFormFrame editing={false} action={action}>
@@ -588,6 +646,23 @@ export function ServiceLaunchForm({
           ))}
         </FormSection>
       ) : null}
+      <MadeByPcp variables={made} />
+      {shape.signin ? (
+        <FormSection title="Its account">
+          <p
+            className="text-xs leading-relaxed text-muted-foreground"
+            data-testid="service-form-signin"
+          >
+            It works under an account of yours. Once it runs, you sign in on
+            PCP&apos;s sign-in page for it (its page links there): PCP calls its{" "}
+            {shape.signin} for the provider&apos;s address and hands it the code
+            you paste back, on your own action only. It reads the sign-in&apos;s
+            status tool by itself only while that tool&apos;s tier is Read (its
+            tiers show on the service&apos;s page once it runs). An assistant
+            only gets the link.
+          </p>
+        </FormSection>
+      ) : null}
       <FormFooter
         editing={false}
         state={state}
@@ -625,7 +700,10 @@ export function ServiceSettingsForm({
   const [env, setEnv] = useState(initial.env)
   const [values, setValues] = useState(initial.values ?? {})
   const plain = variables.filter((variable) => variable.plain)
-  const secretVariables = variables.filter((variable) => !variable.plain)
+  const made = variables.filter((variable) => variable.generated)
+  const secretVariables = variables.filter(
+    (variable) => !variable.plain && !variable.generated,
+  )
 
   return (
     <ServerFormFrame editing action={action}>
@@ -679,6 +757,7 @@ export function ServiceSettingsForm({
           ))}
         </FormSection>
       ) : null}
+      <MadeByPcp variables={made} launched />
       <FormFooter
         editing
         state={state}

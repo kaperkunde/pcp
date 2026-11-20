@@ -11,12 +11,18 @@ import { resolveSecretRef, type SecretRefUse } from "./secret-refs"
 import {
   ensureSecretScopes,
   grantSecretScope,
+  isAnywhere,
   readSecretScopes,
   removeFromSecretScope,
   scopeCovers,
   setSecretAnywhere,
 } from "./secret-scope"
-import { createSecret, writeManagedSecret } from "./secrets"
+import {
+  createGeneratedSecret,
+  createSecret,
+  generatedSecretName,
+  writeManagedSecret,
+} from "./secrets"
 import { serverCreateData } from "./server-meta"
 import { createServer } from "./servers"
 import { scratchDatabase } from "./test-db"
@@ -475,6 +481,25 @@ describe("filling in a scope from before", () => {
     await db().mcpServer.delete({ where: { id: broken } })
     await ensureSecretScopes(ctx)
     expect((await marks())[spare.id]).toBe(true)
+  })
+
+  it("makes a value PCP makes for a service its service's alone", async () => {
+    const made = await createGeneratedSecret(ctx, {
+      name: generatedSecretName("Docs", "API_KEY"),
+    })
+    const docs = await service("Docs", { API_KEY: made.id })
+    const other = await headerServer("Other")
+
+    expect(await isAnywhere(ctx, made.id)).toBe(false)
+    expect(await scopeCovers(ctx, made.id, docs)).toBe(true)
+    expect(await scopeCovers(ctx, made.id, other.id)).toBe(false)
+    // And nothing names it by name, in scope or not.
+    expect(
+      await resolveSecretRef(ctx, generatedSecretName("Docs", "API_KEY"), {
+        kind: "service_env",
+        consumer: { id: docs, name: "Docs" },
+      }),
+    ).toBeNull()
   })
 
   it("never makes one of PCP's own secrets anywhere", async () => {

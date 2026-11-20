@@ -1,4 +1,9 @@
-import { createServer, type Server } from "node:http"
+import {
+  createServer,
+  type IncomingMessage,
+  type Server,
+  type ServerResponse,
+} from "node:http"
 import type { AddressInfo } from "node:net"
 
 import { expect, test } from "@playwright/test"
@@ -34,7 +39,92 @@ let ssh: FakeSsh
 let docker: FakeDocker
 let http: Server
 let port: number
+/** Where the sessions service's container is published: its MCP server. */
+let sessions: Server
+let sessionsPort: number
 let authorized: string | null = null
+
+/** The account the sessions service is signed in as; null: signed out. */
+let account: string | null = null
+const CODE = `code-${RUN}-4f1a9b`
+
+/**
+ * A service that signs in to an account, as its MCP server: the three
+ * sign-in tools its definition names (signin), answered as JSON text.
+ */
+function answerSessions(request: IncomingMessage, response: ServerResponse) {
+  if (request.method !== "POST") {
+    response.writeHead(405).end()
+    return
+  }
+
+  let body = ""
+  request.on("data", (chunk: Buffer) => (body += chunk.toString()))
+  request.on("end", () => {
+    const message = JSON.parse(body) as {
+      id?: number
+      method: string
+      params?: {
+        protocolVersion?: string
+        name?: string
+        arguments?: { code?: string }
+      }
+    }
+
+    if (message.id === undefined) {
+      response.writeHead(202).end()
+      return
+    }
+
+    const text = (value: unknown, isError = false) => ({
+      content: [{ type: "text", text: JSON.stringify(value) }],
+      ...(isError ? { isError: true } : {}),
+    })
+    const call = () => {
+      switch (message.params?.name) {
+        case "login_status":
+          return text({ signed_in: account !== null, email: account })
+        case "login_start":
+          return text({
+            url: `https://claude.ai/oauth/authorize?state=${RUN}`,
+            expires_at: new Date(Date.now() + 15 * 60_000).toISOString(),
+          })
+        case "login_finish":
+          if (message.params.arguments?.code !== CODE) {
+            return text({ error: "That code did not work." }, true)
+          }
+          account = "ada@example.com"
+          return text({ signed_in: true, email: account })
+        default:
+          return text({ error: "No such tool." }, true)
+      }
+    }
+    const result =
+      message.method === "initialize"
+        ? {
+            protocolVersion: message.params?.protocolVersion,
+            capabilities: { tools: {} },
+            serverInfo: { name: "sessions", version: "1" },
+          }
+        : message.method === "tools/list"
+          ? {
+              tools: ["login_status", "login_start", "login_finish"].map(
+                (name) => ({
+                  name,
+                  inputSchema: { type: "object" },
+                  // Its status only reads: PCP reads it by itself.
+                  annotations: { readOnlyHint: name === "login_status" },
+                }),
+              ),
+            }
+          : message.method === "tools/call"
+            ? call()
+            : {}
+
+    response.writeHead(200, { "content-type": "application/json" })
+    response.end(JSON.stringify({ jsonrpc: "2.0", id: message.id, result }))
+  })
+}
 
 test.beforeAll(async () => {
   docker = startFakeDocker()
@@ -66,10 +156,22 @@ test.beforeAll(async () => {
   })
   await new Promise<void>((resolve) => http.listen(0, "127.0.0.1", resolve))
   port = (http.address() as AddressInfo).port
+  sessions = createServer((request, response) => {
+    if (request.url === "/mcp") {
+      answerSessions(request, response)
+      return
+    }
+
+    response.writeHead(200, { "content-type": "application/json" })
+    response.end("{}")
+  })
+  await new Promise<void>((resolve) => sessions.listen(0, "127.0.0.1", resolve))
+  sessionsPort = (sessions.address() as AddressInfo).port
 })
 
 test.afterAll(async () => {
   await new Promise<void>((resolve) => http?.close(() => resolve()))
+  await new Promise<void>((resolve) => sessions?.close(() => resolve()))
   await ssh?.close()
   docker?.close()
 })
@@ -149,4 +251,88 @@ test("a service launches on an SSH server and registers its API endpoint", async
   await card.getByRole("link", { name: /Serves/ }).click()
   await expect(page.getByRole("heading", { name: NAME })).toBeVisible()
   await expect(page.getByText("list_things")).toBeVisible()
+})
+
+test("a service that signs in to an account: PCP's own sign-in page takes the code", async ({
+  page,
+}) => {
+  // On the SSH server the first test pinned, at a port of its own.
+  await page.goto("/servers/services/new")
+  await page.getByLabel("Name", { exact: true }).fill(`Sessions ${RUN}`)
+  await page
+    .getByLabel("SSH server", { exact: true })
+    .selectOption({ label: `${HOST} (127.0.0.1)` })
+  await page.getByLabel("Definition").fill(
+    JSON.stringify({
+      image: `ghcr.io/example/sessions@sha256:${"c".repeat(64)}`,
+      ports: [{ container: 8080 }],
+      env: [{ name: "MCP_AUTH_TOKEN", required: true, generated: true }],
+      health: { kind: "http", port: 8080, path: "/health" },
+      registers: {
+        kind: "mcp",
+        port: 8080,
+        path: "/mcp",
+        auth: {
+          env: "MCP_AUTH_TOKEN",
+          header: "Authorization",
+          template: "Bearer {{secret}}",
+        },
+      },
+      signin: {
+        style: "paste_code",
+        status: { tool: "login_status", signed_in: "signed_in", who: "email" },
+        start: { tool: "login_start", url: "url", expires: "expires_at" },
+        finish: { tool: "login_finish", argument: "code" },
+      },
+    }),
+  )
+  await page
+    .getByLabel("The SSH server's port for 8080")
+    .fill(String(sessionsPort))
+  // Its token is PCP's to make: nothing to choose, and the form says so.
+  await expect(page.getByLabel("MCP_AUTH_TOKEN")).toHaveCount(0)
+  await expect(page.getByTestId("service-made-by-pcp")).toContainText(
+    "MCP_AUTH_TOKEN: made by PCP",
+  )
+  await expect(page.getByTestId("service-form-signin")).toContainText(
+    "login_start",
+  )
+  await page.getByRole("button", { name: "Launch" }).click()
+
+  await expect(page).toHaveURL(/\/servers\/[0-9a-f-]+$/)
+  const card = page.getByTestId("service-card")
+  await expect(card).toContainText("Running and healthy")
+  await expect(card).toContainText("MCP_AUTH_TOKEN: made by PCP")
+
+  // Its account, on PCP's own sign-in page.
+  await card.getByTestId("service-account").click()
+  await expect(page).toHaveURL(/\/servers\/[0-9a-f-]+\/sign-in$/)
+  const signIn = page.getByTestId("service-sign-in")
+  // Nothing starts by itself: a reload or a second tab would end the sign-in
+  // in progress.
+  await expect(signIn).toContainText("Not signed in")
+  await expect(signIn.getByTestId("sign-in-link")).toHaveCount(0)
+  await clickHydrated(signIn.getByRole("button", { name: "Start signing in" }))
+  await expect(signIn).toContainText("Open claude.ai")
+  await expect(signIn.getByTestId("sign-in-link")).toHaveAttribute(
+    "href",
+    `https://claude.ai/oauth/authorize?state=${RUN}`,
+  )
+
+  // A wrong code is refused, and says so without the code.
+  await signIn.getByLabel("2. Paste the code").fill("not-the-code-123")
+  await signIn.getByRole("button", { name: "Sign in" }).click()
+  await expect(signIn).toContainText("did not take the code")
+  await expect(signIn).not.toContainText("not-the-code-123")
+
+  await signIn.getByLabel("2. Paste the code").fill(CODE)
+  await signIn.getByRole("button", { name: "Sign in" }).click()
+  await expect(signIn).toContainText("Signed in as ada@example.com")
+  await expect(page.getByText(CODE)).toHaveCount(0)
+
+  // Opened again, it reads who is signed in.
+  await page.reload()
+  await expect(page.getByTestId("service-sign-in")).toContainText(
+    "Signed in as ada@example.com",
+  )
 })
