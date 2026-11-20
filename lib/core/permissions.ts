@@ -259,6 +259,7 @@ import {
   isServiceUpdate,
   type ServiceUpdateAsk,
 } from "./services/updates"
+import { signinOffer } from "./services/signin"
 import {
   applyWrapperChange,
   type WrapperChangeAsk,
@@ -669,6 +670,24 @@ export async function runCall(
       open: resultOpener(ctx, tokenId),
       deadline,
     })
+    // A service that signs in, signed out: its sign-in link instead of the
+    // bare error (services/signin.ts), its status read the same way. What
+    // the service said goes with it only when nothing of the answer is to
+    // be shaped (a part kept as a handle, or picked).
+    const signin = await signinOffer(ctx, server, toolName, answer, {
+      publicUrl,
+      quote: !fields?.length && !decode?.length && !keep?.length,
+      call: (target, tool, callArgs) =>
+        executor.callTool(ctx, target, tool, callArgs, {
+          publicUrl,
+          deadline,
+        }),
+    })
+
+    if (signin) {
+      return signin
+    }
+
     const {
       shown,
       whole,

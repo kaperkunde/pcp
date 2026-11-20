@@ -611,3 +611,126 @@ describe("a definition built from a repository", () => {
     expect(runReference(BASE.image!)).toBe(BASE.image)
   })
 })
+
+describe("a service that signs in to an account (format 6)", () => {
+  const SIGNIN = {
+    style: "paste_code",
+    status: { tool: "login_status", signed_in: "signed_in", who: "email" },
+    start: { tool: "login_start", url: "url", expires: "expires_at" },
+    finish: { tool: "login_finish", argument: "code" },
+  }
+  const SESSIONS = withChange({
+    registers: {
+      kind: "mcp",
+      port: 5001,
+      path: "/mcp",
+      auth: {
+        env: "DOCLING_API_KEY",
+        header: "Authorization",
+        template: "Bearer {{secret}}",
+      },
+    },
+    signin: SIGNIN,
+  })
+
+  it("takes the three tools and the fields their answers carry", () => {
+    expect(parseServiceDefinition(SESSIONS).signin).toEqual(SIGNIN)
+    // `who` and `expires` may be left out.
+    expect(
+      parseServiceDefinition(
+        withChange({
+          signin: {
+            ...SIGNIN,
+            status: { tool: "login_status", signed_in: "signed_in" },
+            start: { tool: "login_start", url: "url" },
+          },
+        }),
+      ).signin?.start,
+    ).toEqual({ tool: "login_start", url: "url" })
+  })
+
+  it("checks every name against its pattern, and nothing more", () => {
+    for (const signin of [
+      { ...SIGNIN, style: "oauth" },
+      { ...SIGNIN, status: { ...SIGNIN.status, tool: "login status" } },
+      { ...SIGNIN, start: { ...SIGNIN.start, url: "result.url" } },
+      { ...SIGNIN, finish: { ...SIGNIN.finish, argument: "1code" } },
+      { ...SIGNIN, finish: { ...SIGNIN.finish, extra: "x" } },
+      { ...SIGNIN, more: true },
+    ]) {
+      expect(() => parseServiceDefinition(withChange({ signin }))).toThrowError(
+        /definition/,
+      )
+    }
+  })
+
+  it("signs in through tools of what it registers, the finish a tool of its own", () => {
+    expect(() =>
+      parseServiceDefinition(
+        withChange({ registers: { kind: "none" }, signin: SIGNIN }),
+      ),
+    ).toThrowError(/registers kind mcp or openapi/)
+    expect(() =>
+      parseServiceDefinition(
+        withChange({
+          signin: {
+            ...SIGNIN,
+            finish: { tool: "login_start", argument: "code" },
+          },
+        }),
+      ),
+    ).toThrowError(/finish is a tool of its own/)
+  })
+})
+
+describe("a variable PCP makes a value for (generated, format 6)", () => {
+  it("takes true or a recipe within bounds", () => {
+    const definition = parseServiceDefinition(
+      withChange({
+        env: [
+          { name: "DOCLING_API_KEY", required: true, generated: true },
+          { name: "OTHER", generated: { length: 64, symbols: true } },
+        ],
+      }),
+    )
+    expect(definition.env.map((entry) => entry.generated)).toEqual([
+      true,
+      { length: 64, symbols: true },
+    ])
+    // Left out, it stays out: an older PCP's documents do not change.
+    expect(parseServiceDefinition(BASE).env[0]).not.toHaveProperty("generated")
+
+    for (const generated of [false, { length: 8 }, { length: 4096 }, "yes"]) {
+      expect(() =>
+        parseServiceDefinition(
+          withChange({ env: [{ name: "DOCLING_API_KEY", generated }] }),
+        ),
+      ).toThrowError(/definition/)
+    }
+  })
+
+  it("has no typed or fixed value besides", () => {
+    for (const extra of [{ plain: true }, { value: "x" }]) {
+      expect(() =>
+        parseServiceDefinition(
+          withChange({
+            env: [{ name: "DOCLING_API_KEY", generated: true, ...extra }],
+          }),
+        ),
+      ).toThrowError(/made by PCP/)
+    }
+  })
+
+  it("needs no secret chosen, also where the header sends it", () => {
+    const definition = parseServiceDefinition(
+      withChange({
+        env: [{ name: "DOCLING_API_KEY", required: true, generated: true }],
+      }),
+    )
+    expect(checkEnvBindings({}, definition)).toEqual({})
+    // The owner may still choose one of theirs for it.
+    expect(checkEnvBindings({ DOCLING_API_KEY: "s1" }, definition)).toEqual({
+      DOCLING_API_KEY: "s1",
+    })
+  })
+})

@@ -103,6 +103,8 @@ import {
   type SkillOutcome,
 } from "./skills"
 import { connectResult, type ServerState } from "./connect"
+import { SIGNIN_POLL_MS } from "./services/limits"
+import { connectAccount, signinCheck } from "./services/signin"
 import {
   CHECK_PERMISSION_NEXT,
   linkLastText,
@@ -314,6 +316,7 @@ import {
   embeddingProvider,
   needsConnecting,
   serviceStateLine,
+  signinCaller,
   syncServerTools,
   openExitForCall,
 } from "./upstream"
@@ -4245,6 +4248,16 @@ export function buildGatewayServer(
       passOn(await withdrawPermission(scope, args.id)),
   })
 
+  /**
+   * Whether this token is told who a service is signed in as (its account's
+   * name): not when every tool of that server is blocked for it, which
+   * learns signed in or not only.
+   */
+  const accountShown = (serverId: string) => {
+    const server = servers.find((entry) => entry.id === serverId)
+    return server !== undefined && visibleTools(server).length > 0
+  }
+
   register({
     name: "check_server",
     title: "Check a server",
@@ -4335,9 +4348,97 @@ export function buildGatewayServer(
         : pacing
           ? ` It is throttled, so PCP paces its calls: one at a time, at least ${Math.max(1, Math.round(pacing.min_interval_ms / 1000))} s apart, each waited for up to ${Math.round(pacing.timeout_ms / 1000)} s (${pacing.reason}).`
           : ""
-      const said = `${row.name} is connected, with ${state.toolCount} tool${state.toolCount === 1 ? "" : "s"}.${row.enabled ? "" : " The owner has switched it off in PCP."}${coolingLine}${service ? ` ${service}` : (row.status === "error" || row.status === "refused") && row.statusMessage ? ` Last contact failed: ${row.statusMessage}` : ""}${note ? ` ${ownerNoteLine(note)}` : ""}`
+      // A service that signs in to an account: whether it is, now (and a
+      // little while the owner may still be at it), or the link again.
+      const signin = await signinCheck(scope.ctx, row, {
+        publicUrl: scope.publicUrl,
+        call: signinCaller(scope.ctx, scope.publicUrl),
+        wait: (ready) =>
+          waitForOwner(ready, { signal: ctx.signal, pollMs: SIGNIN_POLL_MS }),
+        state,
+        showsWho: accountShown,
+      })
+
+      if (signin && "result" in signin) {
+        return passOn(signin.result)
+      }
+
+      const said = `${row.name} is connected, with ${state.toolCount} tool${state.toolCount === 1 ? "" : "s"}.${row.enabled ? "" : " The owner has switched it off in PCP."}${coolingLine}${service ? ` ${service}` : (row.status === "error" || row.status === "refused") && row.statusMessage ? ` Last contact failed: ${row.statusMessage}` : ""}${signin ? ` ${signin.line}` : ""}${note ? ` ${ownerNoteLine(note)}` : ""}`
 
       return ok({ kind: "done", server: state, message: said }, { text: said })
+    },
+  })
+
+  register({
+    name: "connect_account",
+    title: "Connect a service's account",
+    description:
+      "Connect an account a service signs in to (a service whose definition declares a sign-in, such as one that runs an app under the owner's own account): says whether it is signed in, and as whom; when it is not, hands you a link to PCP's sign-in page, where the owner signs in at the provider and pastes the code back. You never see the code, and its sign-in tools are PCP's to call, not yours. End your reply with the link; on the owner's next message, whatever it says, call check_server with the server before you send the link again or assume it is still not signed in. A call to such a service that fails signed out hands you the same link.",
+    input: z.object({
+      server: z
+        .string()
+        .describe(
+          "The server's short name: the service, or the server it serves.",
+        ),
+    }),
+    output: z.discriminatedUnion("kind", [
+      NEEDS_OWNER,
+      z.object({
+        kind: z.literal("done"),
+        server: z.object({
+          id: z.string(),
+          slug: z.string(),
+          name: z.string(),
+        }),
+        signed_in: z.literal(true),
+        /** The account's name, as the service says it; null when it says none. */
+        who: z.string().nullable(),
+        message: z.string(),
+      }),
+    ]),
+    // Write: it starts what the owner finishes, a sign-in that changes what
+    // the service can reach. Asking again only reads and links again.
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
+    log: serverNamed("server"),
+    async run(args: { server: string }) {
+      const row = bySlug.get(args.server.trim())
+
+      if (!row) {
+        return failure(
+          `No server called ${args.server}. Servers: ${slugs.join(", ") || "(none)"}.`,
+          "not_found",
+        )
+      }
+
+      const answer = await connectAccount(scope.ctx, row, {
+        publicUrl: scope.publicUrl,
+        call: signinCaller(scope.ctx, scope.publicUrl),
+        showsWho: accountShown,
+      })
+
+      if ("result" in answer) {
+        return passOn(answer.result)
+      }
+
+      return ok(
+        {
+          kind: "done",
+          server: {
+            id: answer.server.id,
+            slug: answer.server.slug,
+            name: answer.server.name,
+          },
+          signed_in: true,
+          who: answer.who,
+          message: answer.said,
+        },
+        { text: answer.said },
+      )
     },
   })
 

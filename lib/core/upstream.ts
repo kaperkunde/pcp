@@ -107,6 +107,29 @@ import {
 } from "./services/services"
 import { newerImageOn, type NewerImage } from "./services/updates"
 import {
+  bindGeneratedEnv,
+  dropGeneratedSecrets,
+  dropUnusedGeneratedSecrets,
+  generatedSecretsOf,
+  makeGeneratedSecrets,
+  type MadeSecret,
+} from "./services/generated"
+import { SIGNIN_CALL_TIMEOUT_MS } from "./services/limits"
+import {
+  checkSigninCode,
+  finishProblem,
+  signinTools,
+  readSignin,
+  scrubCode,
+  signinTarget,
+  statusReadable,
+  startSignin,
+  type SigninCall,
+  type SigninStart,
+  type SigninState,
+  type SigninTarget,
+} from "./services/signin"
+import {
   AddressBlockedError,
   isOwnAddress,
   isPublicAddress,
@@ -159,6 +182,7 @@ import {
 import { noteExitUsed, noteSecretTyped } from "./request-log"
 import { resolveHandles } from "./result-handles"
 import type { BytesKeeper, ResultKeeper, ResultOpener } from "./tool-results"
+import { TOOL_NAME_SELECT, toolName } from "./tool-rows"
 import { isToolName } from "./tools/define"
 import { familyError } from "./tools/family"
 import {
@@ -2946,6 +2970,13 @@ export type ServiceOptions = {
    * the reconcile pass leave it off.
    */
   byOwner?: boolean
+  /**
+   * The way in may make the container again (a start, a restart, a remake,
+   * an update, the reconcile pass): a generated variable its definition
+   * gained gets its value first. Never on a read (status, logs, a newer
+   * image, a failure's reason) or a removal.
+   */
+  bindGenerated?: boolean
 }
 
 /**
@@ -3056,16 +3087,20 @@ async function serviceEnv(
 /** What the services module needs for a service; null once its SSH server is gone. */
 async function serviceAccess(
   ctx: VaultContext,
-  loaded: LoadedService,
-  { publicUrl, timing, byOwner = false }: ServiceOptions,
+  given: LoadedService,
+  { publicUrl, timing, byOwner = false, bindGenerated = false }: ServiceOptions,
 ): Promise<ServiceAccess | null> {
-  if (!loaded.host) {
+  if (!given.host) {
     return null
   }
 
+  // A generated variable its definition gained since it launched gets its
+  // value before the container is made again with its variables.
+  const loaded = bindGenerated ? await bindGeneratedEnv(ctx, given) : given
+
   const registers = loaded.definition.registers
 
-  const connection = await serviceConnection(ctx, loaded.host, { publicUrl })
+  const connection = await serviceConnection(ctx, given.host, { publicUrl })
   const exitAuth =
     loaded.definition.registers.kind === "exit" &&
     loaded.definition.registers.auth
@@ -3204,9 +3239,9 @@ export async function launchService(
   input: ServiceLaunchInput,
   options: ServiceOptions,
 ): Promise<LaunchResult & { message: string }> {
-  const prepared = await prepareLaunch(ctx, input)
-  const connection = await serviceConnection(ctx, prepared.host, options)
-  const registers = prepared.definition.registers
+  const asked = await prepareLaunch(ctx, input)
+  const connection = await serviceConnection(ctx, asked.host, options)
+  const registers = asked.definition.registers
   // An exit's proxy gets a login of its own, made here for this instance:
   // a random password the container reads among its variables and the
   // exit signs in with; launchServiceOn keeps it as a managed secret.
@@ -3217,19 +3252,52 @@ export async function launchService(
           password: randomBytes(24).toString("base64url"),
         }
       : undefined
-  const access: ServiceAccess = {
-    host: connection.host,
-    forward: connection.forward,
-    env: await serviceEnv(ctx, prepared.definition, prepared.env, {
-      typed: prepared.values,
-      proxyAuth,
-    }),
-    ...(registers.kind === "exit"
-      ? { loopback: connection.loopback, ...(proxyAuth ? { proxyAuth } : {}) }
-      : {}),
-    ...(options.timing ? { timing: options.timing } : {}),
+  let result: LaunchResult
+  let prepared = asked
+  // The values made for its generated variables: taken back, every one
+  // this launch made so far, when anything after fails.
+  const made: MadeSecret[] = []
+
+  try {
+    // The variables PCP makes a value for (generated): a secret each,
+    // bound like one the owner chose.
+    // services.ts takes a generated secret only for the variables named in
+    // generatedEnv (its launch checks), and the server it registers sends
+    // it as such.
+    const generated = await makeGeneratedSecrets(ctx, {
+      service: asked.name,
+      definition: asked.definition,
+      bindings: asked.env,
+      made,
+    })
+    prepared = {
+      ...asked,
+      env: generated.bindings,
+      generatedEnv: [
+        ...new Set([...asked.generatedEnv, ...generated.generated]),
+      ],
+    }
+    const access: ServiceAccess = {
+      host: connection.host,
+      forward: connection.forward,
+      env: await serviceEnv(ctx, prepared.definition, prepared.env, {
+        typed: prepared.values,
+        proxyAuth,
+      }),
+      ...(registers.kind === "exit"
+        ? {
+            loopback: connection.loopback,
+            ...(proxyAuth ? { proxyAuth } : {}),
+          }
+        : {}),
+      ...(options.timing ? { timing: options.timing } : {}),
+    }
+    result = await launchServiceOn(ctx, prepared, access)
+  } catch (error) {
+    await dropGeneratedSecrets(ctx, made)
+    throw error
   }
-  const result = await launchServiceOn(ctx, prepared, access)
+
   let message = `${prepared.name} is running on ${prepared.host.name}.`
 
   if (result.exitId && prepared.exit) {
@@ -3253,7 +3321,119 @@ export async function launchService(
     }
   }
 
+  // Its sign-in calls tools of what it registered: say so when one is not
+  // there, rather than on the owner's sign-in page later.
+  const signin = prepared.definition.signin
+
+  if (signin && result.registeredId) {
+    const served = await db().mcpTool.findMany({
+      where: { serverId: result.registeredId },
+      select: TOOL_NAME_SELECT,
+    })
+    const names = new Set(served.map((tool) => toolName(ctx, tool)))
+    const missing = signinTools(signin).filter((name) => !names.has(name))
+
+    if (served.length > 0 && missing.length > 0) {
+      message += ` Its sign-in names ${missing.join(", ")}, which it does not serve: signing in to its account will not work until its definition names its own tools.`
+    } else if (missing.length === 0) {
+      message += " Sign in to its account on its page to use it."
+    }
+  }
+
   return { ...result, message }
+}
+
+// ---- Signing in to a service's account (services/signin.ts) -----------------
+
+/**
+ * How the sign-in reaches the server a service registered: callServerTool,
+ * paced and through the service's tunnel like any call, with no token's
+ * levels: what PCP calls for its own sign-in step, or for the owner's page.
+ */
+export function signinCaller(ctx: VaultContext, publicUrl: string): SigninCall {
+  return (server, tool, args) =>
+    callServerTool(ctx, server, tool, args, {
+      publicUrl,
+      deadline: Date.now() + SIGNIN_CALL_TIMEOUT_MS,
+    })
+}
+
+/** The service that signs in behind this server id, or not found. */
+export async function requireSigninTarget(
+  ctx: VaultContext,
+  serverId: string,
+): Promise<SigninTarget> {
+  const server = await findServer(ctx, { id: serverId, vaultId: ctx.vaultId })
+  const target = server ? await signinTarget(ctx, server) : null
+
+  if (!target) {
+    throw notFound("A service that signs in to an account")
+  }
+
+  return target
+}
+
+/** Whether a service is signed in, for the owner's sign-in page. */
+export async function readServiceSignin(
+  ctx: VaultContext,
+  serverId: string,
+  { publicUrl }: { publicUrl: string },
+): Promise<SigninState> {
+  const target = await requireSigninTarget(ctx, serverId)
+  return readSignin(ctx, target, signinCaller(ctx, publicUrl))
+}
+
+/** Starts a sign-in, for the owner's sign-in page: the provider's address. */
+export async function startServiceSignin(
+  ctx: VaultContext,
+  serverId: string,
+  { publicUrl }: { publicUrl: string },
+): Promise<SigninStart> {
+  const target = await requireSigninTarget(ctx, serverId)
+  return startSignin(target, signinCaller(ctx, publicUrl))
+}
+
+/**
+ * The owner's code, handed to the service's finish tool, then its status
+ * read. The code goes into that one call's arguments here and nowhere
+ * else: never stored, never logged (the owner's page writes no request-log
+ * line), and taken out of whatever error comes back.
+ */
+export async function finishServiceSignin(
+  ctx: VaultContext,
+  serverId: string,
+  pasted: unknown,
+  { publicUrl }: { publicUrl: string },
+): Promise<SigninState> {
+  const code = checkSigninCode(pasted)
+  const target = await requireSigninTarget(ctx, serverId)
+  const call = signinCaller(ctx, publicUrl)
+  let answer: CallToolResult
+
+  try {
+    answer = await call(target.server, target.signin.finish.tool, {
+      [target.signin.finish.argument]: code,
+    })
+  } catch (error) {
+    throw new PcpError(
+      isPcpError(error) ? error.code : "upstream",
+      scrubCode(error instanceof Error ? error.message : String(error), code),
+    )
+  }
+
+  const problem = finishProblem(target, answer, code)
+
+  if (problem) {
+    throw new PcpError("upstream", problem)
+  }
+
+  // Its finish tool took the code. Its status tool, when it is not a Read
+  // tool, is not called: signed in, as whom not known.
+  if (!(await statusReadable(ctx, target))) {
+    return { signedIn: true, who: null }
+  }
+
+  return readSignin(ctx, target, call)
 }
 
 /** The service's state now, read on its SSH server for the owner's page. */
@@ -3305,7 +3485,11 @@ export async function runServiceAction(
   return serviceActionOn(
     loaded,
     action,
-    await requireAccess(ctx, loaded, { ...options, byOwner: true }),
+    await requireAccess(ctx, loaded, {
+      ...options,
+      byOwner: true,
+      bindGenerated: action !== "stop",
+    }),
   )
 }
 
@@ -3318,7 +3502,11 @@ export async function recreateService(
   const loaded = await loadService(ctx, id)
   return recreateServiceOn(
     loaded,
-    await requireAccess(ctx, loaded, { ...options, byOwner: true }),
+    await requireAccess(ctx, loaded, {
+      ...options,
+      byOwner: true,
+      bindGenerated: true,
+    }),
   )
 }
 
@@ -3336,7 +3524,11 @@ export async function updateService(
   const loaded = await loadService(ctx, id)
   return updateServiceOn(
     loaded,
-    await requireAccess(ctx, loaded, { ...options, byOwner: true }),
+    await requireAccess(ctx, loaded, {
+      ...options,
+      byOwner: true,
+      bindGenerated: true,
+    }),
     choice,
   )
 }
@@ -3359,12 +3551,19 @@ export async function removeService(
   options: ServiceOptions,
 ): Promise<string> {
   const loaded = await loadService(ctx, id)
-  return removeServiceOn(
+  const made = await generatedSecretsOf(ctx, loaded.env)
+  const said = await removeServiceOn(
     ctx,
     loaded,
     await serviceAccess(ctx, loaded, options),
     choices,
   )
+
+  // The secrets it made for its generated variables, unless the server it
+  // registered (kept) still sends one.
+  await dropUnusedGeneratedSecrets(ctx, made)
+
+  return said
 }
 
 /**
@@ -3384,7 +3583,11 @@ export async function restartServicesUsingSecret(
       const loaded = await loadService(ctx, id)
       const status = await recreateServiceOn(
         loaded,
-        await requireAccess(ctx, loaded, { ...options, byOwner: true }),
+        await requireAccess(ctx, loaded, {
+          ...options,
+          byOwner: true,
+          bindGenerated: true,
+        }),
       )
       outcomes.push({
         id,
@@ -3419,7 +3622,10 @@ async function wakeService(
       return null
     }
 
-    const access = await serviceAccess(ctx, loaded, { publicUrl })
+    const access = await serviceAccess(ctx, loaded, {
+      publicUrl,
+      bindGenerated: true,
+    })
     return access ? await startOnDemand(loaded, access) : null
   } catch {
     return null
@@ -3439,7 +3645,7 @@ export async function reconcileServices(
 ): Promise<ReconcileRun> {
   return reconcileServicesWith(
     ctx,
-    (loaded) => serviceAccess(ctx, loaded, { publicUrl }),
+    (loaded) => serviceAccess(ctx, loaded, { publicUrl, bindGenerated: true }),
     options,
   ).catch(() => ({ started: [] }))
 }

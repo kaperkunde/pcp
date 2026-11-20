@@ -54,6 +54,7 @@ const OWN_TOOLS = [
   "check_permission",
   "withdraw_request",
   "check_server",
+  "connect_account",
   "get_server_limits",
   "propose_server_limits",
   "get_version",
@@ -260,6 +261,7 @@ describe("PCP's own tools", () => {
         "check_permission",
         "check_server",
         "check_upload",
+        "connect_account",
         "convert_document",
         "create_upload_link",
         "create_wrapper",
@@ -308,6 +310,7 @@ describe("PCP's own tools", () => {
       "execute_read",
       "check_permission",
       "check_server",
+      "connect_account",
       "create_upload_link",
       "check_upload",
       "propose_tool_access",
@@ -337,7 +340,7 @@ describe("PCP's own tools", () => {
       const first = tool.description!.slice(0, 25)
 
       expect(first, tool.name).toMatch(
-        /^(Check first: |(Search|List|Get|Execute|Run|Check|Withdraw|Read|Share|Receive|Request|Propose|Change|Fetch|Save|Edit|Convert|Find|Make|Move|Delete|View|Update) )/,
+        /^(Check first: |(Search|List|Get|Execute|Run|Check|Connect|Withdraw|Read|Share|Receive|Request|Propose|Change|Fetch|Save|Edit|Convert|Find|Make|Move|Delete|View|Update) )/,
       )
       // A verb and an object, not a verb alone.
       expect(first.trim().split(/\s+/).length, tool.name).toBeGreaterThan(2)
@@ -357,6 +360,7 @@ describe("PCP's own tools", () => {
       check_permission: /permission/,
       withdraw_request: /request/,
       check_server: /server/,
+      connect_account: /^Connect an account/,
       get_server_limits: /^Get a server's limits/,
       propose_server_limits: /^Propose server limits/,
       get_version: /^Get PCP's version/,

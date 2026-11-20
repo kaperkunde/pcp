@@ -67,6 +67,7 @@ import {
   checkEnvBindings,
   checkPlainValues,
   COMMIT,
+  generatedEnv,
   LOCAL_IMAGE,
   EXIT_PUBLISH_ADDRESS,
   parsePublish,
@@ -137,6 +138,7 @@ import {
   type OpenServiceOwn,
 } from "./own-values"
 import { SECRET_META_SELECT, secretName } from "../secret-meta"
+import { toolTier } from "../tool-tiers"
 import {
   findServer,
   openServer,
@@ -1849,7 +1851,16 @@ export async function saveServiceSettings(
   const values = input.values
     ? checkPlainValues(input.values, loaded.definition)
     : loaded.values
-  const env = checkEnvBindings(input.env, loaded.definition, values)
+  // A variable PCP made a value for keeps it unless a secret is chosen.
+  const given = { ...input.env }
+
+  for (const { name: variable } of generatedEnv(loaded.definition)) {
+    if (!given[variable] && loaded.env[variable]) {
+      given[variable] = loaded.env[variable]
+    }
+  }
+
+  const env = checkEnvBindings(given, loaded.definition, values)
   const ids = [...new Set(Object.values(env))]
   const rows = await db().secret.findMany({
     where: { vaultId: ctx.vaultId, id: { in: ids } },
@@ -2584,6 +2595,11 @@ export type ServiceView = {
   /** The exit it added, for an exit's service. */
   exit: { id: string; name: string; label: string } | null
   registered: { id: string; name: string; slug: string; kind: string } | null
+  /**
+   * Each sign-in tool's tier on the server it registered (signin): PCP
+   * reads the status itself only while its tool is Read.
+   */
+  signinTiers: { status: string; start: string; finish: string } | null
 }
 
 export async function serviceView(
@@ -2650,6 +2666,26 @@ export async function serviceView(
           kind: registered.kind,
         }
       : null,
+    signinTiers:
+      loaded.definition.signin && registered
+        ? {
+            status: await toolTier(
+              ctx,
+              registered.id,
+              loaded.definition.signin.status.tool,
+            ),
+            start: await toolTier(
+              ctx,
+              registered.id,
+              loaded.definition.signin.start.tool,
+            ),
+            finish: await toolTier(
+              ctx,
+              registered.id,
+              loaded.definition.signin.finish.tool,
+            ),
+          }
+        : null,
   }
 }
 

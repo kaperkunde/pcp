@@ -444,6 +444,12 @@ export async function normalizeHeaderAuth(
     | "authSecretGenerated"
   >,
   sender: { name: string },
+  /**
+   * The secret the server sends now, on a change of it: kept as it is, it
+   * may be a value PCP made (a service's generated variable), which the
+   * owner never chooses but keeps when they save the server's page.
+   */
+  kept: string | null = null,
 ): Promise<HeaderAuth> {
   if (!input.authSecretId) {
     throw invalid("Choose the secret to send, or enter a new one.")
@@ -480,7 +486,12 @@ export async function normalizeHeaderAuth(
 
     newSecret = { name, base: `${sender.name} key`, value, description }
   } else {
-    await requireTextSecret(ctx, input.authSecretId, input.authSecretGenerated)
+    await requireTextSecret(
+      ctx,
+      input.authSecretId,
+      input.authSecretGenerated,
+      input.authSecretId === kept,
+    )
   }
 
   return {
@@ -819,7 +830,12 @@ export function oauthTokensObsolete(
   )
 }
 
-async function normalizeInput(ctx: VaultContext, input: ServerInput) {
+async function normalizeInput(
+  ctx: VaultContext,
+  input: ServerInput,
+  /** The secret the server sends now, on an update (normalizeHeaderAuth). */
+  kept: string | null = null,
+) {
   const { name, description } = normalizeNameAndDescription(input)
   const url = validateServerUrl(input.url)
 
@@ -844,7 +860,7 @@ async function normalizeInput(ctx: VaultContext, input: ServerInput) {
     case "none":
       break
     case "header": {
-      const auth = await normalizeHeaderAuth(ctx, input, { name })
+      const auth = await normalizeHeaderAuth(ctx, input, { name }, kept)
       data.authSecretId = auth.authSecretId
       data.authHeaderName = auth.authHeaderName
       data.authValueTemplate = auth.authValueTemplate
@@ -876,9 +892,19 @@ async function requireTextSecret(
   ctx: VaultContext,
   id: string,
   generated = false,
+  /** The one it sends now, kept: a text secret or a value PCP made. */
+  unchanged = false,
 ) {
   const secret = await db().secret.findFirst({
-    where: { id, vaultId: ctx.vaultId, kind: generated ? "generated" : "text" },
+    where: {
+      id,
+      vaultId: ctx.vaultId,
+      kind: unchanged
+        ? { in: ["text", "generated"] }
+        : generated
+          ? "generated"
+          : "text",
+    },
     select: { id: true },
   })
 
@@ -1049,7 +1075,11 @@ export async function updateServer(
     )
   }
 
-  const { data, authExtraHeaders, newSecret } = await normalizeInput(ctx, input)
+  const { data, authExtraHeaders, newSecret } = await normalizeInput(
+    ctx,
+    input,
+    existing.authSecretId,
+  )
   const extrasBefore = await extraAuthHeaders(ctx, id)
   // The page's switch sets it (setServerPublicOnly); the form leaves it out.
   data.publicOnly = input.publicOnly ?? existing.publicOnly

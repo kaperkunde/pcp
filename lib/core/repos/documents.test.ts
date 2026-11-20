@@ -4,6 +4,7 @@ import { createBrowserServer } from "../browser/server"
 import { getWrapper, saveWrapperByOwner } from "../wrappers/admin"
 import type { VaultContext } from "../context"
 import { scratchDatabase } from "../test-db"
+import { parseServiceDefinition } from "../services/definition"
 import { setupVault } from "../vault"
 
 import { applyItem, type InstanceInput } from "./apply"
@@ -863,7 +864,7 @@ describe("format 3: services", () => {
     const text = files["services/docling-service.yaml"]!
     expect(text).toContain(`pcp_format: ${FORMAT_OF_KIND.service}\n`)
     expect(FORMAT_OF_KIND.service).toBe(3)
-    expect(PCP_FORMAT).toBe(5)
+    expect(PCP_FORMAT).toBe(6)
     expect(text).toContain(`image: ${DOCLING.image}`)
     // Nothing of the instance: not its SSH server, address, container,
     // secrets or what it registered.
@@ -937,6 +938,99 @@ describe("format 3: services", () => {
     expect(older.problems[0]?.message).toMatch(
       /format 3, whose MCP server sends no secret header: write it as format 4/,
     )
+  })
+
+  it("writes a service with a sign-in or a variable PCP makes in format 6, and only that one", async () => {
+    const ctx = await freshVault()
+    const signin = {
+      style: "paste_code" as const,
+      status: { tool: "login_status", signed_in: "signed_in", who: "email" },
+      start: { tool: "login_start", url: "url", expires: "expires_at" },
+      finish: { tool: "login_finish", argument: "code" },
+    }
+    const definition = {
+      ...DOCLING,
+      env: [
+        {
+          name: "DOCLING_SERVE_API_KEY",
+          required: true,
+          generated: true as const,
+        },
+      ],
+      signin,
+    }
+    const { id } = await addService(ctx, definition)
+    const document = (await localItem(ctx, "service", id))
+      .document as ServiceDocument
+    const files = serializeItem(document)
+    const text = files["services/docling-service.yaml"]!
+
+    expect(text).toContain("pcp_format: 6\n")
+    expect(text).toContain("generated: true")
+    expect(text).toContain("tool: login_finish")
+    const read = await readRepo(files)
+    expect(read.problems).toEqual([])
+    expect((read.items[0] as ServiceDocument).definition.signin).toEqual(signin)
+    expect((read.items[0] as ServiceDocument).definition.env[0]).toMatchObject({
+      name: "DOCLING_SERVE_API_KEY",
+      generated: true,
+    })
+    expect(serializeItem(read.items[0]!)).toEqual(files)
+
+    // Each alone is format 6 too; a recipe is kept as written.
+    const onlyGenerated = serializeItem({
+      ...document,
+      definition: { ...document.definition, signin: undefined },
+    })
+    expect(onlyGenerated["services/docling-service.yaml"]).toContain(
+      "pcp_format: 6\n",
+    )
+    const recipe = parseServiceDefinition({
+      ...DOCLING,
+      env: [
+        {
+          name: "DOCLING_SERVE_API_KEY",
+          generated: { length: 64, symbols: false },
+        },
+      ],
+    })
+    expect(
+      serializeItem({ ...document, definition: recipe })[
+        "services/docling-service.yaml"
+      ],
+    ).toContain("length: 64")
+
+    // Without either it is the format it was (4: the endpoint's header is
+    // format 3's, so 3).
+    const plain = serializeItem({
+      ...document,
+      definition: parseServiceDefinition(DOCLING),
+    })
+    expect(plain["services/docling-service.yaml"]).toContain("pcp_format: 3\n")
+
+    // A document of an older format that names either is refused, as a PCP
+    // that reads that format would.
+    for (const [extra, said] of [
+      [{ signin }, /format 5, which has no sign-in: write it as format 6/],
+      [
+        {
+          env: [{ name: "DOCLING_SERVE_API_KEY", generated: true }],
+        },
+        /format 5, whose variables PCP makes no value for: write it as format 6/,
+      ],
+    ] as const) {
+      const older = await readRepo({
+        "services/docling.yaml": yamlText({
+          pcp_format: 5,
+          version: 1,
+          name: "Docling",
+          ...DOCLING,
+          ...extra,
+        }),
+      })
+      expect(older.items).toEqual([])
+      expect(older.problems[0]?.message).toMatch(said)
+    }
   })
 
   it("never shares a service built from a repository, and reads no build from a document", async () => {

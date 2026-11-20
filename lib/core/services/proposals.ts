@@ -221,6 +221,14 @@ export async function prepareServiceProposal(
   const env: ProposedVariable[] = []
 
   for (const entry of definition.env) {
+    // A value PCP makes itself (generated): nobody names or makes one for
+    // it, an assistant's generate included.
+    if (entry.generated !== undefined && given.has(entry.name)) {
+      throw invalid(
+        `${entry.name} takes a value PCP makes itself when it launches the service (generated): leave it out of env_secrets.`,
+      )
+    }
+
     const secretName = given.get(entry.name) ?? null
     const stored = secretName
       ? await resolveSecretRef(ctx, secretName, { kind: "service_env" })
@@ -260,7 +268,12 @@ export async function prepareServiceProposal(
       newSecretGenerate = recipe ?? newSecretGenerate
     }
 
-    if (!secretName && entry.required && entry.value === undefined) {
+    if (
+      !secretName &&
+      entry.required &&
+      entry.value === undefined &&
+      entry.generated === undefined
+    ) {
       throw invalid(
         `The service needs ${entry.name}: name the secret it takes in env_secrets.`,
       )
@@ -287,7 +300,13 @@ export async function prepareServiceProposal(
     label: "The service",
   })
 
-  if (auth && !given.has(auth.env)) {
+  if (
+    auth &&
+    !given.has(auth.env) &&
+    !definition.env.some(
+      (entry) => entry.name === auth.env && entry.generated !== undefined,
+    )
+  ) {
     throw invalid(
       `The ${definition.registers.kind === "mcp" ? "MCP server" : "endpoint"} sends ${auth.env}'s secret in ${auth.header}: name it in env_secrets.`,
     )
@@ -346,12 +365,11 @@ export function describeServiceAsk(ask: ServiceChangeAsk): {
       ? `Published on ${publish.address}: ${publish.ports.map((port) => `${port.host} → ${port.container}`).join(", ")}${publish.address === "0.0.0.0" || publish.address === "::" ? " (every address of the SSH server: anything on its network reaches it)" : isLoopback(publish.address) ? " (the SSH server's own loopback: PCP reaches it through the SSH connection)" : " (that address of the SSH server: anything that reaches it reaches the service)"}`
       : "Publishes no port",
     ...ask.env.map((entry) => {
-      const fixed = definition.env.find(
-        (each) => each.name === entry.name,
-      )?.value
+      const declared = definition.env.find((each) => each.name === entry.name)
+      const fixed = declared?.value
 
       return entry.secret === null
-        ? `Variable ${entry.name}: ${fixed !== undefined ? `its fixed value, ${fixed}` : "not set"}`
+        ? `Variable ${entry.name}: ${declared?.generated !== undefined ? "a random value PCP makes when it launches and keeps itself; nobody types, chooses or sees it" : fixed !== undefined ? `its fixed value, ${fixed}` : "not set"}`
         : entry.secretId
           ? `Variable ${entry.name}: your secret "${entry.secret}"`
           : ask.newSecretGenerate
@@ -377,6 +395,11 @@ export function describeServiceAsk(ask: ServiceChangeAsk): {
       : registers.kind === "mcp"
         ? `PCP adds an MCP server at ${registers.path} on port ${registers.port}${registers.auth ? `, sending ${registers.auth.env}'s secret in ${registers.auth.header}` : ""}`
         : "PCP adds no server for it",
+    ...(definition.signin
+      ? [
+          `It signs in to an account of yours: on PCP's sign-in page, PCP calls its ${definition.signin.start.tool} for the provider's address and its ${definition.signin.finish.tool} with the code you paste (as ${definition.signin.finish.argument}), whatever their tiers, on your own action only; it reads ${definition.signin.status.tool} by itself, for any token, only while that tool's tier is Read (its tiers are known once its tools are read). An assistant only gets the link to that page`,
+        ]
+      : []),
     ...(ask.instanceOf
       ? [
           `Another service of ${ask.instanceOf.name}, beside ${ask.instanceOf.instances.join(", ") || "(none)"}: it shares their definition, so a change to it changes every one of them`,
