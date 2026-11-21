@@ -32,6 +32,7 @@ import {
   pluginEntry,
 } from "./catalogue"
 import { setUpEntries } from "./catalogue-state"
+import { itemOffers } from "./setup"
 import { CAPABILITIES } from "./list"
 
 // The catalogue (#163): what PCP can set up when the owner asks for it in a
@@ -239,6 +240,81 @@ async function serviceOf(image: string): Promise<string> {
   return id
 }
 
+/**
+ * The Claude Code sessions service, launched: its definition declares a
+ * sign-in (services/signin.ts) and registers an MCP server with one tool.
+ * Ids of the service and of the server it registered.
+ */
+async function signingService({
+  signin = true,
+}: { signin?: boolean } = {}): Promise<{
+  serviceId: string
+  serverId: string
+  slug: string
+}> {
+  const serviceId = await serverOfKind("service")
+  const name = `sessions ${randomUUID().slice(0, 6)}`
+  const { id: serverId } = await createServer(ctx, {
+    name,
+    url: "https://sessions.example.com/mcp",
+    authType: "none",
+  })
+  await db().mcpTool.create({
+    data: {
+      id: randomUUID(),
+      serverId,
+      plainName: "list_sessions",
+      plainDescription: "List the cloud coding sessions on the account.",
+      plainInputSchema: JSON.stringify({
+        type: "object",
+        properties: {},
+        additionalProperties: false,
+      }),
+      annotations: JSON.stringify({ readOnlyHint: true }),
+    },
+  })
+  const definition = {
+    image: `ghcr.io/kaperkunde/claude-sessions-mcp@${DIGEST}`,
+    ports: [{ container: 8080 }],
+    registers: { kind: "mcp", port: 8080, path: "/mcp" },
+    ...(signin
+      ? {
+          signin: {
+            style: "paste_code",
+            status: { tool: "login_status", signed_in: "signed_in" },
+            start: { tool: "login_start", url: "url" },
+            finish: { tool: "login_finish", argument: "code" },
+          },
+        }
+      : {}),
+  }
+
+  await db().serviceSpec.create({
+    data: {
+      serverId: serviceId,
+      registeredId: serverId,
+      ...sealedServiceDefinition(
+        ctx,
+        serviceId,
+        JSON.stringify(definition),
+        canonicalJson(definition),
+      ),
+      engine: "docker",
+      ...sealedServiceOwn(ctx, serviceId, {
+        containerName: `pcp-${serviceId.slice(0, 8)}`,
+        publish: "{}",
+        values: "{}",
+      }),
+    },
+  })
+
+  const slug = (await loadGatewayServers(scope)).find(
+    (server) => server.id === serverId,
+  )!.slug
+
+  return { serviceId, serverId, slug }
+}
+
 /** What the token behind `scope` has, as search works it out. */
 async function tokenHas(
   hasProvider: () => Promise<boolean> = async () => false,
@@ -324,6 +400,26 @@ describe("what a token has", () => {
 
     vi.mocked(chromiumExecutable).mockResolvedValue("/usr/bin/chromium")
     expect((await tokenHas()).has("browser")).toBe(true)
+  })
+})
+
+describe("an entry's page", () => {
+  it("links the sign-in page of a service it runs that signs in", async () => {
+    const item = pluginEntry("claude_sessions")!.item!
+    const { serviceId, serverId } = await signingService()
+
+    expect((await itemOffers(ctx, [item])).running).toEqual([
+      expect.objectContaining({ id: serviceId, signIn: serverId }),
+    ])
+  })
+
+  it("links none for a service that declares no sign-in", async () => {
+    const item = pluginEntry("claude_sessions")!.item!
+    const { serviceId } = await signingService({ signin: false })
+
+    expect((await itemOffers(ctx, [item])).running).toEqual([
+      expect.objectContaining({ id: serviceId, signIn: null }),
+    ])
   })
 })
 
@@ -430,6 +526,44 @@ describe("search", () => {
     expect(text).toContain("launch it on their SSH server in one click")
     expect(text).not.toContain("register_server")
     expect(text).toContain(`(${PUBLIC_URL}/plugins/claude_sessions)`)
+  })
+
+  it("points to connect_account for a service that signs in, set up or hit", async () => {
+    const { slug } = await signingService()
+    const line = `Sign-in on ${slug}: connect_account says whether it is signed in, and hands the owner the sign-in page when not.`
+
+    // Set up is not signed in: the entry the owner named says so.
+    const named = await search({ query: "my claude code sessions" })
+    expect(named).not.toContain("can set up: Claude Code sessions")
+    expect(named).toContain(line)
+
+    // A hit on one of its tools, whatever the words.
+    const hit = await search({ query: "list sessions" })
+    expect(hit).toContain(`tool ${slug}/list_sessions`)
+    expect(hit).toContain(line)
+
+    // Nothing named and nothing hit: no line.
+    expect(await search({ query: "send an email" })).not.toContain(
+      "connect_account",
+    )
+  })
+
+  it("says nothing of a sign-in for a service that declares none", async () => {
+    await signingService({ signin: false })
+
+    const text = await search({ query: "my claude code sessions" })
+    expect(text).not.toContain("can set up: Claude Code sessions")
+    expect(text).not.toContain("connect_account")
+  })
+
+  it("says nothing of a sign-in to a token that reaches neither server", async () => {
+    await signingService()
+    const ssh = await serverOfKind("ssh")
+    const limited = await tokenScope({ serverIds: [ssh] })
+
+    const text = await search({ query: "my claude code sessions" }, limited)
+    expect(text).toContain("can set up: Claude Code sessions")
+    expect(text).not.toContain("connect_account")
   })
 
   it("is not narrowed to one server's tools or a kind", async () => {

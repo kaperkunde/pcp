@@ -276,6 +276,15 @@ const GATEWAY_TOOLS = [
   // A server's limits, read and proposed (#143).
   "get_server_limits",
   "propose_server_limits",
+  // PCP's version and update, the owner's secrets, a service's sign-in.
+  "change_secret_scope",
+  "connect_account",
+  "delete_secret",
+  "edit_secret",
+  "get_version",
+  "request_secret",
+  "rotate_secret",
+  "update_pcp",
 ]
 
 test("a token reads and changes endpoints only when the owner says so", async ({

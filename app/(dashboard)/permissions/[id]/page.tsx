@@ -534,9 +534,10 @@ function PendingNote({ view }: { view: PermissionView }) {
           <Link href="/secrets" className="underline">
             Secrets
           </Link>
-          , with no sites yet: the browser does not type it until you add one,
-          and it is sent to a server, service or wrapper only once you approve
-          one that names it.
+          , with no sites yet: the browser types it only after asking you each
+          time (Once, or Always at this site, which adds the site), and it is
+          sent to a server, service or wrapper only once you approve one that
+          names it.
         </p>
       ) : (
         <p className={note}>

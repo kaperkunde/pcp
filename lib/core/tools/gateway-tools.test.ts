@@ -431,6 +431,29 @@ describe("PCP's own tools", () => {
     }
   })
 
+  it("are found first by the task their lead says, in a search's words", async () => {
+    const first = async (query: string) => {
+      const result = await client.callTool(
+        entryCall("search", { query, kind: "pcp" }),
+      )
+      const text = (result.content as Array<{ text: string }>)[0]!.text
+
+      return text
+        .split("\n")
+        .filter((line) => line.startsWith("pcp "))
+        .map((line) => line.split(" ")[1])
+    }
+
+    expect((await first("rename secret"))[0]).toBe("edit_secret")
+    expect((await first("rename a secret"))[0]).toBe("edit_secret")
+    expect((await first("new password"))[0]).toBe("request_secret")
+    const password = await first("store a new password")
+    expect(password[0]).toBe("request_secret")
+    expect(password.indexOf("request_secret")).toBeLessThan(
+      password.indexOf("rotate_secret"),
+    )
+  })
+
   it("keep the run entries' and register_server's own descriptions short", async () => {
     const tools = everyTool
     const length = (name: string) =>

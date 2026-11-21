@@ -140,12 +140,12 @@ export function describeSecretRequestAsk(ask: SecretRequestAsk): {
       ...(ask.username ? [`Login name: ${ask.username}`] : []),
       ...(ask.generate
         ? [
-            `It asks PCP to make a new password: ${describeRecipe(ask.generate)}. Nobody sees it but you, on the Secrets page.`,
+            `It asks PCP to make a new ${(ask.generate.format ?? "password") === "password" ? "password" : "token"}: ${describeRecipe(ask.generate)}. Nobody sees it but you, on the Secrets page.`,
           ]
         : []),
       ask.origins.length > 0
         ? `Sites: ${ask.origins.join(", ")}`
-        : "No sites yet: the browser does not type it until you add one. It is sent to a server, a service or a wrapper only where you approve one that names it, which you are shown as also allowing it there.",
+        : "No sites yet: the browser types it only after asking you each time (Once, or Always at this site, which adds the site). It is sent to a server, a service or a wrapper only where you approve one that names it, which you are shown as also allowing it there.",
     ],
     warning:
       ask.origins.length > 0

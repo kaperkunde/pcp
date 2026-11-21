@@ -1145,8 +1145,10 @@ export async function admitSecretUse(
  * request_secret's arguments, checked before the owner is asked: a name
  * PCP holds already is refused (nothing an assistant asks for writes over
  * it), and so is a purpose with characters that do not show on screen.
- * Sites are optional: with none, the browser does not type it until the
- * owner adds one (admitSecretUse; change_secret_scope proposes one), and a
+ * Sites are optional: with none, the browser types it only after asking
+ * the owner each time (admitSecretUse, outOfScope: Once types it that one
+ * time, Always at this site adds the site; change_secret_scope proposes
+ * sites), and a
  * server, service or wrapper is sent it only once the owner approves one
  * naming it, which adds that one to its scope (#162).
  * `serverId` is the browser whose request_secret asked (the alias), or null
@@ -1359,7 +1361,7 @@ export async function applySecretRequest(
   }
 
   if (origins.length === 0) {
-    return `The owner saved the secret "${secret.name}". It has no sites yet, so the browser does not type it until the owner adds one (change_secret_scope proposes one). To send it to a server, a service or a wrapper, name it where a secret is taken (register_server's secret or env_secrets, a wrapper's secrets), which the owner approves. You never see its value.${generated ? " PCP made its value itself; the owner can see it on the Secrets page." : ""}`
+    return `The owner saved the secret "${secret.name}". It has no sites yet, so the browser types it only after asking the owner each time: Once types it that one time, Always at this site adds the site (change_secret_scope proposes sites). To send it to a server, a service or a wrapper, name it where a secret is taken (register_server's secret or env_secrets, a wrapper's secrets), which the owner approves. You never see its value.${generated ? " PCP made its value itself; the owner can see it on the Secrets page." : ""}`
   }
 
   const made = generated

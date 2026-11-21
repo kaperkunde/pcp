@@ -194,6 +194,19 @@ async function EntryPage({ entry }: { entry: CatalogueEntry }) {
                 >
                   {service.name}
                 </Link>
+                {service.signIn ? (
+                  <>
+                    {" "}
+                    <span className="text-muted-foreground">·</span>{" "}
+                    <Link
+                      href={`/servers/${service.signIn}/sign-in`}
+                      className="underline underline-offset-2"
+                      data-testid="plugin-sign-in"
+                    >
+                      Sign in to its account
+                    </Link>
+                  </>
+                ) : null}
               </li>
             ))}
           </ul>

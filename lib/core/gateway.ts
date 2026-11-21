@@ -301,7 +301,7 @@ import {
   canSetUpLine,
   catalogueNamed,
 } from "./capabilities/catalogue"
-import { setUpEntries } from "./capabilities/catalogue-state"
+import { setUpEntries, signinServices } from "./capabilities/catalogue-state"
 import {
   MAX_ANSWER_CHARS as MAX_CAPABILITY_ANSWER_CHARS,
   MAX_MERGED_FILES,
@@ -1852,6 +1852,48 @@ export function buildGatewayServer(
       )
   }
 
+  /**
+   * search's line for each server whose service declares a sign-in
+   * (services/signin.ts) that its hits are on, or that is a catalogue
+   * entry the query names and this token has: set up is not signed in, and
+   * connect_account says which. Read from the stored definitions only:
+   * search calls nothing.
+   */
+  async function signinNotes(query: string, refs: string[]): Promise<string[]> {
+    const hits = new Set(refs.map((ref) => ref.split("/")[0]!))
+    const named = new Set(catalogueNamed(query).map((entry) => entry.id))
+
+    if (hits.size === 0 && named.size === 0) {
+      return []
+    }
+
+    const reached = currentServers()
+    const slugOf = new Map(reached.map((server) => [server.id, server.slug]))
+    const slugs = new Set<string>()
+
+    for (const service of await signinServices(
+      scope.ctx,
+      reached.map((server) => server.id),
+    )) {
+      const own = service.serverIds.flatMap((id) => {
+        const slug = slugOf.get(id)
+        return slug ? [slug] : []
+      })
+      const hit = own.find((slug) => hits.has(slug))
+
+      if (hit) {
+        slugs.add(hit)
+      } else if (own[0] && service.entries.some((id) => named.has(id))) {
+        slugs.add(own[0])
+      }
+    }
+
+    return [...slugs].map(
+      (slug) =>
+        `Sign-in on ${slug}: connect_account says whether it is signed in, and hands the owner the sign-in page when not.`,
+    )
+  }
+
   /** search's answer, before what it says once a session. */
   async function searchRun(args: SearchArgs): Promise<Outcome> {
     if (args.server && !bySlug.has(args.server)) {
@@ -1928,12 +1970,20 @@ export function buildGatewayServer(
       : await missingCapabilities(args.query)
     // What PCP could set up for it that the vault has not (#163).
     const settable = narrowed ? [] : await canSetUp(args.query, reported)
+    // A service that signs in, set up: connect_account says whether it is.
+    const signins = await signinNotes(
+      narrowed ? "" : args.query,
+      results
+        .filter((result) => result.kind === "tool")
+        .map((result) => result.ref),
+    )
 
     if (
       results.length === 0 &&
       repoResults.length === 0 &&
       missing.length === 0 &&
-      settable.length === 0
+      settable.length === 0 &&
+      signins.length === 0
     ) {
       return text(
         `Nothing matches "${args.query}". Try other words, or list_tools for every tool on a server.`,
@@ -1966,6 +2016,7 @@ export function buildGatewayServer(
             `${result.kind} ${result.ref}${result.title ? ` (${result.title})` : ""}${result.tier ? ` [${result.kind === "tool" || result.kind === "pcp" ? `${result.tier}: ${callEntryFor(result.tier)}` : result.tier}]` : ""} — ${result.description}`,
         ),
         ...(notes.length ? ["", ...notes] : []),
+        ...(signins.length ? ["", ...signins] : []),
         ...(missing.length ? ["", ...missing] : []),
         ...(settable.length ? ["", ...settable] : []),
         ...(args.kind
@@ -4739,7 +4790,7 @@ export function buildGatewayServer(
   register({
     name: "request_secret",
     title: "Ask the owner for a secret",
-    description: `Request a new secret from the owner: a password, an API key or token, or a sign-in's one-time codes, stored on PCP's page so its value never passes through you or the conversation. They type it in, or have PCP make it (generate: a password, or a token of letters and digits, hex or base64url, for a key a server or service is to be given), and check the login name and the sites. origins, optional, are the sites the browser may type it at; with none, the browser does not type it until the owner adds one (change_secret_scope proposes one). Name it in register_server's secret or env_secrets, or a wrapper's secrets, to have it sent there once the owner approves. Answers "Not done yet" with a link. ${OWNER_LINK_RULE} ${nextMessageCheck("check_permission with the id it gave")} Never ask for the value in the conversation. A name PCP already holds is refused: name that one instead.`,
+    description: `Request a new secret or password from the owner: a password, an API key or token, or a sign-in's one-time codes, stored on PCP's page so its value never passes through you or the conversation. They type it in, or have PCP make it (generate: a password, or a token of letters and digits, hex or base64url, for a key a server or service is to be given), and check the login name and the sites. origins, optional, are the sites the browser may type it at; with none, the browser types it only after asking the owner each time: Once types it that one time, Always at this site adds the site (change_secret_scope proposes sites). Name it in register_server's secret or env_secrets, or a wrapper's secrets, to have it sent there once the owner approves. Answers "Not done yet" with a link. ${OWNER_LINK_RULE} ${nextMessageCheck("check_permission with the id it gave")} Never ask for the value in the conversation. A name PCP already holds is refused: name that one instead.`,
     input: z
       .object({
         name: z
@@ -4831,7 +4882,7 @@ export function buildGatewayServer(
   register({
     name: "edit_secret",
     title: "Propose changing a secret's details",
-    description: `Edit a secret's details: its name, description, login name or note, never its value (rotate_secret gives it a new one). Always asks the owner, whatever this token may do: answers "Not done yet" with a link. ${OWNER_LINK_RULE} The owner sees each field before and after and what uses the secret; a new name is flagged where wrappers or browser flows name it by its old one, which stop finding it. ${nextMessageCheck("check_permission with the id it gave")} Not for a secret PCP made for something of its own (an OAuth sign-in, an SSH key).`,
+    description: `Edit a secret's details or rename it: its name, description, login name or note, never its value (rotate_secret gives it a new one). Always asks the owner, whatever this token may do: answers "Not done yet" with a link. ${OWNER_LINK_RULE} The owner sees each field before and after and what uses the secret; a new name is flagged where wrappers or browser flows name it by its old one, which stop finding it. ${nextMessageCheck("check_permission with the id it gave")} Not for a secret PCP made for something of its own (an OAuth sign-in, an SSH key).`,
     input: z
       .object({
         name: secretNameArg,

@@ -231,7 +231,13 @@ export async function prepareServiceProposal(
 
     const secretName = given.get(entry.name) ?? null
     const stored = secretName
-      ? await resolveSecretRef(ctx, secretName, { kind: "service_env" })
+      ? await resolveSecretRef(ctx, secretName, {
+          kind: "service_env",
+          // The service this proposes, as register_server's consumer: one
+          // outside the secret's scope is shown as also allowing it there.
+          consumer: { id: null, name: named.name },
+          scope: "ask",
+        })
       : null
     const recipe = generated.get(entry.name) ?? null
 
@@ -493,6 +499,8 @@ export async function applyServiceChange(
         (
           await resolveSecretRef(ctx, entry.secret, {
             kind: "service_env",
+            consumer: { id: null, name: ask.name },
+            scope: "ask",
           })
         )?.id ??
         null

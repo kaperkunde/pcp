@@ -163,6 +163,13 @@ once you chose a provider on Settings → Search. Its instructions say so too.
    Changing a secret it uses restarts it with the new value. Its tools
    (`status`, `logs`, `start`, `stop`, `restart`) follow your levels; a tool
    of the server it serves, called while it is stopped, says so.
+   A service that works under an account of yours (its definition declares
+   a sign-in, as Claude Code sessions does) has a sign-in page of its
+   own in PCP, reached from the service's page (**Account**), from the plugin page that
+   launched it, or by the link `connect_account` hands an assistant: it
+   shows the provider's address, you sign in there and paste the code it
+   shows you, and PCP hands the code to the service and keeps it nowhere.
+   Running is not signed in: `connect_account` says which.
    **Storage folders** are on them too: **Add a folder** on the SSH server's
    page takes the folder's path (a Samba share, a scans folder), whose files
    it should be, a umask (002 by default, so a group share sees ordinary
@@ -234,6 +241,7 @@ tool of each one's tier runs by name, `{"tool": "check_permission",
 | `check_permission`      | Says how a request went once you have answered it; waits a little if you are still on it. With `ids` (up to 20) and a `mode`, `any` (the default, as soon as one is answered) or `all`, it waits on several together and lists each one's status. Without an id, lists the token's own requests still waiting for you.                                                         |
 | `withdraw_request`      | Takes back one of the token's own requests while it still waits for you: it leaves your list, and nothing runs.                                                                                                                                                                                                                                                                |
 | `check_server`          | Says whether a server is connected; waits a little if you are still signing in.                                                                                                                                                                                                                                                                                                |
+| `connect_account`       | Says whether a service that signs in to an account of yours (its definition declares a sign-in) is signed in, and as whom; when it is not, hands the assistant a link to the service's sign-in page in PCP for you. The assistant never sees the code.                                                                                                                         |
 | `get_server_limits`     | Reads a server's limits (calls at once, pause, calls a minute, time per call, bytes a day, cool-downs), which are yours and which are PCP's defaults, whether it is cooling down and why, and its calls, errors and answer times over the last minute, hour and day.                                                                                                           |
 | `propose_server_limits` | Proposes new limits for a server, with a note on why; you see them against the ones it has, may change them, and save them.                                                                                                                                                                                                                                                    |
 | `get_version`           | Says which version this PCP runs, its commit and build date, whether a newer one is out on your channel (from the last check, asking GitHub nothing), what changed, whether this PCP can install an update itself, and how the last install went.                                                                                                                              |
@@ -246,6 +254,12 @@ tool of each one's tier runs by name, `{"tool": "check_permission",
 | `rotate_secret`         | Proposes a new value for one of your secrets, which you type on PCP's page or have PCP make; everything that uses it gets it, and a service that takes it is made again.                                                                                                                                                                                                       |
 | `change_secret_scope`   | Proposes where one of your secrets may be used: sites the browser types it at, and servers, services and wrappers that may name it; you tick which changes to make.                                                                                                                                                                                                            |
 | `delete_secret`         | Proposes deleting one of your secrets (a Destructive tool); you see what uses it, and it is deleted only once nothing does.                                                                                                                                                                                                                                                    |
+
+A service that signs in to an account of yours is set up once it runs, but
+works only once you have signed in on its page ([SSH servers and
+services](#in-pcp), step 6). `connect_account` says whether it is, and when
+it is not hands the assistant the page's link to give you; a call to the
+service that fails signed out hands over the same link.
 
 A Write or Destructive call an assistant makes again with the same
 arguments within a while (from `execute_*`, a program's `pcp.call` or a

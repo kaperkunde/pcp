@@ -81,7 +81,10 @@ describe("request_secret, PCP's own", () => {
     expect(row.serverId).toBeNull()
     expect(view.title).toBe('Store the secret "Docling key"?')
     expect(view.lines).toContain(
-      "No sites yet: the browser does not type it until you add one. It is sent to a server, a service or a wrapper only where you approve one that names it, which you are shown as also allowing it there.",
+      "No sites yet: the browser types it only after asking you each time (Once, or Always at this site, which adds the site). It is sent to a server, a service or a wrapper only where you approve one that names it, which you are shown as also allowing it there.",
+    )
+    expect(view.lines).toContain(
+      "It asks PCP to make a new token: 40 characters: letters and digits. Nobody sees it but you, on the Secrets page.",
     )
     expect(view.secretToEnter).toMatchObject({
       name: "Docling key",
@@ -105,7 +108,7 @@ describe("request_secret, PCP's own", () => {
     const value = await readSecretValue(ctx, secret.id)
     expect(value).toMatch(/^[A-Za-z0-9]{40}$/)
     expect(JSON.stringify(done)).toContain(
-      "It has no sites yet, so the browser does not type it until the owner adds one (change_secret_scope proposes one)",
+      "It has no sites yet, so the browser types it only after asking the owner each time: Once types it that one time, Always at this site adds the site (change_secret_scope proposes sites).",
     )
     expect(JSON.stringify(done)).toContain("PCP made its value itself")
     expect(JSON.stringify(done)).not.toContain(value)

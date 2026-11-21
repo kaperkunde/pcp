@@ -40,22 +40,39 @@ export type CapabilityOffers = {
   /** The commit the launch links name: the branch's head when read. */
   commit: string | null
   offers: ItemOffer[]
-  /** Services in the vault that run one of its items. */
-  running: Array<{ id: string; name: string; item: string }>
+  /**
+   * Services in the vault that run one of its items; `signIn`, the server
+   * whose sign-in page (/servers/<id>/sign-in) the owner signs in on, when
+   * its definition declares a sign-in (services/signin.ts).
+   */
+  running: Array<{
+    id: string
+    name: string
+    item: string
+    signIn: string | null
+  }>
   /** Why the repository could not be read, in words. */
   problem: string | null
 }
 
 /**
  * The vault's services with the words their image and source tag carry,
- * which is how a common item is known wherever it was launched from.
+ * which is how a common item is known wherever it was launched from, and
+ * for one that signs in (services/signin.ts), the server it registered,
+ * whose sign-in page it is.
  */
 export async function vaultServices(
   ctx: VaultContext,
-): Promise<Array<{ id: string; name: string; image: string }>> {
+): Promise<
+  Array<{ id: string; name: string; image: string; signIn: string | null }>
+> {
   const specs = await db().serviceSpec.findMany({
     where: { server: { vaultId: ctx.vaultId } },
-    select: { ...SERVICE_SPEC_SELECT, server: { select: SERVER_META_SELECT } },
+    select: {
+      ...SERVICE_SPEC_SELECT,
+      registeredId: true,
+      server: { select: SERVER_META_SELECT },
+    },
     orderBy: { createdAt: "asc" },
   })
 
@@ -71,6 +88,7 @@ export async function vaultServices(
           name: serverName(ctx, spec.server),
           image:
             `${definition.image ?? ""} ${definition.source ?? ""}`.toLowerCase(),
+          signIn: definition.signin ? spec.registeredId : null,
         },
       ]
     } catch {
@@ -90,7 +108,14 @@ async function runningItems(
     )
 
     return item
-      ? [{ id: service.id, name: service.name, item: item.title }]
+      ? [
+          {
+            id: service.id,
+            name: service.name,
+            item: item.title,
+            signIn: service.signIn,
+          },
+        ]
       : []
   })
 }
