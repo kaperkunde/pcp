@@ -19,7 +19,8 @@ import {
   type WrapperPaceInput,
 } from "../pacing/input"
 import { canonicalJson } from "../permission-rules"
-import { createSecretNamedAfter, findTextSecretByName } from "../secrets"
+import { resolveSecretRef } from "../secret-refs"
+import { createSecretNamedAfter } from "../secrets"
 import { tierOfCalls } from "../tool-tiers"
 import {
   contentInstance,
@@ -973,7 +974,12 @@ async function withSecretIds(
       })
     ).id
   } else if (newSecret) {
-    id = (await findTextSecretByName(ctx, newSecret))?.id ?? null
+    id =
+      (
+        await resolveSecretRef(ctx, newSecret, {
+          kind: "wrapper_binding",
+        })
+      )?.id ?? null
   }
 
   if (!id) {
@@ -1026,11 +1032,14 @@ export async function applyWrapperChange(
     tokenId,
     secretValue,
     access = [],
+    made,
   }: {
     tokenId: string
     secretValue?: string
     /** The levels and tiers the owner left on the page (proposed-access.ts). */
     access?: AccessRule[]
+    /** Filled in with the wrapper a create made. */
+    made?: { ids: string[] }
   },
 ): Promise<string> {
   if (ask.action === "create") {
@@ -1061,6 +1070,7 @@ export async function applyWrapperChange(
       definition,
       ask.instanceOf?.definitionId ?? null,
     )
+    made?.ids.push(id)
 
     if (ask.note) {
       await setPersonalNote(ctx, "server", id, ask.note)

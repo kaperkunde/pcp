@@ -7,6 +7,7 @@ import {
   listBrowserOrigins,
   listSecretAllowances,
 } from "@/lib/core/browser-secrets"
+import { listScopeCandidates, readSecretScopes } from "@/lib/core/secret-scope"
 import { listSecrets } from "@/lib/core/secrets"
 import { requireContext } from "@/lib/server/session"
 
@@ -14,10 +15,13 @@ export const metadata: Metadata = { title: "Secrets" }
 
 export default async function SecretsPage() {
   const ctx = await requireContext()
-  const [secrets, origins, allowances] = await Promise.all([
+  // The scopes first: one from before is worked out from its uses there.
+  const scopes = await readSecretScopes(ctx)
+  const [secrets, origins, allowances, candidates] = await Promise.all([
     listSecrets(ctx),
     listBrowserOrigins(ctx),
     listSecretAllowances(ctx),
+    listScopeCandidates(ctx),
   ])
 
   return (
@@ -28,8 +32,10 @@ export default async function SecretsPage() {
         action={<SecretAddDialog />}
       />
       <SecretsManager
+        candidates={candidates}
         secrets={secrets.map((secret) => ({
           ...secret,
+          scope: scopes.get(secret.id) ?? { anywhere: false, consumers: [] },
           browserOrigins: origins.get(secret.id) ?? [],
           allowances: allowances
             .filter((allowance) => allowance.secretId === secret.id)

@@ -1,11 +1,8 @@
 import type { CallToolResult } from "@modelcontextprotocol/server"
 import type { Locator, Page } from "patchright-core"
 
-import {
-  checkSecretRequest,
-  checkSecretSitesChange,
-  originOf,
-} from "../browser-secrets"
+import { checkSecretRequest, originOf } from "../browser-secrets"
+import { prepareSecretScopeChange } from "../secret-changes"
 import type { VaultContext } from "../context"
 import { db } from "../db"
 import { invalid, PcpError } from "../errors"
@@ -3759,30 +3756,45 @@ async function runTool(
         throw error
       }
 
-      throw new OwnerNeeded({ kind: "secret_request", input })
+      // An alias of PCP's own request_secret for one release
+      // (docs/breaking-changes.md): the same request, with the new name.
+      throw new OwnerNeeded(
+        { kind: "secret_request", input },
+        "The browser's request_secret is now PCP's own request_secret, run through execute_write: call that from now on, as this one goes in the next release. It takes the same arguments, and sites are optional there.",
+      )
     }
     case "update_secret_sites": {
-      let input
-
-      try {
-        input = await checkSecretSitesChange(ctx, server.id, {
+      // An alias of PCP's own change_secret_scope for one release
+      // (docs/breaking-changes.md): the same request, sites only.
+      const prepared = await prepareSecretScopeChange(
+        ctx,
+        server.id,
+        {
           name: args.name as string,
           reason: args.reason as string,
-          add: args.add as
-            Array<{ origin: string; subdomains?: boolean }> | undefined,
-          remove: args.remove as string[] | undefined,
-        })
-      } catch (error) {
-        // Its refusals name sites: a tool error, out of the log.
-        if (error instanceof PcpError) {
-          return text(error.message, true)
-        }
+          ...(args.add
+            ? {
+                add_sites: args.add as Array<{
+                  origin: string
+                  subdomains?: boolean
+                }>,
+              }
+            : {}),
+          ...(args.remove ? { remove_sites: args.remove as string[] } : {}),
+        },
+        "update_secret_sites",
+      )
 
-        throw error
+      // Its refusals name sites: a tool error, out of the log.
+      if ("refused" in prepared) {
+        return text(prepared.refused, true)
       }
 
       // Always the owner's, whatever the token's levels.
-      throw new OwnerNeeded({ kind: "secret_sites_change", input })
+      throw new OwnerNeeded(
+        { kind: "secret_change", input: prepared.ask },
+        "The browser's update_secret_sites is now PCP's own change_secret_scope, run through execute_write: call that from now on, as this one goes in the next release. Its add is add_sites and its remove is remove_sites.",
+      )
     }
     case "evaluate":
       return onTab(scope, tab, spec, (current) =>

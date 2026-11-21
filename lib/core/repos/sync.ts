@@ -204,7 +204,15 @@ export async function syncItem(
       kind === "review" &&
       repo.trust === "trusted" &&
       repo.access === "write" &&
-      review.textOnly
+      review.textOnly &&
+      // Never lets a secret be used further by itself (#162): that waits
+      // for the owner's tick on the review.
+      (
+        await resolveItem(ctx, fetched.document, {
+          onto: true,
+          id: item.itemId,
+        })
+      ).alsoAllows.length === 0
     ) {
       await applyItem(ctx, fetched.document, { id: item.itemId })
       const after = await localOf(ctx, item)
@@ -469,7 +477,10 @@ export async function pendingChange(
     local,
     incoming,
     review: await reviewInVault(ctx, local, incoming.document, item.itemId),
-    resolved: await resolveItem(ctx, incoming.document, { onto: true }),
+    resolved: await resolveItem(ctx, incoming.document, {
+      onto: true,
+      id: item.itemId,
+    }),
   }
 }
 
@@ -510,7 +521,13 @@ export async function approveChange(
    * vault says of the item (found-review.ts) can change while the document
    * does not, as when a secret a flow types is added since.
    */
-  shown: { sha: string; hash: string; flags?: number },
+  shown: {
+    sha: string
+    hash: string
+    flags?: number
+    /** The "Also allow" left ticked (ResolvedItem `alsoAllows`). */
+    alsoAllow?: string[]
+  },
 ): Promise<string[]> {
   const change = await stillAsShown(ctx, itemId, shown)
 
@@ -522,6 +539,7 @@ export async function approveChange(
   }
   const applied = await applyItem(ctx, change.incoming.document, {
     id: change.item.itemId,
+    alsoAllow: shown.alsoAllow,
   })
   const after = await localOf(ctx, change.item)
 
@@ -626,10 +644,17 @@ export async function applyMerged(
   ctx: VaultContext,
   item: RepoItemRow,
   document: ItemDocument,
-  { remoteSha, proposer }: { remoteSha: string; proposer: Proposer },
+  {
+    remoteSha,
+    proposer,
+    alsoAllow,
+  }: { remoteSha: string; proposer: Proposer; alsoAllow?: string[] },
 ): Promise<string[]> {
   const repo = await getRepo(ctx, item.repoId)
-  const applied = await applyItem(ctx, document, { id: item.itemId })
+  const applied = await applyItem(ctx, document, {
+    id: item.itemId,
+    alsoAllow,
+  })
   const after = await localOf(ctx, item)
   let sha = remoteSha
   const notes = [...applied.notes]
@@ -679,6 +704,8 @@ export type AddChoice = {
   instance?: InstanceInput
   /** A new service's own part, and the launch that runs it. */
   service?: ServiceInstance
+  /** The "Also allow" the owner left ticked (ResolvedItem `alsoAllows`). */
+  alsoAllow?: string[]
 }
 
 export type AddResult = {
@@ -744,6 +771,7 @@ export async function addFromRepo(
         id: found?.id ?? null,
         instance: found ? undefined : choice.instance,
         service: found ? undefined : choice.service,
+        alsoAllow: choice.alsoAllow,
       })
       const kind = fetched.document.kind
       const after = await localItem(ctx, kind, applied.id)

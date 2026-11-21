@@ -70,6 +70,12 @@ export default defineConfig(
         PCP_PUBLIC_IP_URL: "http://127.0.0.1:9/ip",
         // The update check asks a port nothing answers on, never GitHub.
         PCP_RELEASES_URL: E2E_RELEASES_URL,
+        // As if the Linux installer watched for an install (install.sh's
+        // PCP_HOST_UPDATER), so update_pcp asks the owner
+        // (permissions.spec.ts); nothing installs unless one is allowed. A
+        // checkout believes it only in a build made with PCP_TEST_BUILD=1
+        // (lib/core/updates/install.ts installHost).
+        PCP_HOST_UPDATER: "1",
         PCP_PCPGG_RELAY_URL: E2E_PCPGG_RELAY_URL,
         // Linked repositories talk to the fake GitHub (e2e/fixtures/github.ts)
         // on a fixed port, never to GitHub. A production build reads these

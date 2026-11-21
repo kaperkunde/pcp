@@ -1633,6 +1633,98 @@ With `definition` it is another of a service definition the token sees,
 its own part only, launched while `definitionBasis` holds. A definition
 with a `build` is refused: a build is the owner's alone.
 
+**A value PCP makes** (`generated` on a variable, format 6,
+`services/generated.ts`): at launch, `upstream.ts launchService` makes a
+value for each generated variable with `secrets.ts createGeneratedSecret`
+(a managed `generated` secret: the CSPRNG, 48 letters and digits by
+default or the definition's length and symbols, stored at once, never
+revealed, renamed or named by an assistant), named
+`generatedSecretName(<service>, <VARIABLE>)`, and binds it, naming the
+variable in the launch's `generatedEnv`: `services.ts prepareLaunch`
+takes a generated secret for those variables only, a text secret of the
+owner's for every other, and the server it registers sends it when the
+variable is its header's (`registers.auth`, `authSecretGenerated`). It
+reaches the container over standard input as any bound secret does.
+Nobody types or chooses it: the launch form, the settings form, the
+launch request, a repository's review and the service's page show it as
+made by PCP, and `register_server`'s `env_secrets` naming it (with
+`generate` or without) is refused. Each is its service's own: a bound variable keeps its value (a remake),
+and a value made now is always a new secret, its name getting "-2", "-3",
+… when taken (a service of that name renamed since, or removed with the
+server it registered kept, which still sends its value), so two services
+never share a token. A variable its definition gains later (an update, a
+repository's change) gets its value only on a way in that may make the
+container again (start, restart, remake, update, start on demand, the
+reconcile pass; never a status, logs or image read, or a removal:
+`ServiceOptions.bindGenerated`), and the server it registered moves to it
+only once the container is made with it (`followRegisteredAuth`). Each is named in the launch's list as soon as it
+exists, so a launch that fails, even part way through making them, takes
+back exactly what it made (`takeBackGenerated`). Removing the service
+removes its generated secrets (`deleteManagedSecret`), except one the
+server it registered (kept on the owner's choice) or another service
+still sends. Saving the service, or the server it registered, with it
+unchanged keeps it (`normalizeHeaderAuth`'s `kept`).
+
+**Connecting an account** (`signin`, format 6, `services/signin.ts`): a
+service that works under an account of the owner's (an app signed in as
+them) names the three tools of the server it registers that sign it in:
+`status` (a true or false field, and who), `start` (a field with the
+provider's address, and when the sign-in ends) and `finish` (the argument
+the pasted code goes in), style `paste_code`. Signing in is then PCP's
+own step, not a wrapper, a blocked tool and a secret the owner makes up:
+
+- PCP calls the status tool by itself (for the owner's page, for
+  connect_account, check_server and a failed call) only while that tool's
+  tier is Read (`statusReadable`, `tool-tiers.ts`, the owner's choice
+  included): the definition names the tool, so one that names a tool that
+  changes things gets no call, its status reads as unknown, and
+  connect_account says so; the owner's page still offers the sign-in, and
+  a finish its tool took reads as signed in, as whom unknown. The start and finish tools are called only on
+  the owner's own action on their page, whatever their tiers; the page,
+  the launch request, the launch form, a repository's review and the
+  service's page (with each tool's tier) say so.
+- The owner's page `/servers/<id>/sign-in` (either the service's id or its
+  server's) reads the status and, signed out, offers Start signing in: it
+  never starts one by itself on opening, as a reload or a second tab would
+  end the one in progress. A started sign-in runs out after the time PCP's
+  machine worked out from the service's end (`readExpiry`: an ISO time or
+  an epoch; one in the past, such as a duration read as 1970, or more than
+  a day ahead is unknown), at least 30 seconds, never by the browser's
+  clock; the page starts it again by itself once, then leaves it to the
+  owner. It shows the provider's
+  address with its host plainly (`checkSigninUrl`: https only, no user
+  name or password in it, within `MAX_SIGNIN_URL_CHARS`: it is the
+  service's text), and takes the code. Its server action
+  (`lib/actions/service-sign-in.ts`) hands the code to
+  `upstream.ts finishServiceSignin`, which checks it (one line, within
+  `MAX_SIGNIN_CODE_CHARS`) before anything is sent, puts it in the finish
+  tool's arguments for that one call through `callServerTool` (paced and
+  through the service's tunnel), scrubs it from the answer's error and
+  anything thrown, and reads the status. The code is never stored or in an
+  answer, and the page's calls are the owner's own: no token's levels
+  apply (so the finish tool's level for tokens can stay blocked) and the
+  request log, a token's calls, has no line for them.
+- An assistant calls `connect_account` (Write: it starts what the owner
+  finishes) with the service or its server: signed in, it says as whom
+  (to a token with every tool of that server blocked, only that it is);
+  signed out, `needs_owner` reason `signin`, `signin: {serverId, slug,
+name, pageUrl}`, the page's link last labelled "Sign in to <name> in
+  PCP", and check_server to call on the owner's next message, which reads
+  the status (waiting up to its usual time while it is still signed out,
+  `SIGNIN_POLL_MS` apart) and says who is signed in, or hands the link
+  again.
+- A call to the server that comes back an error is checked against the
+  status (`signinOffer`, in `permissions.ts runCall`, so execute and a
+  call the owner allowed alike): signed out, the answer is the same
+  `signin` link, so signing in again is offered by itself, with what the
+  service said only when the call shapes nothing of its answer (no `keep`,
+  `fields` or `decode`: a part kept as a handle never reaches the
+  assistant unshaped). A signed-in service's error, and the sign-in's own
+  tools' answers, are left as they came.
+- The launch says which of the three tools the server it registered does
+  not serve, if any; the launch form, the launch request, a repository's
+  review and the service's page (an Account row) show the sign-in.
+
 The test engine (`services/fake-docker.ts`) is a Node program on the PATH of
 a real sh that the test SSH server runs each command in, recording the
 words it got and the env file it read; it keeps named volumes (as folders
@@ -2264,6 +2356,11 @@ version of PCP's suggested instructions they were copied or merged from.
   memory, and so is text still holding a merge's conflict markers. Only the
   owner writes them; no gateway tool does, and `updateApiToken` leaves them
   alone.
+- **What PCP can set up.** Version 8 adds one line: when the owner asks
+  for something PCP has not set up, search for it, say what it takes and
+  offer to set it up with their approval (the gateway's own instructions
+  and key rules say the same, `SET_UP_RULE`; see
+  [What PCP can set up](#what-pcp-can-set-up-the-catalogue)).
 - **When the suggestion changes.** A token whose base is older than the
   latest version is a notice for the owner (`lib/core/owner-notices.ts`,
   worked out when the bell is read; nothing is stored for it). The notice's
@@ -3371,20 +3468,19 @@ site away, or its flag, drops every token's allowance at the origins it no
 longer covers. The owner sets the flag on the secret's row ("And its
 subdomains").
 
-`update_secret_sites` (name, reason, `add` with `subdomains`, `remove`) is an
-assistant's way to fix a secret's sites (a misspelled domain, another
-subdomain): checked first (a secret the browser types, plain text, sites to
-remove that it has, something that changes), it always throws `OwnerNeeded`
-for a `secret_sites_change`, whatever the token's levels. Its page shows the
-sites now and each change with a box, a site under a registrable domain
-none of them has is noted, and a lookalike (`lookalike-sites.ts`: an IDN in
+`update_secret_sites` (name, reason, `add` with `subdomains`, `remove`) is,
+for one release, the browser's alias of PCP's own `change_secret_scope`
+(below): the same checks (a secret the browser types, plain text, sites to
+remove that it has, something that changes, `checkSecretSitesChange`), the
+same `secret_change` request with sites only, named after the alias, with a
+note in front of its answer naming the tool to use. Its page shows the sites
+now and each change with a box, a site under a registrable domain none of
+them has is noted, and a lookalike (`lookalike-sites.ts`: an IDN in
 punycode, the same name under another ending, a confusable spelling, one or
 two edits from a site's domain name, or a site's name inside another
-domain) is flagged and left unticked. The answer carries the keys ticked and
-the sites as shown (`sitesBasis`): `checkSecretSitesAnswer` refuses before
-anything is written when the sites changed since, and
-`applySecretSitesChange` makes only the ticked changes through `bindOrigin`
-and `unbindOrigin`. The value never changes, and is never shown.
+domain) is flagged and left unticked. A `secret_sites_change` request made
+before the alias still answers as it did (`sitesBasis`,
+`applySecretSitesChange`). The value never changes, and is never shown.
 
 **Sign-ins at a page's site** (`sign-in-hint.ts`). So an assistant types a
 password rather than asking the owner for it in the conversation, the
@@ -3669,6 +3765,123 @@ and the page follows its progress. The install is looked for by the
 revision `patchright-core` drives, so after an update to a newer one the
 page offers to install that, which removes the older build. Nothing runs
 until the owner clicks.
+
+## A secret's scope, and what an assistant may propose about one
+
+Where one of the owner's secrets may be used is a property of the secret
+(#162, `lib/core/secret-scope.ts`), granted only on the owner's pages:
+
+- **Consumers**: the servers, API endpoints, mail and calendar accounts,
+  services and wrappers that may name it (a header or sign-in, a variable,
+  a wrapper's place for a secret), as `secret_scope` rows (secret id,
+  server id; neither secret, both exported, cascading with either side).
+  Whatever uses a secret now (`secret-uses.ts secretUses`, linked
+  repositories aside) is in its scope too, row or not: a use is only ever
+  made by the owner's pick on their own pages or by their yes to a
+  proposal, and either is the grant. So the owner's own pages need no
+  extra step, and a consumer that uses a secret cannot be taken out of its
+  scope until it is changed.
+- **Sites**: `secret_browser_origin`, where the browser types it, as below.
+- **Anywhere** (`secret.scope_anywhere`): any consumer, and for the browser
+  any site after asking the owner, which is what every secret was before
+  the scope. A secret the owner adds on the Secrets page with no site
+  starts anywhere; one made for something (a new server's, a service's, a
+  wrapper's, `request_secret`'s) starts with only that.
+
+**Day one.** The migration (`20261120013000_secret_scope`) adds the column
+and the table and marks every existing secret's scope as not worked out
+(null): its uses are partly in sealed wrapper definitions and service
+specs that SQL cannot read. The first request that holds the vault's key
+(`ensureSecretScopes`, called before anything reads a scope or takes a
+secret's basis) writes each one's uses as rows, or anywhere when nothing
+uses it, claiming each secret by the update of its mark so two requests
+never write it twice. "Nothing uses it" is only taken when every wrapper
+definition read (`secretUses`' `report`): otherwise such a secret stays
+unworked out until a request where they all do. PCP's own secrets (OAuth
+tokens, SSH keys, proxy passwords, values PCP made for a service) are never
+anywhere: a generated value's scope is its service. Until then
+a null scope reads as anywhere. An export carries the column and the rows;
+an older file's secrets come in null and are worked out the same way.
+
+**The one check.** `secret-refs.ts resolveSecretRef(ctx, name, use)` takes
+the consumer in `use` (`consumer`: its id, or null for one a proposal would
+make, and its name) and checks the scope (`scopeCovers`): in scope, it
+resolves; outside, `scope` decides: `"check"` (the default, for a caller
+that says nothing) refuses with a `forbidden` error naming
+`change_secret_scope`; `"ask"` (an assistant's proposal: `register_server`
+passes it) resolves with `inScope: false`; `"granted"` is the owner's yes.
+Every way an assistant can name a secret today carries an "Also allow"
+instead: a proposal that names a secret outside its consumer's scope
+(`register`, a new service's variables, a wrapper's places on the wrapper
+and on every other instance of its definition, which `shareWrapper` copies
+them to: `secret-scope-asks.ts`, from the request's stored ids, at view
+and answer time) shows one "Also allow <secret> for <consumer>" per secret
+and consumer, ticked, beside the approval; `decidePermission` refuses the
+yes unless each is still ticked (`alsoAllow`), and once what it proposed
+is made keeps exactly those in the scope as rows (`keepAllowed`: a
+consumer named by id, or for the one the request makes, what uses the
+secret now that did not before), so the grant outlives the use and
+nothing else is widened. A linked repository's item does the same
+(`repos/apply.ts resolveItem`'s `alsoAllows`): its review (the add page,
+a waiting change, an assistant's `repo_change`) shows them ticked,
+`applyItem` refuses unless each is, and keeps only those; a change from a
+trusted repository that would let a secret be used further never applies
+by itself. Nothing an assistant sends ticks one.
+
+**The browser keeps its gate.** Sites are the scope for typing, and
+allowances stay per token. A secret typed through a wrapper's or flow's
+place for it at browser/type is in that wrapper's scope, and passes the
+gate per site as before. A secret with no site that is not anywhere and
+not typed through such a place is typed only on the owner's answer to that
+use: a `secret_use` ask (`outOfScope`) offering Once (a once allowance:
+that call, one sign-in, the scope unchanged) or Always at this site (adds
+the site); an allowance for a while does not count for it, and it is never
+typed without asking. An anywhere one with no site is typed after a
+`secret_use` ask, as before.
+A secret with sites is asked about at another site as before, Always allow
+adding that site. run_<tier> programs never reach a secret: a wrapper's
+bindings are the programs' way, through the wrapper's place in the scope.
+
+**The owner's Secrets page** shows each secret's scope under Scope:
+anywhere (a box), the servers and services and the wrappers in it (one that
+uses it now marked so, with no Remove), its sites (changed under Browser),
+and a picker of the vault's servers, services and wrappers to add
+(`grantSecretScope`, `removeFromSecretScope`, `setSecretAnywhere`).
+
+**An assistant's proposals** (`lib/core/secret-changes.ts`), PCP's own
+tools behind execute: `edit_secret` (name, description, login name, note;
+never the value), `rotate_secret` (a new value the owner types, or PCP
+makes from a recipe on their yes: `generate-password.ts`), and
+`change_secret_scope` (sites to add or take away, with `subdomains`, and
+consumers by short name), all Write, and `delete_secret`, Destructive. Each
+is a `secret_change` request (`action` edit, rotate, scope or delete, `via`
+the tool) that always asks, whatever the token's levels, and carries the
+secret's `basis` when asked (`secretBasis`: hashes of its sealed name,
+description, login name and note, of its value's ciphertext, its kind,
+companion, anywhere, scope rows and sites; nothing opened): the answer is
+refused, writing nothing, once it differs, and asked again the request is
+a new one (the basis is in its target). Its page (`showSecretChange`,
+`components/secret-change-review.tsx`) shows each field before and after,
+what uses the secret (what a new value reaches, or what a deletion would
+break), its sites and scope, and for a rename or a deletion the wrappers
+and browser flows whose programs type it by its name (`secret-literals.ts`)
+or whose places name it, which would stop finding it. A scope change lists
+each change with a box, sites through `showSecretSitesChange` (lookalikes
+flagged and unticked, a new domain noted, subdomains only within a
+registrable domain), consumers by name; the yes makes only the ticked ones
+(`decidePermission`'s `sites.keep`). A rotation writes the value through
+`updateSecret`, which clears the "rejected the credentials" alerts of
+everything that uses it (servers, endpoints, mail and calendar accounts,
+services and wrappers), then remakes the services that take it
+(`restartServicesUsingSecret`, awaited, the result counted in the answer);
+the value goes nowhere else, not into the request, its outcome or the
+answer. A deletion is refused while a blocking use remains
+(`blockingUses`): the page names them, the owner changes them on their own
+pages and answers again; the yes never changes a server, service or
+wrapper itself, since each of those is content the owner approved on its
+own. Managed secrets (an OAuth sign-in, an SSH key, a proxy password, a
+value PCP made for a service) are refused by all four before the owner is
+asked, with what changes each.
 
 ## Search's embeddings
 
@@ -4514,6 +4727,39 @@ what changed. Anything else, including an image from before this, leaves the
 update to the copy with a note. With no copy (no timer of PCP's) nothing is
 read, and the unit changes when the installer next runs. `write_unit` leaves drop-ins in `pcp.container.d/` alone
 and names them, since one may do what the unit now does itself.
+
+**Assistants read the version and ask for an install** (#161). Two of
+PCP's own tools, behind `execute_read` and `execute_write`
+(`updates/tools.ts`): `get_version` answers the version, the commit and the
+time of the build (`PCP_COMMIT`, `PCP_BUILT_AT` in `lib/core/version.ts`,
+written into the build by `next.config.ts` from the Dockerfile's build
+arguments and `build-desktop.yml`, which both take the tag's commit; null in
+a checkout or the dev server), whether it is a build of develop, the owner's
+channel and check, the newest version the last check found (never a new
+request; with the check off, `latest` and `up_to_date` are null), the
+release notes as untrusted text without characters that do not show with a link built from `releasePageUrl`, whether this PCP can
+install an update itself, and the last install. `update_pcp` is a
+`pcp_update` request, always, whatever the levels (own tools have none, and
+its only answers are **Install and restart** and **Not now**: an "always" or
+"allow for" is refused, never read as a yes): the page shows both versions,
+the notes as text and that the restart may drop the assistant's connection.
+The yes runs `installNewest` (`updates/install.ts`), the same check and
+request as the owner's button: one function says whether this PCP installs
+itself (the desktop app's own updater, or the installer that watches its
+container, `PCP_HOST_UPDATER`; a checkout's only in a build for the e2e
+suite, `PCP_TEST_BUILD`) and why not, with the steps Settings shows
+(`lib/update-steps.ts`). Neither installer installs a named version
+(`install.sh watch` pulls the channel's tag, the desktop app reads the latest
+release), so the yes first checks again (the owner's click, as Check now is,
+even with the check off) and goes ahead only while the newest on the channel
+the owner was asked on is still the version they were shown; a newer one,
+another channel or a check that fails installs nothing. Pinning an exact
+version would need the installers to take one. Where PCP cannot, or the
+check is off, or nothing newer is known, `update_pcp` refuses at once with
+those steps and a link to Settings → Updates, and asks nothing.
+`update.status` keeps `lastInstall` (from, to, when) past the restart that
+clears the request, so `get_version` says whether it finished: it did once
+the running version is the one asked for or a later one.
 
 ## Cleanup and the log
 
@@ -5408,6 +5654,59 @@ or a link to the service they have. Search adds a "not installed" line for a
 capability its query names (`capabilitiesNamed`) with no provider, search's ref
 of a capability tool lists its providers or says there is none, and
 read_result's answer for a picture or a PDF names the tool that reads it.
+
+### What PCP can set up: the catalogue
+
+**The principle.** Talking to an assistant is a way to use PCP of its own
+(#163). The owner's pages stay fully capable, but anything PCP can do should
+be found from the conversation: when the owner asks for something PCP could
+do but has not been set up ("I'd like to add my Gmail", "Can you connect to my
+printer?"), the assistant says in a sentence what it takes and then does the
+work, only ever proposing it: the owner agrees or launches on PCP's page,
+asked by link as always.
+
+**The catalogue** (`lib/core/capabilities/catalogue.ts`, pure and static)
+lists it beside `CAPABILITIES`: per entry an id, a title, what it does, what
+it takes (one sentence, the owner's words), query words, its kind (`builtin`:
+the browser, mail and calendar accounts, SSH servers; `common_item`: PDF
+tools, Docling, Claude Code sessions, Text Embeddings Inference, Gluetun,
+bunq, and Whisper transcription, which has no common item yet), how an
+assistant goes about it and the owner's page. Search never reads PCP's common
+items from GitHub to find one. Whether a token has an entry is read inside the
+request from what that token reaches, never from the rest of the vault
+(`catalogue-state.ts setUpEntries`, nothing stored), so a token limited to
+some servers learns nothing of the others, and only the service definitions
+it reaches are opened: a server of a builtin's kind among its servers (the
+browser also needs Chromium on this machine); a service among them, or one
+that registered a server among them, whose image or source tag is the
+item's (`imageName`: the repository's last path part, without tag or digest,
+matched whole against the entry's `images`, so `gluetun-webui` is not
+Gluetun); for an entry that provides a capability, any provider of it among
+the token's tools (`capabilityProviders`), whoever's server it is; and for
+search by meaning only a provider the owner chose on Settings → Search, never
+a Text Embeddings Inference service that merely runs.
+
+`search` with a query adds a "can set up" line for each entry the query names
+(`catalogueNamed`, every word of a phrase by stem) that the token has not got,
+but for one whose capability already has its "not installed" line: what it
+does, what it takes, how, and the page as a markdown link. How is
+`register_server` for a mail or calendar account; for a common item, the link
+to its page, where the owner reads the item and launches it as it is (an
+assistant never retypes a common item's definition into `register_server`,
+which could drift from it: digest, sign-in, files); the owner's own page for
+the browser, an SSH server and a VPN exit, which an assistant never proposes
+(`ownerOnly`). A token the owner limited to some servers gets the same line
+with `LIMITED_TOKEN_NOTE`, whether or not the vault has it: the owner may have
+it already, so ask whether to give this token access before setting up
+another. `search` with no arguments lists, per token, the titles of what it
+has not got, with the same caution for a limited token, and the instructions
+and key rules carry the rule
+(`SET_UP_RULE`), as PCP's suggested instructions do from version 8. A common
+item that is no capability has its page at `/plugins/<id>` (`itemOffers`,
+the capability pages' offers), Whisper's saying there is none yet. After
+setup, Home shows three things to say to an assistant until the vault holds
+more than PCP's own store and the browser, and so does the sheet that adds
+PCP to Claude.
 
 ### Descriptions read in a few words, and client profiles
 

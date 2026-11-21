@@ -180,6 +180,7 @@ export default async function ServerPage({
           description: entry.description,
           plain: entry.plain,
           value: entry.value ?? null,
+          generated: entry.generated !== undefined,
         }))}
         secrets={secrets}
       />

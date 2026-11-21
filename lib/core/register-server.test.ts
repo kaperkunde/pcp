@@ -1,7 +1,7 @@
 import { openLevelName } from "./level-names"
 import { openFromText } from "./sealed"
 import { Client, InMemoryTransport } from "@modelcontextprotocol/client"
-import { afterEach, beforeEach, describe, expect, it } from "vitest"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import { serverNamed } from "./test-servers"
 
@@ -41,6 +41,26 @@ import { setupVault } from "./vault"
 import { secretNameWhere } from "./secret-meta"
 import { TOKEN_NAME_SELECT, tokenName } from "./token-names"
 import { entryCall, listEveryTool } from "./test-handles"
+import { resolveSecretRef } from "./secret-refs"
+import { readSecretValue } from "./secrets"
+
+// Every secret named by name goes through the one resolver (#162): watched
+// here, as it is.
+vi.mock("./secret-refs", async (importOriginal) => {
+  const real = await importOriginal<typeof import("./secret-refs")>()
+  return { ...real, resolveSecretRef: vi.fn(real.resolveSecretRef) }
+})
+
+/** The uses the resolver was asked for since the last look, in order. */
+function resolvedUses(): string[] {
+  const uses = vi
+    .mocked(resolveSecretRef)
+    .mock.calls.map(([, , use]) =>
+      use.kind === "wrapper_binding" && use.typed ? "typed" : use.kind,
+    )
+  vi.mocked(resolveSecretRef).mockClear()
+  return uses
+}
 
 // register_server as an assistant meets it: through the gateway's MCP
 // interface, with its arguments checked and the request the owner is shown.
@@ -1363,7 +1383,7 @@ describe("proposing a service", () => {
     },
   }
 
-  async function approve(secretValue?: string) {
+  async function approve(secretValue?: string, alsoAllow?: string[]) {
     const row = await db().permissionRequest.findFirstOrThrow({
       orderBy: { createdAt: "desc" },
     })
@@ -1372,7 +1392,11 @@ describe("proposing a service", () => {
       ctx,
       row.id,
       "allow_once",
-      { publicUrl: PUBLIC_URL, ...(secretValue ? { secretValue } : {}) },
+      {
+        publicUrl: PUBLIC_URL,
+        ...(secretValue ? { secretValue } : {}),
+        ...(alsoAllow ? { alsoAllow } : {}),
+      },
       executor,
     )
   }
@@ -1426,6 +1450,89 @@ describe("proposing a service", () => {
       "Not now",
     ])
     expect(await db().mcpServer.count({ where: { kind: "service" } })).toBe(0)
+  })
+
+  it("asks to launch one that signs in and makes its own token, showing both, and needs no secret named for it", async () => {
+    const host = await sshServer()
+    await connectSeeing()
+
+    const asked = await register({
+      name: "Sessions",
+      kind: "service",
+      description: "Claude Code sessions.",
+      service: {
+        ...DEFINITION,
+        env: [
+          {
+            name: "DOCLING_SERVE_API_KEY",
+            required: true,
+            generated: true,
+          },
+        ],
+        registers: {
+          kind: "mcp",
+          port: 5001,
+          path: "/mcp",
+          auth: {
+            env: "DOCLING_SERVE_API_KEY",
+            header: "Authorization",
+            template: "Bearer {{secret}}",
+          },
+        },
+        signin: {
+          style: "paste_code",
+          status: { tool: "login_status", signed_in: "signed_in" },
+          start: { tool: "login_start", url: "url" },
+          finish: { tool: "login_finish", argument: "code" },
+        },
+      },
+      ssh_server: host.slug,
+    })
+
+    expect(asked.isError).toBe(false)
+    const view = await shown()
+    expect(view.lines).toEqual(
+      expect.arrayContaining([
+        "Variable DOCLING_SERVE_API_KEY: a random value PCP makes when it launches and keeps itself; nobody types, chooses or sees it",
+        "It signs in to an account of yours: on PCP's sign-in page, PCP calls its login_start for the provider's address and its login_finish with the code you paste (as code), whatever their tiers, on your own action only; it reads login_status by itself, for any token, only while that tool's tier is Read (its tiers are known once its tools are read). An assistant only gets the link to that page",
+      ]),
+    )
+    expect(view.secretToEnter ?? null).toBeNull()
+
+    await approve()
+    expect(launched[0]?.env).toEqual({})
+  })
+
+  it("refuses a secret named for a variable PCP makes itself, with generate or without", async () => {
+    const host = await sshServer()
+    await connectSeeing()
+    const service = {
+      ...DEFINITION,
+      env: [{ name: "DOCLING_SERVE_API_KEY", required: true, generated: true }],
+    }
+
+    for (const entry of [
+      { name: "DOCLING_SERVE_API_KEY", secret: "Docling key" },
+      {
+        name: "DOCLING_SERVE_API_KEY",
+        secret: "Docling key",
+        generate: { length: 32 },
+      },
+    ]) {
+      const asked = await register({
+        name: "Docling",
+        kind: "service",
+        service,
+        ssh_server: host.slug,
+        env_secrets: [entry],
+      })
+
+      expect(asked.isError).toBe(true)
+      expect(asked.text).toMatch(
+        /DOCLING_SERVE_API_KEY takes a value PCP makes itself when it launches the service \(generated\): leave it out of env_secrets/,
+      )
+    }
+    expect(await db().permissionRequest.count()).toBe(0)
   })
 
   it("shows a publish address on the SSH server's network as reaching the service", async () => {
@@ -1503,7 +1610,7 @@ describe("proposing a service", () => {
       expect(done.isError).toBe(true)
       expect(JSON.stringify(done)).toContain("port is already allocated")
       expect(JSON.stringify(done)).toContain(
-        'The secret you entered is kept in PCP as \\"Docling key\\"',
+        'The new secret is kept in PCP as \\"Docling key\\"',
       )
       expect(
         await db().secret.count({ where: secretNameWhere(ctx, "Docling key") }),
@@ -1524,11 +1631,31 @@ describe("proposing a service", () => {
       env_secrets: [{ name: "DOCLING_SERVE_API_KEY", secret: "Docling key" }],
     })
 
-    expect((await shown()).lines).toContain(
+    const view = await shown()
+    expect(view.lines).toContain(
       'Variable DOCLING_SERVE_API_KEY: your secret "Docling key"',
     )
-    await approve()
+    // Outside its scope (#162): shown as also allowing it, ticked, and the
+    // yes needs the tick.
+    expect(view.alsoAllows).toEqual([
+      {
+        key: `also:${key.id}:new`,
+        secretId: key.id,
+        secretName: "Docling key",
+        consumerId: null,
+        consumer: "Docling",
+      },
+    ])
+    const refused = await approve()
+    expect(refused.isError).toBe(true)
+    expect(launched).toHaveLength(0)
+
+    await approve(undefined, [`also:${key.id}:new`])
     expect(launched[0]!.env).toEqual({ DOCLING_SERVE_API_KEY: key.id })
+    // The service it made is in the secret's scope now.
+    expect(await db().secretScope.count({ where: { secretId: key.id } })).toBe(
+      1,
+    )
   })
 
   it("shows the header an MCP server it registers sends, and needs that variable's secret named", async () => {
@@ -1674,7 +1801,8 @@ describe("proposing a service", () => {
 
   it("launches another of a service definition it sees, only while that is as shown", async () => {
     const host = await sshServer()
-    await createSecret(ctx, { name: "Docling key", value: "k" })
+    // One the owner lets be used anywhere: no "also allows" to tick.
+    await createSecret(ctx, { name: "Docling key", value: "k", anywhere: true })
     await connectSeeing()
     await register({
       name: "Docling",
@@ -1768,6 +1896,154 @@ describe("proposing a service", () => {
     })
     expect(outside.isError).toBe(true)
     expect(outside.text).toMatch(/not one of the service's volumes/)
+  })
+
+  it("names its variables' secrets through the resolver, as a service's", async () => {
+    const host = await sshServer()
+    await createSecret(ctx, { name: "Docling key", value: "k" })
+    await connectSeeing()
+    resolvedUses()
+
+    await register({
+      name: "Docling",
+      service: DEFINITION,
+      ssh_server: host.slug,
+      env_secrets: [{ name: "DOCLING_SERVE_API_KEY", secret: "Docling key" }],
+    })
+    await approve()
+
+    expect(new Set(resolvedUses())).toEqual(new Set(["service_env"]))
+  })
+
+  it("does not take one-time codes for a variable: their name is a new secret's", async () => {
+    const host = await sshServer()
+    await createSecret(ctx, {
+      name: "Docling codes",
+      value: "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ",
+      kind: "totp",
+    })
+    await connectSeeing()
+
+    await register({
+      name: "Docling",
+      service: DEFINITION,
+      ssh_server: host.slug,
+      env_secrets: [{ name: "DOCLING_SERVE_API_KEY", secret: "Docling codes" }],
+    })
+
+    expect((await shown()).lines).toContain(
+      'Variable DOCLING_SERVE_API_KEY: a new secret, saved as "Docling codes", which you enter here when you agree',
+    )
+  })
+
+  it("has PCP make a variable's new secret, as proposed, never handing it back (generate)", async () => {
+    const host = await sshServer()
+    await connectSeeing()
+
+    const asked = await register({
+      name: "Docling",
+      service: DEFINITION,
+      ssh_server: host.slug,
+      env_secrets: [
+        {
+          name: "DOCLING_SERVE_API_KEY",
+          secret: "Docling key",
+          generate: { format: "hex", length: 40 },
+        },
+      ],
+    })
+
+    expect(asked.isError).toBe(false)
+    const view = await shown()
+    expect(view.lines).toContain(
+      'Variable DOCLING_SERVE_API_KEY: a new secret, saved as "Docling key", which the assistant proposes PCP makes (40 characters: hex digits); you can type one instead',
+    )
+    expect(view.secretToEnter).toMatchObject({
+      name: "Docling key",
+      generate: { format: "hex", length: 40 },
+      defaultRecipe: { format: "alphanumeric", length: 48 },
+    })
+
+    const row = await db().permissionRequest.findFirstOrThrow({
+      orderBy: { createdAt: "desc" },
+    })
+    const done = await decidePermission(
+      ctx,
+      row.id,
+      "allow_once",
+      { publicUrl: PUBLIC_URL, generate: view.secretToEnter!.generate },
+      executor,
+    )
+
+    expect(done.isError).not.toBe(true)
+    const secret = await db().secret.findFirstOrThrow({
+      where: secretNameWhere(ctx, "Docling key"),
+    })
+    const value = await readSecretValue(ctx, secret.id)
+    expect(value).toMatch(/^[0-9a-f]{40}$/)
+    expect(launched[0]?.env).toEqual({ DOCLING_SERVE_API_KEY: secret.id })
+    expect(JSON.stringify(done)).toContain(
+      'PCP made the value of the new secret \\"Docling key\\" itself',
+    )
+    expect(JSON.stringify(done)).not.toContain(value)
+    // Nowhere in the request: its arguments and its outcome.
+    const after = await db().permissionRequest.findUniqueOrThrow({
+      where: { id: row.id },
+    })
+    const view2 = await getPermissionView(ctx, row.id, {
+      publicUrl: PUBLIC_URL,
+    })
+    expect(JSON.stringify(view2)).not.toContain(value)
+    expect(Buffer.from(after.argsCiphertext ?? []).toString()).not.toContain(
+      value,
+    )
+  })
+
+  it("refuses generate for a secret the owner holds, and a recipe that cannot be made", async () => {
+    const host = await sshServer()
+    await createSecret(ctx, { name: "Docling key", value: "k" })
+    await connectSeeing()
+
+    const held = await register({
+      name: "Docling",
+      service: DEFINITION,
+      ssh_server: host.slug,
+      env_secrets: [
+        {
+          name: "DOCLING_SERVE_API_KEY",
+          secret: "Docling key",
+          generate: {},
+        },
+      ],
+    })
+    expect(held.isError).toBe(true)
+    expect(held.text).toMatch(/generate is for a new secret only/)
+
+    const top = await register({
+      name: "Docling",
+      service: DEFINITION,
+      ssh_server: host.slug,
+      generate: {},
+      env_secrets: [{ name: "DOCLING_SERVE_API_KEY", secret: "New key" }],
+    })
+    expect(top.isError).toBe(true)
+    expect(top.text).toMatch(/generate goes with the variable/)
+
+    const bad = await register({
+      name: "Docling",
+      service: DEFINITION,
+      ssh_server: host.slug,
+      env_secrets: [
+        {
+          name: "DOCLING_SERVE_API_KEY",
+          secret: "New key",
+          generate: { format: "hex", exclude: "a" },
+        },
+      ],
+    })
+    expect(bad.isError).toBe(true)
+    expect(bad.text).toMatch(/not hex/)
+    expect(await db().permissionRequest.count()).toBe(0)
   })
 
   it("takes tool_access for what it registers, by name, and refuses it for a service that registers nothing", async () => {
@@ -2184,5 +2460,336 @@ describe("limits proposed with it (#143)", () => {
 
     expect(asked.isError).toBe(true)
     expect(asked.text).toContain("propose_server_limits")
+  })
+})
+
+describe("secrets named by name (#162)", () => {
+  const NO_SYNC = {
+    callTool: async () => {
+      throw new Error("no call runs here")
+    },
+    syncTools: async () => ({
+      status: "ok" as const,
+      message: "",
+      toolCount: 0,
+    }),
+  }
+
+  async function approve(options: { generate?: unknown } = {}) {
+    const row = await db().permissionRequest.findFirstOrThrow({
+      orderBy: { createdAt: "desc" },
+    })
+
+    return decidePermission(
+      ctx,
+      row.id,
+      "allow_once",
+      { publicUrl: PUBLIC_URL, ...options },
+      NO_SYNC,
+    )
+  }
+
+  it("resolves each through the resolver for what it is: a header, a basic login, an OAuth client, a mail or calendar account", async () => {
+    await createSecret(ctx, { name: "Key", value: "k" })
+    await createSecret(ctx, { name: "Second", value: "s" })
+    resolvedUses()
+
+    await register({
+      name: "Linear",
+      url: "https://mcp.linear.example/mcp",
+      auth_type: "header",
+      secret: "Key",
+      extra_headers: [{ secret: "Second", header_name: "X-Second" }],
+    })
+    expect(resolvedUses()).toEqual(["header", "header"])
+
+    await register({
+      name: "Pets",
+      openapi_schema: PETS,
+      url: "https://api.example.com/v1",
+      auth_type: "basic",
+      username: "ada",
+      secret: "Key",
+    })
+    expect(resolvedUses()).toEqual(["basic"])
+
+    await register({
+      name: "Calendar",
+      url: "https://mcp.linear.example/mcp",
+      auth_type: "oauth",
+      client_id: "pcp",
+      secret: "Key",
+    })
+    expect(resolvedUses()).toEqual(["oauth_client"])
+
+    await register({
+      kind: "jmap",
+      name: "Personal mail",
+      url: "https://mail.example.com",
+      auth_type: "basic",
+      username: "ada@example.com",
+      secret: "Mail password",
+    })
+    // Its answer asks the page too, whether one was added since.
+    expect(new Set(resolvedUses())).toEqual(new Set(["mail"]))
+    // The page asks whether one by that name was added since, the same way.
+    await shown()
+    expect(resolvedUses()).toEqual(["mail"])
+    // And the owner's yes, which finds none and wants a value.
+    expect((await approve()).isError).toBe(true)
+    expect(resolvedUses()).toContain("mail")
+
+    await register({
+      kind: "caldav",
+      name: "iCloud",
+      url: "caldav.icloud.com",
+      auth_type: "basic",
+      username: "ada@icloud.com",
+      secret: "Key",
+    })
+    expect(resolvedUses()).toEqual(["caldav"])
+  })
+
+  it("never sends one-time codes to a server: their name is a new secret's", async () => {
+    await createSecret(ctx, {
+      name: "Codes",
+      value: "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ",
+      kind: "totp",
+    })
+
+    await register({
+      name: "Linear",
+      url: "https://mcp.linear.example/mcp",
+      auth_type: "header",
+      secret: "Codes",
+    })
+
+    expect((await shown()).secretToEnter).toMatchObject({
+      name: "Codes",
+      exists: false,
+    })
+  })
+
+  it("offers to make a header's new secret as a long token and a password for a basic login", async () => {
+    await register({
+      name: "Linear",
+      url: "https://mcp.linear.example/mcp",
+      auth_type: "header",
+      secret: "Linear key",
+    })
+    expect((await shown()).secretToEnter).toMatchObject({
+      generate: null,
+      defaultRecipe: { format: "alphanumeric", length: 48 },
+    })
+
+    await register({
+      name: "Pets",
+      openapi_schema: PETS,
+      url: "https://api.example.com/v1",
+      auth_type: "basic",
+      username: "ada",
+      secret: "Pets password",
+    })
+    expect((await shown()).secretToEnter).toMatchObject({
+      defaultRecipe: { format: "password", length: 24 },
+    })
+  })
+
+  it("has PCP make a new server's secret as the assistant proposed (generate), stored at once and never handed back", async () => {
+    const asked = await register({
+      name: "Linear",
+      url: "https://mcp.linear.example/mcp",
+      auth_type: "header",
+      secret: "Linear key",
+      generate: { format: "base64url", length: 32 },
+    })
+
+    expect(asked.isError).toBe(false)
+    const view = await shown()
+    expect(view.secretToEnter).toMatchObject({
+      name: "Linear key",
+      generate: { format: "base64url", length: 32 },
+    })
+
+    const done = await approve({ generate: view.secretToEnter!.generate })
+
+    expect(done.isError).not.toBe(true)
+    const made = await serverNamed(ctx, "Linear")
+    const value = await readSecretValue(ctx, made.authSecretId!)
+    expect(value).toMatch(/^[A-Za-z0-9_-]{32}$/)
+    expect(JSON.stringify(done)).toContain("PCP made the value")
+    expect(JSON.stringify(done)).not.toContain(value)
+  })
+
+  it("never makes an OAuth client's secret: the provider issues it", async () => {
+    const refused = await register({
+      name: "Calendar",
+      url: "https://mcp.linear.example/mcp",
+      auth_type: "oauth",
+      client_id: "pcp",
+      secret: "Calendar client secret",
+      generate: {},
+    })
+    expect(refused.isError).toBe(true)
+    expect(refused.text).toMatch(/the provider issues it/)
+
+    // Nor on the owner's page: no recipe offered, and none taken.
+    await register({
+      name: "Calendar",
+      url: "https://mcp.linear.example/mcp",
+      auth_type: "oauth",
+      client_id: "pcp",
+    })
+    const view = await shown()
+    expect(view.secretToEnter).toMatchObject({ clientId: "pcp" })
+    expect(view.secretToEnter?.defaultRecipe).toBeNull()
+    const done = await approve({ generate: {} })
+    expect(done.isError).toBe(true)
+    expect(JSON.stringify(done)).toMatch(/the provider issues it/)
+    expect(await db().secret.count()).toBe(0)
+  })
+
+  it("keeps an answer's link last when PCP made the value, as check_permission replays it", async () => {
+    // A server on the owner's network, left public-only: its answer ends
+    // with the link to allow private addresses.
+    const asked = await register({
+      name: "Home tools",
+      url: "https://mcp.home.example/mcp",
+      auth_type: "header",
+      secret: "Home key",
+      generate: {},
+    })
+    expect(asked.isError).toBe(false)
+    const row = await db().permissionRequest.findFirstOrThrow({
+      orderBy: { createdAt: "desc" },
+    })
+
+    const done = await decidePermission(
+      ctx,
+      row.id,
+      "allow_once",
+      { publicUrl: PUBLIC_URL, generate: {} },
+      {
+        ...NO_SYNC,
+        syncTools: async () => ({
+          status: "error" as const,
+          message: "Its address is private.",
+          toolCount: 0,
+        }),
+      },
+    )
+    const checked = await client.callTool(
+      entryCall("check_permission", { id: row.id }),
+    )
+    const replayed = (checked.content as Array<{ text?: string }>)
+      .map((part) => part.text ?? "")
+      .join("\n")
+
+    for (const answer of [
+      done.content.map((part) => ("text" in part ? part.text : "")).join("\n"),
+      replayed,
+    ]) {
+      expect(answer).toContain("PCP made the value")
+      expect(answer.trimEnd()).toMatch(
+        /\[Allow private addresses for Home tools\]\([^)]+\)$/,
+      )
+      expect(answer.indexOf("PCP made the value")).toBeLessThan(
+        answer.indexOf("[Allow private addresses"),
+      )
+    }
+  })
+
+  it("makes a numbered new secret when one of that name was added since, never showing its value", async () => {
+    await register({
+      name: "Linear",
+      url: "https://mcp.linear.example/mcp",
+      auth_type: "header",
+      secret: "Linear key",
+      generate: { format: "hex", length: 32 },
+    })
+    // The owner added one by that name since the request was made.
+    const theirs = await createSecret(ctx, {
+      name: "Linear key",
+      value: "typed-by-the-owner",
+    })
+
+    const done = await approve({ generate: { format: "hex", length: 32 } })
+
+    expect(done.isError).not.toBe(true)
+    const made = await serverNamed(ctx, "Linear")
+    expect(made.authSecretId).not.toBe(theirs.id)
+    const value = await readSecretValue(ctx, made.authSecretId!)
+    expect(value).toMatch(/^[0-9a-f]{32}$/)
+    expect(
+      await db().secret.findFirst({
+        where: {
+          ...secretNameWhere(ctx, "Linear key 2"),
+          id: made.authSecretId!,
+        },
+      }),
+    ).not.toBeNull()
+    expect(await readSecretValue(ctx, theirs.id)).toBe("typed-by-the-owner")
+    const said = JSON.stringify(done)
+    expect(said).toContain('saved in PCP as \\"Linear key 2\\"')
+    expect(said).not.toContain(value)
+    expect(JSON.stringify(await shown())).not.toContain(value)
+  })
+
+  it("makes a value on the owner's own Have PCP make it, though the assistant proposed none", async () => {
+    await register({
+      name: "Linear",
+      url: "https://mcp.linear.example/mcp",
+      auth_type: "header",
+      secret: "Linear key",
+    })
+
+    const done = await approve({ generate: { format: "alphanumeric" } })
+
+    expect(done.isError).not.toBe(true)
+    const made = await serverNamed(ctx, "Linear")
+    expect(await readSecretValue(ctx, made.authSecretId!)).toMatch(
+      /^[A-Za-z0-9]{48}$/,
+    )
+  })
+
+  it("refuses generate where there is no new secret to make, or a recipe that cannot be met", async () => {
+    await createSecret(ctx, { name: "Key", value: "k" })
+
+    for (const [args, refused] of [
+      [
+        {
+          name: "Linear",
+          url: "https://mcp.linear.example/mcp",
+          auth_type: "header",
+          secret: "Key",
+          generate: {},
+        },
+        /"Key" is one the owner holds/,
+      ],
+      [
+        {
+          name: "Linear",
+          url: "https://mcp.linear.example/mcp",
+          generate: {},
+        },
+        /generate makes the value of the new secret/,
+      ],
+      [
+        {
+          name: "Linear",
+          url: "https://mcp.linear.example/mcp",
+          auth_type: "header",
+          secret: "New key",
+          generate: { length: 4 },
+        },
+        /at least 8/,
+      ],
+    ] as const) {
+      const asked = await register(args)
+      expect(asked.isError, JSON.stringify(args)).toBe(true)
+      expect(asked.text).toMatch(refused)
+    }
+
+    expect(await db().permissionRequest.count()).toBe(0)
   })
 })

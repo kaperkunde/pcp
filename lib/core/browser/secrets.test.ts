@@ -1,5 +1,13 @@
 import type { CallToolResult } from "@modelcontextprotocol/server"
-import { afterAll, afterEach, beforeEach, describe, expect, it } from "vitest"
+import {
+  afterAll,
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from "vitest"
 
 import { openServer } from "../server-meta"
 
@@ -20,6 +28,14 @@ import { createBrowserServer } from "./server"
 import { isOwnerNeeded, type BrowserAsk } from "./types"
 import { secretNameWhere } from "../secret-meta"
 import type { OpenServer } from "../server-meta"
+import { resolveSecretRef } from "../secret-refs"
+
+// Every secret named by name goes through the one resolver (#162): watched
+// here, as it is.
+vi.mock("../secret-refs", async (importOriginal) => {
+  const real = await importOriginal<typeof import("../secret-refs")>()
+  return { ...real, resolveSecretRef: vi.fn(real.resolveSecretRef) }
+})
 
 // Typing the owner's secrets into pages, against a real headless Chromium
 // and pages served on this machine, through upstream.ts as every call comes
@@ -101,6 +117,8 @@ beforeEach(async () => {
     }),
   )
   ;({ id: secretId } = await createSecret(ctx, {
+    // As one the owner adds with no site (#162).
+    anywhere: true,
     name: "Shop password",
     value: VALUE,
   }))
@@ -497,6 +515,8 @@ describe.skipIf(!executable)("typing a secret", { timeout: 90_000 }, () => {
 
   it("masks a value the page reformats, and repeats on a later page", async () => {
     const { id: bankId } = await createSecret(ctx, {
+      // As one the owner adds with no site (#162).
+      anywhere: true,
       name: "Bank",
       value: IBAN,
     })
@@ -546,7 +566,13 @@ describe.skipIf(!executable)("typing a secret", { timeout: 90_000 }, () => {
   })
 
   it("types a one-time code secret's code of the moment, never its seed", async () => {
-    await createSecret(ctx, { name: "Shop codes", value: SEED, kind: "totp" })
+    await createSecret(ctx, {
+      // As one the owner adds with no site (#162).
+      anywhere: true,
+      name: "Shop codes",
+      value: SEED,
+      kind: "totp",
+    })
     await always("Shop codes")
     const { tab, opened } = await open("/login")
 
@@ -603,6 +629,12 @@ describe.skipIf(!executable)("typing a secret", { timeout: 90_000 }, () => {
 
     await expect(typed).rejects.toThrow(/keeps no login name/)
     expect(await db().permissionRequest.count()).toBe(0)
+    // Found as a secret the browser types, before anything else.
+    expect(vi.mocked(resolveSecretRef)).toHaveBeenCalledWith(
+      expect.anything(),
+      "Shop password",
+      { kind: "browser_type" },
+    )
   })
 
   it("takes a secret only as type's text, and from a wrapper only where it is bound", async () => {
@@ -664,6 +696,46 @@ describe.skipIf(!executable)("typing a secret", { timeout: 90_000 }, () => {
       call("type", { tab, ref, text: { $secret: "No such secret" } }),
     ).rejects.toThrow(/no secret called "No such secret"/)
   })
+
+  it("passes a wrapper's place only for the secret it was approved for, never one that took its name since (#162)", async () => {
+    const { tab, opened } = await open("/login")
+    const ref = refOf(opened, /textbox "Password"/)
+    // No site and not anywhere: in scope only through the wrapper's place.
+    const bound = await createSecret(ctx, { name: "Flow key", value: "f1" })
+    const place = [
+      {
+        pointer: "/text",
+        name: "Flow key",
+        secretId: bound.id,
+        template: "{{secret}}",
+        url: server.url,
+      },
+    ]
+    const typeThrough = () =>
+      callServerTool(
+        ctx,
+        server,
+        "type",
+        { tab, ref, text: { $secret: "Flow key" } },
+        { publicUrl: PUBLIC_URL, tokenId, secrets: place },
+      )
+
+    // The place's own secret: asked about the site as before.
+    const first = await owner(typeThrough())
+    expect(first).toMatchObject({ kind: "secret_use" })
+    expect((first.input as { outOfScope?: true }).outOfScope).toBeUndefined()
+
+    // Renamed, and a new secret takes the old name: the same place no
+    // longer stands for it, so it meets the scope's gate.
+    await updateSecret(ctx, bound.id, { name: "Flow key old" })
+    await createSecret(ctx, { name: "Flow key", value: "f2" })
+    const second = await owner(typeThrough())
+    expect(second).toMatchObject({
+      kind: "secret_use",
+      input: { secretName: "Flow key", outOfScope: true },
+    })
+    expect(await fieldValue(tab, "#pw")).toBe("")
+  })
 })
 
 describe.skipIf(!executable)(
@@ -672,6 +744,8 @@ describe.skipIf(!executable)(
   () => {
     it("are named on navigate, snapshot and tabs open there, louder at a password field, never elsewhere", async () => {
       const { id: codes } = await createSecret(ctx, {
+        // As one the owner adds with no site (#162).
+        anywhere: true,
         name: "Shop code",
         value: SEED,
         kind: "totp",

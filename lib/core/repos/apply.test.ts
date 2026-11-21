@@ -1,5 +1,5 @@
 import { openServiceOwn } from "../services/own-values"
-import { afterEach, describe, expect, it } from "vitest"
+import { afterEach, describe, expect, it, vi } from "vitest"
 
 import { readServerLimits, writeServerLimits } from "../gate/store"
 import { openServiceSpec } from "../spec-rows"
@@ -38,6 +38,15 @@ import { readServiceDefinition } from "../services/definition"
 import type { ServiceLaunchInput } from "../services/services"
 import { openServer } from "../server-meta"
 import { toolNamed } from "../test-servers"
+import { resolveSecretRef } from "../secret-refs"
+import { createSecret } from "../secrets"
+
+// Every secret named by name goes through the one resolver (#162): watched
+// here, as it is.
+vi.mock("../secret-refs", async (importOriginal) => {
+  const real = await importOriginal<typeof import("../secret-refs")>()
+  return { ...real, resolveSecretRef: vi.fn(real.resolveSecretRef) }
+})
 
 // Applying what the owner approved: names resolved against this vault and
 // never guessed, a secret the vault lacks left out with a note, the owner's
@@ -111,6 +120,35 @@ function formatOnePets(overrides: Record<string, unknown> = {}): RepoFiles {
     }),
   }
 }
+
+describe("the secrets an item names (#162)", () => {
+  it("are found through the resolver: a server's sign-in as its kind, a wrapper's places as a wrapper's", async () => {
+    const items = await populatedItems()
+    const ctx = await freshVault()
+    await createSecret(ctx, {
+      name: "Pets key",
+      value: "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ",
+      kind: "totp",
+    })
+    const [pets] = (await readRepo(formatOnePets())).items as [EndpointDocument]
+    vi.mocked(resolveSecretRef).mockClear()
+
+    // One-time codes are not a key an endpoint sends: still missing.
+    expect((await resolveItem(ctx, pets)).missingSecrets).toEqual(["Pets key"])
+    expect(
+      (await resolveItem(ctx, find(items, "wrapper", "pet-tools")))
+        .missingSecrets,
+    ).toEqual(["Pets key"])
+    expect(
+      vi
+        .mocked(resolveSecretRef)
+        .mock.calls.map(([, name, use]) => [name, use]),
+    ).toEqual([
+      ["Pets key", { kind: "header" }],
+      ["Pets key", { kind: "wrapper_binding" }],
+    ])
+  })
+})
 
 describe("applying an item", () => {
   it("asks for a new server's own address, and takes the one the owner gives", async () => {
@@ -192,6 +230,49 @@ describe("applying an item", () => {
 
     // No value was made up.
     expect(await db().secret.count({ where: { kind: "text" } })).toBe(0)
+  })
+
+  it("lets a wrapper's places use a secret outside its scope only with the owner's tick, and keeps only that (#162)", async () => {
+    const items = await populatedItems()
+    const ctx = await freshVault()
+    await createBrowserServer(ctx)
+    await applyItem(ctx, find(items, "endpoint", "pets"), {
+      id: null,
+      instance: {
+        name: "Pets",
+        url: "https://pets.example.com/v1",
+        readOnly: false,
+        authType: "none",
+      },
+    })
+    // Made for something else: not anywhere, and nothing uses it.
+    const key = await createSecret(ctx, { name: "Pets key", value: "k" })
+    const wrapper = find(items, "wrapper", "pet-tools")
+
+    const resolved = await resolveItem(ctx, wrapper)
+    expect(resolved.alsoAllows).toEqual([
+      {
+        key: `also:${key.id}:new`,
+        secretId: key.id,
+        secretName: "Pets key",
+        consumerId: null,
+        consumer: wrapper.displayName,
+      },
+    ])
+    await expect(applyItem(ctx, wrapper, { id: null })).rejects.toThrow(
+      /also lets .* use your secret "Pets key"/,
+    )
+    expect(await db().mcpServer.count({ where: { kind: "wrapper" } })).toBe(0)
+
+    const applied = await applyItem(ctx, wrapper, {
+      id: null,
+      alsoAllow: [`also:${key.id}:new`],
+    })
+    expect(
+      await db().secretScope.findMany({
+        select: { secretId: true, serverId: true },
+      }),
+    ).toEqual([{ secretId: key.id, serverId: applied.id }])
   })
 
   it("fills a first instance in from a format-1 document, and never writes it over a server the vault has", async () => {

@@ -1,5 +1,6 @@
 import type { PasswordRecipe, ToolAccess } from "../constants"
 import type { FetchArgs } from "../fetch/request"
+import type { SecretChangeAsk } from "../secret-changes"
 import type { ServiceUpdateAsk } from "../services/updates"
 import type {
   BrowserPace,
@@ -107,6 +108,12 @@ export type SecretUseAsk = {
   call: SecretTypeCall
   /** "username": the secret's login name is typed, not its value. */
   part?: SecretPart
+  /**
+   * The secret has no site and is not one the owner lets be used anywhere
+   * (#162): Once types it this one time, Always at this site adds the site
+   * to its scope, and nothing else is offered.
+   */
+  outOfScope?: true
 }
 
 /**
@@ -123,7 +130,11 @@ export type SecretPart = "password" | "username"
  * nothing of it comes back but the name.
  */
 export type SecretRequestAsk = {
-  serverId: string
+  /**
+   * The browser that asked (its request_secret, an alias for one release),
+   * or null for PCP's own request_secret.
+   */
+  serverId: string | null
   name: string
   purpose: string
   origins: string[]
@@ -189,6 +200,7 @@ export type BrowserAsk =
   | { kind: "secret_use"; input: SecretUseAsk }
   | { kind: "secret_request"; input: SecretRequestAsk }
   | { kind: "secret_sites_change"; input: SecretSitesChangeAsk }
+  | { kind: "secret_change"; input: SecretChangeAsk }
   | { kind: "exit_use"; input: ExitUseAsk }
   | { kind: "script_use"; input: ScriptUseAsk }
   | { kind: "tab_pace"; input: TabPaceAsk }
@@ -230,7 +242,14 @@ export type OwnerAsk =
  * it into a permission request, so neither imports the permission flow.
  */
 export class OwnerNeeded extends Error {
-  constructor(readonly ask: OwnerAsk) {
+  /**
+   * `note`: said before the link in the answer (an alias's new name), never
+   * after it, since the link ends the reply.
+   */
+  constructor(
+    readonly ask: OwnerAsk,
+    readonly note?: string,
+  ) {
     super("The owner's answer is needed first.")
     this.name = "OwnerNeeded"
   }

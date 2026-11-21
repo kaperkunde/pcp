@@ -18,6 +18,7 @@ import type {
   RepoItem,
   Secret,
   SecretBrowserOrigin,
+  SecretScope,
   ServerAuthHeader,
   ServerDefinition,
   ServiceSpec,
@@ -342,8 +343,20 @@ const SecretRow = renamedFrom(
     loginName: bytesOrNull.default(null),
     note: bytesOrNull.default(null),
     totpCompanionId: id.nullable().default(null),
+    // Where it may be used (#162): absent from older files, whose secrets
+    // get their uses as their scope (or anywhere, with none) on the first
+    // request after the restore, as at the migration.
+    scopeAnywhere: z.boolean().nullable().default(null),
   }),
 )
+
+// The servers, services and wrappers a secret's scope names, added with
+// the scope (#162): absent from older files.
+const SecretScopeRow = z.strictObject({
+  secretId: id,
+  serverId: id,
+  createdAt: date,
+})
 
 // The sites a secret is typed at in the browser, added with typed secrets:
 // absent from older files. A token's allowances to have one typed are not
@@ -779,6 +792,7 @@ export const PayloadSchema = z.strictObject({
     skills: z.array(SkillRow).default([]),
     secrets: z.array(SecretRow),
     secretBrowserOrigins: z.array(SecretBrowserOriginRow).default([]),
+    secretScopes: z.array(SecretScopeRow).default([]),
     serverDefinitions: z.array(ServerDefinitionRow).default([]),
     servers: z.array(McpServerRow),
     serverAuthHeaders: z.array(ServerAuthHeaderRow),
@@ -1095,6 +1109,11 @@ export function checkReferences(payload: ExportPayload): void {
     pointsAt(site.secretId, secrets, "a secret's site")
   }
 
+  for (const scope of tables.secretScopes) {
+    pointsAt(scope.secretId, secrets, "a secret's scope")
+    pointsAt(scope.serverId, servers, "a server in a secret's scope")
+  }
+
   for (const item of tables.repoItems) {
     pointsAt(item.repoId, repos, "a repository")
     pointsAt(item.skillId, skills, "a linked skill")
@@ -1253,6 +1272,7 @@ export const FORMAT_COVERS_SCHEMA: {
     SecretBrowserOrigin,
     z.output<typeof SecretBrowserOriginRow>
   >
+  secretScope: Covers<SecretScope, z.output<typeof SecretScopeRow>>
   server: Covers<McpServer, z.output<typeof McpServerRow>>
   serverDefinition: Covers<
     ServerDefinition,
@@ -1290,6 +1310,7 @@ export const FORMAT_COVERS_SCHEMA: {
   skill: true,
   secret: true,
   secretBrowserOrigin: true,
+  secretScope: true,
   server: true,
   serverDefinition: true,
   serverAuthHeader: true,

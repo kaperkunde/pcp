@@ -442,6 +442,7 @@ model PermissionRequest {
   /// call | register | memory_share | memory_change | access | endpoint_change
   /// | fetch | browse | browser_handover | wrapper_change | skill_change
   /// | repo_change | secret_use | secret_request | note_change | repo_share
+  /// | pcp_update (and the other PermissionKind values, lib/core/constants.ts)
   kind                 String
   serverId             String?    @map("server_id")
   server               McpServer? @relation(fields: [serverId], references: [id], onDelete: Cascade)
@@ -604,6 +605,7 @@ model Secret {
   /// the vault.
   nameKey          String?   @map("name_key")
   /// text | totp | oauth | ssh_key (PCP's own private key for an SSH server)
+  /// | proxy_password | generated (a value PCP made for a service's variable)
   kind             String    @default("text")
   /// nonce || ciphertext || tag, AES-256-GCM under the vault's data key
   /// with the secret id as associated data.
@@ -627,6 +629,14 @@ model Secret {
   totpCompanionId  String?   @map("totp_companion_id")
   totpCompanion    Secret?   @relation("SecretTotpCompanion", fields: [totpCompanionId], references: [id], onDelete: SetNull)
   totpCompanionFor Secret[]  @relation("SecretTotpCompanion")
+  /// Where the owner lets it be used (#162, lib/core/secret-scope.ts): true
+  /// for anywhere (any server, service or wrapper an assistant names it for
+  /// is shown to the owner as usual, and the browser types it at any site
+  /// after asking); false for only the consumers in its scope
+  /// (`secret_scope`), whatever uses it now, and its sites. Null on a row
+  /// from before the scope, until the first request that holds the vault's
+  /// key works it out from its uses (none: anywhere).
+  scopeAnywhere    Boolean?  @default(false) @map("scope_anywhere")
 
   authFor        McpServer[]               @relation("ServerAuthSecret")
   authHeaderFor  ServerAuthHeader[]
@@ -635,9 +645,29 @@ model Secret {
   repos          Repo[]
   browserOrigins SecretBrowserOrigin[]
   allowances     ApiTokenSecretAllowance[]
+  scope          SecretScope[]
 
   @@unique([vaultId, nameKey])
   @@map("secret")
+}
+
+/// A server, endpoint, mail or calendar account, service or wrapper that may
+/// name a secret (#162, lib/core/secret-scope.ts): in a header or sign-in,
+/// a variable, or a wrapper's place for one. Written by the owner (the
+/// Secrets page, or their yes to a request that showed "also allows"),
+/// never by an assistant. Whatever uses a secret now is in its scope too,
+/// whether it has a row or not. Neither id is secret; both go with their
+/// rows.
+model SecretScope {
+  secretId  String    @map("secret_id")
+  secret    Secret    @relation(fields: [secretId], references: [id], onDelete: Cascade)
+  serverId  String    @map("server_id")
+  server    McpServer @relation(fields: [serverId], references: [id], onDelete: Cascade)
+  createdAt DateTime  @default(now()) @map("created_at")
+
+  @@id([secretId, serverId])
+  @@index([serverId])
+  @@map("secret_scope")
 }
 
 /// An origin where the browser may type a secret (lib/core/browser-secrets.ts):
@@ -881,6 +911,8 @@ model McpServer {
   storageEntries     StorageEntry[]
   storagePending     StoragePending[]
   authHeaders        ServerAuthHeader[]
+  /// The secrets whose scope names it (lib/core/secret-scope.ts).
+  secretScopes       SecretScope[]
   toolResults        ToolResult[]
   repoItems          RepoItem[]
   exits              Exit[]                  @relation("ExitHost")

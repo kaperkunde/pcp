@@ -8,6 +8,8 @@ import { canonicalJson } from "../permission-rules"
 import { contentHash } from "../spec-rows"
 import {
   MAX_BUILD_ARGS,
+  MAX_GENERATED_VALUE_LENGTH,
+  MIN_GENERATED_VALUE_LENGTH,
   MAX_ENV_DESCRIPTION_CHARS,
   MAX_ENV_VALUE_CHARS,
   MAX_IMAGE_CHARS,
@@ -43,9 +45,17 @@ import {
  * - Environment variables are names here; their values are the owner's
  *   secrets, bound per instance, or a fixed value that is no secret. Values
  *   reach the host over standard input only.
+ *   A variable marked `generated` takes a random value PCP makes at launch,
+ *   kept as a secret of the vault and bound to it, with no step of the
+ *   owner's: a token the service and the server it registers share.
  * - `registers` is what PCP adds for it in the same step: an API endpoint
  *   from the schema it serves, an MCP server, an exit (a VPN container's
  *   proxy, lib/core/exits/), or nothing.
+ * - `signin` declares the account the service signs in to, as a step of
+ *   PCP's own (services/signin.ts): which of the tools it registers reads
+ *   whether it is signed in, which starts a sign-in (a link for the owner),
+ *   and which takes the code the owner pastes back. PCP calls them from its
+ *   own sign-in page; an assistant only hands the owner the link.
  * - An exit's container is the one kind that may be given more than a
  *   container gets by default, and only from two allow-lists: the
  *   capability NET_ADMIN (`cap_add`) and the device /dev/net/tun
@@ -99,6 +109,10 @@ export const VOLUME_NAME = /^[a-z0-9][a-z0-9_.-]{0,62}$/
 const CONTAINER_PATH = /^\/(?:[A-Za-z0-9._@+-]+\/?)*$/
 /** A path on the service's HTTP side, without a query. */
 const HTTP_PATH = /^\/[A-Za-z0-9._~!$&'()*+,;=:@%/-]*$/
+/** A tool's name, as the server a service registers names it. */
+export const SIGNIN_TOOL = /^[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}$/
+/** A top-level field of a tool's answer, or one of its arguments. */
+export const SIGNIN_FIELD = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/
 /** A header's name, as HTTP allows one. */
 const HEADER_NAME = /^[A-Za-z0-9!#$%&'*+.^_`|~-]{1,100}$/
 /** The repository part of an image reference, before its tag or digest. */
@@ -134,6 +148,25 @@ const envName = z.string().regex(ENV_NAME, {
     "A variable's name is letters, digits and underscores, not starting with a digit.",
 })
 
+/**
+ * How PCP makes a `generated` variable's value: `true` for its default (40
+ * letters and digits), or a length and whether symbols go in.
+ */
+const GeneratedSchema = z.union([
+  z.literal(true),
+  z.strictObject({
+    length: z
+      .number()
+      .int()
+      .min(MIN_GENERATED_VALUE_LENGTH)
+      .max(MAX_GENERATED_VALUE_LENGTH)
+      .optional(),
+    symbols: z.boolean().optional(),
+  }),
+])
+
+export type ServiceGenerated = z.output<typeof GeneratedSchema>
+
 const EnvSchema = z.strictObject({
   name: envName,
   description: z.string().max(MAX_ENV_DESCRIPTION_CHARS).default(""),
@@ -157,6 +190,13 @@ const EnvSchema = z.strictObject({
       message: "A fixed value is one line.",
     })
     .optional(),
+  /**
+   * PCP makes its value at launch, a random one (format 6): kept as a
+   * secret of the vault, bound to the variable and handed to the container
+   * over standard input as any secret is. No step of the owner's; they may
+   * still choose a secret of their own for it.
+   */
+  generated: GeneratedSchema.optional(),
 })
 
 const VolumeSchema = z.strictObject({
@@ -266,6 +306,42 @@ const RegistersSchema = z.discriminatedUnion("kind", [
   }),
   z.strictObject({ kind: z.literal("none") }),
 ])
+
+const signinTool = z.string().regex(SIGNIN_TOOL, {
+  message: "A tool's name, as the server the service registers names it.",
+})
+const signinField = z.string().regex(SIGNIN_FIELD, {
+  message:
+    "A field's name: letters, digits and underscores, not starting with a digit.",
+})
+
+/**
+ * The account a service signs in to (format 6), as a step of PCP's own:
+ * the owner opens PCP's sign-in page, which calls `start` (its answer's
+ * `url` field is the provider's page; `expires`, when the sign-in ends),
+ * then `finish` with the code the owner pasted as its `argument`, then
+ * `status` (its `signed_in` field, true or false, and `who`, the account's
+ * name). Each tool is one the server it registers serves.
+ */
+const SigninSchema = z.strictObject({
+  style: z.literal("paste_code"),
+  status: z.strictObject({
+    tool: signinTool,
+    signed_in: signinField,
+    who: signinField.optional(),
+  }),
+  start: z.strictObject({
+    tool: signinTool,
+    url: signinField,
+    expires: signinField.optional(),
+  }),
+  finish: z.strictObject({
+    tool: signinTool,
+    argument: signinField,
+  }),
+})
+
+export type ServiceSignin = z.output<typeof SigninSchema>
 
 /** A build argument: a name and a value, no secret (it shows in the image). */
 const BuildArgSchema = z.strictObject({
@@ -377,6 +453,8 @@ export const ServiceDefinitionSchema = z
      * from: a folder in one of its volumes. None: no put_file or get_file.
      */
     files: FilesSchema.optional(),
+    /** The account it signs in to, through PCP's sign-in page (format 6). */
+    signin: SigninSchema.optional(),
   })
   .superRefine((definition, issue) => {
     if (definition.build) {
@@ -501,6 +579,41 @@ export const ServiceDefinitionSchema = z
       }
     }
 
+    for (const entry of definition.env) {
+      if (
+        entry.generated !== undefined &&
+        (entry.plain || entry.value !== undefined)
+      ) {
+        issue.addIssue({
+          code: "custom",
+          message: `${entry.name} is made by PCP (generated): it has no typed or fixed value.`,
+        })
+      }
+    }
+
+    if (definition.signin) {
+      const { status, start, finish } = definition.signin
+
+      if (
+        definition.registers.kind !== "mcp" &&
+        definition.registers.kind !== "openapi"
+      ) {
+        issue.addIssue({
+          code: "custom",
+          message:
+            "A service signs in through tools of the server it registers: signin needs registers kind mcp or openapi.",
+        })
+      }
+
+      if (finish.tool === start.tool || finish.tool === status.tool) {
+        issue.addIssue({
+          code: "custom",
+          message:
+            "The sign-in's finish is a tool of its own, not its start or its status.",
+        })
+      }
+    }
+
     const auth = registerAuth(definition.registers)
 
     if (auth && !names.includes(auth.env)) {
@@ -526,6 +639,17 @@ export function registerAuth(
   return registers.kind === "openapi" || registers.kind === "mcp"
     ? (registers.auth ?? null)
     : null
+}
+
+/** The variables PCP makes a value for at launch (`generated`). */
+export function generatedEnv(
+  definition: ServiceDefinition,
+): Array<{ name: string; generated: ServiceGenerated }> {
+  return definition.env.flatMap((entry) =>
+    entry.generated !== undefined
+      ? [{ name: entry.name, generated: entry.generated }]
+      : [],
+  )
 }
 
 /** What a service registers, in words: "endpoint" or "MCP server". */
@@ -785,7 +909,8 @@ export function checkEnvBindings(
       entry.required &&
       !checked[entry.name] &&
       !values[entry.name] &&
-      entry.value === undefined
+      entry.value === undefined &&
+      entry.generated === undefined
     ) {
       throw invalid(
         entry.plain
@@ -796,8 +921,9 @@ export function checkEnvBindings(
   }
 
   const auth = registerAuth(definition.registers)
+  const made = new Set(generatedEnv(definition).map((entry) => entry.name))
 
-  if (auth && !checked[auth.env]) {
+  if (auth && !checked[auth.env] && !made.has(auth.env)) {
     throw invalid(
       `Choose the secret for ${auth.env}: the ${registeredNoun(definition.registers)} sends it in ${auth.header}.`,
     )

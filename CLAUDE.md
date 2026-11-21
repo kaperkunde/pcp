@@ -58,6 +58,11 @@ so in the summary; the bump itself waits for the request.
   `lib/core/upstream.ts` (headers, a wrapper's bound placeholders, and a
   secret the browser types). Nothing returns a secret value to an assistant;
   `revealSecret` and `revealTotpCode` are for the owner's own screen. A
+  field that takes a secret by name finds it only through
+  `secret-refs.ts resolveSecretRef` with its use (text everywhere, one-time
+  codes only where the browser types, managed kinds never, and with its
+  `consumer`, the secret's scope), and what uses a secret is
+  `secret-uses.ts secretUses` alone. A
   `totp` secret's seed never leaves `secrets.ts`: only the code of the
   moment is typed, and only by the browser. An API endpoint's calls
   (`lib/core/endpoints.ts`, `lib/core/openapi/`) are handed their finished
@@ -297,7 +302,10 @@ so in the summary; the bump itself waits for the request.
   (snake_case, as `create_wrapper` takes it); only one that has a pace is
   written as format 5 (`wrapperFormat`), an older-format one naming it is
   refused, and a pace change is never `textOnly` (its review flags it, and
-  says where it goes past the owner's bounds). PCP's common items,
+  says where it goes past the owner's bounds). Format 6 adds a service's
+  `signin` and a variable's `generated`; only a service document that has
+  either is written as format 6 (`serviceFormat`), and an older-format one
+  naming either is refused. PCP's common items,
   `kaperkunde/pcp-gg-common` (`repos/common.ts`), are offered in one click,
   linked read-only and untrusted (pinned imports), read without a sign-in.
   A push is one commit per item, fast-forward only, and
@@ -567,7 +575,30 @@ storageConnect`), never in the background, and SFTP for nothing else;
   it made, `removeContainer` reporting what the engine would not remove, the
   container's first and last lines in the error; a secret the owner typed
   for it is kept and the error names it. A failed remake marks the service
-  failed and says that Start makes it again. Limits go in
+  failed and says that Start makes it again. A variable marked `generated`
+  gets a random value at launch, or when its definition gains it, before
+  the next remake (`services/generated.ts`): a managed `generated` secret
+  (`secrets.ts createGeneratedSecret`, named `generatedSecretName`, the
+  service's own: kept by a remake, never one that exists by that name,
+  bound for a gained variable only where a remake may follow), bound only where PCP bound it (`generatedEnv`),
+  never a choice among the owner's secrets on any form or proposal
+  (`env_secrets` naming one is refused), taken back with a launch that
+  fails (`takeBackGenerated`), removed with its service unless something
+  still sends it, and kept as it is when the owner saves the service or
+  the server it registered.
+  A definition's `signin` (`services/signin.ts`) is PCP's own sign-in step:
+  PCP calls its status tool by itself only while that tool's tier is Read;
+  `/servers/<id>/sign-in`, the owner's page, starts a sign-in only on the
+  owner's press (and once more by itself when it runs out, by the time
+  left PCP worked out), calls its start tool (an https address only, its
+  host shown), then its finish tool with the code the owner pastes, from
+  `upstream.ts finishServiceSignin`: never stored, in no request-log line
+  or answer, scrubbed from errors; no token's levels apply to the page's
+  calls. An assistant gets `connect_account` (Write; who is signed in only
+  for a token with a tool of that server not blocked) and, when a call
+  fails while the status says signed out, the same `needs_owner` reason
+  `signin`, quoting the service only for an unshaped answer, with the
+  page's link last and check_server on the next message. Limits go in
   `services/limits.ts`; a new command, tool or argument gets a test against
   the fake engine (`services/fake-docker.ts`, `services.test.ts`).
 - Capabilities (`lib/core/capabilities/`): `read_image`, `edit_pdf` and
@@ -592,6 +623,13 @@ storageConnect`), never in the background, and SFTP for nothing else;
   the import page at the common repository's head). A new capability is a
   row in `list.ts`, its operations in `providers.ts`, and a test against
   fake providers (`capabilities.test.ts`).
+  What PCP can set up when the owner asks in a conversation is the
+  catalogue (`catalogue.ts`, static: search never reads the common items
+  from GitHub), set up or not as what the token reaches says, never the
+  rest of the vault (`catalogue-state.ts`); search names what it has not
+  got, a common item by the link to its page (never retyped into
+  `register_server`), and an assistant never proposes an SSH server or an
+  exit. A new entry gets a test in `catalogue.test.ts`.
 - Search (`lib/core/search.ts`, pure) finds a tool by keywords with no
   provider: stems, a short synonym table, and for PCP's own tools what
   their description's lead says they are for (task phrases there, in a
@@ -908,17 +946,22 @@ embeddingProvider`, which hands `embeddings/provider.ts` the header;
   rolling fingerprint, then an HMAC), whatever document the tab shows now.
   The value is scrubbed from answers and errors, and the request log has
   the secret's name and origin, never the value.
-  `request_secret` asks the owner to type a new one on PCP's page (with its
-  login name, `username`), or to have PCP make a password there
-  (`generate`: `generate-password.ts`, a CSPRNG, in `decidePermission`,
+  `request_secret`, PCP's own tool (the browser's is its alias for one
+  release), asks the owner to type a new one on PCP's page (with its login
+  name, `username`), or to have PCP make a password or a token there
+  (`generate`, its `format` `password`, `alphanumeric`, `hex` or
+  `base64url`: `generate-password.ts`, a CSPRNG, in `decidePermission`,
   stored at once and never handed back; the owner reveals it under
   Secrets), and never writes over a name PCP holds. Its page keeps the
   sites out of a password manager's reach (boxes outside the login form,
   `data-1p-ignore`). An assistant changes a secret's sites only by
-  proposing it (`update_secret_sites`, a `secret_sites_change` request that
-  always asks, whatever the levels): the page shows the sites now, each
-  change and lookalikes flagged unticked (`lookalike-sites.ts`), and makes
-  only what the owner ticked, to the sites as shown (`sitesBasis`).
+  proposing it (`change_secret_scope`, below; `update_secret_sites` is its
+  alias for one release): the page shows the sites now, each change and
+  lookalikes flagged unticked (`lookalike-sites.ts`), and makes only what
+  the owner ticked. A secret with no site that is not anywhere, typed other
+  than through a wrapper's place for it, asks every time (`outOfScope`:
+  Once, or Always at this site, which adds the site; never an allowance
+  for a while), as an anywhere one asks.
   Allowances are not exported; origins are, with their flag.
   `navigate`, `snapshot` and `tabs` open name the owner's secrets bound to
   the page's origin (`browser/sign-in-hint.ts`, louder at a password
@@ -927,6 +970,35 @@ embeddingProvider`, which hands `embeddings/provider.ts` the header;
   `:note`, opened only in `secrets.ts`); never a value, and naming one
   grants nothing: typing it is still the gate above. Add a test for each
   new way in.
+- A secret's scope (`lib/core/secret-scope.ts`, #162) is where it may be
+  used: `secret_scope` rows (servers, endpoints, mail and calendar
+  accounts, services, wrappers), whatever uses it now (always in scope
+  while it does), its sites, or `scope_anywhere`. Only the owner's pages
+  widen it: the Secrets page's Scope, their own pick of a secret on a
+  server's page (the use is the grant), or their yes to a proposal whose
+  page showed one "also allows <secret> for <consumer>" per secret and
+  consumer ticked, a wrapper's siblings included (`secret-scope-asks.ts`,
+  `decidePermission`'s `alsoAllow`, then `keepAllowed`, which keeps only
+  those); a linked repository's item the same way on its review
+  (`repos/apply.ts resolveItem`'s `alsoAllows`, `applyItem`'s
+  `alsoAllow`), and never by a change that applies by itself. It is checked in one place, `resolveSecretRef` with
+  the use's `consumer` (`check` refuses naming `change_secret_scope`, `ask`
+  is a proposal's, `granted` the owner's yes); a secret from before is
+  worked out from its uses by the first request with the key
+  (`ensureSecretScopes`; null reads as anywhere). run_<tier> programs get
+  no secret: a wrapper's bindings are the way, through its place in the
+  scope. An assistant proposes changes only through `edit_secret`,
+  `rotate_secret`, `change_secret_scope` (Write) and `delete_secret`
+  (Destructive), each a `secret_change` request (`secret-changes.ts`) that
+  always asks, shows the secret before and after and what uses it, and
+  writes only that while its `basis` holds (a new request once it moved);
+  never a value to the assistant, never a managed kind. A rotation's value
+  is typed on PCP's page or made there from a recipe, written through
+  `updateSecret` (which clears the credential alerts of every use), and
+  remakes the services that take it; a deletion waits until no blocking
+  use remains, which the owner changes on its own page. Add a test for
+  each new field an assistant can set and each new consumer
+  (`secret-changes.test.ts`, `secret-scope.test.ts`).
 - PCP's own authorization server (`lib/core/oauth-server/`), for apps that
   sign in to `/mcp` with a URL alone (claude.ai's connectors, ChatGPT), is
   PCP's and never a relay's: whoever issues the tokens could mint one for
@@ -1043,7 +1115,11 @@ embeddingProvider`, which hands `embeddings/provider.ts` the header;
   installer read out of the image it pulled (`/app/install.sh`), never out
   of the running container; PCP never addresses the host. A build of develop (`X.Y.Z-dev.N`, a pre-release that
   `.github/workflows/develop.yml` makes on every push to develop) is never
-  offered on the stable channel.
+  offered on the stable channel. An assistant reads it through `get_version`
+  (the last check's answer, never a new request) and asks for an install only
+  through `update_pcp`, a `pcp_update` request whose yes is the owner's
+  button's `installNewest` (`updates/install.ts`) after a fresh check that
+  the newest is still the version shown, every time, never a standing allow.
 - `desktop/` is a host for the production build, not part of the app. It
   imports nothing from `lib/`, `app/` or `components/`; the app knows it only
   as `PCP_DESKTOP=1` and `PCP_DESKTOP_UPDATER` (`lib/server/desktop.ts`), for

@@ -71,8 +71,14 @@ jobs:
         run: pnpm install --frozen-lockfile --config.node-linker=hoisted
       - name: Generate Prisma client
         run: pnpm db:generate
+      # The commit the tag names and the time of the build, which the app
+      # carries (next.config.ts, shown on Settings → Updates and by
+      # get_version), as the image's build arguments do.
       - name: Build
-        run: pnpm build
+        run: |
+          PCP_COMMIT="$(git rev-parse HEAD)" \
+          PCP_BUILT_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            pnpm build
       - name: Install Electron and electron-builder
         run: pnpm install --frozen-lockfile
         working-directory: desktop

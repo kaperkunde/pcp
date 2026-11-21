@@ -424,6 +424,12 @@ const DECISION_LABELS: Record<PermissionKind, Record<string, string>> = {
     allow_once: "Save the limits",
     decline: "Not now",
   },
+  // A newer PCP an assistant asked to install (update_pcp): this install
+  // only, never a standing yes, whatever the levels.
+  pcp_update: {
+    allow_once: "Install and restart",
+    decline: "Not now",
+  },
   // A secret the owner types in for the browser, and how its uses go: the
   // next one only, every one for an hour, or every one.
   secret_request: {
@@ -435,6 +441,13 @@ const DECISION_LABELS: Record<PermissionKind, Record<string, string>> = {
   // An assistant's change to a secret's sites: the ticked changes, made.
   secret_sites_change: {
     allow_once: "Apply ticked changes",
+    decline: "Not now",
+  },
+  // An assistant's edit, new value, scope change or deletion of one of
+  // your secrets (#162): this one, as shown; each action names its yes on
+  // the page.
+  secret_change: {
+    allow_once: "Apply",
     decline: "Not now",
   },
 }

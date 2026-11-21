@@ -197,6 +197,8 @@ const SIGN_IN = {
 
 async function digidSecret() {
   const { id } = await createSecret(ctx, {
+    // As one the owner adds with no site (#162).
+    anywhere: true,
     name: "DigiD password",
     value: PASSWORD,
   })
@@ -378,7 +380,12 @@ describe("a secret a flow types into pages by name", () => {
   })
 
   it("is never found for a tool other than the browser's type: that needs a place given by name", async () => {
-    await createSecret(ctx, { name: "Things key", value: "sk-0123456789" })
+    await createSecret(ctx, {
+      // As one the owner adds with no site (#162).
+      anywhere: true,
+      name: "Things key",
+      value: "sk-0123456789",
+    })
     const { wrapper } = await proposeAndApprove([
       {
         name: "sign_in",
@@ -405,8 +412,18 @@ describe("a secret a flow types into pages by name", () => {
   })
 
   it("takes several secrets at one place, each once", async () => {
-    await createSecret(ctx, { name: "Bank user", value: "ada" })
-    await createSecret(ctx, { name: "Bank password", value: "hunter2-bank" })
+    await createSecret(ctx, {
+      // As one the owner adds with no site (#162).
+      anywhere: true,
+      name: "Bank user",
+      value: "ada",
+    })
+    await createSecret(ctx, {
+      // As one the owner adds with no site (#162).
+      anywhere: true,
+      name: "Bank password",
+      value: "hunter2-bank",
+    })
     const tool = {
       ...SIGN_IN,
       program:

@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest"
 
-import { DEFAULT_PASSWORD_RECIPE, PASSWORD_SYMBOLS } from "./constants"
+import {
+  DEFAULT_PASSWORD_RECIPE,
+  DEFAULT_TOKEN_RECIPE,
+  PASSWORD_SYMBOLS,
+} from "./constants"
 import {
   checkPasswordRecipe,
   describeRecipe,
@@ -135,6 +139,75 @@ describe("checkPasswordRecipe", () => {
       }),
     ).toBe(
       "24 characters: lower-case letters, capital letters, digits, without 0O",
+    )
+  })
+})
+
+// A token for a header, a service's variable or a wrapper's place (#162):
+// the format's characters only, the length asked for in characters.
+describe("generatePassword's formats", () => {
+  it("makes a token of letters and digits, 48 by default", () => {
+    expect(checkPasswordRecipe({ format: "alphanumeric" })).toEqual(
+      DEFAULT_TOKEN_RECIPE,
+    )
+
+    for (let i = 0; i < 50; i++) {
+      const value = generatePassword(DEFAULT_TOKEN_RECIPE)
+      expect(value).toMatch(/^[A-Za-z0-9]{48}$/)
+    }
+  })
+
+  it("makes hex and base64url of the length asked for", () => {
+    for (let i = 0; i < 50; i++) {
+      expect(
+        generatePassword(checkPasswordRecipe({ format: "hex", length: 64 })),
+      ).toMatch(/^[0-9a-f]{64}$/)
+      expect(
+        generatePassword(
+          checkPasswordRecipe({ format: "base64url", length: 43 }),
+        ),
+      ).toMatch(/^[A-Za-z0-9_-]{43}$/)
+    }
+  })
+
+  it("draws a token's characters evenly from its own random source", () => {
+    const draws: number[] = []
+    const value = generatePassword(
+      checkPasswordRecipe({ format: "hex", length: 16 }),
+      (max) => {
+        draws.push(max)
+        return draws.length % max
+      },
+    )
+
+    expect(draws).toEqual(Array(16).fill(16))
+    expect(value).toBe("123456789abcdef0")
+  })
+
+  it("leaves characters out of letters and digits only", () => {
+    for (let i = 0; i < 50; i++) {
+      expect(
+        generatePassword(
+          checkPasswordRecipe({ format: "alphanumeric", exclude: "0O1lI" }),
+        ),
+      ).not.toMatch(/[0O1lI]/)
+    }
+
+    expect(() => checkPasswordRecipe({ format: "hex", exclude: "a" })).toThrow(
+      /not hex/,
+    )
+    expect(() => checkPasswordRecipe({ format: "uuid" })).toThrow(/format/)
+    expect(() =>
+      checkPasswordRecipe({ format: "base64url", length: 200 }),
+    ).toThrow(/8 to 128/)
+  })
+
+  it("says what it makes", () => {
+    expect(describeRecipe(DEFAULT_TOKEN_RECIPE)).toBe(
+      "48 characters: letters and digits",
+    )
+    expect(describeRecipe(checkPasswordRecipe({ format: "hex" }))).toBe(
+      "48 characters: hex digits",
     )
   })
 })

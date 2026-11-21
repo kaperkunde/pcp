@@ -161,6 +161,7 @@ export default async function ChangePage({
             hash={pending.hash}
             flags={review.flags.length}
             conflict={conflict}
+            alsoAllows={resolved.alsoAllows}
           />
         ) : conflict ? (
           <ChangeAnswer
@@ -169,6 +170,7 @@ export default async function ChangePage({
             hash={pending.hash}
             flags={review.flags.length}
             conflict
+            alsoAllows={resolved.alsoAllows}
           />
         ) : null}
       </Card>

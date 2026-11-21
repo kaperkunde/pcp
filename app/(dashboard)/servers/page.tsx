@@ -17,12 +17,17 @@ export const metadata: Metadata = { title: "Servers" }
 export default async function ServersPage() {
   const ctx = await requireContext()
   // PCP's own store is always there, for a vault from before it too.
-  await ensureOwnStore(ctx)
+  const ownStore = await ensureOwnStore(ctx)
   const [servers, tokens, flows] = await Promise.all([
     listServers(ctx),
     listApiTokens(ctx),
     flowWrapperIds(ctx),
   ])
+  // Only what PCP comes with (its own store, the browser): an assistant
+  // can set up the rest when asked.
+  const onlyOwn = servers.every(
+    (server) => server.id === ownStore || server.kind === "browser",
+  )
   const now = new Date()
   const hasToken = tokens.some(
     (token) => !token.revokedAt && (!token.expiresAt || token.expiresAt > now),
@@ -61,9 +66,9 @@ export default async function ServersPage() {
           }))}
       />
 
-      {servers.length === 0 ? (
-        <GetStarted hasToken={hasToken} />
-      ) : (
+      {onlyOwn ? <GetStarted hasToken={hasToken} /> : null}
+
+      {servers.length === 0 ? null : (
         <ListSection footer="Each is described in your words: that description is what an assistant reads when it searches for a tool.">
           <ServerList
             servers={servers.map((server) => ({

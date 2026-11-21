@@ -41,7 +41,12 @@ COPY . .
 ENV NODE_ENV=production
 
 RUN pnpm db:generate
-RUN pnpm build
+# The commit and the time of the build, which Settings → Updates and
+# get_version show (lib/core/version.ts): build-images.yml passes them, and
+# next.config.ts writes them into the build. Left empty, they are unknown.
+ARG PCP_COMMIT=
+ARG PCP_BUILT_AT=
+RUN PCP_COMMIT="${PCP_COMMIT}" PCP_BUILT_AT="${PCP_BUILT_AT}" pnpm build
 
 FROM base AS runner
 

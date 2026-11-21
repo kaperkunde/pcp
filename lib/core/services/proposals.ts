@@ -12,11 +12,10 @@ import {
   type ProposedAccess,
   type ToolAccessArg,
 } from "../proposed-access"
-import {
-  createSecretNamedAfter,
-  findTextSecretByName,
-  validateSecretName,
-} from "../secrets"
+import type { PasswordRecipe } from "../constants"
+import { checkPasswordRecipe, describeRecipe } from "../generate-password"
+import { resolveSecretRef } from "../secret-refs"
+import { createSecretNamedAfter, validateSecretName } from "../secrets"
 import { getServer, normalizeNameAndDescription } from "../servers"
 import { parseSshAddress } from "../ssh/hosts"
 import {
@@ -77,6 +76,11 @@ export type ServiceChangeAsk = {
   env: ProposedVariable[]
   /** A secret PCP does not hold yet, which the owner types in. */
   newSecret: string | null
+  /**
+   * The value the assistant proposed PCP make for the new secret
+   * (env_secrets' `generate`), filled in on the page; never a value.
+   */
+  newSecretGenerate?: PasswordRecipe | null
   note: string | null
   /**
    * Levels and tiers the assistant proposed for what it registers, by name
@@ -99,7 +103,7 @@ export type ServiceProposalArgs = {
   sshServerId: string
   publishAddress?: string
   publishPorts?: Array<{ container: number; host: number }>
-  envSecrets?: Array<{ name: string; secret: string }>
+  envSecrets?: Array<{ name: string; secret: string; generate?: unknown }>
   note?: string
   /** tool_access: levels and tiers proposed for what it registers. */
   toolAccess?: ToolAccessArg
@@ -194,6 +198,7 @@ export async function prepareServiceProposal(
 
   const known = new Set(definition.env.map((entry) => entry.name))
   const given = new Map<string, string>()
+  const generated = new Map<string, PasswordRecipe>()
 
   for (const entry of args.envSecrets ?? []) {
     if (!known.has(entry.name)) {
@@ -205,16 +210,42 @@ export async function prepareServiceProposal(
     }
 
     given.set(entry.name, entry.secret.trim())
+
+    if (entry.generate !== undefined) {
+      generated.set(entry.name, checkPasswordRecipe(entry.generate))
+    }
   }
 
   let newSecret: string | null = null
+  let newSecretGenerate: PasswordRecipe | null = null
   const env: ProposedVariable[] = []
 
   for (const entry of definition.env) {
+    // A value PCP makes itself (generated): nobody names or makes one for
+    // it, an assistant's generate included.
+    if (entry.generated !== undefined && given.has(entry.name)) {
+      throw invalid(
+        `${entry.name} takes a value PCP makes itself when it launches the service (generated): leave it out of env_secrets.`,
+      )
+    }
+
     const secretName = given.get(entry.name) ?? null
     const stored = secretName
-      ? await findTextSecretByName(ctx, secretName)
+      ? await resolveSecretRef(ctx, secretName, {
+          kind: "service_env",
+          // The service this proposes, as register_server's consumer: one
+          // outside the secret's scope is shown as also allowing it there.
+          consumer: { id: null, name: named.name },
+          scope: "ask",
+        })
       : null
+    const recipe = generated.get(entry.name) ?? null
+
+    if (recipe && stored) {
+      throw invalid(
+        `${entry.name} takes "${stored.name}", which the owner already holds: generate is for a new secret only.`,
+      )
+    }
 
     if (secretName && !stored) {
       const problem = validateSecretName(secretName)
@@ -230,10 +261,25 @@ export async function prepareServiceProposal(
         )
       }
 
+      if (recipe && newSecretGenerate && newSecret === secretName) {
+        // Two variables take the same new secret: one recipe for it.
+        if (JSON.stringify(recipe) !== JSON.stringify(newSecretGenerate)) {
+          throw invalid(
+            `"${secretName}" is made once: give it one generate, or none.`,
+          )
+        }
+      }
+
       newSecret = secretName
+      newSecretGenerate = recipe ?? newSecretGenerate
     }
 
-    if (!secretName && entry.required && entry.value === undefined) {
+    if (
+      !secretName &&
+      entry.required &&
+      entry.value === undefined &&
+      entry.generated === undefined
+    ) {
       throw invalid(
         `The service needs ${entry.name}: name the secret it takes in env_secrets.`,
       )
@@ -260,7 +306,13 @@ export async function prepareServiceProposal(
     label: "The service",
   })
 
-  if (auth && !given.has(auth.env)) {
+  if (
+    auth &&
+    !given.has(auth.env) &&
+    !definition.env.some(
+      (entry) => entry.name === auth.env && entry.generated !== undefined,
+    )
+  ) {
     throw invalid(
       `The ${definition.registers.kind === "mcp" ? "MCP server" : "endpoint"} sends ${auth.env}'s secret in ${auth.header}: name it in env_secrets.`,
     )
@@ -284,6 +336,7 @@ export async function prepareServiceProposal(
     publish,
     env,
     newSecret,
+    ...(newSecretGenerate ? { newSecretGenerate } : {}),
     note,
     ...(proposedAccess ? { proposedAccess } : {}),
   }
@@ -318,15 +371,16 @@ export function describeServiceAsk(ask: ServiceChangeAsk): {
       ? `Published on ${publish.address}: ${publish.ports.map((port) => `${port.host} → ${port.container}`).join(", ")}${publish.address === "0.0.0.0" || publish.address === "::" ? " (every address of the SSH server: anything on its network reaches it)" : isLoopback(publish.address) ? " (the SSH server's own loopback: PCP reaches it through the SSH connection)" : " (that address of the SSH server: anything that reaches it reaches the service)"}`
       : "Publishes no port",
     ...ask.env.map((entry) => {
-      const fixed = definition.env.find(
-        (each) => each.name === entry.name,
-      )?.value
+      const declared = definition.env.find((each) => each.name === entry.name)
+      const fixed = declared?.value
 
       return entry.secret === null
-        ? `Variable ${entry.name}: ${fixed !== undefined ? `its fixed value, ${fixed}` : "not set"}`
+        ? `Variable ${entry.name}: ${declared?.generated !== undefined ? "a random value PCP makes when it launches and keeps itself; nobody types, chooses or sees it" : fixed !== undefined ? `its fixed value, ${fixed}` : "not set"}`
         : entry.secretId
           ? `Variable ${entry.name}: your secret "${entry.secret}"`
-          : `Variable ${entry.name}: a new secret, saved as "${entry.secret}", which you enter here when you agree`
+          : ask.newSecretGenerate
+            ? `Variable ${entry.name}: a new secret, saved as "${entry.secret}", which the assistant proposes PCP makes (${describeRecipe(ask.newSecretGenerate)}); you can type one instead`
+            : `Variable ${entry.name}: a new secret, saved as "${entry.secret}", which you enter here when you agree`
     }),
     definition.volumes.length > 0
       ? `Named volumes (never a folder of the server): ${definition.volumes.map((volume) => `${volume.name} at ${volume.path}`).join(", ")}`
@@ -347,6 +401,11 @@ export function describeServiceAsk(ask: ServiceChangeAsk): {
       : registers.kind === "mcp"
         ? `PCP adds an MCP server at ${registers.path} on port ${registers.port}${registers.auth ? `, sending ${registers.auth.env}'s secret in ${registers.auth.header}` : ""}`
         : "PCP adds no server for it",
+    ...(definition.signin
+      ? [
+          `It signs in to an account of yours: on PCP's sign-in page, PCP calls its ${definition.signin.start.tool} for the provider's address and its ${definition.signin.finish.tool} with the code you paste (as ${definition.signin.finish.argument}), whatever their tiers, on your own action only; it reads ${definition.signin.status.tool} by itself, for any token, only while that tool's tier is Read (its tiers are known once its tools are read). An assistant only gets the link to that page`,
+        ]
+      : []),
     ...(ask.instanceOf
       ? [
           `Another service of ${ask.instanceOf.name}, beside ${ask.instanceOf.instances.join(", ") || "(none)"}: it shares their definition, so a change to it changes every one of them`,
@@ -394,12 +453,15 @@ export async function applyServiceChange(
     secretValue,
     launch,
     access = [],
+    made,
   }: {
     tokenId: string
     secretValue?: string
     launch: ServiceLauncher
     /** The levels and tiers the owner left on the page, for what it registers. */
     access?: AccessRule[]
+    /** Filled in with what this launch made: the service, what it registered. */
+    made?: { ids: string[] }
   },
 ): Promise<string> {
   if (
@@ -433,7 +495,15 @@ export async function applyServiceChange(
       }
 
       id =
-        saved?.id ?? (await findTextSecretByName(ctx, entry.secret))?.id ?? null
+        saved?.id ??
+        (
+          await resolveSecretRef(ctx, entry.secret, {
+            kind: "service_env",
+            consumer: { id: null, name: ask.name },
+            scope: "ask",
+          })
+        )?.id ??
+        null
     }
 
     if (!id) {
@@ -462,12 +532,17 @@ export async function applyServiceChange(
     if (saved) {
       throw new PcpError(
         isPcpError(error) ? error.code : "upstream",
-        `${isPcpError(error) ? error.message : "Something went wrong inside PCP while launching it."}\nThe secret you entered is kept in PCP as "${saved.name}": an assistant that asks again can name it, and you can choose it when you launch the service yourself, or delete it on the Secrets page.`,
+        `${isPcpError(error) ? error.message : "Something went wrong inside PCP while launching it."}\nThe new secret is kept in PCP as "${saved.name}": an assistant that asks again can name it, and you can choose it when you launch the service yourself, or delete it on the Secrets page.`,
       )
     }
 
     throw error
   }
+
+  made?.ids.push(
+    launched.id,
+    ...(launched.registeredId ? [launched.registeredId] : []),
+  )
 
   if (ask.note) {
     // launchService sets it; this keeps it when a stand-in launched.
@@ -504,7 +579,7 @@ export async function applyServiceChange(
     ? await getServer(ctx, launched.registeredId).catch(() => null)
     : null
   const keptAs = saved
-    ? ` The secret the owner entered is saved in PCP as "${saved.name}".`
+    ? ` The new secret is saved in PCP as "${saved.name}".`
     : ""
 
   return `${launched.message} The service is "${service.slug}" (status, logs, start, stop, restart${service.tools.some((tool) => tool.name === "put_file") ? ", put_file, get_file" : ""})${registered ? `, and what it serves is "${registered.slug}" with ${registered.tools.length} tool${registered.tools.length === 1 ? "" : "s"}` : ""}. ${levels ? `${levels} The service's own tools ask the owner the first time they are used` : "Its tools ask the owner the first time they are used"}; search finds them.${keptAs}`

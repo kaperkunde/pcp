@@ -18,9 +18,16 @@ import { exportVault, readExport, restoreExport } from "../backup"
 import type { VaultContext } from "../context"
 import { db } from "../db"
 import { downloadSpec } from "../endpoints"
-import { createSecret, deleteSecret, updateSecret } from "../secrets"
+import {
+  createGeneratedSecret,
+  createSecret,
+  generatedSecretName,
+  deleteSecret,
+  readSecretValue,
+  updateSecret,
+} from "../secrets"
 import { secretUses } from "../secret-uses"
-import { deleteServer, getServer } from "../servers"
+import { deleteServer, getServer, updateServer } from "../servers"
 import { startFakeSsh, type FakeSsh } from "../ssh/fake-server"
 import { createSshServer } from "../ssh/hosts"
 import { scratchDatabase } from "../test-db"
@@ -30,6 +37,7 @@ import {
   callServerTool,
   checkServiceImage,
   launchService,
+  readServiceLogs,
   readServiceStatus,
   reconcileServices,
   recreateService,
@@ -308,6 +316,52 @@ function everythingSent(): string {
   return JSON.stringify([docker.commands, docker.state().calls])
 }
 
+describe(
+  "a variable bound to a value PCP made (#162)",
+  { timeout: 30_000 },
+  () => {
+    beforeEach(() => setup())
+
+    it("launches with it only where PCP bound it, and keeps it on the owner's save", async () => {
+      const hostId = await pinnedHost()
+      const made = await createGeneratedSecret(ctx, {
+        name: generatedSecretName("Docs", "API_KEY"),
+      })
+      const input = await launchInput(hostId, { env: { API_KEY: made.id } })
+
+      // A variable the owner chose takes a text secret of theirs only.
+      await expect(launchService(ctx, input, FAST)).rejects.toThrow(
+        /not a text secret/,
+      )
+
+      const launched = await launchService(
+        ctx,
+        { ...input, generatedEnv: ["API_KEY"] },
+        FAST,
+      )
+      expect(docker.state().calls.join("\n")).not.toContain(
+        await readSecretValue(ctx, made.id),
+      )
+
+      // The owner's save keeps PCP's binding as it is…
+      await saveServiceSettings(ctx, launched.id, {
+        name: (await getServer(ctx, launched.id)).name,
+        env: { API_KEY: made.id },
+      })
+      // …but never takes another value PCP made for something else.
+      const other = await createGeneratedSecret(ctx, {
+        name: generatedSecretName("Other", "KEY"),
+      })
+      await expect(
+        saveServiceSettings(ctx, launched.id, {
+          name: (await getServer(ctx, launched.id)).name,
+          env: { API_KEY: other.id },
+        }),
+      ).rejects.toThrow(/text secrets of yours/)
+    })
+  },
+)
+
 describe("launching a service", { timeout: 30_000 }, () => {
   beforeEach(() => setup())
   afterEach(teardown)
@@ -520,6 +574,324 @@ describe("launching a service", { timeout: 30_000 }, () => {
     expect(server.tools.map((tool) => tool.name)).toEqual(["convert"])
     expect(mcpSeen.length).toBeGreaterThan(0)
     expect(new Set(mcpSeen)).toEqual(new Set([`Bearer ${API_KEY}`]))
+  })
+
+  it("makes a value for a generated variable: a secret of the vault, sent by the MCP server and handed to the container", async () => {
+    const hostId = await pinnedHost()
+    const input = await launchInput(hostId, {
+      definition: definition({
+        env: [{ name: "API_KEY", required: true, generated: true }],
+        registers: MCP_WITH_AUTH,
+      }),
+      env: {},
+    })
+    const secretsBefore = await db().secret.count()
+    const launched = await launchService(ctx, input, FAST)
+    const server = await getServer(ctx, launched.registeredId!)
+    const spec = await db().serviceSpec.findUniqueOrThrow({
+      where: { serverId: launched.id },
+    })
+    const bound = JSON.parse(spec.env) as Record<string, string>
+
+    // One new secret, bound to the variable and to the server's header.
+    expect(await db().secret.count()).toBe(secretsBefore + 1)
+    expect(bound.API_KEY).toBeTruthy()
+    expect(server.authSecretId).toBe(bound.API_KEY)
+    const value = await readSecretValue(ctx, bound.API_KEY!)
+    expect(value).toMatch(/^[A-Za-z0-9]{48}$/)
+    // A value PCP made: managed, named for the service and its variable.
+    expect(
+      await db().secret.findUniqueOrThrow({
+        where: { id: bound.API_KEY },
+        select: { kind: true },
+      }),
+    ).toEqual({ kind: "generated" })
+
+    // Over standard input, never on a command line.
+    expect(docker.state().containers["pcp-docs"]!.env).toBe(
+      `API_KEY=${value}\n`,
+    )
+    expect(JSON.stringify(docker.commands)).not.toContain(value)
+    expect(new Set(mcpSeen)).toEqual(new Set([`Bearer ${value}`]))
+
+    // The owner saves the MCP server's page as it is: its header keeps
+    // sending the value PCP made, which they never chose…
+    await updateServer(ctx, launched.registeredId!, {
+      name: server.name,
+      url: server.url,
+      authType: "header",
+      authHeaderName: server.authHeaderName,
+      authValueTemplate: server.authValueTemplate,
+      authSecretId: bound.API_KEY!,
+    })
+    expect((await getServer(ctx, launched.registeredId!)).authSecretId).toBe(
+      bound.API_KEY,
+    )
+    // …but cannot choose another value PCP made for something else.
+    const other = await createGeneratedSecret(ctx, {
+      name: generatedSecretName("Other", "KEY"),
+    })
+    await expect(
+      updateServer(ctx, launched.registeredId!, {
+        name: server.name,
+        url: server.url,
+        authType: "header",
+        authHeaderName: server.authHeaderName,
+        authValueTemplate: server.authValueTemplate,
+        authSecretId: other.id,
+      }),
+    ).rejects.toThrow(/does not exist/)
+
+    // Saved with its variable left to PCP, it keeps the value PCP made.
+    expect(
+      await saveServiceSettings(ctx, launched.id, { name: "Docs", env: {} }),
+    ).toEqual({ envChanged: false })
+    expect(
+      JSON.parse(
+        (
+          await db().serviceSpec.findUniqueOrThrow({
+            where: { serverId: launched.id },
+          })
+        ).env,
+      ),
+    ).toEqual(bound)
+  })
+
+  it("makes a value for a generated variable the definition gained since launch, before the container is made again", async () => {
+    const hostId = await pinnedHost()
+    const launched = await launchService(ctx, await launchInput(hostId), FAST)
+    await writeServiceDefinition(
+      ctx,
+      launched.id,
+      parseServiceDefinition(
+        definition({
+          env: [
+            { name: "API_KEY", required: true },
+            { name: "LOG_LEVEL", value: "info" },
+            { name: "SESSION_KEY", generated: true },
+          ],
+        }),
+      ),
+    )
+    await recreateService(ctx, launched.id, FAST)
+
+    const spec = await db().serviceSpec.findUniqueOrThrow({
+      where: { serverId: launched.id },
+    })
+    const bound = JSON.parse(spec.env) as Record<string, string>
+    expect(bound.SESSION_KEY).toBeTruthy()
+    expect(
+      await db().secret.findUniqueOrThrow({
+        where: { id: bound.SESSION_KEY },
+        select: { kind: true },
+      }),
+    ).toEqual({ kind: "generated" })
+    const value = await readSecretValue(ctx, bound.SESSION_KEY!)
+    expect(docker.state().containers["pcp-docs"]!.env).toContain(
+      `SESSION_KEY=${value}\n`,
+    )
+
+    // Made once: the next remake keeps it.
+    await recreateService(ctx, launched.id, FAST)
+    expect(
+      (
+        await db().serviceSpec.findUniqueOrThrow({
+          where: { serverId: launched.id },
+        })
+      ).env,
+    ).toBe(spec.env)
+  })
+
+  it("removes the secrets it made with the service, unless the server it registered is kept and sends one", async () => {
+    const hostId = await pinnedHost()
+    const generated = {
+      definition: definition({
+        env: [{ name: "API_KEY", required: true, generated: true }],
+        registers: MCP_WITH_AUTH,
+      }),
+      env: {},
+    }
+    const first = await launchService(
+      ctx,
+      await launchInput(hostId, generated),
+      FAST,
+    )
+    const madeFirst = Object.values(
+      JSON.parse(
+        (
+          await db().serviceSpec.findUniqueOrThrow({
+            where: { serverId: first.id },
+          })
+        ).env,
+      ) as Record<string, string>,
+    )
+    expect(madeFirst).toHaveLength(1)
+    const ownerSecret = await db().secret.findFirstOrThrow({
+      where: secretNameWhere(ctx, "docs-key"),
+    })
+
+    await removeService(
+      ctx,
+      first.id,
+      { volumes: true, registered: true },
+      PUBLIC,
+    )
+    expect(await db().secret.count({ where: { id: madeFirst[0] } })).toBe(0)
+    // The owner's own secret stays.
+    expect(await db().secret.count({ where: { id: ownerSecret.id } })).toBe(1)
+
+    const second = await launchService(
+      ctx,
+      await launchInput(hostId, generated),
+      FAST,
+    )
+    const madeSecond = Object.values(
+      JSON.parse(
+        (
+          await db().serviceSpec.findUniqueOrThrow({
+            where: { serverId: second.id },
+          })
+        ).env,
+      ) as Record<string, string>,
+    )
+    await removeService(
+      ctx,
+      second.id,
+      { volumes: true, registered: false },
+      PUBLIC,
+    )
+    // The MCP server it registered is kept, and still sends it.
+    expect(await db().secret.count({ where: { id: madeSecond[0] } })).toBe(1)
+  })
+
+  it("gives a new service of an old one's name a token of its own: never the one a renamed or removed service still sends", async () => {
+    const hostId = await pinnedHost()
+    const generated = {
+      definition: definition({
+        env: [{ name: "API_KEY", required: true, generated: true }],
+        registers: MCP_WITH_AUTH,
+      }),
+      env: {},
+    }
+    const tokenOf = async (serviceId: string) =>
+      (
+        JSON.parse(
+          (
+            await db().serviceSpec.findUniqueOrThrow({
+              where: { serverId: serviceId },
+            })
+          ).env,
+        ) as Record<string, string>
+      ).API_KEY!
+
+    // Docs, renamed Docs A: its token stays its own.
+    const first = await launchService(
+      ctx,
+      await launchInput(hostId, generated),
+      FAST,
+    )
+    const firstToken = await tokenOf(first.id)
+    await saveServiceSettings(ctx, first.id, { name: "Docs A", env: {} })
+
+    // A new Docs gets a token of its own.
+    const second = await launchService(
+      ctx,
+      await launchInput(hostId, generated),
+      FAST,
+    )
+    const secondToken = await tokenOf(second.id)
+    expect(secondToken).not.toBe(firstToken)
+
+    // Removed with its MCP server kept: that server still sends its token,
+    // and the next Docs does not get it.
+    await removeService(
+      ctx,
+      second.id,
+      { volumes: true, registered: false },
+      PUBLIC,
+    )
+    expect(await db().secret.count({ where: { id: secondToken } })).toBe(1)
+    const third = await launchService(
+      ctx,
+      await launchInput(hostId, generated),
+      FAST,
+    )
+    const thirdToken = await tokenOf(third.id)
+    expect(thirdToken).not.toBe(secondToken)
+    expect(thirdToken).not.toBe(firstToken)
+  })
+
+  it("moves the registered server's header to a value its definition gained only once the container is made with it, never on a status or logs read", async () => {
+    const hostId = await pinnedHost()
+    const launched = await launchService(
+      ctx,
+      await launchInput(hostId, {
+        definition: definition({ registers: MCP_WITH_AUTH }),
+      }),
+      FAST,
+    )
+    const before = (await getServer(ctx, launched.registeredId!)).authSecretId
+    const secretsBefore = await db().secret.count()
+
+    // Its definition now has PCP make the header's value.
+    await writeServiceDefinition(
+      ctx,
+      launched.id,
+      parseServiceDefinition(
+        definition({
+          env: [
+            { name: "API_KEY", required: true, generated: true },
+            { name: "LOG_LEVEL", value: "info" },
+          ],
+          registers: MCP_WITH_AUTH,
+        }),
+      ),
+    )
+    await db().serviceSpec.update({
+      where: { serverId: launched.id },
+      data: { env: "{}" },
+    })
+
+    await readServiceStatus(ctx, launched.id, PUBLIC)
+    await readServiceLogs(ctx, launched.id, 10, PUBLIC)
+    expect((await getServer(ctx, launched.registeredId!)).authSecretId).toBe(
+      before,
+    )
+    expect(await db().secret.count()).toBe(secretsBefore)
+
+    // Made again: the container and the header take the new value together.
+    await recreateService(ctx, launched.id, FAST)
+    const bound = (
+      JSON.parse(
+        (
+          await db().serviceSpec.findUniqueOrThrow({
+            where: { serverId: launched.id },
+          })
+        ).env,
+      ) as Record<string, string>
+    ).API_KEY!
+    expect(bound).not.toBe(before)
+    expect((await getServer(ctx, launched.registeredId!)).authSecretId).toBe(
+      bound,
+    )
+  })
+
+  it("takes back the value it made when the launch fails", async () => {
+    const hostId = await pinnedHost()
+    forwarding = false
+    const input = await launchInput(hostId, {
+      definition: definition({
+        env: [{ name: "API_KEY", required: true, generated: true }],
+        registers: MCP_WITH_AUTH,
+      }),
+      env: {},
+    })
+    const secretsBefore = await db().secret.count()
+
+    await expect(launchService(ctx, input, FAST)).rejects.toThrow(
+      /did not become healthy/,
+    )
+    expect(await db().secret.count()).toBe(secretsBefore)
   })
 
   it("refuses to launch an MCP server with a header before its variable has a secret", async () => {
@@ -1469,7 +1841,7 @@ describe("a running service", { timeout: 30_000 }, () => {
     const secret = await db().secret.findFirstOrThrow({
       where: secretNameWhere(ctx, "docs-key"),
     })
-    const uses = (await secretUses(ctx)).get(secret.id) ?? []
+    const uses = (await secretUses(ctx)).get(secret.id)?.uses ?? []
     expect(uses.map((use) => use.kind).sort()).toEqual([
       "API endpoint",
       "service",

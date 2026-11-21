@@ -4,6 +4,7 @@ import { revalidatePath } from "next/cache"
 
 import { invalid, PcpError } from "@/lib/core/errors"
 import { checkRateLimit } from "@kaperkunde/security"
+import { installHost, installNewest } from "@/lib/core/updates/install"
 import { CHECK_NOW_LIMIT, isUpdateChannel } from "@/lib/core/updates/limits"
 import {
   checkNow,
@@ -14,16 +15,10 @@ import { isNewer } from "@/lib/core/updates/semver"
 import {
   getUpdateConfig,
   newerRelease,
-  requestInstall,
   saveUpdateConfig,
 } from "@/lib/core/updates/state"
 import { PCP_VERSION } from "@/lib/core/version"
 import { type ActionState, field, guarded } from "@/lib/server/action-state"
-import { desktopUpdater, isDesktopApp } from "@/lib/server/desktop"
-import {
-  hostUpdater,
-  hostUpdaterFollowsChannel,
-} from "@/lib/server/install-kind"
 import { requireContext } from "@/lib/server/session"
 
 /**
@@ -146,42 +141,14 @@ export async function checkForUpdatesAction(): Promise<UpdatesResult> {
  * "Install and restart": PCP notes the request, and the desktop app (which
  * reads /api/health) or the Linux installer's watcher (which reads the file
  * PCP leaves in its data folder) fetches the release and restarts into it.
+ * Whether this PCP can is lib/core/updates/install.ts's, as update_pcp's.
  */
 export async function requestInstallAction(): Promise<UpdatesResult> {
   await requireContext()
 
-  const result = await guarded(async () => {
-    const desktop = isDesktopApp() && desktopUpdater() === "auto"
-    const installer = !isDesktopApp() && hostUpdater()
-
-    if (!desktop && !installer) {
-      throw new PcpError(
-        "state",
-        "This PCP cannot install updates itself. Follow the steps under How to update this PCP.",
-      )
-    }
-
-    const { channel } = await getUpdateConfig()
-
-    if (installer && channel === "develop" && !hostUpdaterFollowsChannel()) {
-      throw new PcpError(
-        "state",
-        "The installer on this computer installs releases only. To follow develop, run the install line under How to update this PCP once more, with PCP_CHANNEL=develop.",
-      )
-    }
-
-    const request = await requestInstall(new Date(), {
-      signalHost: installer,
-      signalChannel:
-        installer && hostUpdaterFollowsChannel() ? channel : undefined,
-    })
-
-    return {
-      message: desktop
-        ? `The app is downloading v${request.version}. PCP restarts by itself when it is done.`
-        : `PCP is installing v${request.version}: the installer on this computer fetches it and starts PCP again, which takes a minute or two.`,
-    }
-  })
+  const result = await guarded(async () => ({
+    message: (await installNewest(installHost())).message,
+  }))
 
   refresh()
   return result

@@ -1,6 +1,6 @@
 import { openRequestTool } from "./level-names"
 import type { CallToolResult } from "@modelcontextprotocol/server"
-import { afterEach, beforeEach, describe, expect, it } from "vitest"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import { openServer } from "./server-meta"
 
@@ -21,7 +21,6 @@ import {
   originOf,
   parseOrigins,
   SECRET_ONCE_MS,
-  showSecretSitesChange,
   signInsAt,
   siteCovers,
   sitesOf,
@@ -55,6 +54,14 @@ import { DEFAULT_PASSWORD_RECIPE } from "./constants"
 import { SECRET_SIGN_IN_WINDOW_MS } from "./browser/limits"
 import { setupVault } from "./vault"
 import { secretName, secretNameWhere } from "./secret-meta"
+import { resolveSecretRef } from "./secret-refs"
+
+// Every secret named by name goes through the one resolver (#162): watched
+// here, as it is.
+vi.mock("./secret-refs", async (importOriginal) => {
+  const real = await importOriginal<typeof import("./secret-refs")>()
+  return { ...real, resolveSecretRef: vi.fn(real.resolveSecretRef) }
+})
 
 // Secrets the browser types, against a scratch database: the sites a secret
 // belongs to, a token's allowance per secret and site (once, an hour,
@@ -83,9 +90,11 @@ beforeEach(async () => {
   })
   tokenId = (await resolveApiToken(token))!.tokenId
   serverId = (await createBrowserServer(ctx)).id
+  // As the owner adds one on the Secrets page with no site: anywhere.
   ;({ id: secretId } = await createSecret(ctx, {
     name: "Shop password",
     value: VALUE,
+    anywhere: true,
   }))
 })
 
@@ -694,8 +703,8 @@ describe("one-time codes", () => {
 
   it("never go out as a server's secret", async () => {
     await createSecret(ctx, { name: "Codes", value: SEED, kind: "totp" })
-    const { findTextSecretByName } = await import("./secrets")
-    expect(await findTextSecretByName(ctx, "Codes")).toBeNull()
+    const { resolveSecretRef } = await import("./secret-refs")
+    expect(await resolveSecretRef(ctx, "Codes", { kind: "header" })).toBeNull()
   })
 })
 
@@ -730,9 +739,17 @@ describe("request_secret", () => {
     await expect(
       checkSecretRequest(ctx, serverId, { ...ASK, purpose: "x".repeat(501) }),
     ).rejects.toThrow(/under 500/)
+    // Sites are optional, but one-time codes are typed by the browser only.
+    expect(
+      await checkSecretRequest(ctx, serverId, { ...ASK, origins: [] }),
+    ).toMatchObject({ origins: [] })
     await expect(
-      checkSecretRequest(ctx, serverId, { ...ASK, origins: [] }),
-    ).rejects.toThrow(/Name the sites/)
+      checkSecretRequest(ctx, serverId, {
+        ...ASK,
+        origins: [],
+        kind: "totp",
+      }),
+    ).rejects.toThrow(/name the sites they are typed at/)
     await expect(
       checkSecretRequest(ctx, serverId, {
         ...ASK,
@@ -759,6 +776,13 @@ describe("request_secret", () => {
     })
     expect(requested).toMatchObject({ serverId })
     expect(openRequestTool(ctx, requested)).toBe("request_secret")
+    // An alias for one release, which says so before the link.
+    expect(textOf(asked)).toContain(
+      "The browser's request_secret is now PCP's own request_secret",
+    )
+    expect(textOf(asked).indexOf("PCP's own request_secret")).toBeLessThan(
+      textOf(asked).indexOf(`${PUBLIC_URL}/permissions/`),
+    )
 
     const held = await runCall(
       ctx,
@@ -774,7 +798,7 @@ describe("request_secret", () => {
   it("never writes over a secret PCP holds", async () => {
     await expect(
       checkSecretRequest(ctx, serverId, { ...ASK, name: "Shop password" }),
-    ).rejects.toThrow(/never writes over one: type it/)
+    ).rejects.toThrow(/never writes over one: name it/)
   })
 
   it("saves what the owner typed, with the sites they left, and tells the assistant the name only", async () => {
@@ -1102,7 +1126,7 @@ describe("update_secret_sites", () => {
     await expect(check({})).rejects.toThrow(/Nothing would change/)
   })
 
-  it("always asks the owner, even where the tool is allowed", async () => {
+  it("always asks the owner, even where the tool is allowed, as change_secret_scope's alias", async () => {
     await writeToolAccess(
       ctx,
       tokenId,
@@ -1118,8 +1142,10 @@ describe("update_secret_sites", () => {
     })
 
     expect(textOf(asked)).toContain("Not done yet")
+    // The alias's note names the tool to use from now on.
+    expect(textOf(asked)).toMatch(/now PCP's own change_secret_scope/)
     const changed = await db().permissionRequest.findFirstOrThrow({
-      where: { kind: "secret_sites_change" },
+      where: { kind: "secret_change" },
     })
     expect(changed).toMatchObject({ serverId })
     expect(openRequestTool(ctx, changed)).toBe("update_secret_sites")
@@ -1140,38 +1166,42 @@ describe("update_secret_sites", () => {
       remove: ["https://www.frankenergy.nl"],
     })
     const row = await db().permissionRequest.findFirstOrThrow({
-      where: { kind: "secret_sites_change" },
+      where: { kind: "secret_change" },
     })
     const view = await getPermissionView(ctx, row.id, { publicUrl: PUBLIC_URL })
 
-    expect(view!.title).toBe('Change where "Shop password" is typed?')
-    expect(view!.decisions.map((decision) => decision.value)).toEqual([
-      "allow_once",
-      "decline",
+    expect(view!.title).toBe(
+      'Change where the secret "Shop password" may be used',
+    )
+    expect(view!.decisions).toEqual([
+      { value: "allow_once", label: "Apply ticked changes" },
+      { value: "decline", label: "Not now" },
     ])
-    expect(view!.secretSites).toMatchObject({
+    expect(view!.secretChange).toMatchObject({
+      action: "scope",
+      via: "update_secret_sites",
       secretName: "Shop password",
-      current: [
-        { origin: SHOP, subdomains: false },
-        { origin: "https://www.frankenergy.nl", subdomains: false },
-      ],
+      stale: false,
+      sites: [SHOP, "https://www.frankenergy.nl"],
       changes: [
-        { key: `add:${FRANK}`, action: "add" },
-        { key: "add:https://www.shop.example", lookalike: null },
-        { key: "remove:https://www.frankenergy.nl", action: "remove" },
+        { key: `site:add:${FRANK}`, action: "add", what: "site" },
+        { key: "site:add:https://www.shop.example", lookalike: null },
+        {
+          key: "site:remove:https://www.frankenergy.nl",
+          action: "remove",
+        },
       ],
     })
     // frankenergie.nl beside frankenergy.nl: a letter or two apart.
-    expect(view!.secretSites!.changes[0]!.lookalike).toMatch(
+    expect(view!.secretChange!.changes[0]!.lookalike).toMatch(
       /letter or two away from frankenergy\.nl/,
     )
-    expect(view!.warning).toMatch(/Check these/)
     expect(view!.lines.join("\n")).toContain(
-      "Take away: https://www.frankenergy.nl",
+      "Take away the site https://www.frankenergy.nl",
     )
   })
 
-  it("makes only the ticked changes, to the sites as shown, and refuses once they moved", async () => {
+  it("makes only the ticked changes, and refuses once the secret moved since it was asked", async () => {
     await grantSecretUse(ctx, {
       tokenId,
       secretId,
@@ -1188,35 +1218,25 @@ describe("update_secret_sites", () => {
       remove: ["https://www.frankenergy.nl"],
     })
     const row = await db().permissionRequest.findFirstOrThrow({
-      where: { kind: "secret_sites_change" },
+      where: { kind: "secret_change" },
     })
-    const shown = await showSecretSitesChange(
-      ctx,
-      await checkSecretSitesChange(ctx, serverId, {
-        name: "Shop password",
-        reason: "x",
-        add: [{ origin: "https://frankenergie.nl", subdomains: true }],
-      }),
-    )
+    const keep = [
+      "site:add:https://frankenergie.nl",
+      "site:remove:https://www.frankenergy.nl",
+    ]
 
     // Nothing ticked is no answer.
     const none = await decidePermission(ctx, row.id, "allow_once", {
       publicUrl: PUBLIC_URL,
-      sites: { basis: shown.basis, keep: [] },
+      sites: { keep: [] },
     })
     expect(none.isError).toBe(true)
 
-    // The sites changed since the page was read.
+    // The sites changed since the assistant asked.
     await bindOrigin(ctx, secretId, "https://late.example")
     const stale = await decidePermission(ctx, row.id, "allow_once", {
       publicUrl: PUBLIC_URL,
-      sites: {
-        basis: shown.basis,
-        keep: [
-          "add:https://frankenergie.nl",
-          "remove:https://www.frankenergy.nl",
-        ],
-      },
+      sites: { keep },
     })
     expect(stale.isError).toBe(true)
     expect(textOf(stale)).toContain("changed since")
@@ -1224,18 +1244,12 @@ describe("update_secret_sites", () => {
 
     const done = await decidePermission(ctx, row.id, "allow_once", {
       publicUrl: PUBLIC_URL,
-      sites: {
-        basis: shown.basis,
-        keep: [
-          "add:https://frankenergie.nl",
-          "remove:https://www.frankenergy.nl",
-        ],
-      },
+      sites: { keep },
     })
 
     expect(done.isError, textOf(done)).not.toBe(true)
     expect(textOf(done)).toContain(
-      "Added: https://frankenergie.nl and its subdomains.",
+      "added the site https://frankenergie.nl and its subdomains",
     )
     expect(textOf(done)).toContain("Not done: adding https://else.example.")
     expect(await sitesOf(ctx, secretId)).toEqual([
@@ -1256,7 +1270,7 @@ describe("update_secret_sites", () => {
       remove: [SHOP],
     })
     const row = await db().permissionRequest.findFirstOrThrow({
-      where: { kind: "secret_sites_change" },
+      where: { kind: "secret_change" },
     })
     await decidePermission(ctx, row.id, "decline", { publicUrl: PUBLIC_URL })
     expect(await sitesOf(ctx, secretId)).toHaveLength(2)
@@ -1295,6 +1309,25 @@ describe("the owner's answer to a secret's use", () => {
     expect(view.browserTabId).toBe("t1")
     expect(view.tool).toBe("type")
     expect(JSON.stringify(view)).not.toContain(VALUE)
+  })
+
+  it("finds the secret for the owner's page and their answer through the resolver (#162)", async () => {
+    const id = await asked()
+    vi.mocked(resolveSecretRef).mockClear()
+    await getPermissionView(ctx, id, { publicUrl: PUBLIC_URL })
+    await decidePermission(
+      ctx,
+      id,
+      "allow_once",
+      { publicUrl: PUBLIC_URL },
+      stub().executor,
+    )
+
+    const calls = vi.mocked(resolveSecretRef).mock.calls
+    expect(calls.length).toBeGreaterThanOrEqual(2)
+    for (const [, name, use] of calls) {
+      expect([name, use]).toEqual(["Shop password", { kind: "browser_type" }])
+    }
   })
 
   it("types it once on Allow once, the call made again with the secret's name", async () => {
@@ -1404,5 +1437,54 @@ describe("the owner's answer to a secret's use", () => {
 
     expect(calls).toEqual([])
     expect(await listSecretAllowances(ctx)).toEqual([])
+  })
+})
+
+describe("the secrets the browser names, through the resolver (#162)", () => {
+  it("finds every one as a secret the browser types", async () => {
+    vi.mocked(resolveSecretRef).mockClear()
+    const input = await checkSecretRequest(ctx, serverId, {
+      name: "Mail password",
+      purpose: "To sign in to the webmail.",
+      origins: ["https://mail.example"],
+    })
+    await withPermission(
+      { ctx, tokenId, publicUrl: PUBLIC_URL },
+      { kind: "secret_request", input },
+    )
+    const row = await db().permissionRequest.findFirstOrThrow({
+      where: { kind: "secret_request" },
+    })
+    await decidePermission(ctx, row.id, "allow_once", {
+      publicUrl: PUBLIC_URL,
+      secretValue: "mail-pass",
+    })
+    await expect(
+      admitSecretUse(ctx, {
+        tokenId,
+        serverId,
+        name: "Nothing by that name",
+        use: pageAt(SHOP),
+      }),
+    ).rejects.toThrow(/no secret called/)
+    await checkSecretSitesChange(ctx, serverId, {
+      name: "Shop password",
+      reason: "The shop moved.",
+      add: [{ origin: "https://shop.example" }],
+    })
+
+    const uses = vi
+      .mocked(resolveSecretRef)
+      .mock.calls.map(([, name, use]) => [name, use.kind])
+    expect(uses).toEqual(
+      expect.arrayContaining([
+        ["Mail password", "browser_type"],
+        ["Nothing by that name", "browser_type"],
+        ["Shop password", "browser_type"],
+      ]),
+    )
+    expect(new Set(uses.map(([, kind]) => kind))).toEqual(
+      new Set(["browser_type"]),
+    )
   })
 })

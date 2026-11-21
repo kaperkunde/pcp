@@ -101,7 +101,9 @@ export function describeSecretUseAsk(
       `In tab ${ask.tabId}`,
       bound
         ? `${ask.origin} is one of the sites of "${ask.secretName}".`
-        : `PCP has not typed "${ask.secretName}" at ${ask.origin} before: Always allow adds it to the secret's sites.`,
+        : ask.outOfScope
+          ? `"${ask.secretName}" has no site the browser types it at, and you have not let it be used anywhere: Once types it this one time and changes nothing, Always at this site adds ${ask.origin} to where it may be used.`
+          : `PCP has not typed "${ask.secretName}" at ${ask.origin} before: Always allow adds it to the secret's sites.`,
     ],
     warning: [
       ...(bound
@@ -126,7 +128,10 @@ export function describeSecretRequestAsk(ask: SecretRequestAsk): {
   warning: string | null
 } {
   return {
-    title: `Store "${ask.name}" for the browser to type?`,
+    title:
+      ask.origins.length > 0
+        ? `Store "${ask.name}" for the browser to type?`
+        : `Store the secret "${ask.name}"?`,
     lines: [
       `It says: ${ask.purpose}`,
       ask.kind === "totp"
@@ -135,13 +140,17 @@ export function describeSecretRequestAsk(ask: SecretRequestAsk): {
       ...(ask.username ? [`Login name: ${ask.username}`] : []),
       ...(ask.generate
         ? [
-            `It asks PCP to make a new password: ${describeRecipe(ask.generate)}. Nobody sees it but you, on the Secrets page.`,
+            `It asks PCP to make a new ${(ask.generate.format ?? "password") === "password" ? "password" : "token"}: ${describeRecipe(ask.generate)}. Nobody sees it but you, on the Secrets page.`,
           ]
         : []),
-      `Sites: ${ask.origins.join(", ")}`,
+      ask.origins.length > 0
+        ? `Sites: ${ask.origins.join(", ")}`
+        : "No sites yet: the browser types it only after asking you each time (Once, or Always at this site, which adds the site). It is sent to a server, a service or a wrapper only where you approve one that names it, which you are shown as also allowing it there.",
     ],
     warning:
-      "Type the value here, on PCP's page, never in the conversation. The assistant gets the secret's name only, and PCP types it only at the sites you leave in.",
+      ask.origins.length > 0
+        ? "Type the value here, on PCP's page, never in the conversation. The assistant gets the secret's name only, and PCP types it only at the sites you leave in."
+        : "Type the value here, on PCP's page, never in the conversation, or have PCP make it. The assistant gets the secret's name only.",
   }
 }
 

@@ -26,37 +26,8 @@ import type { UpdateChannel } from "@/lib/core/updates/limits"
 import type { UpdatesOverview } from "@/lib/core/updates/state"
 import { REPOSITORY_URL } from "@/lib/operator-identity"
 import type { InstallKind } from "@/lib/server/install-kind"
+import { COMPOSE_LINES, installLine, SOURCE_LINES } from "@/lib/update-steps"
 
-const INSTALL_URL =
-  "https://raw.githubusercontent.com/kaperkunde/pcp/main/install.sh"
-
-/**
- * The install line, for the channel: install.sh remembers PCP_CHANNEL, so
- * the develop one says it every time and the stable one only when it is
- * leaving develop.
- */
-function installLine(
-  channel: UpdateChannel,
-  { auto, leaving = false }: { auto?: boolean; leaving?: boolean } = {},
-): string {
-  const settings = [
-    channel === "develop" || leaving ? `PCP_CHANNEL=${channel}` : null,
-    auto === undefined ? null : `PCP_AUTO_UPDATE=${auto ? 1 : 0}`,
-  ].filter(Boolean)
-
-  return `curl -fsSL ${INSTALL_URL} | ${[...settings, "sh"].join(" ")}`
-}
-
-const SOURCE_BUILD = "pnpm install && pnpm db:generate && pnpm build"
-const SOURCE_LINES: Record<UpdateChannel, string> = {
-  stable: `git switch main && git pull && ${SOURCE_BUILD}`,
-  develop: `git switch develop && git pull && ${SOURCE_BUILD}`,
-}
-const COMPOSE_LINES: Record<UpdateChannel, string> = {
-  stable: "docker compose pull && docker compose up -d",
-  develop:
-    "PCP_TAG=develop docker compose pull && PCP_TAG=develop docker compose up -d",
-}
 const CHANNEL_OPTIONS: ReadonlyArray<SegmentedOption<UpdateChannel>> = [
   { value: "stable", label: "Stable" },
   { value: "develop", label: "Develop" },
@@ -193,6 +164,8 @@ function UpdateStatusLine({ overview }: { overview: UpdatesOverview }) {
     retryAt,
     channel,
     devBuild,
+    commit,
+    builtAt,
   } = overview
 
   return (
@@ -265,7 +238,43 @@ function UpdateStatusLine({ overview }: { overview: UpdatesOverview }) {
           Last checked <LocalDate value={checkedAt} />.
         </p>
       ) : null}
+      <BuildLine commit={commit} builtAt={builtAt} />
     </div>
+  )
+}
+
+/** The commit this build was made from and when, where the build says. */
+function BuildLine({
+  commit,
+  builtAt,
+}: {
+  commit: string | null
+  builtAt: string | null
+}) {
+  if (!commit && !builtAt) {
+    return null
+  }
+
+  return (
+    <p className="text-muted-foreground" data-testid="updates-build">
+      {commit ? (
+        <>
+          Built from{" "}
+          <ExternalLink href={`${REPOSITORY_URL}/commit/${commit}`}>
+            <code>{commit.slice(0, 7)}</code>
+          </ExternalLink>
+        </>
+      ) : (
+        "Built"
+      )}
+      {builtAt ? (
+        <>
+          {" "}
+          on <LocalDate value={builtAt} />
+        </>
+      ) : null}
+      .
+    </p>
   )
 }
 
@@ -545,7 +554,7 @@ function HowToUpdate({
   return (
     <div className="flex flex-col gap-3 border-t border-separator pt-4 text-sm">
       <h3 className="font-medium">How to update this PCP</h3>
-      {host === "container" && hostUpdater ? (
+      {host !== "desktop" && hostUpdater ? (
         <InstallerUpdate
           autoUpdated={autoUpdated}
           channels={hostUpdaterChannels}

@@ -21,7 +21,8 @@ describe("PCP's suggested instructions", () => {
 
   it("are short, and pass the owner's own check", () => {
     for (const template of INSTRUCTION_TEMPLATES) {
-      expect(template.text.length).toBeLessThanOrEqual(1_200)
+      // A line per rule, each short: version 8's set-up rule took it past 1,200.
+      expect(template.text.length).toBeLessThanOrEqual(1_300)
       expect(checkInstructions(template.text)).toBe(template.text)
     }
 
@@ -128,5 +129,26 @@ describe("PCP's suggested instructions", () => {
     expect(v7).toContain("execute_destructive")
     expect(v7).toContain("run_destructive")
     expect(mergeLines(v6, v6, v7)).toEqual({ text: v7, conflicts: 0 })
+  })
+  it("offer what PCP can set up from version 8, offered as a merge (#163)", () => {
+    const v7 = templateText(7)!
+    const v8 = templateText(8)!
+
+    expect(v7).not.toContain("has not set up")
+    expect(v8).toContain(
+      "- When the owner asks for something PCP has not set up, search for it, say what it takes and offer to set it up with their approval.",
+    )
+    // Only that line is new.
+    const changed = v8
+      .split("\n")
+      .filter((line) => !v7.split("\n").includes(line))
+    expect(changed).toHaveLength(1)
+    expect(mergeLines(v7, v7, v8)).toEqual({ text: v8, conflicts: 0 })
+
+    const mine = `${v7}\n- Answer in Dutch.`
+    expect(mergeLines(v7, mine, v8)).toEqual({
+      text: `${v8}\n- Answer in Dutch.`,
+      conflicts: 0,
+    })
   })
 })

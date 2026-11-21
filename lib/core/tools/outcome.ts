@@ -28,8 +28,9 @@ import { isPcpError, PassOnlyError, type PcpErrorCode } from "../errors"
  *   assistant reads it and tries again; a protocol error is only for an
  *   unknown tool or a malformed request, which the SDK answers.
  * - needsOwner(owner, text): it waits for the owner: a permission request,
- *   a server to connect, files to upload, or something to set up first (a
- *   capability with no provider, capabilities/). The text ends with the
+ *   a server to connect, files to upload, something to set up first (a
+ *   capability with no provider, capabilities/), or an account a service
+ *   signs in to (services/signin.ts). The text ends with the
  *   link the assistant hands over, a markdown link labelled with `label`
  *   (owner-link.ts linkLastText); structuredContent carries the same as
  *   NEEDS_OWNER, on every tool, declared in the output schema of the tools
@@ -156,6 +157,18 @@ export const CONNECT_LINKS = z.object({
 export type ConnectLinks = z.infer<typeof CONNECT_LINKS>
 
 /**
+ * A service's account to sign in to (reason "signin", services/signin.ts):
+ * the server whose tools need it, and PCP's sign-in page for it.
+ */
+export const SIGNIN_LINKS = z.object({
+  serverId: z.string(),
+  slug: z.string(),
+  name: z.string(),
+  /** PCP's sign-in page for it: the owner pastes the provider's code there. */
+  pageUrl: z.string(),
+})
+
+/**
  * A call that waits for the owner, as structuredContent: the link to hand
  * over and what it is for. `url` is the page the owner opens: signed in to
  * PCP, but for an upload link's, which the link alone opens. A permission
@@ -163,11 +176,13 @@ export type ConnectLinks = z.infer<typeof CONNECT_LINKS>
  * connect names its links, for check_server; an upload link
  * (create_upload_link) its id, for check_upload; something to set up
  * (reason "setup") the capability it is for, whose tool to call again once
- * the owner has.
+ * the owner has; an account to sign in to (reason "signin") its server,
+ * for check_server.
  */
 export const NEEDS_OWNER = needsOwnerSchema({
-  reason: z.enum(["permission", "connect", "upload", "setup"]),
+  reason: z.enum(["permission", "connect", "upload", "setup", "signin"]),
   connect: CONNECT_LINKS.optional(),
+  signin: SIGNIN_LINKS.optional(),
   server: SERVER_STATE.optional(),
   /**
    * What the owner sets up (reason "setup"): a capability's id

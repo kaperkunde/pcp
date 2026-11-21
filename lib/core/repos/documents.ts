@@ -34,6 +34,7 @@ import {
 import {
   parseServiceDefinition,
   type ServiceDefinition,
+  type ServiceSignin,
 } from "../services/definition"
 import { readStrictYaml } from "../strict-yaml"
 import {
@@ -130,10 +131,18 @@ import { MAX_DOCUMENT_DEPTH } from "./limits"
  * shape create_wrapper takes it). Only a wrapper or flow document that has
  * one is written as format 5 (`wrapperFormat`); every other stays as it
  * was, and a document of an older format that names a pace is refused.
+ *
+ * Format 6 adds two fields to a service's definition: the account it signs
+ * in to (`signin`: which of the tools it registers reads whether it is
+ * signed in, starts a sign-in and takes the code the owner pastes back,
+ * services/definition.ts) and a variable whose value PCP makes at launch
+ * (`generated` on one of its `env`). Only a service document that has
+ * either is written as format 6 (`serviceFormat`), and a document of an
+ * older format that names either is refused.
  */
 
 /** The newest document format this PCP reads and writes. */
-export const PCP_FORMAT = 5
+export const PCP_FORMAT = 6
 
 /**
  * The format each kind is written in: the first that holds it. A kind
@@ -151,13 +160,21 @@ export const FORMAT_OF_KIND: Record<ItemKind, number> = {
 }
 
 /**
- * The format of a service's document: 4 when it holds a field format 4
- * added (`registers.auth` on kind mcp, or a files folder, `files`), else 3.
- * Only a document that holds a new field is written in the new format, so
- * an older PCP reads every other one, and refuses that one as "written by a
- * newer PCP" rather than half-reading it.
+ * The format of a service's document: 6 when it holds a field format 6
+ * added (`signin`, or a `generated` variable), 4 when it holds one format
+ * 4 added (`registers.auth` on kind mcp, or a files folder, `files`), else
+ * 3. Only a document that holds a new field is written in the new format,
+ * so an older PCP reads every other one, and refuses that one as "written
+ * by a newer PCP" rather than half-reading it.
  */
 export function serviceFormat(definition: ServiceDefinition): number {
+  if (
+    definition.signin ||
+    definition.env.some((entry) => entry.generated !== undefined)
+  ) {
+    return 6
+  }
+
   return (definition.registers.kind === "mcp" && definition.registers.auth) ||
     definition.files
     ? 4
@@ -437,6 +454,9 @@ function serviceYaml(definition: ServiceDefinition): Record<string, unknown> {
         ...(entry.required ? { required: true } : {}),
         ...(entry.plain ? { plain: true } : {}),
         ...(entry.value !== undefined ? { value: entry.value } : {}),
+        ...(entry.generated !== undefined
+          ? { generated: entry.generated }
+          : {}),
       })),
     ),
     ...listed(
@@ -517,6 +537,25 @@ function serviceYaml(definition: ServiceDefinition): Record<string, unknown> {
           },
         }
       : {}),
+    ...(definition.signin ? { signin: signinYaml(definition.signin) } : {}),
+  }
+}
+
+/** A service's sign-in, its fields in the order the definition gives them. */
+function signinYaml(signin: ServiceSignin): Record<string, unknown> {
+  return {
+    style: signin.style,
+    status: {
+      tool: signin.status.tool,
+      signed_in: signin.status.signed_in,
+      ...(signin.status.who ? { who: signin.status.who } : {}),
+    },
+    start: {
+      tool: signin.start.tool,
+      url: signin.start.url,
+      ...(signin.start.expires ? { expires: signin.start.expires } : {}),
+    },
+    finish: { tool: signin.finish.tool, argument: signin.finish.argument },
   }
 }
 
@@ -1605,6 +1644,21 @@ function parseService(item: ItemFiles): ServiceDocument {
   if (format < 4 && definition.files) {
     throw invalid(
       `${what} is in format ${format}, which has no files folder: write it as format 4 to have files.`,
+    )
+  }
+
+  if (format < 6 && definition.signin) {
+    throw invalid(
+      `${what} is in format ${format}, which has no sign-in: write it as format 6 to have signin.`,
+    )
+  }
+
+  if (
+    format < 6 &&
+    definition.env.some((entry) => entry.generated !== undefined)
+  ) {
+    throw invalid(
+      `${what} is in format ${format}, whose variables PCP makes no value for: write it as format 6 to have generated.`,
     )
   }
 

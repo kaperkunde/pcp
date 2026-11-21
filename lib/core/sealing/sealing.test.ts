@@ -19,12 +19,8 @@ import {
   sitesOf,
   takeSecretUse,
 } from "../browser-secrets"
-import {
-  createSecret,
-  findOwnerSecretByName,
-  listSecrets,
-  updateSecret,
-} from "../secrets"
+import { resolveSecretRef } from "../secret-refs"
+import { createSecret, listSecrets, updateSecret } from "../secrets"
 import {
   getSetting,
   getVaultSetting,
@@ -137,7 +133,9 @@ describe("secrets", () => {
     expect(await onDisk("SECRET-NAME-MARKER")).toBe(false)
     expect(await onDisk("SECRET-DESCRIPTION-MARKER")).toBe(false)
     expect(
-      await findOwnerSecretByName(ctx, "SECRET-NAME-MARKER"),
+      await resolveSecretRef(ctx, "SECRET-NAME-MARKER", {
+        kind: "browser_type",
+      }),
     ).toMatchObject({ id, name: "SECRET-NAME-MARKER" })
     expect(await listSecrets(ctx)).toMatchObject([
       {
@@ -189,7 +187,9 @@ describe("secrets", () => {
       id,
     )
 
-    expect(await findOwnerSecretByName(ctx, "Old mail")).toMatchObject({ id })
+    expect(
+      await resolveSecretRef(ctx, "Old mail", { kind: "browser_type" }),
+    ).toMatchObject({ id })
     await expect(
       createSecret(ctx, { name: "Old mail", value: "c" }),
     ).rejects.toThrow(/already exists/)
@@ -197,7 +197,9 @@ describe("secrets", () => {
     expect(await ensureSealed(ctx)).toBe(true)
 
     expect(await onDisk("From before")).toBe(false)
-    expect(await findOwnerSecretByName(ctx, "Old mail")).toMatchObject({ id })
+    expect(
+      await resolveSecretRef(ctx, "Old mail", { kind: "browser_type" }),
+    ).toMatchObject({ id })
     expect(await listSecrets(ctx)).toMatchObject([
       { id, name: "Old mail", description: "From before" },
     ])

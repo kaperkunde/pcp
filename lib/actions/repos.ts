@@ -6,6 +6,7 @@ import { redirect } from "next/navigation"
 import { invalid } from "@/lib/core/errors"
 import { nextPendingRequest } from "@/lib/core/owner-queue"
 import { confirmProposedShare } from "@/lib/core/permissions"
+import { pluginEntry } from "@/lib/core/capabilities/catalogue"
 import { isCapabilityId } from "@/lib/core/capabilities/list"
 import { addCommonRepository } from "@/lib/core/repos/common"
 import { ITEM_DIRS, type ItemKind } from "@/lib/core/repos/layout"
@@ -176,8 +177,8 @@ export async function deleteRepoAction(id: string): Promise<RepoActionResult> {
 /**
  * PCP's common items (lib/core/repos/common.ts): linked read-only and
  * untrusted, then the owner browses what it offers, or goes back to the
- * capability's page they added them from (/plugins/<id>), which offers
- * its items to launch.
+ * capability's or catalogue entry's page they added them from
+ * (/plugins/<id>), which offers its items to launch.
  */
 export async function addCommonRepoAction(
   forCapability?: string,
@@ -189,7 +190,8 @@ export async function addCommonRepoAction(
 
   if (result.status === "ok") {
     redirect(
-      isCapabilityId(forCapability)
+      isCapabilityId(forCapability) ||
+        (forCapability && pluginEntry(forCapability))
         ? `/plugins/${forCapability}`
         : `${PAGES}/${encodeURIComponent(result.id!)}/browse`,
     )
@@ -273,6 +275,9 @@ export async function addItemsAction(
       items: items.map((item) => ({
         root: String(item.root),
         hash: String(item.hash),
+        ...(Array.isArray(item.alsoAllow)
+          ? { alsoAllow: item.alsoAllow.map(String) }
+          : {}),
       })),
     })
     const added = results.filter((entry) => entry.ok).length
@@ -570,7 +575,12 @@ export async function importServiceAction(
 export async function answerChangeAction(
   itemId: string,
   answer: "approve" | "decline" | "keep",
-  shown: { sha: string; hash: string; flags?: number },
+  shown: {
+    sha: string
+    hash: string
+    flags?: number
+    alsoAllow?: string[]
+  },
 ): Promise<RepoActionResult> {
   const ctx = await requireContext()
   const result = await guarded(async () => {
@@ -582,6 +592,9 @@ export async function answerChangeAction(
             sha,
             hash: String(shown.hash),
             ...(typeof shown.flags === "number" ? { flags: shown.flags } : {}),
+            ...(Array.isArray(shown.alsoAllow)
+              ? { alsoAllow: shown.alsoAllow.map(String) }
+              : {}),
           })
           return { message: "Applied as you were shown it.", lines: notes }
         }

@@ -54,8 +54,11 @@ const OWN_TOOLS = [
   "check_permission",
   "withdraw_request",
   "check_server",
+  "connect_account",
   "get_server_limits",
   "propose_server_limits",
+  "get_version",
+  "update_pcp",
   "read_result",
   "share_result",
   "receive_file",
@@ -66,6 +69,11 @@ const OWN_TOOLS = [
   "update_endpoint",
   "get_endpoint",
   "list_secrets",
+  "request_secret",
+  "edit_secret",
+  "rotate_secret",
+  "change_secret_scope",
+  "delete_secret",
   "get_wrapper",
   "create_wrapper",
   "update_wrapper",
@@ -113,15 +121,24 @@ function described(tool: Tool): Described {
   }
 }
 
-/** Proposals: nothing happens until the owner agrees, and each is new. */
+/**
+ * Proposals: nothing happens until the owner agrees, and each is new.
+ * delete_secret's is Destructive all the same.
+ */
 const PROPOSALS = [
   "register_server",
   "propose_tool_access",
   "propose_server_limits",
+  "request_secret",
+  "edit_secret",
+  "rotate_secret",
+  "change_secret_scope",
+  "delete_secret",
   "create_wrapper",
   "update_wrapper",
   "delete_wrapper",
   "update_endpoint",
+  "update_pcp",
 ]
 
 let cleanup: () => Promise<void>
@@ -233,7 +250,9 @@ describe("PCP's own tools", () => {
 
       expect(tool.annotations, name).toMatchObject({
         readOnlyHint: false,
-        destructiveHint: false,
+        // Deleting a secret is Destructive, so it runs only through
+        // execute_destructive, though it asks the owner first (#162).
+        destructiveHint: name === "delete_secret",
         idempotentHint: false,
       })
     }
@@ -252,16 +271,21 @@ describe("PCP's own tools", () => {
 
     expect(structured).toEqual(
       [
+        "change_secret_scope",
         "check_permission",
         "check_server",
         "check_upload",
+        "connect_account",
         "convert_document",
         "create_upload_link",
         "create_wrapper",
+        "delete_secret",
         "delete_wrapper",
+        "edit_secret",
         "edit_pdf",
         "get_endpoint",
         "get_server_limits",
+        "get_version",
         "get_wrapper",
         "list_secrets",
         "propose_server_limits",
@@ -269,8 +293,11 @@ describe("PCP's own tools", () => {
         "read_image",
         "receive_file",
         "register_server",
+        "request_secret",
+        "rotate_secret",
         "share_result",
         "update_endpoint",
+        "update_pcp",
         "update_wrapper",
       ].sort(),
     )
@@ -300,14 +327,21 @@ describe("PCP's own tools", () => {
       "execute_read",
       "check_permission",
       "check_server",
+      "connect_account",
       "create_upload_link",
       "check_upload",
       "propose_tool_access",
       "propose_server_limits",
+      "request_secret",
+      "edit_secret",
+      "rotate_secret",
+      "change_secret_scope",
+      "delete_secret",
       "update_endpoint",
       "create_wrapper",
       "update_wrapper",
       "delete_wrapper",
+      "update_pcp",
     ]) {
       expect(
         tools.find((tool) => tool.name === name)!.description,
@@ -327,7 +361,7 @@ describe("PCP's own tools", () => {
       const first = tool.description!.slice(0, 25)
 
       expect(first, tool.name).toMatch(
-        /^(Check first: |(Search|List|Get|Execute|Run|Check|Withdraw|Read|Share|Receive|Propose|Change|Fetch|Save|Edit|Convert|Find|Make|Move|Delete|View) )/,
+        /^(Check first: |(Search|List|Get|Execute|Run|Check|Connect|Withdraw|Read|Share|Receive|Request|Propose|Change|Fetch|Save|Edit|Convert|Find|Make|Move|Delete|View|Update|Rotate) )/,
       )
       // A verb and an object, not a verb alone.
       expect(first.trim().split(/\s+/).length, tool.name).toBeGreaterThan(2)
@@ -347,8 +381,11 @@ describe("PCP's own tools", () => {
       check_permission: /permission/,
       withdraw_request: /request/,
       check_server: /server/,
+      connect_account: /^Connect an account/,
       get_server_limits: /^Get a server's limits/,
       propose_server_limits: /^Propose server limits/,
+      get_version: /^Get PCP's version/,
+      update_pcp: /^Update PCP to the newes/,
       check_run: /run/,
       read_result: /result/,
       share_result: /file/,
@@ -357,6 +394,11 @@ describe("PCP's own tools", () => {
       check_upload: /upload/,
       register_server: /server/,
       list_secrets: /secret/,
+      request_secret: /^Request a new secret/,
+      edit_secret: /^Edit a secret's details/,
+      rotate_secret: /^Rotate a secret's value/,
+      change_secret_scope: /^Change a secret's scope/,
+      delete_secret: /^Delete a secret from/,
       get_endpoint: /endpoint/,
       get_wrapper: /wrapper/,
       create_wrapper: /wrapper/,
@@ -387,6 +429,29 @@ describe("PCP's own tools", () => {
     for (const [name, pattern] of Object.entries(keywords)) {
       expect(opening(name), name).toMatch(pattern)
     }
+  })
+
+  it("are found first by the task their lead says, in a search's words", async () => {
+    const first = async (query: string) => {
+      const result = await client.callTool(
+        entryCall("search", { query, kind: "pcp" }),
+      )
+      const text = (result.content as Array<{ text: string }>)[0]!.text
+
+      return text
+        .split("\n")
+        .filter((line) => line.startsWith("pcp "))
+        .map((line) => line.split(" ")[1])
+    }
+
+    expect((await first("rename secret"))[0]).toBe("edit_secret")
+    expect((await first("rename a secret"))[0]).toBe("edit_secret")
+    expect((await first("new password"))[0]).toBe("request_secret")
+    const password = await first("store a new password")
+    expect(password[0]).toBe("request_secret")
+    expect(password.indexOf("request_secret")).toBeLessThan(
+      password.indexOf("rotate_secret"),
+    )
   })
 
   it("keep the run entries' and register_server's own descriptions short", async () => {
@@ -928,6 +993,8 @@ describe("execute_<tier> by name, and the names kept for one release (#113)", ()
         "view_image",
         "convert_document",
         "edit_pdf",
+        // Its request is found again while it waits; a refusal is asked anew.
+        "update_pcp",
       ].sort(),
     )
     expect(declared("reads")).toEqual(["memory", "web_fetch"])

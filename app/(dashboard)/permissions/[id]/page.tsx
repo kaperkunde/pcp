@@ -1,6 +1,7 @@
 import {
   BookOpen,
   ChevronLeft,
+  Download,
   FolderGit2,
   Gauge,
   Globe,
@@ -34,6 +35,7 @@ import { Card } from "@kaperkunde/ui/card"
 import { IconTile } from "@/components/ui/icon-tile"
 import { ShownInFull } from "@/components/shown-in-full"
 import { SkillReview } from "@/components/skill-review"
+import { SecretChangeReview } from "@/components/secret-change-review"
 import { WrapperReview } from "@/components/wrapper-review"
 import { tabFor } from "@/lib/core/browser/owner"
 import { listOwnToolTiers } from "@/lib/core/own-tool-tiers"
@@ -211,7 +213,10 @@ export default async function PermissionPage({
         ) : null}
         {view.skill ? <SkillReview skill={view.skill} /> : null}
         {view.full ? (
-          <ShownInFull parts={view.full} open={view.kind === "script_use"} />
+          <ShownInFull
+            parts={view.full}
+            open={view.kind === "script_use" || view.kind === "pcp_update"}
+          />
         ) : null}
         {view.warning && view.memory ? (
           // The text is what to check; the warning says what to look for,
@@ -235,6 +240,9 @@ export default async function PermissionPage({
           </p>
         ) : null}
         {view.wrapper ? <WrapperReview shown={view.wrapper} /> : null}
+        {view.secretChange ? (
+          <SecretChangeReview shown={view.secretChange} />
+        ) : null}
         {view.repo ? <RepoReview shown={view.repo} /> : null}
         {pending && proposal ? (
           <>
@@ -273,7 +281,22 @@ export default async function PermissionPage({
               id={view.id}
               revision={view.revision}
               decisions={view.decisions}
-              secret={view.secretToEnter}
+              secret={
+                view.secretChange?.action === "rotate"
+                  ? {
+                      name: view.secretChange.secretName,
+                      exists: false,
+                      kind: view.secretChange.kind === "totp" ? "totp" : "text",
+                      generate: view.secretChange.generate,
+                      defaultRecipe: view.secretChange.defaultRecipe,
+                      label:
+                        view.secretChange.kind === "totp"
+                          ? `New seed of "${view.secretChange.secretName}"`
+                          : `New value of "${view.secretChange.secretName}"`,
+                      hint: "It replaces the value the secret has now, encrypted, and everything that uses it gets the new one. The assistant never sees it.",
+                    }
+                  : view.secretToEnter
+              }
               allowForFixed={
                 view.kind === "secret_use" || view.kind === "secret_request"
               }
@@ -286,6 +309,16 @@ export default async function PermissionPage({
               access={view.proposedAccess}
               limits={view.proposedLimits}
               sites={view.secretSites}
+              scopeChanges={
+                view.secretChange?.action === "scope"
+                  ? {
+                      secretName: view.secretChange.secretName,
+                      changes: view.secretChange.changes,
+                      stale: view.secretChange.stale,
+                    }
+                  : null
+              }
+              alsoAllows={view.alsoAllows}
             />
           </>
         ) : (
@@ -362,6 +395,7 @@ function RequestTile({ view }: { view: PermissionView }) {
     case "secret_use":
     case "secret_request":
     case "secret_sites_change":
+    case "secret_change":
       return <IconTile size="lg" icon={KeyRound} className={tile} />
     case "script_use":
       return <IconTile size="lg" icon={SquareCode} className={tile} />
@@ -369,6 +403,8 @@ function RequestTile({ view }: { view: PermissionView }) {
       return <IconTile size="lg" icon={Timer} className={tile} />
     case "limits_change":
       return <IconTile size="lg" icon={Gauge} className={tile} />
+    case "pcp_update":
+      return <IconTile size="lg" icon={Download} className={tile} />
     default:
       return <IconTile size="lg" icon={Server} className={tile} />
   }
@@ -478,8 +514,32 @@ function PendingNote({ view }: { view: PermissionView }) {
           .
         </p>
       )
-    case "secret_request":
+    case "pcp_update":
       return (
+        <p className={note}>
+          Install and restart first checks again which version is the newest on
+          your channel, then installs it as{" "}
+          <Link href="/settings#updates" className="underline">
+            Settings → Updates
+          </Link>{" "}
+          does. If a newer one than this came out since, nothing is installed
+          and the assistant can ask again with it. Each install is asked anew.
+          The release notes are GitHub&apos;s, shown as they are.
+        </p>
+      )
+    case "secret_request":
+      return view.secretToEnter?.origins?.length === 0 ? (
+        <p className={note}>
+          Saving stores the secret under{" "}
+          <Link href="/secrets" className="underline">
+            Secrets
+          </Link>
+          , with no sites yet: the browser types it only after asking you each
+          time (Once, or Always at this site, which adds the site), and it is
+          sent to a server, service or wrapper only once you approve one that
+          names it.
+        </p>
+      ) : (
         <p className={note}>
           Saving stores the secret under{" "}
           <Link href="/secrets" className="underline">
@@ -497,6 +557,24 @@ function PendingNote({ view }: { view: PermissionView }) {
           here; the secret&apos;s value stays as it is. A site you take away
           ends every token&apos;s allowance there. You can change its sites any
           time under{" "}
+          <Link href="/secrets" className="underline">
+            Secrets
+          </Link>
+          .
+        </p>
+      )
+    case "secret_change":
+      return (
+        <p className={note}>
+          {view.secretChange?.action === "rotate"
+            ? "Saving replaces its value; every server, account and wrapper that uses it sends the new one, and a service that takes it is made again with it."
+            : view.secretChange?.action === "delete"
+              ? "Deleting it cannot be undone; it is deleted only once nothing uses it."
+              : view.secretChange?.action === "scope"
+                ? "Applying makes only the changes you ticked. A site you take away ends every token's allowance there."
+                : "Applying changes only what is shown; its value stays as it is."}{" "}
+          Nothing is changed if the secret changed since the assistant asked.
+          You can change any secret yourself under{" "}
           <Link href="/secrets" className="underline">
             Secrets
           </Link>

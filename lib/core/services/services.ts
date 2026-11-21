@@ -67,6 +67,7 @@ import {
   checkEnvBindings,
   checkPlainValues,
   COMMIT,
+  generatedEnv,
   LOCAL_IMAGE,
   EXIT_PUBLISH_ADDRESS,
   parsePublish,
@@ -137,6 +138,7 @@ import {
   type OpenServiceOwn,
 } from "./own-values"
 import { SECRET_META_SELECT, secretName } from "../secret-meta"
+import { toolTier } from "../tool-tiers"
 import {
   findServer,
   openServer,
@@ -382,6 +384,12 @@ export type ServiceLaunchInput = {
   publish: unknown
   /** Which secret (by id) each variable takes. */
   env: ServiceEnvBindings
+  /**
+   * The variables PCP bound itself, to a value it made for them
+   * (secrets.ts createGeneratedSecret): those take a `generated` secret;
+   * every other variable takes a text secret of the owner's.
+   */
+  generatedEnv?: string[]
   /** What the owner typed for the definition's plain variables. */
   values?: ServicePlainValues
   /** An exit's service: the exit PCP adds for it, named by the owner. */
@@ -390,6 +398,8 @@ export type ServiceLaunchInput = {
 }
 
 export type PreparedLaunch = {
+  /** The variables bound to a value PCP made (ServiceLaunchInput's). */
+  generatedEnv: string[]
   name: string
   description: string
   note: string | null
@@ -454,16 +464,22 @@ export async function prepareLaunch(
     select: { ...SECRET_META_SELECT, kind: true },
   })
 
-  for (const id of ids) {
+  const generated = new Set(input.generatedEnv ?? [])
+
+  for (const [variable, id] of Object.entries(env)) {
     const secret = secrets.find((row) => row.id === id)
 
     if (!secret) {
       throw notFound("A secret chosen for the service")
     }
 
-    if (secret.kind !== "text") {
+    // A value PCP made, only where PCP bound it; the owner's own choice
+    // is one of their text secrets.
+    if (secret.kind !== (generated.has(variable) ? "generated" : "text")) {
       throw invalid(
-        `${secretName(ctx, secret)} is not a text secret: a service's variable takes one you typed in.`,
+        generated.has(variable)
+          ? `${variable} takes the value PCP made for it, and ${secretName(ctx, secret)} is not one.`
+          : `${secretName(ctx, secret)} is not a text secret: a service's variable takes one you typed in.`,
       )
     }
   }
@@ -483,6 +499,7 @@ export async function prepareLaunch(
   }
 
   return {
+    generatedEnv: [...generated].filter((variable) => variable in env),
     name,
     description,
     note,
@@ -878,6 +895,8 @@ async function register(
         authHeaderName: auth.header,
         authValueTemplate: auth.template,
         authSecretId: prepared.env[auth.env],
+        // A value PCP made for that variable, as launch checked it.
+        authSecretGenerated: prepared.generatedEnv.includes(auth.env),
       }
     : { authType: "none" as const }
 
@@ -1832,14 +1851,33 @@ export async function saveServiceSettings(
   const values = input.values
     ? checkPlainValues(input.values, loaded.definition)
     : loaded.values
-  const env = checkEnvBindings(input.env, loaded.definition, values)
+  // A variable PCP made a value for keeps it unless a secret is chosen.
+  const given = { ...input.env }
+
+  for (const { name: variable } of generatedEnv(loaded.definition)) {
+    if (!given[variable] && loaded.env[variable]) {
+      given[variable] = loaded.env[variable]
+    }
+  }
+
+  const env = checkEnvBindings(given, loaded.definition, values)
   const ids = [...new Set(Object.values(env))]
-  const found = await db().secret.count({
-    where: { vaultId: ctx.vaultId, id: { in: ids }, kind: "text" },
+  const rows = await db().secret.findMany({
+    where: { vaultId: ctx.vaultId, id: { in: ids } },
+    select: { id: true, kind: true },
   })
 
-  if (found !== ids.length) {
-    throw invalid("Choose text secrets of yours for the service's variables.")
+  // A text secret of the owner's, or the value PCP made that the variable
+  // already takes, kept as it is; never another one PCP made.
+  for (const [variable, id] of Object.entries(env)) {
+    const kind = rows.find((row) => row.id === id)?.kind
+
+    if (
+      kind !== "text" &&
+      !(kind === "generated" && loaded.env[variable] === id)
+    ) {
+      throw invalid("Choose text secrets of yours for the service's variables.")
+    }
   }
 
   const envChanged =
@@ -2557,6 +2595,11 @@ export type ServiceView = {
   /** The exit it added, for an exit's service. */
   exit: { id: string; name: string; label: string } | null
   registered: { id: string; name: string; slug: string; kind: string } | null
+  /**
+   * Each sign-in tool's tier on the server it registered (signin): PCP
+   * reads the status itself only while its tool is Read.
+   */
+  signinTiers: { status: string; start: string; finish: string } | null
 }
 
 export async function serviceView(
@@ -2623,6 +2666,26 @@ export async function serviceView(
           kind: registered.kind,
         }
       : null,
+    signinTiers:
+      loaded.definition.signin && registered
+        ? {
+            status: await toolTier(
+              ctx,
+              registered.id,
+              loaded.definition.signin.status.tool,
+            ),
+            start: await toolTier(
+              ctx,
+              registered.id,
+              loaded.definition.signin.start.tool,
+            ),
+            finish: await toolTier(
+              ctx,
+              registered.id,
+              loaded.definition.signin.finish.tool,
+            ),
+          }
+        : null,
   }
 }
 
