@@ -494,6 +494,44 @@ describe("PCP's own tools in search (#41)", () => {
     expect(found("anyone holding")).not.toContain("share_result")
   })
 
+  it("finds the secret tools by the task their leads say", () => {
+    const own: PcpToolCandidate[] = [
+      ...pcp,
+      {
+        name: "request_secret",
+        title: "Ask the owner for a secret",
+        description:
+          "Request a new secret or password from the owner: a password, an API key or token, stored on PCP's page.",
+      },
+      {
+        name: "edit_secret",
+        title: "Propose changing a secret's details",
+        description:
+          "Edit a secret's details or rename it: its name, description, login name or note, never its value.",
+      },
+      {
+        name: "rotate_secret",
+        title: "Propose a new value for a secret",
+        description:
+          "Rotate a secret's value: the owner types a new one, or has PCP make it (a password, or a token).",
+      },
+      {
+        name: "change_secret_scope",
+        title: "Propose where a secret may be used",
+        description:
+          "Change a secret's scope: where it may be used, sites and servers by name.",
+      },
+    ]
+    const found = (query: string) =>
+      searchEverything({ tools: upstream, pcp: own }, query).map(
+        (result) => result.ref,
+      )
+
+    expect(found("rename secret")[0]).toBe("edit_secret")
+    expect(found("new password")[0]).toBe("request_secret")
+    expect(found("new password")).toContain("rotate_secret")
+  })
+
   it("does not find PCP's tools by the words most of them share", () => {
     const own: PcpToolCandidate[] = Array.from({ length: 6 }, (_, index) => ({
       name: `tool_${index}`,
