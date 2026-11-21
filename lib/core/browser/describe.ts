@@ -140,7 +140,7 @@ export function describeSecretRequestAsk(ask: SecretRequestAsk): {
       ...(ask.username ? [`Login name: ${ask.username}`] : []),
       ...(ask.generate
         ? [
-            `It asks PCP to make a new password: ${describeRecipe(ask.generate)}. Nobody sees it but you, on the Secrets page.`,
+            `It asks PCP to make a new ${(ask.generate.format ?? "password") === "password" ? "password" : "token"}: ${describeRecipe(ask.generate)}. Nobody sees it but you, on the Secrets page.`,
           ]
         : []),
       ask.origins.length > 0

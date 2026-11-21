@@ -946,9 +946,11 @@ embeddingProvider`, which hands `embeddings/provider.ts` the header;
   rolling fingerprint, then an HMAC), whatever document the tab shows now.
   The value is scrubbed from answers and errors, and the request log has
   the secret's name and origin, never the value.
-  `request_secret` asks the owner to type a new one on PCP's page (with its
-  login name, `username`), or to have PCP make a password there
-  (`generate`: `generate-password.ts`, a CSPRNG, in `decidePermission`,
+  `request_secret`, PCP's own tool (the browser's is its alias for one
+  release), asks the owner to type a new one on PCP's page (with its login
+  name, `username`), or to have PCP make a password or a token there
+  (`generate`, its `format` `password`, `alphanumeric`, `hex` or
+  `base64url`: `generate-password.ts`, a CSPRNG, in `decidePermission`,
   stored at once and never handed back; the owner reveals it under
   Secrets), and never writes over a name PCP holds. Its page keeps the
   sites out of a password manager's reach (boxes outside the login form,

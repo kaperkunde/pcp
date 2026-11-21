@@ -83,6 +83,9 @@ describe("request_secret, PCP's own", () => {
     expect(view.lines).toContain(
       "No sites yet: the browser types it only after asking you each time (Once, or Always at this site, which adds the site). It is sent to a server, a service or a wrapper only where you approve one that names it, which you are shown as also allowing it there.",
     )
+    expect(view.lines).toContain(
+      "It asks PCP to make a new token: 40 characters: letters and digits. Nobody sees it but you, on the Secrets page.",
+    )
     expect(view.secretToEnter).toMatchObject({
       name: "Docling key",
       origins: [],
