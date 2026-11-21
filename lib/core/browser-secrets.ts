@@ -1061,7 +1061,7 @@ export async function admitSecretUse(
     name,
     use,
     part = "password",
-    bound = false,
+    boundSecretId,
   }: {
     tokenId: string
     serverId: string
@@ -1070,11 +1070,13 @@ export async function admitSecretUse(
     /** The login name goes through the same gate as the value. */
     part?: SecretPart
     /**
-     * Typed through a wrapper's place for it at browser/type, which the
-     * owner approved (upstream.ts matchGrant): that wrapper uses the
-     * secret, so it is in its scope, and the gate per site is as before.
+     * Typed through a wrapper's place at browser/type that the owner
+     * approved (upstream.ts matchGrant): the id of the secret that place is
+     * for. When it is the secret the name finds now, that wrapper uses it,
+     * so it is in its scope and the gate per site is as before; a secret
+     * that took a renamed one's name is not.
      */
-    bound?: boolean
+    boundSecretId?: string
   },
   now = new Date(),
 ): Promise<TypableSecret> {
@@ -1102,7 +1104,7 @@ export async function admitSecretUse(
   // only on the owner's answer to this very use: Once (that call alone) or
   // Always at this site (which adds the site). Never without asking.
   const outOfScope =
-    !bound &&
+    boundSecretId !== secret.id &&
     !(await hasSites(ctx, secret.id)) &&
     !(await isAnywhere(ctx, secret.id))
 

@@ -973,7 +973,7 @@ export async function applyItem(
   })()
 
   // What the owner ticked, and nothing more, stays in each secret's scope.
-  await keepAllowed(ctx, allowing, alsoAllow)
+  await keepAllowed(ctx, allowing, alsoAllow, [applied.id])
 
   return applied
 }

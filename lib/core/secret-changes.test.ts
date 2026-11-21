@@ -15,6 +15,7 @@ import {
 } from "./permissions"
 import { secretNameWhere } from "./secret-meta"
 import { grantSecretScope, readSecretScopes } from "./secret-scope"
+import { alsoAllowsFor } from "./secret-scope-asks"
 import {
   createSecret,
   readSecretValue,
@@ -664,21 +665,79 @@ describe("also allows", () => {
     ).toBe(1)
   })
 
-  it("is not shown for a consumer the secret's scope covers", async () => {
-    const tracker = await upstream()
-    await grantSecretScope(ctx, keyId, tracker.id)
-    await db().secret.update({
-      where: { id: keyId },
-      data: { scopeAnywhere: true },
+  it("is not shown for a consumer the owner granted, the secret not being allowed anywhere", async () => {
+    const granted = await upstream()
+    const other = await createServer(ctx, {
+      name: "Other",
+      url: "https://other.example/mcp",
+      authType: "none",
+    })
+    await grantSecretScope(ctx, keyId, granted.id)
+    expect(
+      (await db().secret.findUniqueOrThrow({ where: { id: keyId } }))
+        .scopeAnywhere,
+    ).toBe(false)
+
+    expect(
+      await alsoAllowsFor(ctx, [
+        {
+          id: keyId,
+          consumers: [
+            { id: granted.id, name: "Linear" },
+            { id: other.id, name: "Other" },
+          ],
+        },
+      ]),
+    ).toEqual([
+      expect.objectContaining({
+        key: `also:${keyId}:${other.id}`,
+        consumerId: other.id,
+      }),
+    ])
+    expect(tokenId).toBeTruthy()
+  })
+
+  it("keeps only what the request made, not a use another change made meanwhile", async () => {
+    const elsewhere = await createServer(ctx, {
+      name: "Elsewhere",
+      url: "https://elsewhere.example/mcp",
+      authType: "none",
     })
     await call("register_server", {
-      name: "Tracker two",
-      url: "https://tracker2.example/mcp",
+      name: "Tracker",
+      url: "https://tracker.example/mcp",
       auth_type: "header",
       secret: "Linear key",
     })
+    const { row } = await newest()
+    const racing: PermissionExecutor = {
+      ...executor,
+      // While the yes runs, the owner's own page gives Elsewhere the secret.
+      async syncTools(...args) {
+        await db().mcpServer.update({
+          where: { id: elsewhere.id },
+          data: { authType: "header", authSecretId: keyId },
+        })
+        return executor.syncTools(...args)
+      },
+    }
 
-    expect((await newest()).view.alsoAllows).toEqual([])
-    expect(tokenId).toBeTruthy()
+    const done = await decidePermission(
+      ctx,
+      row.id,
+      "allow_once",
+      { publicUrl: PUBLIC_URL, alsoAllow: [`also:${keyId}:new`] },
+      racing,
+    )
+    expect(done.isError, textOf(done)).not.toBe(true)
+    const tracker = await db().mcpServer.findFirstOrThrow({
+      where: { authSecretId: keyId, NOT: { id: elsewhere.id } },
+    })
+    expect(
+      await db().secretScope.findMany({
+        where: { secretId: keyId },
+        select: { serverId: true },
+      }),
+    ).toEqual([{ serverId: tracker.id }])
   })
 })

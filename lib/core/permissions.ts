@@ -3093,6 +3093,8 @@ export async function decidePermission(
   }
 
   let result: CallToolResult
+  // What the yes made, for the "Also allow" it keeps (secret-scope-asks.ts).
+  const made: { ids: string[] } = { ids: [] }
   // A call's own answer, for an identical call to be handed (programAnswer),
   // and the handles its shaping made, for the token to be told.
   const answered: {
@@ -3128,6 +3130,7 @@ export async function decidePermission(
                       tokenId: row.tokenId,
                       ...(typedValue ? { secretValue: typedValue } : {}),
                       access: chosenAccess,
+                      made,
                     },
                   ),
                 )
@@ -3175,6 +3178,7 @@ export async function decidePermission(
                                 ? { secretValue: typedValue }
                                 : {}),
                               access: chosenAccess,
+                              made,
                               launch: (launchCtx, input) =>
                                 (executor.launchService ?? launchService)(
                                   launchCtx,
@@ -3314,7 +3318,21 @@ export async function decidePermission(
   // What the owner's yes also allowed, and nothing more, stays in each
   // secret's scope (secret-scope-asks.ts).
   if (result.isError !== true && allowing) {
-    await keepAllowed(ctx, allowing, alsoAllow).catch((error) => {
+    // A new server's id is the request's own once it is added.
+    const added =
+      kind === "register"
+        ? (
+            await db().permissionRequest.findUnique({
+              where: { id: row.id },
+              select: { serverId: true },
+            })
+          )?.serverId
+        : null
+
+    await keepAllowed(ctx, allowing, alsoAllow, [
+      ...made.ids,
+      ...(added ? [added] : []),
+    ]).catch((error) => {
       console.error("[permissions] keeping a secret's scope failed", {
         id: row.id,
         error,

@@ -323,7 +323,7 @@ describe("the browser's gate and the scope", () => {
     call: { tab: "t1", ref: "e3" },
   }
 
-  async function typing(bound = false) {
+  async function typing(bound?: string) {
     const { token } = await createApiToken(ctx, {
       name: `Claude ${newId()}`,
       allowAllServers: true,
@@ -341,7 +341,7 @@ describe("the browser's gate and the scope", () => {
           serverId: browser.id,
           name: "Mail password",
           use,
-          ...(bound ? { bound: true } : {}),
+          ...(bound ? { boundSecretId: bound } : {}),
         }),
     }
   }
@@ -401,7 +401,7 @@ describe("the browser's gate and the scope", () => {
     })
     const browser = await createBrowserServer(ctx)
     await wrapper("Mail flow", id, browser.id)
-    const { tokenId, type } = await typing(true)
+    const { tokenId, type } = await typing(id)
 
     // Asked about the site as before, not as outside its scope.
     const asked = await type().catch((error: unknown) => error)

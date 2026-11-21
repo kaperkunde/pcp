@@ -2350,12 +2350,18 @@ async function callBrowser(
 
   // A wrapper's or a flow's call carries one only where the owner's
   // approval of it says so.
+  // The secret that place was approved for, by id: the scope's gate is
+  // passed only for that very secret, never for one that took its name.
+  let boundSecretId: string | undefined
+
   if (options.secrets !== undefined) {
     for (const binding of matchGrant(
       found,
       options.secrets,
       `${server.slug}/${toolName}`,
     )) {
+      boundSecretId = binding.secretId
+
       if (binding.url !== server.url) {
         throw invalid(
           `${server.name}'s address has changed since the owner allowed the secret "${binding.name}" there, so the call was not made.`,
@@ -2391,7 +2397,7 @@ async function callBrowser(
         use,
         part,
         // A wrapper's or flow's place for it, which matchGrant found above.
-        bound: options.secrets !== undefined,
+        ...(boundSecretId ? { boundSecretId } : {}),
       })
 
       // The login name is no secret from the assistant (the page's sign-in

@@ -234,13 +234,16 @@ export async function beforeAllowing(
 /**
  * Once the yes made what it proposed: exactly what the owner ticked, kept
  * in each secret's scope. A consumer it names by id is granted; the one it
- * makes ("new") is whatever uses the secret now that did not before.
- * Nothing else that uses the secret is kept.
+ * makes ("new") is what this request made (`made`: the ids its apply
+ * returned, the server, service and what it registered, or the wrapper),
+ * where it uses the secret now and did not before. Nothing else that uses
+ * the secret is kept, whatever else made it use it meanwhile.
  */
 export async function keepAllowed(
   ctx: VaultContext,
   { shown, before }: { shown: AlsoAllow[]; before: Map<string, Set<string>> },
   ticked: readonly string[] | undefined,
+  made: readonly string[],
 ): Promise<void> {
   const chosen = shown.filter((also) => (ticked ?? []).includes(also.key))
 
@@ -257,8 +260,10 @@ export async function keepAllowed(
     const ids =
       also.consumerId !== null
         ? [also.consumerId]
-        : [...(after.get(also.secretId) ?? [])].filter(
-            (id) => !(before.get(also.secretId)?.has(id) ?? false),
+        : made.filter(
+            (id) =>
+              (after.get(also.secretId)?.has(id) ?? false) &&
+              !(before.get(also.secretId)?.has(id) ?? false),
           )
 
     for (const id of ids) {

@@ -696,6 +696,46 @@ describe.skipIf(!executable)("typing a secret", { timeout: 90_000 }, () => {
       call("type", { tab, ref, text: { $secret: "No such secret" } }),
     ).rejects.toThrow(/no secret called "No such secret"/)
   })
+
+  it("passes a wrapper's place only for the secret it was approved for, never one that took its name since (#162)", async () => {
+    const { tab, opened } = await open("/login")
+    const ref = refOf(opened, /textbox "Password"/)
+    // No site and not anywhere: in scope only through the wrapper's place.
+    const bound = await createSecret(ctx, { name: "Flow key", value: "f1" })
+    const place = [
+      {
+        pointer: "/text",
+        name: "Flow key",
+        secretId: bound.id,
+        template: "{{secret}}",
+        url: server.url,
+      },
+    ]
+    const typeThrough = () =>
+      callServerTool(
+        ctx,
+        server,
+        "type",
+        { tab, ref, text: { $secret: "Flow key" } },
+        { publicUrl: PUBLIC_URL, tokenId, secrets: place },
+      )
+
+    // The place's own secret: asked about the site as before.
+    const first = await owner(typeThrough())
+    expect(first).toMatchObject({ kind: "secret_use" })
+    expect((first.input as { outOfScope?: true }).outOfScope).toBeUndefined()
+
+    // Renamed, and a new secret takes the old name: the same place no
+    // longer stands for it, so it meets the scope's gate.
+    await updateSecret(ctx, bound.id, { name: "Flow key old" })
+    await createSecret(ctx, { name: "Flow key", value: "f2" })
+    const second = await owner(typeThrough())
+    expect(second).toMatchObject({
+      kind: "secret_use",
+      input: { secretName: "Flow key", outOfScope: true },
+    })
+    expect(await fieldValue(tab, "#pw")).toBe("")
+  })
 })
 
 describe.skipIf(!executable)(
