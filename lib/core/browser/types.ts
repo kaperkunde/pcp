@@ -1,5 +1,6 @@
 import type { PasswordRecipe, ToolAccess } from "../constants"
 import type { FetchArgs } from "../fetch/request"
+import type { SecretChangeAsk } from "../secret-changes"
 import type { ServiceUpdateAsk } from "../services/updates"
 import type {
   BrowserPace,
@@ -107,6 +108,12 @@ export type SecretUseAsk = {
   call: SecretTypeCall
   /** "username": the secret's login name is typed, not its value. */
   part?: SecretPart
+  /**
+   * The secret has no site and is not one the owner lets be used anywhere
+   * (#162): Once types it this one time, Always at this site adds the site
+   * to its scope, and nothing else is offered.
+   */
+  outOfScope?: true
 }
 
 /**
@@ -193,6 +200,7 @@ export type BrowserAsk =
   | { kind: "secret_use"; input: SecretUseAsk }
   | { kind: "secret_request"; input: SecretRequestAsk }
   | { kind: "secret_sites_change"; input: SecretSitesChangeAsk }
+  | { kind: "secret_change"; input: SecretChangeAsk }
   | { kind: "exit_use"; input: ExitUseAsk }
   | { kind: "script_use"; input: ScriptUseAsk }
   | { kind: "tab_pace"; input: TabPaceAsk }

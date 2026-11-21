@@ -668,7 +668,12 @@ describe("asking the owner", () => {
 
     try {
       const { ctx, scope } = await setup()
-      const key = await createSecret(ctx, { name: "GitHub key", value: "k" })
+      const key = await createSecret(ctx, {
+        // As one the owner adds with no site (#162).
+        anywhere: true,
+        name: "GitHub key",
+        value: "k",
+      })
       await createEndpoint(ctx, {
         name: "GitHub REST",
         specSource: "upload",
@@ -1820,7 +1825,12 @@ describe("adding a server", () => {
   it("names the secret a header server would get, and reads its tools once added", async () => {
     const { ctx, scope } = await setup()
     const { executor } = stub()
-    const secret = await createSecret(ctx, { name: "weather key", value: "k" })
+    const secret = await createSecret(ctx, {
+      // As one the owner adds with no site (#162).
+      anywhere: true,
+      name: "weather key",
+      value: "k",
+    })
 
     await withPermission(scope, {
       kind: "register",
@@ -1858,8 +1868,15 @@ describe("adding a server", () => {
   it("names every secret when the credential has several headers, and adds them all", async () => {
     const { ctx, scope } = await setup()
     const { executor } = stub()
-    const key = await createSecret(ctx, { name: "domains key", value: "k" })
+    const key = await createSecret(ctx, {
+      // As one the owner adds with no site (#162).
+      anywhere: true,
+      name: "domains key",
+      value: "k",
+    })
     const secretKey = await createSecret(ctx, {
+      // As one the owner adds with no site (#162).
+      anywhere: true,
       name: "domains secret key",
       value: "s",
     })
@@ -2112,7 +2129,12 @@ describe("adding an API from OpenAPI text", () => {
   it("names the secret and the address it goes to, and read-only in what it offers", async () => {
     const { ctx, scope } = await setup()
     const { executor } = stub()
-    const secret = await createSecret(ctx, { name: "pets key", value: "k-123" })
+    const secret = await createSecret(ctx, {
+      // As one the owner adds with no site (#162).
+      anywhere: true,
+      name: "pets key",
+      value: "k-123",
+    })
 
     await withPermission(scope, {
       kind: "register",
@@ -2167,7 +2189,12 @@ describe("adding an API from OpenAPI text", () => {
 
 describe("a change to an API endpoint of the owner's", () => {
   async function ownersEndpoint(ctx: VaultContext) {
-    const secret = await createSecret(ctx, { name: "Pets key", value: "k" })
+    const secret = await createSecret(ctx, {
+      // As one the owner adds with no site (#162).
+      anywhere: true,
+      name: "Pets key",
+      value: "k",
+    })
     const { id } = await createEndpoint(ctx, {
       name: "Pets",
       specSource: "upload",
@@ -2406,6 +2433,8 @@ describe("a new secret the owner types in", () => {
     await withPermission(scope, { kind: "register", input })
     const first = await onlyRequestId()
     const added = await createSecret(ctx, {
+      // As one the owner adds with no site (#162).
+      anywhere: true,
       name: "Pets API key",
       value: "from-secrets-page",
     })
@@ -3611,6 +3640,8 @@ describe("a mail account an assistant proposes", () => {
   it("uses a password the owner already stored, by its name", async () => {
     const { ctx, scope } = await setup()
     const stored = await createSecret(ctx, {
+      // As one the owner adds with no site (#162).
+      anywhere: true,
       name: "Mail password",
       value: PASSWORD,
     })

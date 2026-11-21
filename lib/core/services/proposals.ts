@@ -447,12 +447,15 @@ export async function applyServiceChange(
     secretValue,
     launch,
     access = [],
+    made,
   }: {
     tokenId: string
     secretValue?: string
     launch: ServiceLauncher
     /** The levels and tiers the owner left on the page, for what it registers. */
     access?: AccessRule[]
+    /** Filled in with what this launch made: the service, what it registered. */
+    made?: { ids: string[] }
   },
 ): Promise<string> {
   if (
@@ -527,6 +530,11 @@ export async function applyServiceChange(
 
     throw error
   }
+
+  made?.ids.push(
+    launched.id,
+    ...(launched.registeredId ? [launched.registeredId] : []),
+  )
 
   if (ask.note) {
     // launchService sets it; this keeps it when a stand-in launched.

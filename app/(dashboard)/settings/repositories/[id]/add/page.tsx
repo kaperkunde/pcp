@@ -123,6 +123,7 @@ export default async function AddPage({
 
           const resolved = await resolveItem(ctx, fetched.document, {
             onto: current !== null,
+            id: found?.kind ? found.id : null,
           })
 
           return {
@@ -258,6 +259,7 @@ export default async function AddPage({
             items={ready.map((entry) => ({
               root: entry.root,
               hash: entry.fetched!.hash,
+              alsoAllows: entry.resolved?.alsoAllows ?? [],
             }))}
           />
           <p className="text-xs text-muted-foreground">

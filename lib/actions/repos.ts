@@ -275,6 +275,9 @@ export async function addItemsAction(
       items: items.map((item) => ({
         root: String(item.root),
         hash: String(item.hash),
+        ...(Array.isArray(item.alsoAllow)
+          ? { alsoAllow: item.alsoAllow.map(String) }
+          : {}),
       })),
     })
     const added = results.filter((entry) => entry.ok).length
@@ -572,7 +575,12 @@ export async function importServiceAction(
 export async function answerChangeAction(
   itemId: string,
   answer: "approve" | "decline" | "keep",
-  shown: { sha: string; hash: string; flags?: number },
+  shown: {
+    sha: string
+    hash: string
+    flags?: number
+    alsoAllow?: string[]
+  },
 ): Promise<RepoActionResult> {
   const ctx = await requireContext()
   const result = await guarded(async () => {
@@ -584,6 +592,9 @@ export async function answerChangeAction(
             sha,
             hash: String(shown.hash),
             ...(typeof shown.flags === "number" ? { flags: shown.flags } : {}),
+            ...(Array.isArray(shown.alsoAllow)
+              ? { alsoAllow: shown.alsoAllow.map(String) }
+              : {}),
           })
           return { message: "Applied as you were shown it.", lines: notes }
         }

@@ -443,6 +443,13 @@ const DECISION_LABELS: Record<PermissionKind, Record<string, string>> = {
     allow_once: "Apply ticked changes",
     decline: "Not now",
   },
+  // An assistant's edit, new value, scope change or deletion of one of
+  // your secrets (#162): this one, as shown; each action names its yes on
+  // the page.
+  secret_change: {
+    allow_once: "Apply",
+    decline: "Not now",
+  },
 }
 
 /** The answers the owner is offered, in order, with their labels. */

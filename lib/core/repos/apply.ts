@@ -47,6 +47,15 @@ import { writeServiceDefinition } from "../services/services"
 import { saveSkillByOwner } from "../skills"
 import { saveWrapperByOwner } from "../wrappers/admin"
 import {
+  alsoAllowsFor,
+  beforeAllowing,
+  keepAllowed,
+  missingAlsoAllow,
+  wrapperConsumers,
+  type AlsoAllow,
+  type NamedSecret,
+} from "../secret-scope-asks"
+import {
   browserServerIds,
   splitRef,
   type WrapperInput,
@@ -99,6 +108,12 @@ export type ResolvedItem = {
   problems: string[]
   /** Secrets it names that the vault does not hold. */
   missingSecrets: string[]
+  /**
+   * Secrets it names that it would let something use outside their scope
+   * (#162, secret-scope-asks.ts): shown ticked on the review, and applied
+   * only with each still ticked (applyItem's `alsoAllow`).
+   */
+  alsoAllows: AlsoAllow[]
 }
 
 export type AppliedItem = {
@@ -303,6 +318,48 @@ async function wrapperProblems(
 }
 
 /**
+ * The vault's secrets an item names and what would use each: a wrapper's
+ * places go to the wrapper and every other instance of its definition
+ * (shareWrapper copies them), a new server's sign-in from its document to
+ * its first instance. A sign-in the owner gives for the instance is their
+ * own pick, and nothing onto a server the vault has is its sign-in.
+ */
+async function itemNamedSecrets(
+  ctx: VaultContext,
+  document: ItemDocument,
+  id: string | null,
+  instance: boolean,
+  /** The secrets it names that the vault holds (secretIds), by name. */
+  found: Map<string, string>,
+): Promise<NamedSecret[]> {
+  if (document.kind === "wrapper" || document.kind === "flow") {
+    const consumers = await wrapperConsumers(
+      ctx,
+      id,
+      id ? (await getServer(ctx, id)).name : document.displayName,
+    )
+
+    return [...new Set(found.values())].map((secretId) => ({
+      id: secretId,
+      consumers,
+    }))
+  }
+
+  if (
+    (document.kind === "endpoint" || document.kind === "server") &&
+    id === null &&
+    !instance
+  ) {
+    return [...new Set(found.values())].map((secretId) => ({
+      id: secretId,
+      consumers: [{ id: null, name: document.displayName }],
+    }))
+  }
+
+  return []
+}
+
+/**
  * What an item's names are in this vault: the servers and tools a wrapper
  * calls (a name with nothing to it is a problem, never a guess) and the
  * secrets it names (one the vault lacks is listed, for the owner to add).
@@ -312,7 +369,17 @@ async function wrapperProblems(
 export async function resolveItem(
   ctx: VaultContext,
   document: ItemDocument,
-  { onto = false }: { onto?: boolean } = {},
+  {
+    onto = false,
+    id = null,
+    instance = false,
+  }: {
+    onto?: boolean
+    /** The vault's item it goes onto, for what its secrets would reach. */
+    id?: string | null
+    /** The owner gives a new server's sign-in on the page (InstanceInput). */
+    instance?: boolean
+  } = {},
 ): Promise<ResolvedItem> {
   const names =
     onto && (document.kind === "endpoint" || document.kind === "server")
@@ -325,7 +392,14 @@ export async function resolveItem(
       ? await wrapperProblems(ctx, document)
       : []
 
-  return { problems, missingSecrets }
+  return {
+    problems,
+    missingSecrets,
+    alsoAllows: await alsoAllowsFor(
+      ctx,
+      await itemNamedSecrets(ctx, document, id, instance, found),
+    ),
+  }
 }
 
 function missingNote(secret: string, what: string): string {
@@ -852,29 +926,54 @@ export async function applyItem(
     id,
     instance,
     service,
-  }: { id: string | null; instance?: InstanceInput; service?: ServiceInstance },
+    alsoAllow,
+  }: {
+    id: string | null
+    instance?: InstanceInput
+    service?: ServiceInstance
+    /**
+     * The "Also allow" the owner left ticked on the review (ResolvedItem
+     * `alsoAllows`): each shown has to be, and only those are kept.
+     */
+    alsoAllow?: string[]
+  },
 ): Promise<AppliedItem> {
-  const { problems, missingSecrets } = await resolveItem(ctx, document, {
-    onto: id !== null,
-  })
+  const { problems, missingSecrets, alsoAllows } = await resolveItem(
+    ctx,
+    document,
+    { onto: id !== null, id, instance: instance !== undefined },
+  )
 
   if (problems.length > 0) {
     throw invalid(problems.join(" "))
   }
 
-  const into = await target(ctx, document, id)
+  const unticked = missingAlsoAllow(alsoAllows, alsoAllow)
 
-  switch (document.kind) {
-    case "skill":
-      return applySkill(ctx, document, into)
-    case "wrapper":
-    case "flow":
-      return applyWrapper(ctx, document, into, missingSecrets)
-    case "endpoint":
-      return applyEndpoint(ctx, document, into, instance)
-    case "server":
-      return applyServer(ctx, document, into, instance)
-    case "service":
-      return applyService(ctx, document, into, service)
+  if (unticked) {
+    throw new PcpError("conflict", unticked)
   }
+
+  const into = await target(ctx, document, id)
+  const allowing = await beforeAllowing(ctx, alsoAllows)
+  const applied = await (async () => {
+    switch (document.kind) {
+      case "skill":
+        return applySkill(ctx, document, into)
+      case "wrapper":
+      case "flow":
+        return applyWrapper(ctx, document, into, missingSecrets)
+      case "endpoint":
+        return applyEndpoint(ctx, document, into, instance)
+      case "server":
+        return applyServer(ctx, document, into, instance)
+      case "service":
+        return applyService(ctx, document, into, service)
+    }
+  })()
+
+  // What the owner ticked, and nothing more, stays in each secret's scope.
+  await keepAllowed(ctx, allowing, alsoAllow, [applied.id])
+
+  return applied
 }

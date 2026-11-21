@@ -60,8 +60,9 @@ so in the summary; the bump itself waits for the request.
   `revealSecret` and `revealTotpCode` are for the owner's own screen. A
   field that takes a secret by name finds it only through
   `secret-refs.ts resolveSecretRef` with its use (text everywhere, one-time
-  codes only where the browser types, managed kinds never), and what uses
-  a secret is `secret-uses.ts secretUses` alone. A
+  codes only where the browser types, managed kinds never, and with its
+  `consumer`, the secret's scope), and what uses a secret is
+  `secret-uses.ts secretUses` alone. A
   `totp` secret's seed never leaves `secrets.ts`: only the code of the
   moment is typed, and only by the browser. An API endpoint's calls
   (`lib/core/endpoints.ts`, `lib/core/openapi/`) are handed their finished
@@ -952,10 +953,13 @@ embeddingProvider`, which hands `embeddings/provider.ts` the header;
   Secrets), and never writes over a name PCP holds. Its page keeps the
   sites out of a password manager's reach (boxes outside the login form,
   `data-1p-ignore`). An assistant changes a secret's sites only by
-  proposing it (`update_secret_sites`, a `secret_sites_change` request that
-  always asks, whatever the levels): the page shows the sites now, each
-  change and lookalikes flagged unticked (`lookalike-sites.ts`), and makes
-  only what the owner ticked, to the sites as shown (`sitesBasis`).
+  proposing it (`change_secret_scope`, below; `update_secret_sites` is its
+  alias for one release): the page shows the sites now, each change and
+  lookalikes flagged unticked (`lookalike-sites.ts`), and makes only what
+  the owner ticked. A secret with no site that is not anywhere, typed other
+  than through a wrapper's place for it, asks every time (`outOfScope`:
+  Once, or Always at this site, which adds the site; never an allowance
+  for a while), as an anywhere one asks.
   Allowances are not exported; origins are, with their flag.
   `navigate`, `snapshot` and `tabs` open name the owner's secrets bound to
   the page's origin (`browser/sign-in-hint.ts`, louder at a password
@@ -964,6 +968,35 @@ embeddingProvider`, which hands `embeddings/provider.ts` the header;
   `:note`, opened only in `secrets.ts`); never a value, and naming one
   grants nothing: typing it is still the gate above. Add a test for each
   new way in.
+- A secret's scope (`lib/core/secret-scope.ts`, #162) is where it may be
+  used: `secret_scope` rows (servers, endpoints, mail and calendar
+  accounts, services, wrappers), whatever uses it now (always in scope
+  while it does), its sites, or `scope_anywhere`. Only the owner's pages
+  widen it: the Secrets page's Scope, their own pick of a secret on a
+  server's page (the use is the grant), or their yes to a proposal whose
+  page showed one "also allows <secret> for <consumer>" per secret and
+  consumer ticked, a wrapper's siblings included (`secret-scope-asks.ts`,
+  `decidePermission`'s `alsoAllow`, then `keepAllowed`, which keeps only
+  those); a linked repository's item the same way on its review
+  (`repos/apply.ts resolveItem`'s `alsoAllows`, `applyItem`'s
+  `alsoAllow`), and never by a change that applies by itself. It is checked in one place, `resolveSecretRef` with
+  the use's `consumer` (`check` refuses naming `change_secret_scope`, `ask`
+  is a proposal's, `granted` the owner's yes); a secret from before is
+  worked out from its uses by the first request with the key
+  (`ensureSecretScopes`; null reads as anywhere). run_<tier> programs get
+  no secret: a wrapper's bindings are the way, through its place in the
+  scope. An assistant proposes changes only through `edit_secret`,
+  `rotate_secret`, `change_secret_scope` (Write) and `delete_secret`
+  (Destructive), each a `secret_change` request (`secret-changes.ts`) that
+  always asks, shows the secret before and after and what uses it, and
+  writes only that while its `basis` holds (a new request once it moved);
+  never a value to the assistant, never a managed kind. A rotation's value
+  is typed on PCP's page or made there from a recipe, written through
+  `updateSecret` (which clears the credential alerts of every use), and
+  remakes the services that take it; a deletion waits until no blocking
+  use remains, which the owner changes on its own page. Add a test for
+  each new field an assistant can set and each new consumer
+  (`secret-changes.test.ts`, `secret-scope.test.ts`).
 - PCP's own authorization server (`lib/core/oauth-server/`), for apps that
   sign in to `/mcp` with a URL alone (claude.ai's connectors, ChatGPT), is
   PCP's and never a relay's: whoever issues the tokens could mint one for

@@ -336,6 +336,12 @@ export async function createSecret(
     loginName?: string | null
     note?: string | null
     totpCompanionId?: string | null
+    /**
+     * Where it may be used (#162, secret-scope.ts): anywhere, or (the
+     * default) only by what it is made for, its sites, and what the owner
+     * adds to its scope.
+     */
+    anywhere?: boolean
   },
 ): Promise<{ id: string }> {
   await checkNewSecret(ctx, input)
@@ -361,6 +367,7 @@ export async function createSecret(
       loginName: sealDetail(ctx, id, "login", loginName),
       note: sealDetail(ctx, id, "note", note),
       totpCompanionId,
+      scopeAnywhere: input.anywhere === true,
       ciphertext: asBytes(
         encryptString(
           ctx.dek,
@@ -528,24 +535,20 @@ export async function updateSecret(
   await db().secret.update({ where: { id }, data })
 
   // A new value is the fix for "rejected the credentials": those alerts of
-  // the servers that send it are over until a call says otherwise. Other
-  // alerts (unreachable, refused) say nothing about the credential.
+  // everything that uses it (servers, API endpoints, mail and calendar
+  // accounts, services and wrappers: secret-uses.ts) are over until a call
+  // says otherwise. Other alerts (unreachable, refused) say nothing about
+  // the credential.
   if (valueChanged) {
-    const users = await db().mcpServer.findMany({
-      where: {
-        vaultId: ctx.vaultId,
-        OR: [
-          { authSecretId: id },
-          { authHeaders: { some: { secretId: id } } },
-          { oauthClientSecretId: id },
-        ],
-      },
-      select: { id: true },
-    })
+    const uses = (await secretUses(ctx, [id])).get(id)?.uses ?? []
 
     await clearAlerts(
       ctx,
-      users.map((user) => user.id),
+      [
+        ...new Set(
+          uses.filter((use) => use.via !== "repo").map((use) => use.id),
+        ),
+      ],
       ["auth_required"],
     )
   }
@@ -877,6 +880,9 @@ export async function createGeneratedSecret(
             .slice(0, MAX_DESCRIPTION),
         }),
         kind: "generated",
+        // Its scope is what it was made for, its service, never anywhere
+        // (#162, secret-scope.ts); nothing names it by name.
+        scopeAnywhere: false,
         ciphertext: asBytes(
           encryptString(ctx.dek, generatePassword(recipe), aad(id)),
         ),

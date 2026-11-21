@@ -21,7 +21,6 @@ import {
   originOf,
   parseOrigins,
   SECRET_ONCE_MS,
-  showSecretSitesChange,
   signInsAt,
   siteCovers,
   sitesOf,
@@ -91,9 +90,11 @@ beforeEach(async () => {
   })
   tokenId = (await resolveApiToken(token))!.tokenId
   serverId = (await createBrowserServer(ctx)).id
+  // As the owner adds one on the Secrets page with no site: anywhere.
   ;({ id: secretId } = await createSecret(ctx, {
     name: "Shop password",
     value: VALUE,
+    anywhere: true,
   }))
 })
 
@@ -1125,7 +1126,7 @@ describe("update_secret_sites", () => {
     await expect(check({})).rejects.toThrow(/Nothing would change/)
   })
 
-  it("always asks the owner, even where the tool is allowed", async () => {
+  it("always asks the owner, even where the tool is allowed, as change_secret_scope's alias", async () => {
     await writeToolAccess(
       ctx,
       tokenId,
@@ -1141,8 +1142,10 @@ describe("update_secret_sites", () => {
     })
 
     expect(textOf(asked)).toContain("Not done yet")
+    // The alias's note names the tool to use from now on.
+    expect(textOf(asked)).toMatch(/now PCP's own change_secret_scope/)
     const changed = await db().permissionRequest.findFirstOrThrow({
-      where: { kind: "secret_sites_change" },
+      where: { kind: "secret_change" },
     })
     expect(changed).toMatchObject({ serverId })
     expect(openRequestTool(ctx, changed)).toBe("update_secret_sites")
@@ -1163,38 +1166,42 @@ describe("update_secret_sites", () => {
       remove: ["https://www.frankenergy.nl"],
     })
     const row = await db().permissionRequest.findFirstOrThrow({
-      where: { kind: "secret_sites_change" },
+      where: { kind: "secret_change" },
     })
     const view = await getPermissionView(ctx, row.id, { publicUrl: PUBLIC_URL })
 
-    expect(view!.title).toBe('Change where "Shop password" is typed?')
-    expect(view!.decisions.map((decision) => decision.value)).toEqual([
-      "allow_once",
-      "decline",
+    expect(view!.title).toBe(
+      'Change where the secret "Shop password" may be used',
+    )
+    expect(view!.decisions).toEqual([
+      { value: "allow_once", label: "Apply ticked changes" },
+      { value: "decline", label: "Not now" },
     ])
-    expect(view!.secretSites).toMatchObject({
+    expect(view!.secretChange).toMatchObject({
+      action: "scope",
+      via: "update_secret_sites",
       secretName: "Shop password",
-      current: [
-        { origin: SHOP, subdomains: false },
-        { origin: "https://www.frankenergy.nl", subdomains: false },
-      ],
+      stale: false,
+      sites: [SHOP, "https://www.frankenergy.nl"],
       changes: [
-        { key: `add:${FRANK}`, action: "add" },
-        { key: "add:https://www.shop.example", lookalike: null },
-        { key: "remove:https://www.frankenergy.nl", action: "remove" },
+        { key: `site:add:${FRANK}`, action: "add", what: "site" },
+        { key: "site:add:https://www.shop.example", lookalike: null },
+        {
+          key: "site:remove:https://www.frankenergy.nl",
+          action: "remove",
+        },
       ],
     })
     // frankenergie.nl beside frankenergy.nl: a letter or two apart.
-    expect(view!.secretSites!.changes[0]!.lookalike).toMatch(
+    expect(view!.secretChange!.changes[0]!.lookalike).toMatch(
       /letter or two away from frankenergy\.nl/,
     )
-    expect(view!.warning).toMatch(/Check these/)
     expect(view!.lines.join("\n")).toContain(
-      "Take away: https://www.frankenergy.nl",
+      "Take away the site https://www.frankenergy.nl",
     )
   })
 
-  it("makes only the ticked changes, to the sites as shown, and refuses once they moved", async () => {
+  it("makes only the ticked changes, and refuses once the secret moved since it was asked", async () => {
     await grantSecretUse(ctx, {
       tokenId,
       secretId,
@@ -1211,35 +1218,25 @@ describe("update_secret_sites", () => {
       remove: ["https://www.frankenergy.nl"],
     })
     const row = await db().permissionRequest.findFirstOrThrow({
-      where: { kind: "secret_sites_change" },
+      where: { kind: "secret_change" },
     })
-    const shown = await showSecretSitesChange(
-      ctx,
-      await checkSecretSitesChange(ctx, serverId, {
-        name: "Shop password",
-        reason: "x",
-        add: [{ origin: "https://frankenergie.nl", subdomains: true }],
-      }),
-    )
+    const keep = [
+      "site:add:https://frankenergie.nl",
+      "site:remove:https://www.frankenergy.nl",
+    ]
 
     // Nothing ticked is no answer.
     const none = await decidePermission(ctx, row.id, "allow_once", {
       publicUrl: PUBLIC_URL,
-      sites: { basis: shown.basis, keep: [] },
+      sites: { keep: [] },
     })
     expect(none.isError).toBe(true)
 
-    // The sites changed since the page was read.
+    // The sites changed since the assistant asked.
     await bindOrigin(ctx, secretId, "https://late.example")
     const stale = await decidePermission(ctx, row.id, "allow_once", {
       publicUrl: PUBLIC_URL,
-      sites: {
-        basis: shown.basis,
-        keep: [
-          "add:https://frankenergie.nl",
-          "remove:https://www.frankenergy.nl",
-        ],
-      },
+      sites: { keep },
     })
     expect(stale.isError).toBe(true)
     expect(textOf(stale)).toContain("changed since")
@@ -1247,18 +1244,12 @@ describe("update_secret_sites", () => {
 
     const done = await decidePermission(ctx, row.id, "allow_once", {
       publicUrl: PUBLIC_URL,
-      sites: {
-        basis: shown.basis,
-        keep: [
-          "add:https://frankenergie.nl",
-          "remove:https://www.frankenergy.nl",
-        ],
-      },
+      sites: { keep },
     })
 
     expect(done.isError, textOf(done)).not.toBe(true)
     expect(textOf(done)).toContain(
-      "Added: https://frankenergie.nl and its subdomains.",
+      "added the site https://frankenergie.nl and its subdomains",
     )
     expect(textOf(done)).toContain("Not done: adding https://else.example.")
     expect(await sitesOf(ctx, secretId)).toEqual([
@@ -1279,7 +1270,7 @@ describe("update_secret_sites", () => {
       remove: [SHOP],
     })
     const row = await db().permissionRequest.findFirstOrThrow({
-      where: { kind: "secret_sites_change" },
+      where: { kind: "secret_change" },
     })
     await decidePermission(ctx, row.id, "decline", { publicUrl: PUBLIC_URL })
     expect(await sitesOf(ctx, secretId)).toHaveLength(2)

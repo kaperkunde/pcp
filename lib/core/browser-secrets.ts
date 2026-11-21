@@ -1,5 +1,7 @@
 import { createHash } from "node:crypto"
 
+import type { Prisma } from "@/lib/generated/prisma/client"
+
 import { parse as parseHost } from "tldts"
 
 import { requireToken } from "./api-tokens"
@@ -33,6 +35,7 @@ import {
 } from "./secret-meta"
 import { openText, sealText, type Sealed } from "./sealed"
 import { resolveSecretRef, type ResolvedSecret } from "./secret-refs"
+import { isAnywhere } from "./secret-scope"
 import {
   checkLoginName,
   createSecret,
@@ -87,7 +90,7 @@ export const MAX_SECRET_PURPOSE = MAX_SECRET_PURPOSE_CHARS
 
 export type SecretUseLevel = "once" | "hour" | "always"
 
-export type TypableSecret = ResolvedSecret
+export type TypableSecret = Omit<ResolvedSecret, "inScope">
 
 /**
  * One of a secret's sites: an origin, and with `subdomains` every origin at
@@ -444,6 +447,15 @@ function byOrigin(a: SecretSite, b: SecretSite): number {
   return a.origin < b.origin ? -1 : a.origin > b.origin ? 1 : 0
 }
 
+/** Whether the secret has a site at all. */
+async function hasSites(ctx: VaultContext, secretId: string): Promise<boolean> {
+  return (
+    (await db().secretBrowserOrigin.count({
+      where: { secretId, secret: { vaultId: ctx.vaultId } },
+    })) > 0
+  )
+}
+
 /** A secret's sites, as they are now. */
 export async function sitesOf(
   ctx: VaultContext,
@@ -582,6 +594,89 @@ export async function unbindOrigin(
       where: { secretId, origin: { in: allowanceOrigins(ctx, origin) } },
     }),
   ])
+  await dropUncoveredAllowances(
+    ctx,
+    secretId,
+    before,
+    await sitesOf(ctx, secretId),
+  )
+}
+
+/**
+ * The writes that add and take away several of a secret's sites, checked
+ * first, for a caller to make in one transaction with its own
+ * (secret-changes.ts); then `settleSites` with what they were before.
+ * Throws, writing nothing, when one would not do.
+ */
+export async function siteChangeWrites(
+  ctx: VaultContext,
+  secretId: string,
+  { add, remove }: { add: ProposedSecretSite[]; remove: string[] },
+): Promise<{ writes: Prisma.PrismaPromise<unknown>[]; before: SecretSite[] }> {
+  await requireTypable(ctx, secretId)
+  const before = await sitesOf(ctx, secretId)
+  const writes: Prisma.PrismaPromise<unknown>[] = []
+  let count = before.length
+
+  for (const origin of remove) {
+    if (before.some((site) => site.origin === origin)) {
+      count -= 1
+    }
+
+    writes.push(
+      db().secretBrowserOrigin.deleteMany({
+        where: { secretId, origin: { in: originKeys(ctx, [origin]) } },
+      }),
+      db().apiTokenSecretAllowance.deleteMany({
+        where: { secretId, origin: { in: allowanceOrigins(ctx, origin) } },
+      }),
+    )
+  }
+
+  for (const site of add) {
+    const [origin] = parseOrigins([site.origin])
+
+    if (!origin) {
+      throw invalid("Enter the site's address, like https://example.com.")
+    }
+
+    if (site.subdomains && !canCoverSubdomains(origin)) {
+      throw invalid(`${origin} cannot stand for its subdomains.`)
+    }
+
+    if (!before.some((known) => known.origin === origin)) {
+      count += 1
+    }
+
+    const sealed = sealedOrigin(ctx, secretId, origin)
+
+    writes.push(
+      db().secretBrowserOrigin.deleteMany({ where: { secretId, origin } }),
+      db().secretBrowserOrigin.upsert({
+        where: { secretId_origin: { secretId, origin: sealed.origin } },
+        create: { secretId, ...sealed, includeSubdomains: site.subdomains },
+        update: { includeSubdomains: site.subdomains },
+      }),
+    )
+  }
+
+  if (count > MAX_SITES_PER_SECRET) {
+    throw invalid(`A secret has at most ${MAX_SITES_PER_SECRET} sites.`)
+  }
+
+  return { writes, before }
+}
+
+/**
+ * After siteChangeWrites: every token's allowance at an origin the sites
+ * no longer cover goes, and so do the sign-in windows.
+ */
+export async function settleSites(
+  ctx: VaultContext,
+  secretId: string,
+  before: SecretSite[],
+): Promise<void> {
+  endSignInWindows(null, secretId)
   await dropUncoveredAllowances(
     ctx,
     secretId,
@@ -966,6 +1061,7 @@ export async function admitSecretUse(
     name,
     use,
     part = "password",
+    boundSecretId,
   }: {
     tokenId: string
     serverId: string
@@ -973,6 +1069,14 @@ export async function admitSecretUse(
     use: SecretUseContext
     /** The login name goes through the same gate as the value. */
     part?: SecretPart
+    /**
+     * Typed through a wrapper's place at browser/type that the owner
+     * approved (upstream.ts matchGrant): the id of the secret that place is
+     * for. When it is the secret the name finds now, that wrapper uses it,
+     * so it is in its scope and the gate per site is as before; a secret
+     * that took a renamed one's name is not.
+     */
+    boundSecretId?: string
   },
   now = new Date(),
 ): Promise<TypableSecret> {
@@ -995,6 +1099,15 @@ export async function admitSecretUse(
     return secret
   }
 
+  // Its sites are where it may be typed (#162). One with none, not let be
+  // used anywhere and not typed through a wrapper's place for it, is typed
+  // only on the owner's answer to this very use: Once (that call alone) or
+  // Always at this site (which adds the site). Never without asking.
+  const outOfScope =
+    boundSecretId !== secret.id &&
+    !(await hasSites(ctx, secret.id)) &&
+    !(await isAnywhere(ctx, secret.id))
+
   const taken = await takeAllowance(
     ctx,
     { tokenId, secretId: secret.id, origin: use.origin },
@@ -1005,7 +1118,7 @@ export async function admitSecretUse(
     openSignInWindow(key, part, now)
   }
 
-  if (taken) {
+  if (taken === "once" || (taken && !outOfScope)) {
     return secret
   }
 
@@ -1021,6 +1134,7 @@ export async function admitSecretUse(
       field: use.field,
       call: use.call,
       ...(part === "username" ? { part } : {}),
+      ...(outOfScope ? { outOfScope: true as const } : {}),
     },
   })
 }
@@ -1031,9 +1145,10 @@ export async function admitSecretUse(
  * request_secret's arguments, checked before the owner is asked: a name
  * PCP holds already is refused (nothing an assistant asks for writes over
  * it), and so is a purpose with characters that do not show on screen.
- * Sites are optional: with none yet, the browser types it only where the
- * owner allows it, asking them each time (admitSecretUse), and a server,
- * service or wrapper is sent it only once the owner approves one naming it.
+ * Sites are optional: with none, the browser does not type it until the
+ * owner adds one (admitSecretUse; change_secret_scope proposes one), and a
+ * server, service or wrapper is sent it only once the owner approves one
+ * naming it, which adds that one to its scope (#162).
  * `serverId` is the browser whose request_secret asked (the alias), or null
  * for PCP's own tool.
  */
@@ -1244,7 +1359,7 @@ export async function applySecretRequest(
   }
 
   if (origins.length === 0) {
-    return `The owner saved the secret "${secret.name}". It has no sites yet: the browser types it only where the owner allows it, asking them each time. To send it to a server, a service or a wrapper, name it where a secret is taken (register_server's secret or env_secrets, a wrapper's secrets), which the owner approves. You never see its value.${generated ? " PCP made its value itself; the owner can see it on the Secrets page." : ""}`
+    return `The owner saved the secret "${secret.name}". It has no sites yet, so the browser does not type it until the owner adds one (change_secret_scope proposes one). To send it to a server, a service or a wrapper, name it where a secret is taken (register_server's secret or env_secrets, a wrapper's secrets), which the owner approves. You never see its value.${generated ? " PCP made its value itself; the owner can see it on the Secrets page." : ""}`
   }
 
   const made = generated

@@ -241,6 +241,11 @@ tool of each one's tier runs by name, `{"tool": "check_permission",
 | `read_result`           | Reads a long answer or a kept value, a slice at a time from any offset or from where a text appears; a file is described, not shown.                                                                                                                                                                                                                                           |
 | `register_server`       | Proposes a new MCP server, an API from an OpenAPI 3 schema, a mail account (JMAP or IMAP) or a calendar account (CalDAV), with no auth, a secret by name, a user name and password, or OAuth; or another server of one it sees (`definition`), with a note for you to keep and limits on how PCP calls it.                                                                     |
 | `propose_tool_access`   | Proposes which tools its token may run, many at once and across servers, and hears which tools would change; you review and save it in PCP.                                                                                                                                                                                                                                    |
+| `request_secret`        | Asks you to store a new secret on PCP's page, typed by you or made by PCP there; the assistant gets its name only.                                                                                                                                                                                                                                                             |
+| `edit_secret`           | Proposes a new name, description, login name or note for one of your secrets; you see each before and after, and what still names it by its old name.                                                                                                                                                                                                                          |
+| `rotate_secret`         | Proposes a new value for one of your secrets, which you type on PCP's page or have PCP make; everything that uses it gets it, and a service that takes it is made again.                                                                                                                                                                                                       |
+| `change_secret_scope`   | Proposes where one of your secrets may be used: sites the browser types it at, and servers, services and wrappers that may name it; you tick which changes to make.                                                                                                                                                                                                            |
+| `delete_secret`         | Proposes deleting one of your secrets (a Destructive tool); you see what uses it, and it is deleted only once nothing does.                                                                                                                                                                                                                                                    |
 
 A Write or Destructive call an assistant makes again with the same
 arguments within a while (from `execute_*`, a program's `pcp.call` or a
@@ -614,4 +619,35 @@ lists its sites and the tokens allowed there, each with a way to end it, as
 does the token's page. `request_secret` asks you for a secret PCP does not
 hold yet: you type it on PCP's page, check its sites and choose how its uses
 go, and the assistant gets its name. The request log names the secret and the
-site of each use, never the value.
+site of each use, never the value. A secret with no site, used anywhere or
+not, is typed only after asking you: for one you have not let be used
+anywhere, you answer **Once** (this time only) or **Always at this site**
+(which adds the site to it). A browser flow you approved types the secrets
+it has a place for at its sites as before.
+
+**Where a secret may be used.** Each secret has a scope, under **Scope** on
+its row: the servers, API endpoints, mail and calendar accounts, services
+and wrappers that may use it, its sites, or **Anywhere**. Whatever uses it
+now is in its scope while it does; you add others, take away one that does
+not use it, or tick Anywhere there. Picking a secret on a server's own page
+is enough to let that server use it. A secret you add with no site starts as
+Anywhere; one made for something (a new server's, a service's, a wrapper's,
+or one an assistant asked for) starts with only that. Secrets from before
+scopes got what used them as their scope, and the ones nothing used are
+Anywhere, so nothing changed for them. When an assistant proposes something
+that uses one of your secrets outside its scope, its request shows **Also
+allow "<secret>" for <what>**, ticked: agreeing adds it to the scope, and
+the request cannot be agreed to with it unticked. A change to a wrapper lists each other wrapper of the same definition too, since they get the same places, and an item from a linked repository asks the same on its review.
+
+**Changes an assistant proposes to a secret.** `edit_secret`,
+`rotate_secret`, `change_secret_scope` and `delete_secret` always ask you,
+whatever the token may do, on a page that shows the secret before and after
+and what uses it, and change only what it shows, and only if the secret has
+not changed since the assistant asked. A new value is typed on that page or
+made by PCP there, never seen by the assistant; everything that uses the
+secret sends the new one, its "rejected the credentials" alerts are cleared,
+and a service that takes it is made again with it. A new name lists the
+wrappers and browser flows that name the secret by its old one. A secret is
+deleted only once nothing uses it: change those on their own pages first.
+PCP's own secrets (an OAuth sign-in, an SSH key, a VPN's proxy password, a
+value PCP made for a service) are not an assistant's to change.

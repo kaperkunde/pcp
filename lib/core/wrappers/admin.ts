@@ -1032,11 +1032,14 @@ export async function applyWrapperChange(
     tokenId,
     secretValue,
     access = [],
+    made,
   }: {
     tokenId: string
     secretValue?: string
     /** The levels and tiers the owner left on the page (proposed-access.ts). */
     access?: AccessRule[]
+    /** Filled in with the wrapper a create made. */
+    made?: { ids: string[] }
   },
 ): Promise<string> {
   if (ask.action === "create") {
@@ -1067,6 +1070,7 @@ export async function applyWrapperChange(
       definition,
       ask.instanceOf?.definitionId ?? null,
     )
+    made?.ids.push(id)
 
     if (ask.note) {
       await setPersonalNote(ctx, "server", id, ask.note)
