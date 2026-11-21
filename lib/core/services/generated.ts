@@ -8,6 +8,7 @@ import {
   generatedSecretName,
   takeBackGenerated,
 } from "../secrets"
+import { blockingUses, secretUses } from "../secret-uses"
 import { isPcpError, PcpError } from "../errors"
 import {
   generatedEnv,
@@ -221,24 +222,31 @@ export async function generatedSecretsOf(
 
 /**
  * After a service is removed: the values PCP made for its variables go too
- * (deleteManagedSecret), unless something still sends one (the server it
- * registered, kept, or another service of the same name's variable).
+ * (deleteManagedSecret), unless something still uses one (secret-uses.ts,
+ * the one list of uses: the server it registered, kept, another service's
+ * variable, a wrapper's place). While a wrapper's definition does not read,
+ * its uses are unknown, so nothing is dropped then.
  */
 export async function dropUnusedGeneratedSecrets(
   ctx: VaultContext,
   ids: string[],
 ): Promise<void> {
-  for (const id of ids) {
-    const [servers, specs] = await Promise.all([
-      db().mcpServer.count({
-        where: { vaultId: ctx.vaultId, authSecretId: id },
-      }),
-      db().serviceSpec.count({
-        where: { server: { vaultId: ctx.vaultId }, env: { contains: id } },
-      }),
-    ])
+  if (ids.length === 0) {
+    return
+  }
 
-    if (servers === 0 && specs === 0) {
+  const report = { unread: 0 }
+  const usage = await secretUses(ctx, ids, report)
+
+  if (report.unread > 0) {
+    return
+  }
+
+  for (const id of ids) {
+    if (
+      usage.has(id) &&
+      blockingUses(usage.get(id), "generated").length === 0
+    ) {
       await deleteManagedSecret(ctx, id)
     }
   }
