@@ -64,15 +64,25 @@ export async function setUpEntries(
   return done
 }
 
+/** A service among a token's servers, or one that registered one of them. */
+type ServiceAmong = {
+  serviceId: string
+  registeredId: string | null
+  /** Its image and source tag. */
+  images: string[]
+  /** Whether its definition declares a sign-in (services/signin.ts). */
+  signin: boolean
+}
+
 /**
- * The images and source tags of the services among these servers, or that
- * registered one of them: a token that reaches only what a service serves
- * has that service's item all the same.
+ * The services among these servers, or that registered one of them: a
+ * token that reaches only what a service serves has that service's item
+ * all the same.
  */
-async function serviceImages(
+async function servicesAmong(
   ctx: VaultContext,
   serverIds: string[],
-): Promise<string[]> {
+): Promise<ServiceAmong[]> {
   if (serverIds.length === 0) {
     return []
   }
@@ -85,7 +95,7 @@ async function serviceImages(
         { registeredId: { in: serverIds } },
       ],
     },
-    select: SERVICE_SPEC_SELECT,
+    select: { ...SERVICE_SPEC_SELECT, serverId: true, registeredId: true },
   })
 
   return specs.flatMap((spec) => {
@@ -94,10 +104,50 @@ async function serviceImages(
         openServiceSpec(ctx, spec).definition,
       )
 
-      return [definition.image ?? "", definition.source ?? ""]
+      return [
+        {
+          serviceId: spec.serverId,
+          registeredId: spec.registeredId,
+          images: [definition.image ?? "", definition.source ?? ""],
+          signin: definition.signin !== undefined,
+        },
+      ]
     } catch {
       // A stored definition that no longer reads says nothing.
       return []
     }
   })
+}
+
+/** The images and source tags of the services among these servers. */
+async function serviceImages(
+  ctx: VaultContext,
+  serverIds: string[],
+): Promise<string[]> {
+  return (await servicesAmong(ctx, serverIds)).flatMap(
+    (service) => service.images,
+  )
+}
+
+/**
+ * The services among these servers whose definition declares a sign-in
+ * (services/signin.ts), each with the servers of it the token reaches (the
+ * service, the server it registered) and the catalogue entries it is. Read
+ * from the stored definitions only: whether one is signed in is
+ * connect_account's to say, which search never calls.
+ */
+export async function signinServices(
+  ctx: VaultContext,
+  serverIds: string[],
+): Promise<Array<{ serverIds: string[]; entries: CatalogueId[] }>> {
+  const reached = new Set(serverIds)
+
+  return (await servicesAmong(ctx, serverIds))
+    .filter((service) => service.signin && service.registeredId)
+    .map((service) => ({
+      serverIds: [service.registeredId!, service.serviceId].filter((id) =>
+        reached.has(id),
+      ),
+      entries: entriesOfImages(service.images).map((entry) => entry.id),
+    }))
 }

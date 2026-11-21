@@ -301,7 +301,7 @@ import {
   canSetUpLine,
   catalogueNamed,
 } from "./capabilities/catalogue"
-import { setUpEntries } from "./capabilities/catalogue-state"
+import { setUpEntries, signinServices } from "./capabilities/catalogue-state"
 import {
   MAX_ANSWER_CHARS as MAX_CAPABILITY_ANSWER_CHARS,
   MAX_MERGED_FILES,
@@ -1852,6 +1852,48 @@ export function buildGatewayServer(
       )
   }
 
+  /**
+   * search's line for each server whose service declares a sign-in
+   * (services/signin.ts) that its hits are on, or that is a catalogue
+   * entry the query names and this token has: set up is not signed in, and
+   * connect_account says which. Read from the stored definitions only:
+   * search calls nothing.
+   */
+  async function signinNotes(query: string, refs: string[]): Promise<string[]> {
+    const hits = new Set(refs.map((ref) => ref.split("/")[0]!))
+    const named = new Set(catalogueNamed(query).map((entry) => entry.id))
+
+    if (hits.size === 0 && named.size === 0) {
+      return []
+    }
+
+    const reached = currentServers()
+    const slugOf = new Map(reached.map((server) => [server.id, server.slug]))
+    const slugs = new Set<string>()
+
+    for (const service of await signinServices(
+      scope.ctx,
+      reached.map((server) => server.id),
+    )) {
+      const own = service.serverIds.flatMap((id) => {
+        const slug = slugOf.get(id)
+        return slug ? [slug] : []
+      })
+      const hit = own.find((slug) => hits.has(slug))
+
+      if (hit) {
+        slugs.add(hit)
+      } else if (own[0] && service.entries.some((id) => named.has(id))) {
+        slugs.add(own[0])
+      }
+    }
+
+    return [...slugs].map(
+      (slug) =>
+        `Sign-in on ${slug}: connect_account says whether it is signed in, and hands the owner the sign-in page when not.`,
+    )
+  }
+
   /** search's answer, before what it says once a session. */
   async function searchRun(args: SearchArgs): Promise<Outcome> {
     if (args.server && !bySlug.has(args.server)) {
@@ -1928,12 +1970,20 @@ export function buildGatewayServer(
       : await missingCapabilities(args.query)
     // What PCP could set up for it that the vault has not (#163).
     const settable = narrowed ? [] : await canSetUp(args.query, reported)
+    // A service that signs in, set up: connect_account says whether it is.
+    const signins = await signinNotes(
+      narrowed ? "" : args.query,
+      results
+        .filter((result) => result.kind === "tool")
+        .map((result) => result.ref),
+    )
 
     if (
       results.length === 0 &&
       repoResults.length === 0 &&
       missing.length === 0 &&
-      settable.length === 0
+      settable.length === 0 &&
+      signins.length === 0
     ) {
       return text(
         `Nothing matches "${args.query}". Try other words, or list_tools for every tool on a server.`,
@@ -1966,6 +2016,7 @@ export function buildGatewayServer(
             `${result.kind} ${result.ref}${result.title ? ` (${result.title})` : ""}${result.tier ? ` [${result.kind === "tool" || result.kind === "pcp" ? `${result.tier}: ${callEntryFor(result.tier)}` : result.tier}]` : ""} — ${result.description}`,
         ),
         ...(notes.length ? ["", ...notes] : []),
+        ...(signins.length ? ["", ...signins] : []),
         ...(missing.length ? ["", ...missing] : []),
         ...(settable.length ? ["", ...settable] : []),
         ...(args.kind
