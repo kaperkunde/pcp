@@ -591,7 +591,7 @@ storageConnect`), never in the background, and SFTP for nothing else;
   (link last, check_server next), a proposal's token and chosen levels wait
   with it and are given by the relaunch (`settleLaunch`), a remake that picks
   another port moves what it registered (`followPublishedPort`), and an
-  exit's service is not kept. A failed remake marks the service
+  exit's service is not kept. A failed remake of a service that ran marks it
   failed and says that Start makes it again. A variable marked `generated`
   gets a random value at launch, or when its definition gains it, before
   the next remake (`services/generated.ts`): a managed `generated` secret
