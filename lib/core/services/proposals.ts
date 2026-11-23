@@ -29,6 +29,7 @@ import {
 } from "./definition"
 import {
   KeptFailedLaunch,
+  keepLaunchCarry,
   serviceOfDefinition,
   type ServiceLaunchInput,
 } from "./services"
@@ -444,6 +445,53 @@ export type ServiceLauncher = (
 }>
 
 /**
+ * What the owner's yes gives the token that asked, once what it proposed
+ * runs: a token scoped to chosen servers reaches the service and what it
+ * registered, and the levels and tiers the owner left on the page are
+ * written for it (or kept to apply to the tools first read). Also what a
+ * kept failed service applies when it is launched again.
+ */
+export async function settleLaunch(
+  ctx: VaultContext,
+  {
+    tokenId,
+    serviceId,
+    registeredId,
+    access,
+  }: {
+    tokenId: string
+    serviceId: string
+    registeredId: string | null
+    access: AccessRule[]
+  },
+): Promise<string> {
+  const token = await db().apiToken.findUniqueOrThrow({
+    where: { id: tokenId },
+    select: { allowAllServers: true },
+  })
+
+  if (!token.allowAllServers) {
+    for (const serverId of [serviceId, registeredId]) {
+      if (serverId) {
+        await db().apiTokenServer.upsert({
+          where: { tokenId_serverId: { tokenId, serverId } },
+          create: { tokenId, serverId },
+          update: {},
+        })
+      }
+    }
+  }
+
+  return registeredId
+    ? await settleChosenAccess(ctx, {
+        serverId: registeredId,
+        tokenId,
+        rules: access,
+      })
+    : ""
+}
+
+/**
  * The owner said yes: launches exactly what they were shown, with the
  * secret they typed in (saved under the name shown, and kept when the
  * launch fails, which the error says), and gives the token that asked what
@@ -535,6 +583,14 @@ export async function applyServiceChange(
     // What the owner typed stays theirs: said so, never dropped unseen.
     // A service PCP kept is bound to it: its page, last in the error, is
     // where they go on.
+    if (error instanceof KeptFailedLaunch) {
+      // What the owner chose for the token goes with the service PCP kept,
+      // and is applied once it is launched again.
+      await keepLaunchCarry(ctx, error.serviceId, { tokenId, access }).catch(
+        () => {},
+      )
+    }
+
     if (saved && !(error instanceof KeptFailedLaunch)) {
       throw new PcpError(
         isPcpError(error) ? error.code : "upstream",
@@ -555,31 +611,12 @@ export async function applyServiceChange(
     await setPersonalNote(ctx, "server", launched.id, ask.note).catch(() => {})
   }
 
-  const token = await db().apiToken.findUniqueOrThrow({
-    where: { id: tokenId },
-    select: { allowAllServers: true },
+  const levels = await settleLaunch(ctx, {
+    tokenId,
+    serviceId: launched.id,
+    registeredId: launched.registeredId,
+    access,
   })
-
-  // A token scoped to chosen servers reaches what it just launched.
-  if (!token.allowAllServers) {
-    for (const serverId of [launched.id, launched.registeredId]) {
-      if (serverId) {
-        await db().apiTokenServer.upsert({
-          where: { tokenId_serverId: { tokenId, serverId } },
-          create: { tokenId, serverId },
-          update: {},
-        })
-      }
-    }
-  }
-
-  const levels = launched.registeredId
-    ? await settleChosenAccess(ctx, {
-        serverId: launched.registeredId,
-        tokenId,
-        rules: access,
-      })
-    : ""
   const service = await getServer(ctx, launched.id)
   const registered = launched.registeredId
     ? await getServer(ctx, launched.registeredId).catch(() => null)

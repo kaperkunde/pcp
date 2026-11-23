@@ -110,6 +110,7 @@ import {
   type ServiceStatus,
   type ServiceUpdateChoice,
 } from "./services/services"
+import { settleLaunch } from "./services/proposals"
 import { newerImageOn, type NewerImage } from "./services/updates"
 import {
   bindGeneratedEnv,
@@ -3389,6 +3390,7 @@ export async function relaunchService(
     byOwner: true,
     bindGenerated: true,
   })
+  const carry = loaded.carry
   const result = await relaunchFailedOn(loaded, access)
   const registers = loaded.definition.registers
   let message =
@@ -3406,6 +3408,21 @@ export async function relaunchService(
       if (sync.status !== "ok") {
         message += ` PCP could not read its tools yet: ${sync.message}`
       }
+    }
+  }
+
+  // A service an assistant proposed: its token gets what the owner chose
+  // when they agreed to it, now that it runs.
+  if (carry) {
+    const levels = await settleLaunch(ctx, {
+      tokenId: carry.tokenId,
+      serviceId: result.id,
+      registeredId: result.registeredId,
+      access: carry.access,
+    }).catch(() => "")
+
+    if (levels) {
+      message += ` ${levels}`
     }
   }
 

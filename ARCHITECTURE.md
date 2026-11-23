@@ -1534,9 +1534,15 @@ published on the loopback, where a port number widens nothing), the plain
 values and the secrets bound to its variables, saved or launched again; the
 second launch is the same code on the same rows. Another image, ports
 beyond the ones approved, an address, new variables or another SSH server is
-a fresh proposal, never this form. An assistant's `status` says it failed,
-and `start`, `stop`, `restart`, `logs`, `update` and the file tools refuse
-with the reason and the page's link, last; `check_server` says so too. The
+a fresh proposal, never this form. Every call of an assistant to it (`status`, `start`, `stop`,
+`restart`, `logs`, `update`, the file tools) answers `needs_owner` (reason
+`setup`) with the reason, `check_server` on the owner's next message and the
+page's link last; `check_server` says so too. A proposal's token and the
+levels the owner left on its request page are kept with the failed service
+(in its sealed `failure`) and given on a successful relaunch
+(`settleLaunch`). A remake that picks another port also moves what the
+service registered (an MCP server's address, an endpoint's base and schema
+address: only the host port part, `followPublishedPort`). The
 answer to the owner's or an assistant's launch ends with the link to the
 kept service's page. It is removed like any service. An exit's service is
 not kept (the owner names the exit in the launch). Making a container again (`recreateServiceOn`: an update, a changed
@@ -1697,8 +1703,11 @@ container again (start, restart, remake, update, start on demand, the
 reconcile pass; never a status, logs or image read, or a removal:
 `ServiceOptions.bindGenerated`), and the server it registered moves to it
 only once the container is made with it (`followRegisteredAuth`). Each is named in the launch's list as soon as it
-exists, so a launch that fails, even part way through making them, takes
-back exactly what it made (`takeBackGenerated`). Removing the service
+exists, so a launch that fails before PCP asks the engine for anything,
+even part way through making them, takes back exactly what it made
+(`takeBackGenerated`); one that fails after it keeps them, bound to the
+failed service it keeps (a relaunch uses them, removing the service
+removes them). Removing the service
 removes its generated secrets (`deleteManagedSecret`), except one the
 server it registered (kept on the owner's choice) or another service
 still sends. Saving the service, or the server it registered, with it

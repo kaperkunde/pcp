@@ -35,7 +35,9 @@ import type { LoadedService } from "./services"
  * name that is taken (a service of the same name renamed since, or removed
  * with the server it registered kept, which still sends its value) gets
  * "-2", "-3", …, so two services never share a token. Only what this call
- * made is taken back when a launch fails (takeBackGenerated). Removing the
+ * made is taken back when a launch fails before the engine is asked for
+ * anything (takeBackGenerated), and kept, bound, with a failed launch the
+ * service is kept for. Removing the
  * service removes them, unless something still sends one.
  */
 

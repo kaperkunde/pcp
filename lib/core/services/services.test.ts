@@ -69,6 +69,7 @@ import {
 } from "./definition"
 import {
   KeptFailedLaunch,
+  keepLaunchCarry,
   saveServiceSettings,
   serviceDial,
   serviceOfDefinition,
@@ -2078,6 +2079,67 @@ describe(
       expect(again?.registeredId).toBeTruthy()
     })
 
+    it("moves the MCP server it registered to the port a remake picks", async () => {
+      const hostId = await pinnedHost()
+      const launched = await launchService(
+        ctx,
+        await launchInput(hostId, {
+          publish: AUTO,
+          definition: definition({
+            env: [{ name: "LOG_LEVEL", value: "info" }],
+            registers: MCP,
+          }),
+          env: {},
+        }),
+        FAST,
+      )
+      const first = launched.publish!.ports[0]!.host
+      docker.update((state) => {
+        state.busyPorts = [first]
+      })
+
+      await recreateService(ctx, launched.id, FAST)
+      const second = (await serviceView(ctx, launched.id)).publish.ports[0]!
+        .host
+
+      expect(second).not.toBe(first)
+      expect((await getServer(ctx, launched.registeredId!)).url).toBe(
+        `http://127.0.0.1:${second}/mcp`,
+      )
+    })
+
+    it("refuses at once when the engine says the port the owner named is taken, and PCP cannot read what listens", async () => {
+      const hostId = await pinnedHost()
+      docker.withoutSs()
+      docker.update((state) => {
+        state.busyPorts = [8081]
+      })
+
+      const failure = (await launchService(
+        ctx,
+        await launchInput(hostId, {
+          definition: definition({
+            ports: [{ container: 5001 }, { container: 5002 }],
+            health: { kind: "http", port: 5001, path: "/health" },
+          }),
+          publish: {
+            address: "127.0.0.1",
+            ports: [{ container: 5001 }, { container: 5002, host: 8081 }],
+          },
+        }),
+        FAST,
+      ).catch((error: unknown) => error)) as KeptFailedLaunch
+
+      expect(failure).toBeInstanceOf(KeptFailedLaunch)
+      expect(failure.message).toMatch(
+        /Port 8081 on Build box .* is already in use by something else/,
+      )
+      // One try: the port PCP did not pick is never moved by picking again.
+      expect(
+        docker.state().calls.filter((words) => words[0] === "run"),
+      ).toHaveLength(1)
+    })
+
     it("keeps its port when it is remade, and picks another when something took it", async () => {
       const hostId = await pinnedHost()
       const launched = await launchService(
@@ -2105,6 +2167,21 @@ describe(
       expect(docker.state().containers["pcp-docs"]!.publish).toEqual([
         `127.0.0.1:${second.host}:5001`,
       ])
+
+      // What it registered follows the new port, and a call goes through.
+      const endpoint = await getServer(ctx, launched.registeredId!)
+      expect(endpoint.url).toBe(`http://127.0.0.1:${second.host}`)
+      expect(endpoint.specUrl).toBe(
+        `http://127.0.0.1:${second.host}/openapi.json`,
+      )
+      const called = await callServerTool(
+        ctx,
+        endpoint,
+        "list_things",
+        {},
+        PUBLIC,
+      )
+      expect(called.isError).not.toBe(true)
     })
 
     it("keeps a failed launch, marked failed, with no container, and says so to an assistant", async () => {
@@ -2128,19 +2205,40 @@ describe(
       const service = await getServer(ctx, id)
       expect(service.status).toBe("error")
 
-      const status = await callServerTool(ctx, service, "status", {}, PUBLIC)
-      const said = (status.content as Array<{ text: string }>)[0]!.text
-      expect(said).toMatch(/failed to launch and PCP kept it, marked failed/)
+      const textOf = (result: { content: unknown }) =>
+        (result.content as Array<{ text: string }>)[0]!.text
+      const link = `[Change Docs service and launch it again in PCP](${PUBLIC.publicUrl}/servers/${id})`
 
-      const start = await callServerTool(ctx, service, "start", {}, PUBLIC)
-      expect(start.isError).toBe(true)
-      expect((start.content as Array<{ text: string }>)[0]!.text).toMatch(
-        /marked failed[\s\S]*The service's page: \[Open Docs service's page in PCP\]\(.*\)$/,
-      )
+      for (const tool of ["status", "start", "restart", "logs"] as const) {
+        const answered = await callServerTool(ctx, service, tool, {}, PUBLIC)
+        const text = textOf(answered)
+
+        expect(text).toMatch(/failed to launch and PCP kept it, marked failed/)
+        expect(text).toMatch(/call check_server with server "docs-service"/)
+        // The link to its page is last, never a bare address in JSON.
+        expect(text.trim().endsWith(link)).toBe(true)
+        expect(answered.structuredContent).toMatchObject({
+          kind: "needs_owner",
+          url: `${PUBLIC.publicUrl}/servers/${id}`,
+        })
+        expect(JSON.stringify(answered.structuredContent)).not.toContain(
+          "summary",
+        )
+      }
+
       expect(docker.state().containers).toEqual({})
       // Nothing starts it by itself.
       await reconcileServices(ctx, PUBLIC, { now: Date.now() + 3_600_000 })
       expect(docker.state().containers).toEqual({})
+
+      // An update touches nothing of it: not its definition either.
+      const before = JSON.stringify((await serviceView(ctx, id)).definition)
+      await expect(updateService(ctx, id, FAST)).rejects.toThrow(
+        /failed to launch/,
+      )
+      expect(JSON.stringify((await serviceView(ctx, id)).definition)).toBe(
+        before,
+      )
     })
 
     it("launches a failed service again once what stopped it is fixed, on the same service", async () => {
@@ -2219,6 +2317,51 @@ describe(
       await expect(
         relaunchService(ctx, failure.serviceId, { values: {} }, FAST),
       ).rejects.toThrow(/did not fail to launch/)
+    })
+
+    it("gives the token an assistant's proposal named what the owner chose for it, once the kept service is launched again", async () => {
+      const hostId = await pinnedHost()
+      forwarding = false
+      const failure = (await launchService(
+        ctx,
+        await launchInput(hostId, { publish: AUTO }),
+        FAST,
+      ).catch((error: unknown) => error)) as KeptFailedLaunch
+      const { token } = await createApiToken(ctx, {
+        name: "Claude",
+        allowAllServers: false,
+        serverIds: [hostId],
+      })
+      const tokenId = (await resolveApiToken(token))!.tokenId
+
+      await keepLaunchCarry(ctx, failure.serviceId, {
+        tokenId,
+        access: [{ pattern: "list_*", access: "allowed" }],
+      })
+      // Nothing is given before it runs.
+      expect(
+        await db().apiTokenServer.count({
+          where: { tokenId, serverId: failure.serviceId },
+        }),
+      ).toBe(0)
+
+      // Saving its settings keeps what was chosen.
+      forwarding = true
+      await relaunchService(ctx, failure.serviceId, { values: {} }, FAST)
+      const again = await relaunchService(
+        ctx,
+        failure.serviceId,
+        {},
+        { ...FAST, launch: true },
+      )
+
+      const reached = await db().apiTokenServer.findMany({
+        where: { tokenId },
+        select: { serverId: true },
+      })
+      expect(reached.map((row) => row.serverId)).toEqual(
+        expect.arrayContaining([failure.serviceId, again!.registeredId!]),
+      )
     })
 
     it("is removed like any service", async () => {

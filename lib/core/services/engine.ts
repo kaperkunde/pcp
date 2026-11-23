@@ -747,16 +747,34 @@ export async function runPublished(
       const says = error instanceof Error ? error.message : String(error)
       const autos = ports.filter((entry) => entry.auto)
 
-      if (
-        autos.length === 0 ||
-        !TAKEN.test(says) ||
-        attempt >= AUTO_PORT_TRIES
-      ) {
+      if (!TAKEN.test(says)) {
         throw error
       }
 
-      // Taken since it was looked at: the engine's word is the truth.
-      for (const entry of autos) {
+      // Which port the engine says is taken: a number after a colon in its
+      // words (127.0.0.1:8081). One the owner named is theirs, never moved.
+      const named = new Set(
+        [...says.matchAll(/:(\d{1,5})\b/g)].map((found) => Number(found[1])),
+      )
+      const explicit = ports.find(
+        (entry) => !entry.auto && named.has(entry.host),
+      )
+
+      if (explicit) {
+        throw new EngineError(
+          `Port ${explicit.host} on ${host.name} (${address}) is already in use by something else, so PCP did not start ${spec.containerName}. Choose another host port, or leave it out and PCP picks a free one.`,
+        )
+      }
+
+      if (autos.length === 0 || attempt >= AUTO_PORT_TRIES) {
+        throw error
+      }
+
+      // Taken since it was looked at: the engine's word is the truth. The
+      // ports it names are not tried again (all of them when it names none).
+      const taken = autos.filter((entry) => named.has(entry.host))
+
+      for (const entry of taken.length > 0 ? taken : autos) {
         refused.add(entry.host)
       }
 

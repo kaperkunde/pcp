@@ -49,7 +49,15 @@ import { handleOf, type BytesKeeper, type ResultOpener } from "../tool-results"
 import { readCapped } from "../openapi/http"
 import { makeRedactor } from "../openapi/redact"
 import { send, type SendOptions } from "../openapi/transport"
-import { markdownLink } from "../owner-link"
+import {
+  linkLabel,
+  linkLastText,
+  markdownLink,
+  nextMessageCheck,
+} from "../owner-link"
+import type { AccessRule } from "../proposed-access"
+import { noteOwnerAsked } from "../request-log"
+import type { NeedsOwner } from "../tools/outcome"
 import { checkPersonalNote, setPersonalNote } from "../personal-notes"
 import { writeManagedSecret } from "../secrets"
 import {
@@ -255,6 +263,8 @@ export type LoadedService = {
   ask: ServicePublishAsk
   /** Why its launch failed while PCP keeps it marked failed; else null. */
   failure: string | null
+  /** What a kept proposal's token gets when it is launched again. */
+  carry: LaunchCarry | null
   env: ServiceEnvBindings
   /** What the owner typed for its plain variables. */
   values: ServicePlainValues
@@ -276,7 +286,7 @@ function ownPart(
     containerName: loaded.spec.containerName,
     publish: JSON.stringify(loaded.ask),
     values: JSON.stringify(loaded.values),
-    failure: sealedFailure(loaded.failure),
+    failure: sealedFailure(loaded.failure, loaded.carry),
     ...over,
   }
 }
@@ -314,6 +324,7 @@ export async function loadService(
     publish: readPublish(own.publish),
     ask: readPublishAsk(own.publish),
     failure: readFailure((own as { failure?: string }).failure),
+    carry: readCarry((own as { failure?: string }).failure),
     env: readEnvBindings(spec.env),
     values: readPlainValues(own.values),
     engine: engineOf(spec.engine),
@@ -623,9 +634,19 @@ export class KeptFailedLaunch extends PcpError {
   }
 }
 
+/**
+ * What an assistant's proposal gets once its service is launched: the token
+ * that asked and the levels and tiers the owner left on the page. Kept with
+ * the failed service the proposal made, and applied by its relaunch.
+ */
+export type LaunchCarry = { tokenId: string; access: AccessRule[] }
+
 /** The failure a service keeps, as the own part seals it. */
-export function sealedFailure(message: string | null): string {
-  return message ? JSON.stringify({ message }) : ""
+export function sealedFailure(
+  message: string | null,
+  carry: LaunchCarry | null = null,
+): string {
+  return message ? JSON.stringify({ message, ...(carry ? { carry } : {}) }) : ""
 }
 
 export function readFailure(json: string | undefined): string | null {
@@ -639,6 +660,38 @@ export function readFailure(json: string | undefined): string | null {
   } catch {
     return "failed"
   }
+}
+
+export function readCarry(json: string | undefined): LaunchCarry | null {
+  try {
+    const value = JSON.parse(json ?? "") as { carry?: LaunchCarry }
+    return value.carry &&
+      typeof value.carry.tokenId === "string" &&
+      Array.isArray(value.carry.access)
+      ? value.carry
+      : null
+  } catch {
+    return null
+  }
+}
+
+/** Keeps what the owner chose for the token with the failed service. */
+export async function keepLaunchCarry(
+  ctx: VaultContext,
+  id: string,
+  carry: LaunchCarry,
+): Promise<void> {
+  const loaded = await loadService(ctx, id)
+
+  if (!loaded.failure) {
+    return
+  }
+
+  loaded.carry = carry
+  await db().serviceSpec.update({
+    where: { serverId: id },
+    data: sealedServiceOwn(ctx, id, ownPart(loaded)),
+  })
 }
 
 /**
@@ -742,6 +795,37 @@ export function publishedWords(publish: ServicePublish): string {
     .join(", ")
 
   return ports ? `Published on ${publish.address}: ${ports}.` : ""
+}
+
+/**
+ * What a call to a service whose launch failed answers: needs_owner
+ * (reason "setup"), the link to its page last, and check_server on the
+ * owner's next message, as any answer that hands the owner a page.
+ */
+function failedAnswer(
+  loaded: LoadedService,
+  publicUrl: string,
+): CallToolResult {
+  const pageUrl = pageOf(loaded.server.id, publicUrl)
+  const label = `Change ${loaded.server.name} and launch it again in PCP`
+  const owner: NeedsOwner = {
+    kind: "needs_owner",
+    reason: "setup",
+    url: pageUrl,
+    label: linkLabel(label),
+  }
+
+  noteOwnerAsked()
+
+  return {
+    content: [
+      {
+        type: "text",
+        text: `Not done yet: ${failedWords(loaded)}\n${nextMessageCheck(`check_server with server "${loaded.server.slug}"`, "it is still failed")}\n\n${linkLastText(pageUrl, label)}`,
+      },
+    ],
+    structuredContent: owner,
+  }
 }
 
 /** The words that close a failed launch's error: what PCP kept. */
@@ -1005,7 +1089,7 @@ export async function launchServiceOn(
               containerName: prepared.containerName,
               publish: JSON.stringify(asked.publish),
               values: JSON.stringify(prepared.values),
-              failure: sealedFailure(failure.trim()),
+              failure: sealedFailure(failure.trim(), existing?.carry ?? null),
             }),
           },
         })
@@ -1713,6 +1797,39 @@ export async function serviceActionOn(
   return serviceStatusOn(loaded, access)
 }
 
+/**
+ * What the service registered names the port it was published on: when a
+ * remake published another, its address (an MCP server's, an endpoint's
+ * base and schema) follows, the host port part only, the path kept.
+ */
+async function followPublishedPort(
+  loaded: LoadedService,
+  before: ServicePublish,
+): Promise<void> {
+  const registers = loaded.definition.registers
+  const id = loaded.spec.registeredId
+
+  if (!id || (registers.kind !== "mcp" && registers.kind !== "openapi")) {
+    return
+  }
+
+  const was = serviceOrigin(before, "", registers.port, "tunnel")
+  const now = serviceOrigin(loaded.publish, "", registers.port, "tunnel")
+  const registered = await findServer(loaded.ctx, { id })
+
+  if (!was || !now || was === now || !registered) {
+    return
+  }
+
+  const swap = (address: string | null) =>
+    address?.startsWith(was) ? `${now}${address.slice(was.length)}` : address
+
+  await writeServer(loaded.ctx, id, {
+    url: swap(registered.url) ?? registered.url,
+    ...(registered.specUrl ? { specUrl: swap(registered.specUrl) } : {}),
+  })
+}
+
 /** Writes the ports as published to the service's own part. */
 async function saveOwnPublish(loaded: LoadedService): Promise<void> {
   await db().serviceSpec.update({
@@ -1776,9 +1893,11 @@ export async function recreateServiceOn(
     )
 
     if (JSON.stringify(ran) !== JSON.stringify(loaded.publish)) {
+      const before = loaded.publish
       loaded.publish = ran
       loaded.ask = ran
       await saveOwnPublish(loaded)
+      await followPublishedPort(loaded, before)
     }
   } catch (error) {
     throw await failedRecreate(loaded, access, error)
@@ -1963,6 +2082,11 @@ export async function updateServiceOn(
   access: ServiceAccess,
   choice: ServiceUpdateChoice = {},
 ): Promise<{ status: ServiceStatus; image: string; changed: boolean }> {
+  // Nothing of a service whose launch failed is changed before it runs.
+  if (loaded.failure) {
+    throw new PcpError("state", failedWords(loaded))
+  }
+
   // A request asked before the vault's rows were sealed holds the plain
   // SHA-256 of the definition: it still counts.
   if (
@@ -2429,24 +2553,7 @@ export async function callServiceTool(
   // A launch that failed is kept with no container: say so, and where the
   // owner changes it and launches it again.
   if (loaded.failure) {
-    const page = markdownLink(
-      `Open ${loaded.server.name}'s page in PCP`,
-      pageOf(loaded.server.id, publicUrl),
-    )
-
-    return call.tool === "status"
-      ? jsonToolResult(
-          {
-            summary: failedWords(loaded),
-            state: "failed",
-            host: loaded.host?.name ?? null,
-            page: pageOf(loaded.server.id, publicUrl),
-          },
-          { redact },
-        )
-      : errorToolResult(`${failedWords(loaded)}\nThe service's page: ${page}`, {
-          redact,
-        })
+    return failedAnswer(loaded, publicUrl)
   }
 
   // An image update is the owner's: what it finds is a request for them.

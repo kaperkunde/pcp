@@ -111,6 +111,8 @@ export type FakeDocker = {
   volumeDir: (volume: string) => string
   /** Takes curl or wget off the login's PATH. */
   withoutDownloader: (program: "curl" | "wget") => void
+  /** Takes `ss` off the login's PATH: PCP then relies on the engine's refusal. */
+  withoutSs: () => void
   /** Every process's command line PCP's commands ran with (as `ps` would show). */
   commands: string[]
   close: () => void
@@ -460,6 +462,7 @@ export function startFakeDocker({
     dir,
     volumeDir: (volume) => path.join(dir, "volumes", volume),
     withoutDownloader: (program) => rmSync(path.join(bin, program)),
+    withoutSs: () => rmSync(path.join(bin, "ss")),
     close: () => rmSync(dir, { recursive: true, force: true }),
   }
 }
