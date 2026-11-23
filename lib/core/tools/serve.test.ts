@@ -14,6 +14,8 @@ import {
 } from "./outcome"
 import {
   ARGUMENTS_DID_NOT_FIT,
+  masked,
+  MASKED_OUT_OF_SHAPE,
   permissionLinkIn,
   registerTool,
   TOOL_REPORTED_ERROR,
@@ -411,5 +413,66 @@ describe("a lead in front of an answer (#59)", () => {
       type: "text",
       text: "Answered since: …",
     })
+  })
+})
+
+describe("an answer masked last (#158)", () => {
+  const output = () => ({
+    type: "object",
+    properties: { n: { type: "number" }, note: { type: "string" } },
+    required: ["n"],
+  })
+  const answer = {
+    content: [{ type: "text" as const, text: '{"n":3,"note":"tok_abc"}' }],
+    structuredContent: { n: 3, note: "tok_abc" },
+  }
+
+  it("fails closed: PCP's own fault, never the answer unmasked", async () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => {})
+    const result = await masked(
+      answer,
+      async () => {
+        throw new Error("the database went away")
+      },
+      "count",
+      output,
+    )
+    error.mockRestore()
+
+    expect(result.isError).toBe(true)
+    expect(JSON.stringify(result)).not.toContain("tok_abc")
+    expect(result._meta?.[ERROR_META_KEY]).toMatchObject({ code: "internal" })
+  })
+
+  it("passes a masked answer that still has the tool's shape", async () => {
+    const result = await masked(
+      answer,
+      async (shown) => ({
+        ...shown,
+        structuredContent: { n: 3, note: "[kept: r1]" },
+      }),
+      "count",
+      output,
+    )
+
+    expect(result.structuredContent).toEqual({ n: 3, note: "[kept: r1]" })
+  })
+
+  it("says why when masking left the answer outside the tool's shape", async () => {
+    const result = await masked(
+      { ...answer, structuredContent: { n: 12345678 } },
+      async (shown) => ({
+        ...shown,
+        structuredContent: { n: "[kept: r1]" },
+      }),
+      "count",
+      output,
+    )
+
+    expect(result.isError).toBe(true)
+    expect(result._meta?.[ERROR_META_KEY]).toMatchObject({ code: "pass_only" })
+    expect((result.content[0] as { text: string }).text).toBe(
+      MASKED_OUT_OF_SHAPE,
+    )
   })
 })

@@ -1392,6 +1392,8 @@ model ToolResult {
 
   @@index([tokenId, createdAt])
   @@index([expiresAt])
+  /// The live pass-only results a token's answers are masked with (#158).
+  @@index([tokenId, passOnly, expiresAt])
   @@map("tool_result")
 }
 

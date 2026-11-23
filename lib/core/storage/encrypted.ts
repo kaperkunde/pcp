@@ -76,6 +76,20 @@ type Meta = {
   t?: string
   /** Modified, ISO. */
   m: string
+  /**
+   * Saved from a pass-only kept result (#158), sealed with the row's id as
+   * associated data beside the row's own `pass_only`, so a write to the
+   * database alone cannot clear it: either one marks the file.
+   */
+  p?: true
+}
+
+/** Whether an entry is marked pass-only, by its row or its sealed meta. */
+export function isPassOnlyEntry(
+  entry: Pick<StorageEntry, "passOnly">,
+  meta: Meta,
+): boolean {
+  return entry.passOnly || meta.p === true
 }
 
 export type EncryptedStore = {
@@ -471,6 +485,7 @@ export async function openEncryptedFolder(
       s: object.size,
       ...(type ? { t: type } : {}),
       m: new Date().toISOString(),
+      ...(passOnly ? { p: true as const } : {}),
     }
     const wrapped = asBytes(
       wrapFileKey(store.storeKey, serverId, object.objectId, object.fileKey),
@@ -733,7 +748,7 @@ export async function openEncryptedFolder(
         name: meta.n,
         bytes: Buffer.concat(chunks),
         modified: meta.m,
-        passOnly: entry.passOnly,
+        passOnly: isPassOnlyEntry(entry, meta),
       }
     },
 
@@ -757,7 +772,7 @@ export async function openEncryptedFolder(
           entry.fileKey,
         ),
         rootReal: store.rootReal,
-        passOnly: entry.passOnly,
+        passOnly: isPassOnlyEntry(entry, meta),
       }
     },
 
@@ -774,7 +789,7 @@ export async function openEncryptedFolder(
         offset,
         length,
         stream: readObject(store, fs, entry, size, { offset, length }),
-        passOnly: entry.passOnly,
+        passOnly: isPassOnlyEntry(entry, meta),
       }
       return opened
     },

@@ -238,7 +238,12 @@ import {
   type ProposedAccess,
   type ProposedAccessShown,
 } from "./proposed-access"
-import { maskKeptError, maskKeptJson, maskKeptText } from "./kept-masks"
+import {
+  maskKeptError,
+  maskKeptJson,
+  maskKeptText,
+  passOnlyTracker,
+} from "./kept-masks"
 import { namesInWords, secretUses } from "./secret-uses"
 import {
   browserExitsFor,
@@ -699,15 +704,21 @@ export async function runCall(
     return connectResult(server, publicUrl)
   }
 
+  // A pass-only kept result handed to the tool is taken back out of what
+  // the call shows (#158), after keep has made its handles from the answer
+  // as it came.
+  const tracked = passOnlyTracker(resultOpener(ctx, tokenId))
+
   try {
-    const keepers = resultKeepers(ctx, tokenId)
+    const kept = resultKeepers(ctx, tokenId)
+    const keepers = { text: tracked.keeper(kept.text)!, bytes: kept.bytes }
     const context = { serverId: server.id, toolName }
     const answer = await executor.callTool(ctx, server, toolName, args, {
       publicUrl,
       tokenId,
       keep: keepers.text,
       keepBytes: keepers.bytes,
-      open: resultOpener(ctx, tokenId),
+      open: tracked.open,
       deadline,
     })
     // A service that signs in, signed out: its sign-in link instead of the
@@ -725,7 +736,7 @@ export async function runCall(
     })
 
     if (signin) {
-      return signin
+      return tracked.scrub(signin)
     }
 
     const {
@@ -744,11 +755,13 @@ export async function runCall(
     handles?.push(...made)
 
     return await keepWholeAnswer(
-      { raw: answer, shown, whole },
+      { raw: answer, shown: tracked.scrub(shown), whole },
       keepers.text,
       context,
     )
-  } catch (error) {
+  } catch (thrown) {
+    const error = tracked.scrubError(thrown)
+
     // A site the owner just saw: a site is asked about only for the address
     // in the call's arguments, so when they allowed the call, they allowed
     // it for this tab. Not when the arguments held a kept result: the owner
@@ -902,15 +915,20 @@ export async function runCodeCall(
     return { owner: connectResult(server, publicUrl) }
   }
 
+  // As in runCall: the value of a pass-only handle the call was given is
+  // out of what the program sees, after keep made its handles (#158).
+  const tracked = passOnlyTracker(resultOpener(ctx, tokenId))
+
   try {
-    const keepers = resultKeepers(ctx, tokenId)
+    const kept = resultKeepers(ctx, tokenId)
+    const keepers = { text: tracked.keeper(kept.text)!, bytes: kept.bytes }
     const context = { serverId: server.id, toolName }
     const answer = await executor.callTool(ctx, server, toolName, args, {
       publicUrl,
       tokenId,
       keep: keepers.text,
       keepBytes: keepers.bytes,
-      open: resultOpener(ctx, tokenId),
+      open: tracked.open,
       ...(secrets ? { secrets } : {}),
       ...(run
         ? {
@@ -928,6 +946,7 @@ export async function runCodeCall(
     return await maskedOutcome(
       ctx,
       tokenId,
+      tracked,
       await answerValue(
         answer,
         { fields, decode, keep },
@@ -938,7 +957,8 @@ export async function runCodeCall(
         { max },
       ),
     )
-  } catch (error) {
+  } catch (thrown) {
+    const error = tracked.scrubError(thrown)
     const owner = await ownerFirst(error, { ctx, tokenId, publicUrl, server })
 
     if (owner) {
@@ -957,19 +977,37 @@ export async function runCodeCall(
   }
 }
 
-/** A program's outcome with the token's pass-only values masked (#158). */
+/**
+ * A program's outcome with the values the call was handed and the token's
+ * pass-only values masked (#158).
+ */
 async function maskedOutcome(
   ctx: VaultContext,
   tokenId: string,
+  tracked: ReturnType<typeof passOnlyTracker>,
   outcome: CodeCallOutcome,
 ): Promise<CodeCallOutcome> {
   if ("owner" in outcome) {
-    return outcome
+    return { owner: tracked.scrub(outcome.owner) }
   }
 
   return outcome.ok
-    ? { ...outcome, value: await maskKeptJson(ctx, tokenId, outcome.value) }
-    : { ...outcome, error: await maskKeptText(ctx, tokenId, outcome.error) }
+    ? {
+        ...outcome,
+        value: await maskKeptJson(
+          ctx,
+          tokenId,
+          tracked.scrubValue(outcome.value),
+        ),
+      }
+    : {
+        ...outcome,
+        error: await maskKeptText(
+          ctx,
+          tokenId,
+          tracked.scrubText(outcome.error),
+        ),
+      }
 }
 
 /**

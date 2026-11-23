@@ -396,12 +396,26 @@ describe("a file saved from a pass-only result (#158)", () => {
     expect(opened).toMatchObject({ passOnly: true })
     expect(opened!.text()).toBe(VALUE)
 
+    // The mark is sealed in the index too: a write to the database alone
+    // does not clear it, and no link reads the file out.
+    await db().storageEntry.updateMany({
+      where: { serverId: id },
+      data: { passOnly: false },
+    })
+    const again = data(await call(id, "get_file", { path: "token.txt" }))
+    expect(again).not.toHaveProperty("text")
+    await expect(
+      readResult(ctx, {
+        tokenId,
+        id: (again.result as { $result: string }).$result,
+      }),
+    ).rejects.toMatchObject({ name: "PassOnlyError" })
+
     // Moved, it keeps its mark; written over with plain text, it loses it.
     data(await call(id, "move", { from: "token.txt", to: "moved.txt" }))
     expect(
-      (await db().storageEntry.findFirst({ where: { serverId: id } }))!
-        .passOnly,
-    ).toBe(true)
+      data(await call(id, "get_file", { path: "moved.txt" })),
+    ).not.toHaveProperty("text")
     data(
       await call(id, "save_file", {
         path: "moved.txt",
@@ -429,6 +443,12 @@ describe("a file saved from a pass-only result (#158)", () => {
       }),
     )
     data(await call(id, "save_file", { path: "other.txt", text: "plain" }))
+
+    // Also with the row's own mark cleared behind PCP's back.
+    await db().storageEntry.updateMany({
+      where: { serverId: id },
+      data: { passOnly: false },
+    })
 
     const refused = await call(id, "share_file", { path: "token.txt" })
     expect(refusal(refused)).toMatch(/never reads it out or links to it/)

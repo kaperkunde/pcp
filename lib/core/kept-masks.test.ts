@@ -21,7 +21,12 @@ import {
   passOnlyTracker,
 } from "./kept-masks"
 import { json, startTestApi, type TestApi } from "./openapi/test-api"
-import { runCall, runCodeCall, type PermissionExecutor } from "./permissions"
+import {
+  decidePermission,
+  runCall,
+  runCodeCall,
+  type PermissionExecutor,
+} from "./permissions"
 import { resolveHandles } from "./result-handles"
 import { createServer, getServer } from "./servers"
 import { scratchDatabase } from "./test-db"
@@ -128,6 +133,8 @@ describe("the call that was handed a pass-only value", () => {
     expect(error.message).toBe(
       `Invalid key [kept: ${id}] (an ordinary long text)`,
     )
+    // An internal error is logged with its stack, which repeats the message.
+    expect(error.stack).not.toContain(TOKEN_VALUE)
   })
 })
 
@@ -143,7 +150,20 @@ describe("an endpoint that echoes what it was sent", () => {
         return
       }
 
-      json(res, 200, { received: JSON.parse(request.body || "{}") })
+      const body = JSON.parse(request.body || "{}") as {
+        token?: string
+        mode?: string
+      }
+
+      if (body.mode === "connect") {
+        json(res, 200, {
+          connection_string: `postgres://app:${body.token}@db.example/main`,
+          note: `signed in with ${body.token}`,
+        })
+        return
+      }
+
+      json(res, 200, { received: body })
     })
   })
 
@@ -202,6 +222,29 @@ describe("an endpoint that echoes what it was sent", () => {
     expect(answer.isError).not.toBe(true)
     expect(JSON.stringify(answer)).not.toContain(TOKEN_VALUE)
     expect(textOf(answer)).toContain(`[kept: ${id}]`)
+  })
+
+  it("keeps a part keep names from the answer as it came, the value inside it (#158 review)", async () => {
+    const id = await passOnly()
+    const handles: Array<{ path: string; id: string }> = []
+    const answer = await runCall(
+      ctx,
+      await echo(),
+      "echo",
+      { body: { token: { $result: id }, mode: "connect" } },
+      { ...PUBLIC, tokenId, keep: ["connection_string"], handles },
+    )
+
+    // What is shown holds neither the value nor the part kept.
+    expect(answer.isError).not.toBe(true)
+    expect(JSON.stringify(answer)).not.toContain(TOKEN_VALUE)
+    expect(textOf(answer)).toContain(`signed in with [kept: ${id}]`)
+
+    // The part is kept whole, pass-only, ready for the next tool.
+    expect(handles.map((handle) => handle.path)).toEqual(["connection_string"])
+    const kept = await resultOpener(ctx, tokenId)(handles[0]!.id)
+    expect(kept).toMatchObject({ passOnly: true })
+    expect(kept!.text()).toBe(`postgres://app:${TOKEN_VALUE}@db.example/main`)
   })
 
   it("shows [kept: id] in an error that is not JSON", async () => {
@@ -323,6 +366,89 @@ describe("every later answer to the token, while the result lives", () => {
 
     expect(await showNote()).toBe(`Your note: ${TOKEN_VALUE}`)
     expect(await keptMasker(ctx, tokenId)).toBeNull()
+  })
+
+  it("is not pushed out by more pass-only results than it could look for once", async () => {
+    const id = await passOnly()
+
+    for (let index = 0; index < 80; index++) {
+      await passOnly(`throwaway-value-${index}-abcdefgh`)
+    }
+
+    says = `Your note: ${TOKEN_VALUE}`
+    expect(await showNote()).toBe(`Your note: [kept: ${id}]`)
+
+    // And the hashes this process holds are only a cache: worked out again.
+    forgetKeptMasks()
+    expect((await keptMasker(ctx, tokenId))!(TOKEN_VALUE)).toBe(`[kept: ${id}]`)
+  })
+
+  it("masks read_result and the results resource, which read a kept text back", async () => {
+    const id = await passOnly()
+    const long = (
+      await keepResult(ctx, {
+        tokenId,
+        serverId: serverId,
+        toolName: "show_note",
+        text: `A long note that quotes ${TOKEN_VALUE} in passing.`,
+        mediaType: "text/plain",
+      })
+    ).id
+    const client = await connect()
+
+    const read = textOf(
+      await client.callTool({
+        name: "execute_read",
+        arguments: { tool: "read_result", arguments: { id: long } },
+      }),
+    )
+    expect(read).toContain(`quotes [kept: ${id}] in passing`)
+    expect(read).not.toContain(TOKEN_VALUE)
+
+    const resource = await client.readResource({
+      uri: `pcp://results/${long}`,
+    })
+    const text = (resource.contents[0] as { text: string }).text
+    expect(text).toBe(`A long note that quotes [kept: ${id}] in passing.`)
+  })
+
+  it("masks check_permission's replay of a call the owner allowed", async () => {
+    const id = await passOnly()
+    await writeToolAccess(ctx, tokenId, serverId, "show_note", "ask")
+    says = `Your note: ${TOKEN_VALUE}`
+    const client = await connect()
+    const handle = await describedHandle(client, "notes", "show_note")
+
+    const asked = textOf(
+      await client.callTool({
+        name: "execute_read",
+        arguments: { call_handle: handle, arguments: {} },
+      }),
+    )
+    expect(asked).toContain("Not done yet")
+    const request = await db().permissionRequest.findFirstOrThrow()
+    await decidePermission(
+      ctx,
+      request.id,
+      "allow_once",
+      { ...PUBLIC },
+      executor,
+    )
+
+    const replay = textOf(
+      await (
+        await connect()
+      ).callTool({
+        name: "execute_destructive",
+        arguments: {
+          tool: "check_permission",
+          arguments: { id: request.id },
+        },
+      }),
+    )
+    expect(replay).toContain("The owner allowed it and it ran.")
+    expect(replay).toContain(`Your note: [kept: ${id}]`)
+    expect(replay).not.toContain(TOKEN_VALUE)
   })
 
   it("reaches a program's pcp.call too, its value and its errors", async () => {

@@ -670,18 +670,22 @@ embeddingProvider`, which hands `embeddings/provider.ts` the header;
   the resource, `pcp.read`/`image`/`frames`, view_image, links, a
   capability's input, the browser's `upload_file`) refuses it with code `pass_only`, and a new reader
   calls `refusePassOnly`. A tool that echoes it is masked (#158,
-  `kept-masks.ts`): the call it was handed to, in `upstream.ts
-callServerTool`, shows it as `[kept: <id>]` in its answer and errors
-  (`passOnlyTracker`), and for the result's life every answer to the token
-  does too (the gateway's `mask` hook, `runCodeCall`, `pcp.read`, the
-  resource), found by keyed hashes and a keyed rolling fingerprint
-  (`value-masks.ts`, as `maskTyped`), the values opened from the token's
-  rows inside a request and only their hashes held in memory, never stored;
-  at least `MIN_KEPT_MASK_CHARS`. A new way an answer reaches an assistant
+  `kept-masks.ts`): the call it was handed to (`permissions.ts runCall`
+  and `runCodeCall`, `passOnlyTracker`) shows it as `[kept: <id>]` in what
+  it shows and its errors (message and stack), after keep made its handles
+  from the answer as it came, and for the result's life every answer to the
+  token does too (the gateway's `mask` hook, failing closed and checking a
+  changed structured answer against the tool's output again,
+  `runCodeCall`, `pcp.read`, the resource), found by keyed hashes and a
+  keyed rolling fingerprint (`value-masks.ts`, as `maskTyped`), the values
+  opened from the token's rows inside a request and only their hashes held
+  in memory, never stored; at least `MIN_KEPT_MASK_CHARS`, every live one
+  up to what a token can hold. A new way an answer reaches an assistant
   goes through `maskKeptResult`. `save_file` of one marks the file in an
-  encrypted store's index (`storage_entry.pass_only`), so `get_file` answers
-  a pass-only handle again and `share_file` refuses it; a plain folder
-  refuses it. File links (`lib/core/file-links.ts`, only for a token
+  encrypted store's index (`storage_entry.pass_only` and its sealed meta,
+  either one counting), so `get_file` answers a pass-only handle again and
+  `share_file` and a conversion to plain refuse it; a plain folder refuses
+  it. File links (`lib/core/file-links.ts`, only for a token
   with `shareFiles`) move one kept file to or from the assistant's own
   computer: the link's secret is the credential for that file alone, stored
   only as its hash, the file encrypted under a key derived from it (an

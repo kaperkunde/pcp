@@ -285,7 +285,10 @@ function maskRuns(
         const label = labels.get(digestOf(chars.slice(at, at + length)))
 
         if (label !== undefined) {
-          found.push({ from: start[at]!, to: end[at + length - 1]!, label })
+          found.push({
+            ...outsideEscapes(text, start[at]!, end[at + length - 1]!),
+            label,
+          })
         }
       }
 
@@ -322,6 +325,50 @@ function maskRuns(
 
   parts.push(text.slice(at))
   return parts.join("")
+}
+
+/** Whether text[at] is a backslash that starts an escape (an odd run). */
+function startsEscape(text: string, at: number): boolean {
+  if (at < 0 || text.charCodeAt(at) !== 0x5c) {
+    return false
+  }
+
+  let run = 1
+
+  while (at - run >= 0 && text.charCodeAt(at - run) === 0x5c) {
+    run += 1
+  }
+
+  return run % 2 === 1
+}
+
+/**
+ * A run widened so it does not cut an escape in two (a backslash is a
+ * separator, so a run can start right after one, or inside a JSON
+ * `\uXXXX`): what stands in its place leaves the text valid JSON.
+ */
+function outsideEscapes(
+  text: string,
+  from: number,
+  to: number,
+): { from: number; to: number } {
+  for (let at = from - 1; at >= Math.max(0, from - 5); at -= 1) {
+    if (startsEscape(text, at)) {
+      const unicode = text.charCodeAt(at + 1) === 0x75
+      if (at === from - 1 || (unicode && from <= at + 5)) from = at
+      break
+    }
+  }
+
+  for (let at = to - 1; at >= Math.max(from, to - 5); at -= 1) {
+    if (startsEscape(text, at)) {
+      const end = text.charCodeAt(at + 1) === 0x75 ? at + 6 : at + 2
+      to = Math.min(text.length, Math.max(to, end))
+      break
+    }
+  }
+
+  return { from, to }
 }
 
 function decoded(word: string): string {

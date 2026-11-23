@@ -1,7 +1,12 @@
 import type { VaultContext } from "../context"
 import { db } from "../db"
 import { isPcpError, PcpError } from "../errors"
-import { openEncryptedFolder, openMeta, sweepPending } from "./encrypted"
+import {
+  isPassOnlyEntry,
+  openEncryptedFolder,
+  openMeta,
+  sweepPending,
+} from "./encrypted"
 import { openFolder, type Entry, type StorageFolder } from "./files"
 import {
   CONVERT_BUDGET_MS,
@@ -98,14 +103,19 @@ export async function convertStoreStep(
   // A file saved from a part keep named stays encrypted (#158): a plain
   // folder has nowhere to keep its mark. Said before anything starts.
   if (to === "plain" && loaded.root.converting !== "plain") {
-    const held = await db().storageEntry.findMany({
-      where: { serverId: server.id, passOnly: true, folder: false },
-      select: { id: true, meta: true },
-      take: 6,
-    })
+    // By the row's mark or the sealed one, which a database write alone
+    // cannot clear.
+    const held = (
+      await db().storageEntry.findMany({
+        where: { serverId: server.id, folder: false },
+        select: { id: true, meta: true, passOnly: true },
+      })
+    )
+      .map((row) => ({ row, meta: openMeta(ctx, row) }))
+      .filter(({ row, meta }) => isPassOnlyEntry(row, meta))
 
     if (held.length > 0) {
-      const names = held.slice(0, 5).map((row) => openMeta(ctx, row).n)
+      const names = held.slice(0, 5).map(({ meta }) => meta.n)
       throw new PcpError(
         "state",
         `${server.name} holds files saved from results PCP never reads out (${names.join(", ")}${held.length > 5 ? ", and more" : ""}), which a plain folder cannot keep so: delete them first, then make it plain.`,

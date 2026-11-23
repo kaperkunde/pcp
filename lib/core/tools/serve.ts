@@ -23,7 +23,7 @@ import {
   toolError,
   type NeedsOwner,
 } from "./outcome"
-import { RESULT_HANDLE } from "./validate"
+import { RESULT_HANDLE, validate } from "./validate"
 
 /**
  * How a call of a tool defined with defineTool runs is @kaperkunde/mcp's
@@ -233,18 +233,48 @@ export function withoutRepeatedStructure(
   return rest
 }
 
-/** The answer through `mask`; PCP's own fault when that fails. */
-async function masked(
+/**
+ * What a tool answers when masking a value kept from the assistant (#158)
+ * left its structured answer outside the tool's output schema.
+ */
+export const MASKED_OUT_OF_SHAPE =
+  "This answer held a value kept from you (a result keep made, which PCP never reads out), shown as [kept: <id>], and with it in place the answer no longer has this tool's shape. Ask for that part as a handle with keep instead, and pass the handle on."
+
+/**
+ * The answer through `mask`: PCP's own fault when that fails, never the
+ * answer unmasked. Masking runs after the answer was checked against the
+ * tool's output schema, so a structured answer it changed is checked again
+ * (`output`), and one that no longer fits says why rather than failing the
+ * client's own check.
+ */
+export async function masked(
   result: CallToolResult,
   mask: (result: CallToolResult) => Promise<CallToolResult>,
   tool: string,
+  output?: () => unknown,
 ): Promise<CallToolResult> {
+  let out: CallToolResult
+
   try {
-    return await mask(result)
+    out = await mask(result)
   } catch (error) {
     console.error("[gateway] an answer could not be masked", { tool, error })
     return toCallToolResult(toolError(INTERNAL_MESSAGE, { code: "internal" }))
   }
+
+  if (
+    output &&
+    !out.isError &&
+    out.structuredContent !== undefined &&
+    !sameJson(out.structuredContent, result.structuredContent) &&
+    validate(output(), out.structuredContent, { handles: false }).length > 0
+  ) {
+    return toCallToolResult(
+      toolError(MASKED_OUT_OF_SHAPE, { code: "pass_only" }),
+    )
+  }
+
+  return out
 }
 
 /** How a tool is registered beyond the package's own. */
@@ -296,7 +326,14 @@ export function registerTool(
       const answer =
         lead.length > 0 ? withLeadText(result, lead.join("\n")) : result
 
-      return hooks.mask ? masked(answer, hooks.mask, tool.name) : answer
+      return hooks.mask
+        ? masked(
+            answer,
+            hooks.mask,
+            tool.name,
+            tool.output ? () => tool.outputSchema() : undefined,
+          )
+        : answer
     },
   )
 }
