@@ -1,3 +1,5 @@
+import { randomInt } from "node:crypto"
+
 import type { ExecResult } from "../ssh/client"
 import { makeRedactor } from "../openapi/redact"
 import {
@@ -13,6 +15,7 @@ import {
   type ServiceDefinition,
   type ServiceFiles,
   type ServicePublish,
+  type ServicePublishAsk,
 } from "./definition"
 import {
   fileName,
@@ -580,6 +583,203 @@ export async function runContainer(
     throw new EngineError(
       `${host.name} did not start ${spec.containerName}: ${said(result, env.redact)}`,
     )
+  }
+}
+
+// ---- Host ports -------------------------------------------------------------
+
+/** The range PCP picks a free host port from: below the ephemeral ports. */
+export const AUTO_PORT_FIRST = 20_000
+export const AUTO_PORT_LAST = 32_000
+/** How many times a launch picks again when the engine finds a port taken. */
+const AUTO_PORT_TRIES = 5
+
+type Listening = { address: string; port: number }
+
+/**
+ * The TCP ports listening on the SSH server, read with `ss`: null when it
+ * cannot be read (no `ss` there), in which case the engine's own refusal is
+ * the check.
+ */
+export async function listeningPorts(
+  host: ServiceHost,
+): Promise<Listening[] | null> {
+  const result = await run(host, "ss -Hltn 2>/dev/null")
+
+  if (failed(result)) {
+    return null
+  }
+
+  const found: Listening[] = []
+
+  for (const line of text(result.stdout).split(/\r?\n/)) {
+    const local = line.trim().split(/\s+/)[3]
+    const at = local?.lastIndexOf(":") ?? -1
+
+    if (!local || at < 1) {
+      continue
+    }
+
+    const port = Number(local.slice(at + 1))
+
+    if (Number.isInteger(port)) {
+      found.push({
+        address: local.slice(0, at).replace(/^\[(.*)\]$/, "$1"),
+        port,
+      })
+    }
+  }
+
+  return found
+}
+
+function isAnyAddress(address: string): boolean {
+  return address === "*" || address === "0.0.0.0" || address === "::"
+}
+
+/** What already listens on a port a container would be published on. */
+function holder(
+  listening: Listening[],
+  address: string,
+  port: number,
+): Listening | undefined {
+  return listening.find(
+    (entry) =>
+      entry.port === port &&
+      (entry.address === address ||
+        isAnyAddress(entry.address) ||
+        isAnyAddress(address)),
+  )
+}
+
+const TAKEN = /address already in use|port is already allocated/i
+
+/**
+ * Starts the container with its ports published: a port with a host port
+ * the owner chose is checked free before anything is made (refused,
+ * naming what holds it, never moved), and one with none gets a free port
+ * PCP picks (the one it had, while that is free), set explicitly so it
+ * stays the same whenever the engine restarts the container. When the engine
+ * still finds a picked port taken (it was taken between the check and the
+ * start), the half-made container is removed and PCP picks again. Returns
+ * the ports as published.
+ */
+export async function runPublished(
+  host: ServiceHost,
+  engine: ServiceEngine,
+  spec: Omit<ContainerSpec, "publish"> & { publish: ServicePublishAsk },
+  env: ServiceEnv,
+): Promise<ServicePublish> {
+  const { address } = spec.publish
+  const listening = (await listeningPorts(host)) ?? []
+  const refused = new Set<number>()
+
+  for (const entry of spec.publish.ports) {
+    if (entry.host === undefined || entry.auto) {
+      continue
+    }
+
+    const held = holder(listening, address, entry.host)
+
+    if (held) {
+      throw new EngineError(
+        `Port ${entry.host} on ${host.name} (${held.address === address || isAnyAddress(held.address) ? held.address : address}) is already in use by something else, so PCP did not start ${spec.containerName}. Choose another host port, or leave it out and PCP picks a free one.`,
+      )
+    }
+  }
+
+  for (let attempt = 1; ; attempt += 1) {
+    const taken = new Set<number>(refused)
+
+    for (const entry of spec.publish.ports) {
+      if (entry.host !== undefined && !entry.auto) {
+        taken.add(entry.host)
+      }
+    }
+
+    const ports: ServicePublish["ports"] = []
+
+    for (const entry of spec.publish.ports) {
+      if (entry.host !== undefined && !entry.auto) {
+        ports.push({ container: entry.container, host: entry.host })
+        continue
+      }
+
+      let chosen = entry.host
+
+      if (
+        chosen === undefined ||
+        refused.has(chosen) ||
+        holder(listening, address, chosen) ||
+        ports.some((each) => each.host === chosen)
+      ) {
+        chosen = undefined
+
+        for (let tries = 0; tries < 200 && chosen === undefined; tries += 1) {
+          const candidate =
+            AUTO_PORT_FIRST + randomInt(AUTO_PORT_LAST - AUTO_PORT_FIRST + 1)
+
+          if (
+            !taken.has(candidate) &&
+            !holder(listening, address, candidate) &&
+            !ports.some((each) => each.host === candidate)
+          ) {
+            chosen = candidate
+          }
+        }
+
+        if (chosen === undefined) {
+          throw new EngineError(
+            `PCP found no free port on ${host.name} for the service's port ${entry.container}.`,
+          )
+        }
+      }
+
+      ports.push({ container: entry.container, host: chosen, auto: true })
+    }
+
+    const publish: ServicePublish = { address, ports }
+
+    try {
+      await runContainer(host, engine, { ...spec, publish }, env)
+      return publish
+    } catch (error) {
+      const says = error instanceof Error ? error.message : String(error)
+      const autos = ports.filter((entry) => entry.auto)
+
+      if (!TAKEN.test(says)) {
+        throw error
+      }
+
+      // Which port the engine says is taken: a number after a colon in its
+      // words (127.0.0.1:8081). One the owner named is theirs, never moved.
+      const named = new Set(
+        [...says.matchAll(/:(\d{1,5})\b/g)].map((found) => Number(found[1])),
+      )
+      const explicit = ports.find(
+        (entry) => !entry.auto && named.has(entry.host),
+      )
+
+      if (explicit) {
+        throw new EngineError(
+          `Port ${explicit.host} on ${host.name} (${address}) is already in use by something else, so PCP did not start ${spec.containerName}. Choose another host port, or leave it out and PCP picks a free one.`,
+        )
+      }
+
+      if (autos.length === 0 || attempt >= AUTO_PORT_TRIES) {
+        throw error
+      }
+
+      // Taken since it was looked at: the engine's word is the truth. The
+      // ports it names are not tried again (all of them when it names none).
+      const taken = autos.filter((entry) => named.has(entry.host))
+
+      for (const entry of taken.length > 0 ? taken : autos) {
+        refused.add(entry.host)
+      }
+
+      await removeContainer(host, engine, spec.containerName)
+    }
   }
 }
 

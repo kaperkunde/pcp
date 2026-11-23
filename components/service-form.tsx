@@ -8,11 +8,14 @@ import {
   NameFields,
   ServerFormFrame,
 } from "@/components/server-form-parts"
+import { Button } from "@kaperkunde/ui/button"
+import { FormError, FormNote } from "@kaperkunde/ui/form-status"
 import { Checkbox, Input, Select, Textarea } from "@kaperkunde/ui/input"
 import { Field } from "@kaperkunde/ui/label"
 import type { ServerActionResult } from "@/lib/actions/servers"
 import {
   launchServiceAction,
+  relaunchServiceAction,
   saveServiceSettingsAction,
 } from "@/lib/actions/services"
 
@@ -584,6 +587,11 @@ export function ServiceLaunchForm({
                     : `The SSH server's port for ${port}`
                 }
                 htmlFor={`service-port-${port}`}
+                hint={
+                  shape.exit || !onNetwork
+                    ? "Leave it empty and PCP picks a free port when it starts the service. Type one to choose it: if it is taken, the launch is refused."
+                    : "Published on the network, so the port needs a number that stays the same."
+                }
               >
                 <input type="hidden" name="port.container" value={port} />
                 <Input
@@ -591,12 +599,17 @@ export function ServiceLaunchForm({
                   name="port.host"
                   inputMode="numeric"
                   pattern="[0-9]{1,5}"
-                  value={hostPorts[port] ?? String(port)}
+                  value={hostPorts[port] ?? ""}
                   onChange={(event) =>
                     setHostPorts({ ...hostPorts, [port]: event.target.value })
                   }
                   className="font-mono"
-                  required
+                  placeholder={
+                    shape.exit || !onNetwork
+                      ? "PCP picks a free port"
+                      : "A port that stays the same"
+                  }
+                  required={!shape.exit && onNetwork}
                 />
               </Field>
             ))}
@@ -765,5 +778,154 @@ export function ServiceSettingsForm({
         pendingText="Saving…"
       />
     </ServerFormFrame>
+  )
+}
+
+/**
+ * A service whose launch failed and PCP kept: the host ports (while it is
+ * published on the SSH server's own loopback), the values of its plain
+ * variables and the secrets for its variables are changed here, and Launch
+ * again runs it with them. Nothing else of what you approved is: another
+ * image, ports or variables, address or SSH server is a new proposal.
+ */
+export function FailedServiceForm({
+  initial,
+  variables,
+  secrets,
+}: {
+  initial: {
+    id: string
+    address: string
+    loopback: boolean
+    ports: Array<{ container: number; host: number | null }>
+    env: Record<string, string>
+    values: Record<string, string>
+  }
+  variables: Variable[]
+  secrets: Option[]
+}) {
+  const [state, action] = useActionState<ServerActionResult, FormData>(
+    relaunchServiceAction,
+    { status: "idle" },
+  )
+  const [hostPorts, setHostPorts] = useState<Record<number, string>>(
+    Object.fromEntries(
+      initial.ports.map((port) => [
+        port.container,
+        port.host === null ? "" : String(port.host),
+      ]),
+    ),
+  )
+  const [env, setEnv] = useState(initial.env)
+  const [values, setValues] = useState(initial.values)
+  const plain = variables.filter((variable) => variable.plain)
+  const secretVariables = variables.filter(
+    (variable) => !variable.plain && !variable.generated,
+  )
+
+  return (
+    <form
+      action={action}
+      className="flex flex-col gap-6"
+      data-testid="failed-service-form"
+    >
+      <input type="hidden" name="id" value={initial.id} />
+      {initial.ports.length > 0 ? (
+        <FormSection title="Ports">
+          {initial.loopback ? (
+            <p className="text-xs leading-relaxed text-muted-foreground">
+              Published on the SSH server&apos;s own 127.0.0.1. Leave a port
+              empty and PCP picks a free one when it launches; type one to
+              choose it (if it is taken, the launch is refused).
+            </p>
+          ) : (
+            <p className="text-xs leading-relaxed text-muted-foreground">
+              Published on {initial.address}, which anything on that network
+              reaches: a different port there is a different exposure, so it
+              needs a new proposal.
+            </p>
+          )}
+          <div className="grid gap-4 sm:grid-cols-2">
+            {initial.ports.map((port) => (
+              <Field
+                key={port.container}
+                label={`The SSH server's port for ${port.container}`}
+                htmlFor={`failed-port-${port.container}`}
+              >
+                {initial.loopback ? (
+                  <input
+                    type="hidden"
+                    name="port.container"
+                    value={port.container}
+                  />
+                ) : null}
+                <Input
+                  id={`failed-port-${port.container}`}
+                  name="port.host"
+                  inputMode="numeric"
+                  pattern="[0-9]{1,5}"
+                  value={hostPorts[port.container] ?? ""}
+                  onChange={(event) =>
+                    setHostPorts({
+                      ...hostPorts,
+                      [port.container]: event.target.value,
+                    })
+                  }
+                  placeholder="PCP picks a free port"
+                  className="font-mono"
+                  disabled={!initial.loopback}
+                  required={!initial.loopback}
+                />
+              </Field>
+            ))}
+          </div>
+        </FormSection>
+      ) : null}
+      {plain.length > 0 ? (
+        <FormSection title="Its settings">
+          <input type="hidden" name="values" value="1" />
+          {plain.map((variable) => (
+            <PlainField
+              key={variable.name}
+              variable={variable}
+              value={values[variable.name] ?? ""}
+              onChange={(value) =>
+                setValues({ ...values, [variable.name]: value })
+              }
+            />
+          ))}
+        </FormSection>
+      ) : null}
+      {secretVariables.length > 0 ? (
+        <FormSection title="Secrets for its variables">
+          {secretVariables.map((variable) => (
+            <SecretSelect
+              key={variable.name}
+              variable={variable}
+              secrets={secrets}
+              value={env[variable.name] ?? ""}
+              onChange={(value) => setEnv({ ...env, [variable.name]: value })}
+            />
+          ))}
+        </FormSection>
+      ) : null}
+      <div className="flex flex-col gap-3">
+        <FormError error={state.status === "error" ? state.error : null} />
+        <FormNote message={state.status === "ok" ? state.message : null} />
+        <div className="flex flex-wrap items-center justify-end gap-2">
+          <Button type="submit" variant="secondary" name="launch" value="">
+            Save
+          </Button>
+          <Button
+            type="submit"
+            name="launch"
+            value="1"
+            data-testid="launch-again"
+          >
+            Launch again
+          </Button>
+        </div>
+      </div>
+    </form>
   )
 }

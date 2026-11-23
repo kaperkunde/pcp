@@ -85,7 +85,12 @@ import {
   loadService,
   prepareLaunch,
   reconcileServicesWith,
+  failedWords,
+  publishedWords,
+  KeptFailedLaunch,
   recreateServiceOn,
+  relaunchFailedOn,
+  saveFailedService,
   removeServiceOn,
   serviceActionOn,
   serviceBehind,
@@ -105,6 +110,7 @@ import {
   type ServiceStatus,
   type ServiceUpdateChoice,
 } from "./services/services"
+import { settleLaunch } from "./services/proposals"
 import { newerImageOn, type NewerImage } from "./services/updates"
 import {
   bindGeneratedEnv,
@@ -3302,11 +3308,22 @@ export async function launchService(
     }
     result = await launchServiceOn(ctx, prepared, access)
   } catch (error) {
+    // A failed launch PCP kept still takes the values it made, and its page
+    // is where the owner goes on: the link is last.
+    if (error instanceof KeptFailedLaunch) {
+      throw new KeptFailedLaunch(
+        error.code,
+        `${error.message}\nThe service's page: ${markdownLink(`Open ${prepared.name}'s page in PCP`, `${options.publicUrl.replace(/\/+$/, "")}/servers/${error.serviceId}`)}`,
+        error.serviceId,
+      )
+    }
+
     await dropGeneratedSecrets(ctx, made)
     throw error
   }
 
-  let message = `${prepared.name} is running on ${prepared.host.name}.`
+  let message =
+    `${prepared.name} is running on ${prepared.host.name}. ${publishedWords(result.publish ?? { address: prepared.publish.address, ports: [] })}`.trim()
 
   if (result.exitId && prepared.exit) {
     message += ` Its exit ${prepared.exit.name} is ready: allow it for a token on the token's page.`
@@ -3345,6 +3362,67 @@ export async function launchService(
       message += ` Its sign-in names ${missing.join(", ")}, which it does not serve: signing in to its account will not work until its definition names its own tools.`
     } else if (missing.length === 0) {
       message += " Sign in to its account on its page to use it."
+    }
+  }
+
+  return { ...result, message }
+}
+
+/**
+ * The owner's change to a service whose launch failed (its host ports,
+ * plain values, secrets) and, with `launch`, its launch again: the same
+ * launch, on the rows PCP kept. A second failure keeps it failed.
+ */
+export async function relaunchService(
+  ctx: VaultContext,
+  id: string,
+  input: Parameters<typeof saveFailedService>[2],
+  options: ServiceOptions & { launch?: boolean },
+): Promise<(LaunchResult & { message: string }) | null> {
+  const loaded = await saveFailedService(ctx, id, input)
+
+  if (!options.launch) {
+    return null
+  }
+
+  const access = await requireAccess(ctx, loaded, {
+    ...options,
+    byOwner: true,
+    bindGenerated: true,
+  })
+  const carry = loaded.carry
+  const result = await relaunchFailedOn(loaded, access)
+  const registers = loaded.definition.registers
+  let message =
+    `${loaded.server.name} is running on ${loaded.host?.name ?? "its SSH server"}. ${publishedWords(result.publish ?? loaded.publish)}`.trim()
+
+  if (result.registeredId && registers.kind === "mcp") {
+    const registered = await findServer(ctx, { id: result.registeredId })
+
+    if (registered) {
+      const sync = await syncServerTools(ctx, registered, {
+        publicUrl: options.publicUrl,
+        byOwner: true,
+      })
+
+      if (sync.status !== "ok") {
+        message += ` PCP could not read its tools yet: ${sync.message}`
+      }
+    }
+  }
+
+  // A service an assistant proposed: its token gets what the owner chose
+  // when they agreed to it, now that it runs.
+  if (carry) {
+    const levels = await settleLaunch(ctx, {
+      tokenId: carry.tokenId,
+      serviceId: result.id,
+      registeredId: result.registeredId,
+      access: carry.access,
+    }).catch(() => "")
+
+    if (levels) {
+      message += ` ${levels}`
     }
   }
 
@@ -3589,6 +3667,13 @@ export async function restartServicesUsingSecret(
   for (const id of await servicesUsingSecret(ctx, secretId)) {
     try {
       const loaded = await loadService(ctx, id)
+
+      // A launch that failed has no container: it takes the new value when
+      // the owner launches it again.
+      if (loaded.failure) {
+        continue
+      }
+
       const status = await recreateServiceOn(
         loaded,
         await requireAccess(ctx, loaded, {
@@ -3700,6 +3785,10 @@ export async function serviceStateLine(
 
     if (!loaded) {
       return null
+    }
+
+    if (loaded.failure) {
+      return failedWords(loaded)
     }
 
     const access = await serviceAccess(ctx, loaded, { publicUrl })

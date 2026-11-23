@@ -5823,13 +5823,16 @@ export function buildGatewayServer(
               .int()
               .min(1)
               .max(65535)
-              .describe("The SSH server's port it is published on."),
+              .optional()
+              .describe(
+                "The SSH server's port it is published on. Leave it out and PCP picks a free port itself when it starts the service (only on 127.0.0.1); name one only when something needs it to stay the same, and know that a taken one is refused.",
+              ),
           }),
         )
         .max(8)
         .optional()
         .describe(
-          "For kind service: the SSH server's port for each of the service's; a port left out keeps its own number.",
+          "For kind service: the SSH server's port for each of the service's. Leave out a port, or its host, and PCP picks a free port at launch: you never need to look for one.",
         ),
       env_secrets: z
         .array(
@@ -5885,7 +5888,7 @@ export function buildGatewayServer(
       service?: Record<string, unknown>
       ssh_server?: string
       publish_address?: string
-      publish_ports?: Array<{ container: number; host: number }>
+      publish_ports?: Array<{ container: number; host?: number }>
       env_secrets?: Array<{ name: string; secret: string; generate?: unknown }>
       generate?: unknown
       tool_access?: ToolAccessArg

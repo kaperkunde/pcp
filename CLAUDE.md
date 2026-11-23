@@ -570,11 +570,28 @@ storageConnect`), never in the background, and SFTP for nothing else;
   (`basis`); never for a built one. The owner's "Check for a newer image"
   resolves the source's digest on their click only, never polled. Status is read only inside a request (page, `check_server`, a failing call), never
   polled; a saved secret remakes the services that take it through
-  `after()`. A launch that fails takes back everything it did: the
+  `after()`. A `publish_ports` host (and the launch form's port) may be
+  left out: PCP picks a free port at launch (`engine.ts runPublished`:
+  `ss` over `exec`, a random port below the ephemeral range published
+  explicitly, picked again if the engine finds it taken), only on the SSH
+  server's loopback, stored with `auto`, kept by a remake while free and
+  picked again otherwise; a host port that was named and is taken is refused
+  before anything is made, naming what holds it, never moved. A launch that
+  fails takes back what it did: the
   container (also one `run` made but could not start) and only the volumes
   it made, `removeContainer` reporting what the engine would not remove, the
-  container's first and last lines in the error; a secret the owner typed
-  for it is kept and the error names it. A failed remake marks the service
+  container's first and last lines in the error, and keeps the service
+  (`KeptFailedLaunch`): its definition and settings, no container, marked
+  failed (`service_spec`'s sealed `failure`, `intended_state` stopped, so
+  nothing starts it). Its page changes only its loopback host ports, plain
+  values and the secrets bound to its variables and launches it again
+  (`saveFailedService`, `relaunchService`: the same launch, on the same
+  rows, no new approval); another image, ports, address, variable or SSH
+  server is a fresh proposal. An assistant's calls to it answer `needs_owner`
+  (link last, check_server next), a proposal's token and chosen levels wait
+  with it and are given by the relaunch (`settleLaunch`), a remake that picks
+  another port moves what it registered (`followPublishedPort`), and an
+  exit's service is not kept. A failed remake marks the service
   failed and says that Start makes it again. A variable marked `generated`
   gets a random value at launch, or when its definition gains it, before
   the next remake (`services/generated.ts`): a managed `generated` secret
@@ -582,8 +599,9 @@ storageConnect`), never in the background, and SFTP for nothing else;
   service's own: kept by a remake, never one that exists by that name,
   bound for a gained variable only where a remake may follow), bound only where PCP bound it (`generatedEnv`),
   never a choice among the owner's secrets on any form or proposal
-  (`env_secrets` naming one is refused), taken back with a launch that
-  fails (`takeBackGenerated`), removed with its service unless something
+  (`env_secrets` naming one is refused), kept and bound to the failed
+  service a launch that fails past the engine's first command keeps (a
+  launch that fails before it, taken back with `takeBackGenerated`), removed with its service unless something
   still sends it, and kept as it is when the owner saves the service or
   the server it registered.
   A definition's `signin` (`services/signin.ts`) is PCP's own sign-in step:
