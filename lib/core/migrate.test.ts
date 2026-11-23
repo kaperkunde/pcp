@@ -187,6 +187,47 @@ describe("applyMigrations", () => {
     }
   })
 
+  it("marks no stored file from before as pass-only (#158)", () => {
+    scratch = mkdtempSync(path.join(tmpdir(), "pcp-migrate-"))
+    const file = path.join(scratch, "pcp.db")
+    const names = listMigrations()
+    const added = names.indexOf("20261123010000_storage_entry_pass_only")
+    expect(added).toBeGreaterThan(0)
+    const before = path.join(scratch, "before")
+
+    for (const name of names.slice(0, added)) {
+      cpSync(path.join(migrationsDir(), name), path.join(before, name), {
+        recursive: true,
+      })
+    }
+
+    applyMigrations({ file, dir: before })
+
+    const seed = new Database(file)
+    try {
+      seed.pragma("foreign_keys = OFF")
+      seed.exec(`
+        INSERT INTO storage_entry (id, server_id, name_key, meta)
+          VALUES ('old', 's', 'k', x'00');
+      `)
+    } finally {
+      seed.close()
+    }
+
+    expect(applyMigrations({ file }).applied).toEqual(names.slice(added))
+
+    const sqlite = new Database(file)
+    try {
+      expect(
+        sqlite
+          .prepare(`SELECT pass_only FROM storage_entry WHERE id = 'old'`)
+          .get(),
+      ).toEqual({ pass_only: 0 })
+    } finally {
+      sqlite.close()
+    }
+  })
+
   it("refuses a migration that was edited after it was applied", () => {
     scratch = mkdtempSync(path.join(tmpdir(), "pcp-migrate-"))
     const file = path.join(scratch, "pcp.db")

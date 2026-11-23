@@ -1,6 +1,6 @@
 import type { Readable } from "node:stream"
 
-import { PcpError } from "../errors"
+import { PassOnlyError, PcpError } from "../errors"
 import type { SealedFile } from "./encrypted"
 import {
   MAX_DELETE_ENTRIES,
@@ -78,11 +78,21 @@ export type StorageFolder = {
     test: (name: string) => boolean,
     options: { type?: "file" | "folder"; limit: number },
   ): Promise<Found>
-  /** A file's bytes, its name and size, at most `maxBytes`. */
+  /**
+   * A file's bytes, its name and size, at most `maxBytes`. `passOnly`: it
+   * was saved from a pass-only kept result (#158), only in an encrypted
+   * store's index.
+   */
   read(
     path: string,
     maxBytes: number,
-  ): Promise<{ path: string; name: string; bytes: Buffer; modified: string }>
+  ): Promise<{
+    path: string
+    name: string
+    bytes: Buffer
+    modified: string
+    passOnly?: boolean
+  }>
   /**
    * A file as a stream, whole or a range of it (`offset`, `length`), for a
    * download or a conversion: nothing is held but what is being read.
@@ -91,10 +101,15 @@ export type StorageFolder = {
     path: string,
     range?: { offset?: number; length?: number },
   ): Promise<OpenedFile>
+  /**
+   * `passOnly`: the bytes are a pass-only kept result's (#158), marked so
+   * in an encrypted store's index; a plain folder refuses them, having
+   * nowhere to keep the mark.
+   */
   save(
     path: string,
     bytes: Buffer,
-    options: { overwrite: boolean },
+    options: { overwrite: boolean; passOnly?: boolean },
   ): Promise<{ path: string; size: number; replaced: boolean }>
   /**
    * The same from a stream, as it arrives; past `maxBytes` it stops,
@@ -128,6 +143,19 @@ export type StorageFolder = {
   sealed?(path: string): Promise<SealedFile>
 }
 
+/**
+ * Why a pass-only kept result is not saved in a plain folder (#158): its
+ * files are there as they are, so the mark that keeps one from being read
+ * out has nowhere to go.
+ */
+export const PLAIN_PASS_ONLY =
+  "This file holds a part keep named, which PCP never reads out, and this is a plain folder: its files are there as they are for whatever reads the folder, so PCP does not save it there. Save it in an encrypted store, such as PCP files."
+
+/** Why a stored file that holds a part keep named is not read out (#158). */
+export function storedPassOnlyMessage(path: string): string {
+  return `${path} was saved from a result that holds a part keep named: PCP hands it on only in a tool's arguments, as the handle get_file answers, and never reads it out or links to it.`
+}
+
 export type OpenedFile = {
   path: string
   name: string
@@ -138,6 +166,8 @@ export type OpenedFile = {
   offset: number
   length: number
   stream: Readable
+  /** Saved from a pass-only kept result (#158): no link reads it out. */
+  passOnly?: boolean
 }
 
 /** The range asked of a file of `size` bytes, cut to it. */
@@ -552,7 +582,13 @@ export async function openFolder(
       }
     },
 
-    save(raw, bytes, { overwrite }) {
+    save(raw, bytes, { overwrite, passOnly }) {
+      // A plain file is there for whatever reads the folder: nowhere to
+      // keep the mark (#158).
+      if (passOnly) {
+        throw new PassOnlyError("", PLAIN_PASS_ONLY)
+      }
+
       return folder.saveFrom(raw, [bytes], { overwrite })
     },
 

@@ -14,7 +14,12 @@ import { closeAllSshConnections } from "../ssh/client"
 import { startFakeSsh, type FakeSsh } from "../ssh/fake-server"
 import { createSshServer } from "../ssh/hosts"
 import { scratchDatabase } from "../test-db"
-import { resultKeepers, resultOpener } from "../tool-results"
+import {
+  keepResult,
+  readResult,
+  resultKeepers,
+  resultOpener,
+} from "../tool-results"
 import {
   callServerTool,
   convertStore,
@@ -342,6 +347,101 @@ describe("PCP's own store", () => {
   })
 })
 
+describe("a file saved from a pass-only result (#158)", () => {
+  const VALUE = "tok_8f3KdPq2ZxW91mLr"
+
+  async function keptPassOnly() {
+    return (
+      await keepResult(ctx, {
+        tokenId,
+        serverId: null,
+        toolName: "make_token",
+        text: VALUE,
+        mediaType: "text/plain",
+        passOnly: true,
+      })
+    ).id
+  }
+
+  it("comes back from get_file as a pass-only result, never its text", async () => {
+    const id = await ensureOwnStore(ctx)
+    const kept = await keptPassOnly()
+
+    expect(
+      data(
+        await call(id, "save_file", {
+          path: "token.txt",
+          file: { $result: kept },
+        }),
+      ),
+    ).toMatchObject({ saved: "created", size: VALUE.length })
+    expect(
+      (await db().storageEntry.findMany({ where: { serverId: id } })).map(
+        (entry) => entry.passOnly,
+      ),
+    ).toEqual([true])
+
+    const got = await call(id, "get_file", { path: "token.txt" })
+    expect(JSON.stringify(got)).not.toContain(VALUE)
+    const answer = data(got)
+    expect(answer).not.toHaveProperty("text")
+    const handle = answer.result as { $result: string }
+    expect(handle).not.toHaveProperty("preview")
+
+    // A reader refuses it; a tool's arguments still take it.
+    await expect(
+      readResult(ctx, { tokenId, id: handle.$result }),
+    ).rejects.toMatchObject({ name: "PassOnlyError" })
+    const opened = await resultOpener(ctx, tokenId)(handle.$result)
+    expect(opened).toMatchObject({ passOnly: true })
+    expect(opened!.text()).toBe(VALUE)
+
+    // Moved, it keeps its mark; written over with plain text, it loses it.
+    data(await call(id, "move", { from: "token.txt", to: "moved.txt" }))
+    expect(
+      (await db().storageEntry.findFirst({ where: { serverId: id } }))!
+        .passOnly,
+    ).toBe(true)
+    data(
+      await call(id, "save_file", {
+        path: "moved.txt",
+        text: "plain words",
+        overwrite: true,
+      }),
+    )
+    expect(
+      data(await call(id, "get_file", { path: "moved.txt" })),
+    ).toMatchObject({ text: "plain words" })
+  })
+
+  it("is not shared by a link", async () => {
+    ;({ id: tokenId } = await createApiToken(ctx, {
+      name: "Sharing",
+      allowAllServers: true,
+      shareFiles: true,
+    }))
+    const id = await ensureOwnStore(ctx)
+    const kept = await keptPassOnly()
+    data(
+      await call(id, "save_file", {
+        path: "token.txt",
+        file: { $result: kept },
+      }),
+    )
+    data(await call(id, "save_file", { path: "other.txt", text: "plain" }))
+
+    const refused = await call(id, "share_file", { path: "token.txt" })
+    expect(refusal(refused)).toMatch(/never reads it out or links to it/)
+    expect(refused._meta?.["gg.pcp/error"]).toMatchObject({ code: "pass_only" })
+    expect(await db().fileLink.count()).toBe(0)
+
+    // An ordinary file of the same store still is.
+    expect(
+      data(await call(id, "share_file", { path: "other.txt" })),
+    ).toHaveProperty("url")
+  })
+})
+
 describe("converting a folder on an SSH server", () => {
   let fake: FakeSsh
   let authorized: string | null
@@ -451,6 +551,47 @@ describe("converting a folder on an SSH server", () => {
       expect(after.get(name)!.equals(bytes), name).toBe(true)
     }
     expect(await db().storageEntry.count()).toBe(0)
+  })
+
+  it("refuses a pass-only value in a plain folder, and stays encrypted while it holds one", async () => {
+    const id = await addFolder()
+    const kept = (
+      await keepResult(ctx, {
+        tokenId,
+        serverId: null,
+        toolName: "make_token",
+        text: "tok_8f3KdPq2ZxW91mLr",
+        mediaType: "text/plain",
+        passOnly: true,
+      })
+    ).id
+
+    const refused = await call(id, "save_file", {
+      path: "token.txt",
+      file: { $result: kept },
+    })
+    expect(refusal(refused)).toMatch(/this is a plain folder/)
+    expect(refused._meta?.["gg.pcp/error"]).toMatchObject({ code: "pass_only" })
+    expect(fs.existsSync(path.join(top, "token.txt"))).toBe(false)
+
+    // Encrypted, it takes it, and will not be made plain while it holds it.
+    expect((await convertStore(ctx, id, "encrypted", PUBLIC)).done).toBe(true)
+    data(
+      await call(id, "save_file", {
+        path: "token.txt",
+        file: { $result: kept },
+      }),
+    )
+    await expect(convertStore(ctx, id, "plain", PUBLIC)).rejects.toThrow(
+      /token\.txt.*delete them first/,
+    )
+    expect((await loadStorageRoot(ctx, id)).root).toMatchObject({
+      mode: "encrypted",
+      converting: "",
+    })
+
+    data(await call(id, "delete", { path: "token.txt" }))
+    expect((await convertStore(ctx, id, "plain", PUBLIC)).done).toBe(true)
   })
 
   it("keeps an encrypted store with files from being removed, and lets a plain one go", async () => {

@@ -669,8 +669,19 @@ embeddingProvider`, which hands `embeddings/provider.ts` the header;
   (`resultOpener`) and the owner's page open it; every reader (read_result,
   the resource, `pcp.read`/`image`/`frames`, view_image, links, a
   capability's input, the browser's `upload_file`) refuses it with code `pass_only`, and a new reader
-  calls `refusePassOnly`. A tool that echoes its input can still hand the
-  value back, out of PCP's control. File links (`lib/core/file-links.ts`, only for a token
+  calls `refusePassOnly`. A tool that echoes it is masked (#158,
+  `kept-masks.ts`): the call it was handed to, in `upstream.ts
+callServerTool`, shows it as `[kept: <id>]` in its answer and errors
+  (`passOnlyTracker`), and for the result's life every answer to the token
+  does too (the gateway's `mask` hook, `runCodeCall`, `pcp.read`, the
+  resource), found by keyed hashes and a keyed rolling fingerprint
+  (`value-masks.ts`, as `maskTyped`), the values opened from the token's
+  rows inside a request and only their hashes held in memory, never stored;
+  at least `MIN_KEPT_MASK_CHARS`. A new way an answer reaches an assistant
+  goes through `maskKeptResult`. `save_file` of one marks the file in an
+  encrypted store's index (`storage_entry.pass_only`), so `get_file` answers
+  a pass-only handle again and `share_file` refuses it; a plain folder
+  refuses it. File links (`lib/core/file-links.ts`, only for a token
   with `shareFiles`) move one kept file to or from the assistant's own
   computer: the link's secret is the credential for that file alone, stored
   only as its hash, the file encrypted under a key derived from it (an

@@ -343,6 +343,8 @@ export type SealedFile = {
   fileKey: Buffer
   /** The store's real folder on its backend, where the object is. */
   rootReal: string
+  /** Saved from a pass-only kept result (#158): no link reads it out. */
+  passOnly: boolean
 }
 
 /**
@@ -458,7 +460,11 @@ export async function openEncryptedFolder(
     parentId: string,
     name: string,
     object: WrittenObject,
-    { overwrite, type }: { overwrite: boolean; type?: string },
+    {
+      overwrite,
+      type,
+      passOnly = false,
+    }: { overwrite: boolean; type?: string; passOnly?: boolean },
   ): Promise<{ replaced: boolean }> {
     const meta: Meta = {
       n: name,
@@ -506,6 +512,7 @@ export async function openEncryptedFolder(
               fileKey: wrapped,
               meta: asBytes(sealMeta(ctx, there.id, meta)),
               storedBytes: object.storedBytes,
+              passOnly,
             },
           })
           // Let go of the old object: swept at once below, or later.
@@ -528,6 +535,7 @@ export async function openEncryptedFolder(
               fileKey: wrapped,
               meta: asBytes(sealMeta(ctx, id, meta)),
               storedBytes: object.storedBytes,
+              passOnly,
             },
           })
         }
@@ -595,6 +603,49 @@ export async function openEncryptedFolder(
     }
 
     return found.reverse()
+  }
+
+  /**
+   * Writes a file's object and points the index at it; `passOnly` marks
+   * it as saved from a pass-only kept result (#158).
+   */
+  async function saveTo(
+    raw: string,
+    source: AsyncIterable<Buffer> | Iterable<Buffer>,
+    {
+      overwrite,
+      maxBytes,
+      passOnly = false,
+    }: { overwrite: boolean; maxBytes?: number; passOnly?: boolean },
+  ): Promise<{ path: string; size: number; replaced: boolean }> {
+    const { names, parentId, leaf, entry } = await place(raw)
+
+    if (names.length === 0) {
+      throw new PcpError("validation", "Name the file to save, not the store.")
+    }
+
+    if (entry?.folder) {
+      throw new PcpError(
+        "conflict",
+        `${joinRelative(names)} is a folder; a file cannot take its place.`,
+      )
+    }
+
+    if (entry && !overwrite) {
+      throw new PcpError(
+        "conflict",
+        `${joinRelative(names)} is there already. Pass overwrite: true to replace it, or choose another name.`,
+      )
+    }
+
+    const object = await writeObject(store, fs, source, {
+      ...(maxBytes !== undefined ? { maxBytes } : {}),
+    })
+    const { replaced } = await commit(parentId, leaf, object, {
+      overwrite,
+      passOnly,
+    })
+    return { path: joinRelative(names), size: object.size, replaced }
   }
 
   const folder: StorageFolder = {
@@ -682,6 +733,7 @@ export async function openEncryptedFolder(
         name: meta.n,
         bytes: Buffer.concat(chunks),
         modified: meta.m,
+        passOnly: entry.passOnly,
       }
     },
 
@@ -705,6 +757,7 @@ export async function openEncryptedFolder(
           entry.fileKey,
         ),
         rootReal: store.rootReal,
+        passOnly: entry.passOnly,
       }
     },
 
@@ -721,43 +774,20 @@ export async function openEncryptedFolder(
         offset,
         length,
         stream: readObject(store, fs, entry, size, { offset, length }),
+        passOnly: entry.passOnly,
       }
       return opened
     },
 
-    save(raw, bytes, { overwrite }) {
-      return folder.saveFrom(raw, [bytes], { overwrite })
+    save(raw, bytes, { overwrite, passOnly = false }) {
+      return saveTo(raw, [bytes], { overwrite, passOnly })
     },
 
-    async saveFrom(raw, source, { overwrite, maxBytes }) {
-      const { names, parentId, leaf, entry } = await place(raw)
-
-      if (names.length === 0) {
-        throw new PcpError(
-          "validation",
-          "Name the file to save, not the store.",
-        )
-      }
-
-      if (entry?.folder) {
-        throw new PcpError(
-          "conflict",
-          `${joinRelative(names)} is a folder; a file cannot take its place.`,
-        )
-      }
-
-      if (entry && !overwrite) {
-        throw new PcpError(
-          "conflict",
-          `${joinRelative(names)} is there already. Pass overwrite: true to replace it, or choose another name.`,
-        )
-      }
-
-      const object = await writeObject(store, fs, source, {
+    saveFrom(raw, source, { overwrite, maxBytes }) {
+      return saveTo(raw, source, {
+        overwrite,
         ...(maxBytes !== undefined ? { maxBytes } : {}),
       })
-      const { replaced } = await commit(parentId, leaf, object, { overwrite })
-      return { path: joinRelative(names), size: object.size, replaced }
     },
 
     async makeFolder(raw, { parents }) {

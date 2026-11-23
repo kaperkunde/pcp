@@ -180,6 +180,7 @@ import {
   setServerStatus,
 } from "./servers"
 import { noteExitUsed, noteSecretTyped } from "./request-log"
+import { passOnlyTracker } from "./kept-masks"
 import { resolveHandles } from "./result-handles"
 import type { BytesKeeper, ResultKeeper, ResultOpener } from "./tool-results"
 import { TOOL_NAME_SELECT, toolName } from "./tool-rows"
@@ -2254,21 +2255,35 @@ export async function callServerTool(
   args: Record<string, unknown>,
   options: CallOptions,
 ): Promise<CallToolResult> {
-  if (server.kind === "browser") {
-    return callBrowser(ctx, server, toolName, args, options)
+  // A pass-only kept result handed to the tool is taken back out of what
+  // it answers (#158): a tool that echoes its input does not read it out.
+  const tracked = passOnlyTracker(options.open)
+  const watched: CallOptions = {
+    ...options,
+    ...(tracked.open ? { open: tracked.open } : {}),
+    ...(options.keep ? { keep: tracked.keeper(options.keep) } : {}),
   }
 
-  return gateServerCall(
-    ctx,
-    server,
-    toolName,
-    { signal: options.signal, deadline: options.deadline },
-    (timeoutMs) =>
-      callPlaced(ctx, server, toolName, args, {
-        ...options,
-        ...(timeoutMs !== undefined ? { timeoutMs } : {}),
-      }),
-  )
+  try {
+    const result =
+      server.kind === "browser"
+        ? await callBrowser(ctx, server, toolName, args, watched)
+        : await gateServerCall(
+            ctx,
+            server,
+            toolName,
+            { signal: options.signal, deadline: options.deadline },
+            (timeoutMs) =>
+              callPlaced(ctx, server, toolName, args, {
+                ...watched,
+                ...(timeoutMs !== undefined ? { timeoutMs } : {}),
+              }),
+          )
+
+    return tracked.scrub(result)
+  } catch (error) {
+    throw tracked.scrubError(error)
+  }
 }
 
 /** A server's call once the gate let it through, its secrets in place. */

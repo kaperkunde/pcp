@@ -8,7 +8,7 @@ import type { VaultContext } from "./context"
 import { asBytes, decrypt, encrypt, randomSecret, sha256Hex } from "./crypto"
 import { dataDir } from "./data-dir"
 import { db } from "./db"
-import { invalid } from "./errors"
+import { invalid, PassOnlyError } from "./errors"
 import {
   fileLinkUrl,
   GONE,
@@ -25,7 +25,7 @@ import { newId } from "./ids"
 import { fileMediaType } from "./media-types"
 import { encryptStream, newKey, newObjectId, OBJECT_ID } from "./storage/crypt"
 import { objectPath, openSealedObject } from "./storage/encrypted"
-import type { StorageFolder } from "./storage/files"
+import { storedPassOnlyMessage, type StorageFolder } from "./storage/files"
 import {
   DEFAULT_STORE_LINK_DOWNLOADS,
   DEFAULT_STORE_LINK_MINUTES,
@@ -249,6 +249,11 @@ export async function shareStoreFile(
   if (input.direct && folder.sealed) {
     const sealed = await folder.sealed(input.path)
 
+    // A link would read out a part keep named (#158).
+    if (sealed.passOnly) {
+      throw new PassOnlyError("", storedPassOnlyMessage(sealed.path))
+    }
+
     file = {
       objectId: sealed.objectId,
       fileKey: sealed.fileKey,
@@ -259,6 +264,11 @@ export async function shareStoreFile(
     }
   } else {
     const opened = await folder.open(input.path)
+
+    if (opened.passOnly) {
+      opened.stream.destroy()
+      throw new PassOnlyError("", storedPassOnlyMessage(opened.path))
+    }
 
     if (opened.size > input.maxBytes) {
       opened.stream.destroy()

@@ -1,7 +1,7 @@
 import type { VaultContext } from "../context"
 import { db } from "../db"
 import { isPcpError, PcpError } from "../errors"
-import { openEncryptedFolder, sweepPending } from "./encrypted"
+import { openEncryptedFolder, openMeta, sweepPending } from "./encrypted"
 import { openFolder, type Entry, type StorageFolder } from "./files"
 import {
   CONVERT_BUDGET_MS,
@@ -92,6 +92,24 @@ export async function convertStoreStep(
       files: 0,
       skipped: [],
       message: `${server.name} is ${to} already.`,
+    }
+  }
+
+  // A file saved from a part keep named stays encrypted (#158): a plain
+  // folder has nowhere to keep its mark. Said before anything starts.
+  if (to === "plain" && loaded.root.converting !== "plain") {
+    const held = await db().storageEntry.findMany({
+      where: { serverId: server.id, passOnly: true, folder: false },
+      select: { id: true, meta: true },
+      take: 6,
+    })
+
+    if (held.length > 0) {
+      const names = held.slice(0, 5).map((row) => openMeta(ctx, row).n)
+      throw new PcpError(
+        "state",
+        `${server.name} holds files saved from results PCP never reads out (${names.join(", ")}${held.length > 5 ? ", and more" : ""}), which a plain folder cannot keep so: delete them first, then make it plain.`,
+      )
     }
   }
 
@@ -345,6 +363,16 @@ async function decryptFile(
   skipped: string[],
 ): Promise<void> {
   const opened = await encrypted.open(entry.path)
+
+  // A plain file has nowhere to keep the mark of a part keep named (#158):
+  // it stays encrypted until it is deleted.
+  if (opened.passOnly) {
+    opened.stream.destroy()
+    skipped.push(
+      `${label(entry.path)} (saved from a result PCP never reads out, which a plain folder cannot keep so: delete it to finish)`,
+    )
+    return
+  }
 
   try {
     await plain.makeFolder(parentOf(entry.path), { parents: true })

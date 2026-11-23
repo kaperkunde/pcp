@@ -52,6 +52,7 @@ import {
 } from "./endpoint-admin"
 import { MAX_FIELDS, readFields, type AnswerShape } from "./answers"
 import { isPcpError, passOnlyMessage } from "./errors"
+import { maskKeptResult, maskKeptText } from "./kept-masks"
 import { instructionsBlock } from "./instructions-block"
 import { receiveFile, shareResult } from "./file-links"
 import {
@@ -1337,6 +1338,9 @@ export function buildGatewayServer(
   const hooks: ServeHooks = {
     publicUrl: scope.publicUrl,
     lead: answeredLead,
+    // Every answer shows the token's pass-only kept values as [kept: id],
+    // whatever tool handed them back (#158).
+    mask: (result) => maskKeptResult(scope.ctx, scope.tokenId, result),
     log: ({ tool, names, ok: done, ms, error, note }) =>
       void appendRequestLog({
         vaultId: scope.ctx.vaultId,
@@ -5076,7 +5080,11 @@ export function buildGatewayServer(
 
       const contents =
         opened.kind === "text"
-          ? { uri: uri.href, mimeType: opened.mediaType, text: opened.text() }
+          ? {
+              uri: uri.href,
+              mimeType: opened.mediaType,
+              text: await maskKeptText(scope.ctx, scope.tokenId, opened.text()),
+            }
           : {
               uri: uri.href,
               mimeType: opened.mediaType,

@@ -19,6 +19,8 @@ import {
   INTERNAL_MESSAGE,
   NOTES_META_KEY,
   PCP_META,
+  toCallToolResult,
+  toolError,
   type NeedsOwner,
 } from "./outcome"
 import { RESULT_HANDLE } from "./validate"
@@ -63,6 +65,12 @@ export type ServeHooks = {
    * null for none. Its failure costs the answer nothing.
    */
   lead?: () => Promise<string | null>
+  /**
+   * The answer as the client gets it, last of all: with the token's
+   * pass-only kept values masked (kept-masks.ts, #158). A failure here
+   * answers that PCP went wrong rather than the answer unmasked.
+   */
+  mask?: (result: CallToolResult) => Promise<CallToolResult>
 }
 
 /**
@@ -225,6 +233,20 @@ export function withoutRepeatedStructure(
   return rest
 }
 
+/** The answer through `mask`; PCP's own fault when that fails. */
+async function masked(
+  result: CallToolResult,
+  mask: (result: CallToolResult) => Promise<CallToolResult>,
+  tool: string,
+): Promise<CallToolResult> {
+  try {
+    return await mask(result)
+  } catch (error) {
+    console.error("[gateway] an answer could not be masked", { tool, error })
+    return toCallToolResult(toolError(INTERNAL_MESSAGE, { code: "internal" }))
+  }
+}
+
 /** How a tool is registered beyond the package's own. */
 export type RegisterOptions = {
   /**
@@ -271,7 +293,10 @@ export function registerTool(
         (line): line is string => typeof line === "string" && line !== "",
       )
 
-      return lead.length > 0 ? withLeadText(result, lead.join("\n")) : result
+      const answer =
+        lead.length > 0 ? withLeadText(result, lead.join("\n")) : result
+
+      return hooks.mask ? masked(answer, hooks.mask, tool.name) : answer
     },
   )
 }

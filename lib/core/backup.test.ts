@@ -987,11 +987,17 @@ describe("restoring", { timeout: 60_000 }, () => {
     await folder.save("tax/return.pdf", Buffer.from("%PDF"), {
       overwrite: false,
     })
+    // Saved from a part keep named: its mark goes with the index (#158).
+    await folder.save("tax/token.txt", Buffer.from("tok_8f3KdPq2ZxW91mLr"), {
+      overwrite: false,
+      passOnly: true,
+    })
     const entries = await db().storageEntry.findMany({ orderBy: { id: "asc" } })
     const root = await db().storageRoot.findUniqueOrThrow({
       where: { serverId: own },
     })
-    expect(entries).toHaveLength(2)
+    expect(entries).toHaveLength(3)
+    expect(entries.filter((entry) => entry.passOnly)).toHaveLength(1)
 
     const file = await exportVault(ctx, EXPORT_PASSWORD)
     const raw = await openRaw(file, EXPORT_PASSWORD)
@@ -1023,6 +1029,21 @@ describe("restoring", { timeout: 60_000 }, () => {
     expect((await again.read("tax/return.pdf", 100)).bytes.toString()).toBe(
       "%PDF",
     )
+
+    // A file from before #158 names no mark: none of its files has one.
+    const unmarked = structuredClone(raw)
+    for (const row of (unmarked.tables as { storageEntries: object[] })
+      .storageEntries as Array<Record<string, unknown>>) {
+      delete row.passOnly
+    }
+    const { payload: before158 } = await readExport(
+      await encodeExport(unmarked, EXPORT_PASSWORD),
+      EXPORT_PASSWORD,
+    )
+    expect(before158.tables.storageEntries).toHaveLength(3)
+    expect(
+      before158.tables.storageEntries.every((row) => row.passOnly === false),
+    ).toBe(true)
 
     const older = structuredClone(raw)
     delete (older.tables as Record<string, unknown>).storageEntries

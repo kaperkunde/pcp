@@ -238,6 +238,7 @@ import {
   type ProposedAccess,
   type ProposedAccessShown,
 } from "./proposed-access"
+import { maskKeptError, maskKeptJson, maskKeptText } from "./kept-masks"
 import { namesInWords, secretUses } from "./secret-uses"
 import {
   browserExitsFor,
@@ -922,14 +923,20 @@ export async function runCodeCall(
         : {}),
     })
 
-    return await answerValue(
-      answer,
-      { fields, decode, keep },
-      {
-        text: (input) => keepers.text({ ...input, ...context }),
-        bytes: (input) => keepers.bytes({ ...input, ...context }),
-      },
-      { max },
+    // What the program sees shows the token's pass-only values as
+    // [kept: <id>], after keep made its handles (#158).
+    return await maskedOutcome(
+      ctx,
+      tokenId,
+      await answerValue(
+        answer,
+        { fields, decode, keep },
+        {
+          text: (input) => keepers.text({ ...input, ...context }),
+          bytes: (input) => keepers.bytes({ ...input, ...context }),
+        },
+        { max },
+      ),
     )
   } catch (error) {
     const owner = await ownerFirst(error, { ctx, tokenId, publicUrl, server })
@@ -941,13 +948,28 @@ export async function runCodeCall(
     if (isPcpError(error)) {
       return {
         ok: false,
-        error: error.message,
+        error: await maskKeptText(ctx, tokenId, error.message),
         ...(isTransitFailure(error) ? { transit: true } : {}),
       }
     }
 
-    throw error
+    throw await maskKeptError(ctx, tokenId, error)
   }
+}
+
+/** A program's outcome with the token's pass-only values masked (#158). */
+async function maskedOutcome(
+  ctx: VaultContext,
+  tokenId: string,
+  outcome: CodeCallOutcome,
+): Promise<CodeCallOutcome> {
+  if ("owner" in outcome) {
+    return outcome
+  }
+
+  return outcome.ok
+    ? { ...outcome, value: await maskKeptJson(ctx, tokenId, outcome.value) }
+    : { ...outcome, error: await maskKeptText(ctx, tokenId, outcome.error) }
 }
 
 /**

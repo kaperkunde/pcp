@@ -5375,12 +5375,53 @@ read_result, the `pcp://results` resource, `pcp.read`, `pcp.image` and
 view_image, a file link (`share_result`), the browser's `upload_file` (a page
 could echo the file back) and a capability's input (read_image,
 edit_pdf, convert_document, whose provider would read it out) refuse it with
-the tool error code `pass_only` (`refusePassOnly`, `PassOnlyError`). This
-keeps PCP from reading the value out, not every tool: one that echoes its
-input (an API that returns what it was sent, a store's `save_file` then
-`get_file`) can still hand it back as an ordinary answer, which is out of
-PCP's control. Like every kept result, it is not exported and `wipeVault`
-removes it.
+the tool error code `pass_only` (`refusePassOnly`, `PassOnlyError`). Like
+every kept result, it is not exported and `wipeVault` removes it.
+
+A tool that echoes its input (an API that returns the body it was sent, a
+search that quotes its query) or a round trip through a store could still
+hand the value back, so PCP looks for it (#158, `lib/core/kept-masks.ts`):
+
+- **In the call it was handed to.** `upstream.ts callServerTool` wraps the
+  call's opener (`passOnlyTracker`): each pass-only result it opens is noted
+  with the forms it is put in as (its text, its base64), and that call's
+  answer (texts, a text resource, `structuredContent`), its thrown error's
+  message and any long text the kind keeps for it (a mail body) show it as
+  `[kept: <id>]`, as it is and in the forms JSON encoders write it
+  (`openapi/redact.ts makeRedactor`). This is before shaping, so an error
+  that is not JSON is covered too.
+- **For the result's life (a day).** Every answer to the token shows each of
+  its live pass-only values as `[kept: <id>]`, found as the browser finds a
+  typed secret (`lib/core/value-masks.ts`, which `browser/held.ts` uses too):
+  each word hashed whole (and URL-decoded), then every run of the text that
+  is the value once white space and separators are out and it is upper-cased,
+  picked by a keyed rolling fingerprint and confirmed by an HMAC. It is
+  applied last to every answer the gateway serves (`tools/serve.ts`'s `mask`
+  hook: execute_<tier>, run_<tier>, PCP's own tools, `check_permission`'s
+  replay, read_result), to a program's and a wrapper's `pcp.call` values and
+  errors (`permissions.ts runCodeCall`), to `pcp.read` as text and to the
+  `pcp://results` resource. A masking that fails answers "Something went
+  wrong inside PCP." rather than the answer unmasked. Nothing new is stored:
+  the values are opened from the token's own rows inside the request (one
+  query, newest `MAX_MASKED_RESULTS` first, each value at most
+  `MAX_KEPT_MASK_CHARS`), and only their hashes stay in memory, per result,
+  in this process (at most 4,096 results). A value shorter than
+  `MIN_KEPT_MASK_CHARS` (8) is not looked for, as it is or normalised:
+  shorter ones would mask ordinary text. An expired result is no longer
+  looked for, and another token's never is.
+- **Through a store.** `save_file` with a pass-only handle marks the file in
+  an encrypted store's index (`storage_entry.pass_only`, exported with the
+  index, false in a file from before); `get_file` of it answers a pass-only
+  handle again, with no text, and `share_file` refuses it (`pass_only`),
+  as the conversion to plain does while the store holds one (delete it
+  first). A plain folder refuses the handle (`PLAIN_PASS_ONLY`), since its
+  files are there as they are for whatever reads the folder. The owner's
+  Files pages still open it.
+
+What is still out of PCP's reach: a value a tool transforms before it
+answers (encodes, splits, reverses), one shorter than the minimum, and a
+copy the tool keeps on its own side (a service's files folder, a mail sent
+to oneself) read back once the result has expired.
 Each answer also carries a `resource_link` per handle (`pcp://results/<id>`),
 the mail tools' own included; the gateway's resource template of that name
 gives the text or the file's bytes to the token that kept it, and lists
