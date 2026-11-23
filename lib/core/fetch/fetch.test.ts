@@ -252,6 +252,32 @@ describe("a site that checks its visitors", () => {
     expect(textOf(answer.result)).not.toContain(CHALLENGE_LINE)
   })
 
+  it("marks a GET refused with 403 or 451 as refused, but not a POST or a JSON answer", async () => {
+    const answerWith = async (
+      status: number,
+      type: string,
+      method?: string,
+    ) => {
+      api = await startTestApi((_, res) => {
+        res.statusCode = status
+        res.setHeader("content-type", type)
+        res.end(type === "application/json" ? '{"error":"key"}' : "<h1>No</h1>")
+      })
+      const answer = await fetchWeb(
+        prepareFetch({ url: `${api.origin}/`, ...(method ? { method } : {}) }),
+        reachLoopback,
+      )
+      await api.close()
+      return answer.refused
+    }
+
+    expect(await answerWith(403, "text/html")).toBe(true)
+    expect(await answerWith(451, "text/html")).toBe(true)
+    expect(await answerWith(403, "text/html", "POST")).toBe(false)
+    expect(await answerWith(403, "application/json")).toBe(false)
+    expect(await answerWith(404, "text/html")).toBe(false)
+  })
+
   it("adds a note to the lines in front of the page", () => {
     const noted = withNote(
       { content: [{ type: "text", text: "URL: x\nStatus: y\n\nThe page" }] },

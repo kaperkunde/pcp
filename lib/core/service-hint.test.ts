@@ -71,7 +71,17 @@ describe("search for software to run on a server (#166)", () => {
       expect(asksForService(query), query).toBe(true)
     }
 
-    for (const query of ["list files", "read my mail", "price of a lamp"]) {
+    for (const query of [
+      "list files",
+      "read my mail",
+      "price of a lamp",
+      "ssh host key",
+      "host key",
+      "hostname",
+      "host header",
+      "install updates",
+      "storage container",
+    ]) {
       expect(asksForService(query), query).toBe(false)
     }
   })
@@ -113,6 +123,16 @@ describe("search for software to run on a server (#166)", () => {
 
   it("does not repeat the hint where register_server is already listed", async () => {
     expect(await search({ query: "launch a container" })).not.toContain(HINT)
+  })
+
+  it("adds the hint to a search that finds nothing, beside the usual text", async () => {
+    const text = await search({
+      query: "zzqx host a website",
+      server: "bazzite",
+    })
+
+    expect(text).toContain("Nothing matches")
+    expect(text).toContain(HINT)
   })
 
   it("describes run_command as a pointer to services", () => {

@@ -356,7 +356,7 @@ describe("PCP's own tools", () => {
         .find((tool) => tool.name === name)!
         .description!.split(/[.;:](?=\s|$)|\n/)[0]!
 
-    for (const word of ["install", "host", "Docker", "Podman", "container"]) {
+    for (const word of ["Install", "host", "Docker", "Podman", "container"]) {
       expect(lead("register_server")).toContain(word)
     }
     expect(
@@ -375,7 +375,7 @@ describe("PCP's own tools", () => {
       const first = tool.description!.slice(0, 25)
 
       expect(first, tool.name).toMatch(
-        /^(Check first: |(Search|List|Get|Execute|Run|Check|Connect|Withdraw|Read|Share|Receive|Request|Propose|Change|Fetch|Save|Edit|Convert|Find|Make|Move|Delete|View|Update|Rotate) )/,
+        /^(Check first: |(Search|List|Get|Execute|Run|Check|Connect|Withdraw|Read|Share|Receive|Request|Install|Propose|Change|Fetch|Save|Edit|Convert|Find|Make|Move|Delete|View|Update|Rotate) )/,
       )
       // A verb and an object, not a verb alone.
       expect(first.trim().split(/\s+/).length, tool.name).toBeGreaterThan(2)
@@ -406,7 +406,7 @@ describe("PCP's own tools", () => {
       receive_file: /file/,
       create_upload_link: /files/,
       check_upload: /upload/,
-      register_server: /^Propose a server or conta/,
+      register_server: /^Install a container/,
       list_secrets: /secret/,
       request_secret: /^Request a new secret/,
       edit_secret: /^Edit a secret's details/,

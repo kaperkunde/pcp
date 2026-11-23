@@ -21,8 +21,8 @@ describe("PCP's suggested instructions", () => {
 
   it("are short, and pass the owner's own check", () => {
     for (const template of INSTRUCTION_TEMPLATES) {
-      // A line per rule, each short: version 8's set-up rule took it past 1,200, version 9's two rules past 1,300.
-      expect(template.text.length).toBeLessThanOrEqual(1_600)
+      // A line per rule, each short: version 8's set-up rule took it past 1,200, version 9's two rules to about 1,540.
+      expect(template.text.length).toBeLessThanOrEqual(1_550)
       expect(checkInstructions(template.text)).toBe(template.text)
     }
 

@@ -68,7 +68,7 @@ export type FetchAnswer = {
   throttle?: Throttle | null
   /** The bytes of the page it answered. */
   bytes?: number
-  /** The site refused PCP's request (403 or 451) with no check to pass. */
+  /** The site refused a GET (403 or 451, not JSON) with no check to pass. */
   refused?: boolean
 }
 
@@ -339,8 +339,12 @@ async function readAnswer(
 
   return {
     challenged,
+    // A GET refused outright; a JSON answer asks for a key, not a bot's exit.
     refused:
-      !challenged && (response.status === 403 || response.status === 451),
+      !challenged &&
+      args.method === "GET" &&
+      !isJson(type) &&
+      (response.status === 403 || response.status === 451),
     throttle: httpSignal(response.status, response.headers, url.host),
     bytes: bytes.length,
     result: presentPage(

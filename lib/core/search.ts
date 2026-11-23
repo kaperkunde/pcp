@@ -555,11 +555,22 @@ export type SearchKind = "tool" | "pcp" | "skill" | "memory"
 
 /**
  * Whether a query asks to install, host or run software on a server (#166):
- * the words people use for what a PCP service is for.
+ * a docker or podman word alone, or a verb for it (install, deploy, host,
+ * run) with something to run (a container, app, service, website). "host
+ * key", "hostname" and "install updates" are not.
  */
 export function asksForService(query: string): boolean {
-  return /\b(install(ing|ed)?|deploy(ing|ed)?|(self[- ]?)?host(ing|ed)?|docker|podman|containers?|compose|quadlets?)\b/i.test(
-    query,
+  if (/\b(docker|podman|quadlets?|self[- ]?host(ed|ing)?)\b/i.test(query)) {
+    return true
+  }
+
+  return (
+    /\b(install(ing)?|deploy(ing)?|host(ing)?|run(ning)?|launch(ing)?|set up)\b/i.test(
+      query,
+    ) &&
+    /\b(containers?|compose|apps?|applications?|services?|websites?|web ?sites?|software|images?)\b/i.test(
+      query,
+    )
   )
 }
 
