@@ -553,6 +553,27 @@ export type PcpToolCandidate = {
 
 export type SearchKind = "tool" | "pcp" | "skill" | "memory"
 
+/**
+ * Whether a query asks to install, host or run software on a server (#166):
+ * a docker or podman word alone, or a verb for it (install, deploy, host,
+ * run) with something to run (a container, app, service, website). "host
+ * key", "hostname" and "install updates" are not.
+ */
+export function asksForService(query: string): boolean {
+  if (/\b(docker|podman|quadlets?|self[- ]?host(ed|ing)?)\b/i.test(query)) {
+    return true
+  }
+
+  return (
+    /\b(install(ing)?|deploy(ing)?|host(ing)?|run(ning)?|launch(ing)?|set up)\b/i.test(
+      query,
+    ) &&
+    /\b(containers?|compose|apps?|applications?|services?|websites?|web ?sites?|software|images?)\b/i.test(
+      query,
+    )
+  )
+}
+
 /** What a result of kind pcp says after its line: how it is run. */
 export function pcpToolNote(
   name: string,

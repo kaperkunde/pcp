@@ -350,6 +350,20 @@ describe("PCP's own tools", () => {
     }
   })
 
+  it("lead register_server with running a container as a service, and web_fetch with fetching (#166, #168)", () => {
+    const lead = (name: string) =>
+      everyTool
+        .find((tool) => tool.name === name)!
+        .description!.split(/[.;:](?=\s|$)|\n/)[0]!
+
+    for (const word of ["Install", "host", "Docker", "Podman", "container"]) {
+      expect(lead("register_server")).toContain(word)
+    }
+    expect(
+      everyTool.find((tool) => tool.name === "web_fetch")!.description,
+    ).toContain("before you say you cannot")
+  })
+
   it("open each description with a verb and what it acts on, in the words a deferred list shows", async () => {
     // Claude's apps show some 25 characters of a deferred tool's
     // description after the connector's name (observed 2026-11-02).
@@ -361,7 +375,7 @@ describe("PCP's own tools", () => {
       const first = tool.description!.slice(0, 25)
 
       expect(first, tool.name).toMatch(
-        /^(Check first: |(Search|List|Get|Execute|Run|Check|Connect|Withdraw|Read|Share|Receive|Request|Propose|Change|Fetch|Save|Edit|Convert|Find|Make|Move|Delete|View|Update|Rotate) )/,
+        /^(Check first: |(Search|List|Get|Execute|Run|Check|Connect|Withdraw|Read|Share|Receive|Request|Install|Propose|Change|Fetch|Save|Edit|Convert|Find|Make|Move|Delete|View|Update|Rotate) )/,
       )
       // A verb and an object, not a verb alone.
       expect(first.trim().split(/\s+/).length, tool.name).toBeGreaterThan(2)
@@ -392,7 +406,7 @@ describe("PCP's own tools", () => {
       receive_file: /file/,
       create_upload_link: /files/,
       check_upload: /upload/,
-      register_server: /server/,
+      register_server: /^Install a container/,
       list_secrets: /secret/,
       request_secret: /^Request a new secret/,
       edit_secret: /^Edit a secret's details/,

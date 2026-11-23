@@ -467,7 +467,9 @@ export async function runFetch(
 
   const result = answer.challenged
     ? withNote(noted, await checkHint(ctx, tokenId))
-    : noted
+    : answer.refused
+      ? withNote(noted, await refusedHint(ctx, tokenId, exit?.name))
+      : noted
 
   await recordFetch(ctx, tokenId, host)
   return result
@@ -490,6 +492,31 @@ async function checkHint(ctx: VaultContext, tokenId: string): Promise<string> {
   }
 
   return "The owner can add the browser on PCP's Browser page; PCP then passes such checks for web_fetch."
+}
+
+/**
+ * What an assistant can do when a site refuses automated readers outright
+ * (#168): PCP's browser opens the page under the owner's own rules for the
+ * site, so try it before saying the page cannot be read. Through an exit
+ * (a 451 geo-block), the tab takes the same exit.
+ */
+export async function refusedHint(
+  ctx: VaultContext,
+  tokenId: string,
+  exit?: string,
+): Promise<string> {
+  const reached = await tokenReachesBrowser(ctx, tokenId)
+  const lead = "The site refuses automated readers."
+
+  if (reached) {
+    return `${lead} Do not give up: open the page in PCP's browser with ${reached.slug}/tabs (action open${exit ? `, exit "${exit}": tabs open takes exit too` : ""}) and read it with ${reached.slug}/read_page; the owner's own rules for the site apply there.`
+  }
+
+  if (await findBrowserServer(ctx)) {
+    return `${lead} PCP's browser may open it: the owner can let this token use it.`
+  }
+
+  return `${lead} PCP's browser may open it: the owner can add it on PCP's Browser page. A web-reading server of the owner's may also read it.`
 }
 
 const CHANGING_METHODS_WARNING =
