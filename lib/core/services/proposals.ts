@@ -25,9 +25,13 @@ import {
   parseServiceDefinition,
   registerAuth,
   type ServiceDefinition,
-  type ServicePublish,
+  type ServicePublishAsk,
 } from "./definition"
-import { serviceOfDefinition, type ServiceLaunchInput } from "./services"
+import {
+  KeptFailedLaunch,
+  serviceOfDefinition,
+  type ServiceLaunchInput,
+} from "./services"
 
 /**
  * A service an assistant proposes (register_server, kind "service"): a
@@ -72,7 +76,7 @@ export type ServiceChangeAsk = {
     instances: string[]
   }
   host: { id: string; name: string; address: string }
-  publish: ServicePublish
+  publish: ServicePublishAsk
   env: ProposedVariable[]
   /** A secret PCP does not hold yet, which the owner types in. */
   newSecret: string | null
@@ -102,7 +106,7 @@ export type ServiceProposalArgs = {
   /** The SSH server, a row of kind ssh the token sees. */
   sshServerId: string
   publishAddress?: string
-  publishPorts?: Array<{ container: number; host: number }>
+  publishPorts?: Array<{ container: number; host?: number }>
   envSecrets?: Array<{ name: string; secret: string; generate?: unknown }>
   note?: string
   /** tool_access: levels and tiers proposed for what it registers. */
@@ -180,9 +184,9 @@ export async function prepareServiceProposal(
       address: args.publishAddress?.trim() || DEFAULT_PUBLISH_ADDRESS,
       ports: definition.ports.map(({ container }) => ({
         container,
-        host:
-          args.publishPorts?.find((entry) => entry.container === container)
-            ?.host ?? container,
+        // Left out: PCP picks a free port when it starts the container.
+        host: args.publishPorts?.find((entry) => entry.container === container)
+          ?.host,
       })),
     },
     definition,
@@ -368,7 +372,7 @@ export function describeServiceAsk(ask: ServiceChangeAsk): {
       ? `Updates from: ${definition.source}, when you update it on its page`
       : "Updates: by hand only (it names no image to update from)",
     publish.ports.length > 0
-      ? `Published on ${publish.address}: ${publish.ports.map((port) => `${port.host} → ${port.container}`).join(", ")}${publish.address === "0.0.0.0" || publish.address === "::" ? " (every address of the SSH server: anything on its network reaches it)" : isLoopback(publish.address) ? " (the SSH server's own loopback: PCP reaches it through the SSH connection)" : " (that address of the SSH server: anything that reaches it reaches the service)"}`
+      ? `Published on ${publish.address}: ${publish.ports.map((port) => (port.host === undefined ? `a free port PCP picks when it starts → ${port.container}` : `${port.host} → ${port.container}`)).join(", ")}${publish.address === "0.0.0.0" || publish.address === "::" ? " (every address of the SSH server: anything on its network reaches it)" : isLoopback(publish.address) ? " (the SSH server's own loopback: PCP reaches it through the SSH connection)" : " (that address of the SSH server: anything that reaches it reaches the service)"}`
       : "Publishes no port",
     ...ask.env.map((entry) => {
       const declared = definition.env.find((each) => each.name === entry.name)
@@ -529,7 +533,9 @@ export async function applyServiceChange(
     })
   } catch (error) {
     // What the owner typed stays theirs: said so, never dropped unseen.
-    if (saved) {
+    // A service PCP kept is bound to it: its page, last in the error, is
+    // where they go on.
+    if (saved && !(error instanceof KeptFailedLaunch)) {
       throw new PcpError(
         isPcpError(error) ? error.code : "upstream",
         `${isPcpError(error) ? error.message : "Something went wrong inside PCP while launching it."}\nThe new secret is kept in PCP as "${saved.name}": an assistant that asks again can name it, and you can choose it when you launch the service yourself, or delete it on the Secrets page.`,

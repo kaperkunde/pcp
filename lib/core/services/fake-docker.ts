@@ -65,6 +65,11 @@ export type FakeDockerState = {
    * it with this error, as Docker does when a port is taken.
    */
   runFailsAfterCreate: string | null
+  /**
+   * Ports something else on the host listens on: `ss` lists them, and
+   * `run` fails to publish one ("address already in use"), as an engine does.
+   */
+  busyPorts: number[]
   /** `rm` of a container that is there fails with this error. */
   failRm: string | null
   /** `volume rm` fails with this error. */
@@ -178,6 +183,11 @@ if (command === "version") {
   }
   const label = (option("--label") || "").replace(/^pcp\.service=/, "") || null
   for (const mount of volumes) { const volume = mount.split(":")[0]; if (!state.volumes.includes(volume)) state.volumes.push(volume); fs.mkdirSync(require("node:path").join(require("node:path").dirname(file), "volumes", volume), { recursive: true }) }
+  const taken = publish.map((spec) => Number(spec.split(":").slice(-2, -1)[0])).find((port) => state.busyPorts.includes(port))
+  if (taken !== undefined) {
+    state.containers[name] = { name, image, label, state: "created", exitCode: 0, health: null, args: args.slice(at + 1), publish, volumes, capAdd, devices, env }
+    fail("Error: cannot listen on the TCP port: listen tcp4 127.0.0.1:" + taken + ": bind: address already in use\n", 126)
+  }
   if (state.runFailsAfterCreate) {
     state.containers[name] = { name, image, label, state: "created", exitCode: 0, health: null, args: args.slice(at + 1), publish, volumes, capAdd, devices, env }
     fail(state.runFailsAfterCreate + "\n", 125)
@@ -263,6 +273,17 @@ if (command === "version") {
   fail("unknown command " + command + "\n")
 }
 save()
+`
+
+/**
+ * ss for tests: the listening TCP ports of the fake host, as `ss -Hltn`
+ * writes them: the busy ports a test set (the fake does not make a
+ * container's own ports busy: tests launch several on one port).
+ */
+const SS = String.raw`
+const fs = require("node:fs")
+const state = JSON.parse(fs.readFileSync(process.env.FAKE_DOCKER_STATE, "utf8"))
+for (const port of state.busyPorts) process.stdout.write("LISTEN 0 4096 0.0.0.0:" + port + " 0.0.0.0:*\n")
 `
 
 /**
@@ -362,6 +383,9 @@ export function startFakeDocker({
   writeFileSync(script, `#!${process.execPath}\n${PROGRAM}`)
   chmodSync(script, 0o755)
 
+  writeFileSync(path.join(bin, "ss"), `#!${process.execPath}\n${SS}`)
+  chmodSync(path.join(bin, "ss"), 0o755)
+
   // A test takes either away by deleting it (`withoutDownloader`).
   for (const downloader of ["curl", "wget"]) {
     const file = path.join(bin, downloader)
@@ -382,6 +406,7 @@ export function startFakeDocker({
     volumes: [],
     volumesRemoved: [],
     runFailsAfterCreate: null,
+    busyPorts: [],
     failRm: null,
     failVolumeRm: null,
     tarball: null,

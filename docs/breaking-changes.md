@@ -6,6 +6,18 @@ release, with a note in front of the answer ("addPatches was renamed to
 add_patches; use add_patches."); after that it is refused like any other
 unknown key.
 
+## A service's host port left out is one PCP picks
+
+`register_server` for a service: a `publish_ports` entry's `host` is
+optional, and a container port left out of `publish_ports` no longer keeps
+its own number as its host port. PCP picks a free port on the SSH server's
+127.0.0.1 when it launches the service, and the answer says which. Name a
+`host` only when something needs the port to stay the same (and always when
+`publish_address` is not 127.0.0.1): one that is taken is refused before
+anything is made, never moved. A launch that fails now stays as a service
+marked failed on its page, where the owner changes its loopback host ports
+and launches it again; you need no second proposal for a port.
+
 ## `update_secret_sites` is PCP's own `change_secret_scope`
 
 Proposing where one of the owner's secrets may be used is PCP's own

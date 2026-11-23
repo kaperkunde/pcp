@@ -1544,12 +1544,38 @@ describe("proposing a service", () => {
       service: DEFINITION,
       ssh_server: host.slug,
       publish_address: "0.0.0.0",
+      publish_ports: [{ container: 5001, host: 5001 }],
       env_secrets: [{ name: "DOCLING_SERVE_API_KEY", secret: "Docling key" }],
     })
 
     expect((await shown()).lines).toContain(
       "Published on 0.0.0.0: 5001 → 5001 (every address of the SSH server: anything on its network reaches it)",
     )
+  })
+
+  it("says a host port left out is one PCP picks, and refuses that where the network needs a fixed one", async () => {
+    const host = await sshServer()
+    await connectSeeing()
+
+    await register({
+      name: "Docling",
+      service: DEFINITION,
+      ssh_server: host.slug,
+      publish_ports: [{ container: 5001 }],
+      env_secrets: [{ name: "DOCLING_SERVE_API_KEY", secret: "Docling key" }],
+    })
+    expect((await shown()).lines).toContain(
+      "Published on 127.0.0.1: a free port PCP picks when it starts → 5001 (the SSH server's own loopback: PCP reaches it through the SSH connection)",
+    )
+
+    const refused = await register({
+      name: "Docling two",
+      service: DEFINITION,
+      ssh_server: host.slug,
+      publish_address: "0.0.0.0",
+      env_secrets: [{ name: "DOCLING_SERVE_API_KEY", secret: "Docling key" }],
+    })
+    expect(refused.text).toMatch(/needs a host port .* loopback/)
   })
 
   it("launches exactly what was shown on approval, with the secret the owner typed", async () => {
@@ -1572,10 +1598,11 @@ describe("proposing a service", () => {
       expect.objectContaining({
         name: "Docling",
         hostId: host.id,
-        // The SSH server's own loopback unless the assistant names another.
+        // The SSH server's own loopback unless the assistant names another,
+        // and a host port PCP picks when it launches, unless one is named.
         publish: {
           address: "127.0.0.1",
-          ports: [{ container: 5001, host: 5001 }],
+          ports: [{ container: 5001 }],
         },
         env: { DOCLING_SERVE_API_KEY: secret.id },
         definition: expect.objectContaining({ image: IMAGE }),

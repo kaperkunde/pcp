@@ -414,6 +414,15 @@ describe("a service (kind service)", () => {
     ).toBeNull()
   })
 
+  it("takes a port with no host port: PCP picks one", () => {
+    expect(
+      checkRegisterShape("service", {
+        ...service,
+        publish_ports: [{ container: 5001 }],
+      }),
+    ).toBeNull()
+  })
+
   it("needs a definition and an SSH server", () => {
     expect(checkRegisterShape("service", { ssh_server: "build-box" })).toMatch(
       /from its definition in service/,

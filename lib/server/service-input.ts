@@ -1,6 +1,7 @@
 import type { VaultContext } from "@/lib/core/context"
 import { invalid, isPcpError, PcpError } from "@/lib/core/errors"
 import { createSecret } from "@/lib/core/secrets"
+import { KeptFailedLaunch } from "@/lib/core/services/services"
 import { DEFAULT_PUBLISH_ADDRESS } from "@/lib/core/services/definition"
 
 import { field, fields } from "./action-state"
@@ -96,6 +97,11 @@ export function publishFrom(formData: FormData) {
     // The SSH server's own loopback unless the owner chose its network.
     address: field(formData, "address") || DEFAULT_PUBLISH_ADDRESS,
     ports: containers.map((container, at) => {
+      // Left empty: PCP picks a free port when it starts the container.
+      if (!hosts[at]?.trim()) {
+        return { container: Number(container) }
+      }
+
       const host = Number(hosts[at])
       if (!Number.isInteger(host)) {
         throw invalid(`Choose the SSH server's port for port ${container}.`)
@@ -132,7 +138,12 @@ export async function withNewSecrets<T>(
 
     return await launch(bound)
   } catch (error) {
-    if (made.length === 0 || !isPcpError(error)) {
+    // The service PCP kept is bound to them: its page says it all.
+    if (
+      made.length === 0 ||
+      !isPcpError(error) ||
+      error instanceof KeptFailedLaunch
+    ) {
       throw error
     }
 

@@ -22,17 +22,23 @@ import type { ServiceSpec } from "@/lib/generated/prisma/client"
  */
 export type ServiceOwn = {
   containerName: string
-  /** JSON, as ServicePublish. */
+  /** JSON, as ServicePublish (ServicePublishAsk while it is failed). */
   publish: string
   /** JSON {"NAME": "value"}. */
   values: string
+  /**
+   * JSON {"message": "…"} while a launch that failed is kept, marked
+   * failed; "" otherwise. Never had a plain column.
+   */
+  failure?: string
 }
 
 export const SERVICE_OWN: SealedGroup<ServiceOwn, "sealedOwn", "serverId"> = {
   column: "sealedOwn",
   idKey: "serverId",
   aad: (id) => `service_spec:${id}:own`,
-  blank: { containerName: "", publish: "{}", values: "{}" },
+  blank: { containerName: "", publish: "{}", values: "{}", failure: "" },
+  sealedOnly: ["failure"],
 }
 
 /** The columns a reader selects to read a service's own values. */

@@ -1493,14 +1493,53 @@ volumes are on the SSH server already (`existingVolumes`: a service removed
 before with its data kept); a failure from `run` on (Docker's `run
 --detach` makes the container and its volumes before it starts it, so a
 port in use leaves both) removes the container and only the volumes this
-launch made, and whatever was made in PCP, and the error says what was
-taken back and what was kept, with the container's first and last lines
-(scrubbed). `removeContainer` takes a container or volume that is gone as
+launch made, and the error says what was taken back and what was kept,
+with the container's first and last lines (scrubbed). What PCP made of the
+registered server goes too, but the service itself stays (below). `removeContainer` takes a container or volume that is gone as
 removed and reports anything else the engine refused, which the error then
 names as left on the SSH server to remove by hand. A secret the owner typed
 for the launch (on the launch form, or on an assistant's request) is kept
-when it fails, and the error names it, so they choose it when they try
-again. Making a container again (`recreateServiceOn`: an update, a changed
+and bound to the service PCP keeps.
+
+**Host ports PCP picks** (`engine.ts runPublished`). A `publish_ports` entry
+or launch-form port with no host port is one PCP picks, only while the
+service is published on the SSH server's own loopback (a network address
+needs a number that stays the same, `parsePublish`). Before it makes
+anything it reads what listens on the SSH server (`ss -Hltn` over `exec`;
+without `ss`, the engine's own refusal is the check): a port the owner or
+assistant named that is taken is refused, naming what holds it, and never
+moved; for the others it picks a random free port from 20000-32000 (below
+the ephemeral range) and publishes it explicitly, so it stays the same
+whenever the engine restarts the container (an engine's random publish
+(`-p 127.0.0.1::8080`) does not). When the engine still finds a picked port
+taken, the half-made container is removed and PCP picks again, at most five
+times. The numbers are stored in the service's own part with `auto: true`,
+which tunnels, the registered server and the health check read; a remake
+keeps an `auto` port while it is free and picks another when it is not
+(`recreateServiceOn` saves it), and the launch answer and the service's page
+say which ports PCP picked. The request page for a proposal says "a free
+port PCP picks when it starts".
+
+**A launch that fails is kept** (`launchServiceOn`, `KeptFailedLaunch`).
+Past the point where PCP asked the engine for anything, a failure takes the
+container and the volumes it made back, as above, and keeps the service:
+its server row (status error) and `service_spec` with the definition, the
+ports as asked (those PCP had not picked still without a host port), the
+variables and a `failure` (sealed in the own part: the reason, what was
+taken back, the container's first and last lines), `intended_state`
+`stopped` so a call, the reconcile pass and a secret's remake leave it
+alone. Nothing it would have registered exists. Its page shows why and a
+form (`saveFailedService`, `relaunchService`): the host ports (only while
+published on the loopback, where a port number widens nothing), the plain
+values and the secrets bound to its variables, saved or launched again; the
+second launch is the same code on the same rows. Another image, ports
+beyond the ones approved, an address, new variables or another SSH server is
+a fresh proposal, never this form. An assistant's `status` says it failed,
+and `start`, `stop`, `restart`, `logs`, `update` and the file tools refuse
+with the reason and the page's link, last; `check_server` says so too. The
+answer to the owner's or an assistant's launch ends with the link to the
+kept service's page. It is removed like any service. An exit's service is
+not kept (the owner names the exit in the launch). Making a container again (`recreateServiceOn`: an update, a changed
 secret, Start on a gone container) gets the image first, then removes the
 old container; when the new one does not start, the one made is removed
 (its volumes stay), the service's row is marked failed, and the error says

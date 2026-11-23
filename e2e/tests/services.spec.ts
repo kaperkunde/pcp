@@ -336,3 +336,56 @@ test("a service that signs in to an account: PCP's own sign-in page takes the co
     "Signed in as ada@example.com",
   )
 })
+
+test("a launch that fails is kept: change its port on its page and launch it again", async ({
+  page,
+}) => {
+  // Something else on the SSH server holds the port the form names.
+  docker.update((state) => {
+    state.busyPorts = [port]
+  })
+  const name = `Kept ${RUN}`
+
+  await page.goto("/servers/services/new")
+  await page.getByLabel("Name", { exact: true }).fill(name)
+  await page
+    .getByLabel("SSH server", { exact: true })
+    .selectOption({ label: `${HOST} (127.0.0.1)` })
+  await page.getByLabel("Definition").fill(
+    JSON.stringify({
+      image: `ghcr.io/example/kept@sha256:${"d".repeat(64)}`,
+      ports: [{ container: 8081 }],
+      env: [],
+      health: { kind: "http", port: 8081, path: "/health" },
+      registers: { kind: "none" },
+    }),
+  )
+  // Left empty, PCP picks a free port: the form says so.
+  await expect(
+    page.getByLabel("The SSH server's port for 8081"),
+  ).toHaveAttribute("placeholder", "PCP picks a free port")
+  await page.getByLabel("The SSH server's port for 8081").fill(String(port))
+  await page.getByRole("button", { name: "Launch" }).click()
+
+  // The service is kept, marked failed, with the reason and its settings.
+  await expect(page).toHaveURL(/\/servers\/[0-9a-f-]+$/)
+  await expect(page.getByTestId("service-failure")).toContainText(
+    `Port ${port} on ${HOST}`,
+  )
+  expect(docker.state().containers[`pcp-kept-${RUN}`]).toBeUndefined()
+
+  // Another port, and launched again: no new approval.
+  docker.update((state) => {
+    state.busyPorts = []
+  })
+  await page
+    .getByLabel("The SSH server's port for 8081")
+    .fill(String(sessionsPort))
+  await clickHydrated(page.getByTestId("launch-again"))
+  await expect(page.getByTestId("service-card")).toContainText(
+    "Running and healthy",
+  )
+  expect(docker.state().containers[`pcp-kept-${RUN}`]?.publish).toEqual([
+    `127.0.0.1:${sessionsPort}:8081`,
+  ])
+})

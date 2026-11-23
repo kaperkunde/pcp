@@ -13,7 +13,10 @@ import { ServerLimits } from "@/components/server-limits"
 import { ServerPacingForm } from "@/components/server-pacing-form"
 import { ExitsCard } from "@/components/exits-card"
 import { ServiceCard } from "@/components/service-card"
-import { ServiceSettingsForm } from "@/components/service-form"
+import {
+  FailedServiceForm,
+  ServiceSettingsForm,
+} from "@/components/service-form"
 import { SshAccessCard } from "@/components/ssh-access-card"
 import { SshServerForm } from "@/components/ssh-server-form"
 import { StorageCard } from "@/components/storage-card"
@@ -155,6 +158,42 @@ export default async function ServerPage({
           readOnly: storage.readOnly,
         }}
         login={storage.host?.login ?? ""}
+      />
+    ) : service?.failure ? (
+      <FailedServiceForm
+        initial={{
+          id: server.id,
+          address: service.ask.address,
+          loopback:
+            service.ask.address === "::1" ||
+            service.ask.address.startsWith("127."),
+          ports: service.definition.ports.map((port) => ({
+            container: port.container,
+            host:
+              service.ask.ports.find(
+                (entry) => entry.container === port.container,
+              )?.host ?? null,
+          })),
+          env: Object.fromEntries(
+            service.env
+              .filter((entry) => entry.secretId)
+              .map((entry) => [entry.name, entry.secretId!]),
+          ),
+          values: Object.fromEntries(
+            service.env
+              .filter((entry) => entry.value !== null)
+              .map((entry) => [entry.name, entry.value!]),
+          ),
+        }}
+        variables={service.definition.env.map((entry) => ({
+          name: entry.name,
+          required: entry.required,
+          description: entry.description,
+          plain: entry.plain,
+          value: entry.value ?? null,
+          generated: entry.generated !== undefined,
+        }))}
+        secrets={secrets}
       />
     ) : service ? (
       <ServiceSettingsForm
