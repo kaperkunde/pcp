@@ -29,8 +29,9 @@ export class PcpError extends Error {
  * (tools/outcome.ts).
  */
 export class PassOnlyError extends PcpError {
-  constructor(id: string) {
-    super("forbidden", passOnlyMessage(id))
+  /** `message`: said otherwise, for a stored file rather than a result (#158). */
+  constructor(id: string, message = passOnlyMessage(id)) {
+    super("forbidden", message)
     this.name = "PassOnlyError"
   }
 }

@@ -1,7 +1,12 @@
 import type { VaultContext } from "../context"
 import { db } from "../db"
 import { isPcpError, PcpError } from "../errors"
-import { openEncryptedFolder, sweepPending } from "./encrypted"
+import {
+  isPassOnlyEntry,
+  openEncryptedFolder,
+  openMeta,
+  sweepPending,
+} from "./encrypted"
 import { openFolder, type Entry, type StorageFolder } from "./files"
 import {
   CONVERT_BUDGET_MS,
@@ -95,6 +100,20 @@ export async function convertStoreStep(
     }
   }
 
+  // A file saved from a part keep named stays encrypted (#158): a plain
+  // folder has nowhere to keep its mark. Said before anything starts.
+  if (to === "plain" && loaded.root.converting !== "plain") {
+    const held = await passOnlyFiles(ctx, server.id, 6)
+
+    if (held.length > 0) {
+      const names = held.slice(0, 5)
+      throw new PcpError(
+        "state",
+        `${server.name} holds files saved from results PCP never reads out (${names.join(", ")}${held.length > 5 ? ", and more" : ""}), which a plain folder cannot keep so: delete them first, then make it plain.`,
+      )
+    }
+  }
+
   // Marked first, with a key to encrypt under: from here every tool waits.
   if (
     loaded.root.converting !== to ||
@@ -182,6 +201,59 @@ export async function convertStoreStep(
   } finally {
     fs.end()
   }
+}
+
+/** How many entries of the index the pass-only check opens at once. */
+const PASS_ONLY_PAGE = 500
+
+/**
+ * The names of up to `most` files of an encrypted store saved from a
+ * pass-only kept result (#158), by the row's mark or the sealed one, which a
+ * database write alone cannot clear: the marked rows first, then the index
+ * a page at a time, stopping once it found as many.
+ */
+async function passOnlyFiles(
+  ctx: VaultContext,
+  serverId: string,
+  most: number,
+): Promise<string[]> {
+  const found = new Map<string, string>()
+  const select = { id: true, meta: true, passOnly: true } as const
+
+  for (const row of await db().storageEntry.findMany({
+    where: { serverId, folder: false, passOnly: true },
+    select,
+    take: most,
+  })) {
+    found.set(row.id, openMeta(ctx, row).n)
+  }
+
+  let after: string | undefined
+
+  while (found.size < most) {
+    const page = await db().storageEntry.findMany({
+      where: {
+        serverId,
+        folder: false,
+        passOnly: false,
+        ...(after ? { id: { gt: after } } : {}),
+      },
+      select,
+      orderBy: { id: "asc" },
+      take: PASS_ONLY_PAGE,
+    })
+
+    for (const row of page) {
+      const meta = openMeta(ctx, row)
+      if (isPassOnlyEntry(row, meta)) found.set(row.id, meta.n)
+      if (found.size >= most) break
+    }
+
+    if (page.length < PASS_ONLY_PAGE) break
+    after = page[page.length - 1]!.id
+  }
+
+  return [...found.values()]
 }
 
 function skippedWords(skipped: string[]): string {
@@ -345,6 +417,16 @@ async function decryptFile(
   skipped: string[],
 ): Promise<void> {
   const opened = await encrypted.open(entry.path)
+
+  // A plain file has nowhere to keep the mark of a part keep named (#158):
+  // it stays encrypted until it is deleted.
+  if (opened.passOnly) {
+    opened.stream.destroy()
+    skipped.push(
+      `${label(entry.path)} (saved from a result PCP never reads out, which a plain folder cannot keep so: delete it to finish)`,
+    )
+    return
+  }
 
   try {
     await plain.makeFolder(parentOf(entry.path), { parents: true })

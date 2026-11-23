@@ -1285,6 +1285,9 @@ model StorageEntry {
   meta        Bytes
   /// The sealed object's size, what it takes on the backend.
   storedBytes Float     @default(0) @map("stored_bytes")
+  /// Saved from a pass-only kept result (#158): get_file hands it on only
+  /// as a pass-only result again, and no link reads it out.
+  passOnly    Boolean   @default(false) @map("pass_only")
   createdAt   DateTime  @default(now()) @map("created_at")
 
   @@unique([serverId, parentId, nameKey])
@@ -1389,6 +1392,8 @@ model ToolResult {
 
   @@index([tokenId, createdAt])
   @@index([expiresAt])
+  /// The live pass-only results a token's answers are masked with (#158).
+  @@index([tokenId, passOnly, expiresAt])
   @@map("tool_result")
 }
 

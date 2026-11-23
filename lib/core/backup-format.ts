@@ -656,6 +656,8 @@ const StorageEntryRow = z.strictObject({
   fileKey: bytesOrNull.default(null),
   meta: bytes,
   storedBytes: z.number().min(0).default(0),
+  // Added with #158: absent from older files.
+  passOnly: z.boolean().default(false),
   createdAt: date,
 })
 

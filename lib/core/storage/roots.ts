@@ -12,7 +12,7 @@ import { storeTools, type SyncResult } from "../catalogue"
 import type { VaultContext } from "../context"
 import { asBytes, CryptoError } from "../crypto"
 import { db } from "../db"
-import { invalid, isPcpError, PcpError } from "../errors"
+import { invalid, isPcpError, PassOnlyError, PcpError } from "../errors"
 import { newId } from "../ids"
 import { jsonToolResult } from "../json-result"
 import {
@@ -47,7 +47,12 @@ import {
 } from "../tools/family"
 import { newKey, unwrapStoreKey, wrapStoreKey } from "./crypt"
 import { openEncryptedFolder } from "./encrypted"
-import { openFolder, type StorageFolder } from "./files"
+import {
+  openFolder,
+  PLAIN_PASS_ONLY,
+  storedPassOnlyMessage,
+  type StorageFolder,
+} from "./files"
 import { DEFAULT_FIND_RESULTS, MAX_GET_TEXT_CHARS } from "./limits"
 import { ensureLocalStoreDir, localFs } from "./local"
 import { globMatcher, normalizeRootPath, splitPath } from "./paths"
@@ -703,6 +708,8 @@ export async function callStorageTool(
   const notes = checked.notes
   let matcher: ((name: string) => boolean) | null = null
   let upload: Buffer | null = null
+  /** The file to save is a pass-only kept result's (#158). */
+  let passOnly = false
   const { fileBytes } = await loadResourceLimits()
 
   try {
@@ -748,6 +755,13 @@ export async function callStorageTool(
           throw invalid(missingResultMessage())
         }
 
+        // A part keep named keeps its mark in an encrypted store's index;
+        // a plain folder has nowhere to keep it (#158).
+        if (opened.passOnly && !isEncryptedStore(loaded.root)) {
+          throw new PassOnlyError(opened.id, PLAIN_PASS_ONLY)
+        }
+
+        passOnly = opened.passOnly
         upload = opened.bytes()
       }
 
@@ -793,6 +807,7 @@ export async function callStorageTool(
         : runTool(folder, loaded, toolName, a, {
             matcher,
             upload,
+            passOnly,
             fileBytes,
             keepBytes,
           }),
@@ -890,11 +905,13 @@ async function runTool(
   {
     matcher,
     upload,
+    passOnly,
     fileBytes,
     keepBytes,
   }: {
     matcher: ((name: string) => boolean) | null
     upload: Buffer | null
+    passOnly: boolean
     fileBytes: number
     keepBytes?: BytesKeeper
   },
@@ -917,6 +934,34 @@ async function runTool(
     case "get_file": {
       const read = await folder.read(path, fileBytes)
       const type = fileMediaType(read.name, read.bytes)
+
+      // Saved from a part keep named: a pass-only result again, never its
+      // text (#158).
+      if (read.passOnly) {
+        if (!keepBytes) {
+          throw new PassOnlyError("", storedPassOnlyMessage(read.path))
+        }
+
+        const kept = await keepBytes({
+          bytes: read.bytes,
+          mediaType: type,
+          name: read.name,
+          serverId: loaded.server.id,
+          toolName,
+          passOnly: true,
+        })
+
+        return {
+          path: read.path,
+          name: read.name,
+          size: read.bytes.length,
+          type: bareType(type),
+          modified: read.modified,
+          result: handleOf(kept),
+          note: `This file was saved from a result that holds a part keep named: pass {"$result": "${kept.id}"} as it is in a tool's arguments where the value belongs. PCP never reads it out (read_result and the like refuse it, code pass_only).`,
+        }
+      }
+
       const text = isTextType(type)
         ? decodeText(read.bytes, charsetOf(type))
         : null
@@ -964,6 +1009,7 @@ async function runTool(
     case "save_file": {
       const saved = await folder.save(path, upload!, {
         overwrite: a.overwrite === true,
+        ...(passOnly ? { passOnly: true } : {}),
       })
       return { ...saved, saved: saved.replaced ? "replaced" : "created" }
     }

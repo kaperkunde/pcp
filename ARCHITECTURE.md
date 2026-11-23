@@ -5375,12 +5375,83 @@ read_result, the `pcp://results` resource, `pcp.read`, `pcp.image` and
 view_image, a file link (`share_result`), the browser's `upload_file` (a page
 could echo the file back) and a capability's input (read_image,
 edit_pdf, convert_document, whose provider would read it out) refuse it with
-the tool error code `pass_only` (`refusePassOnly`, `PassOnlyError`). This
-keeps PCP from reading the value out, not every tool: one that echoes its
-input (an API that returns what it was sent, a store's `save_file` then
-`get_file`) can still hand it back as an ordinary answer, which is out of
-PCP's control. Like every kept result, it is not exported and `wipeVault`
-removes it.
+the tool error code `pass_only` (`refusePassOnly`, `PassOnlyError`). Like
+every kept result, it is not exported and `wipeVault` removes it.
+
+A tool that echoes its input (an API that returns the body it was sent, a
+search that quotes its query) or a round trip through a store could still
+hand the value back, so PCP looks for it (#158, `lib/core/kept-masks.ts`):
+
+- **In the call it was handed to.** `permissions.ts runCall` and
+  `runCodeCall`, where every call with a result opener is made, wrap the
+  call's opener (`passOnlyTracker`): each pass-only result it opens is
+  noted with the forms it is put in as (its text, its base64). keep makes
+  its handles from the answer as it came, so a part it names that holds the
+  value (a connection string around a key) is kept whole, pass-only itself;
+  then what the call shows (the shaped answer's texts, text resources and
+  `structuredContent`, a program's value), its errors (message and stack,
+  which an internal error is logged with) and the long texts it keeps that
+  are not pass-only (a mail body, an answer too long to pass on) show the
+  value as `[kept: <id>]`, as it is and in the forms JSON encoders write it
+  (`openapi/redact.ts makeRedactor`). A call the owner allowed once shares
+  its tracker with the value stored for a program's identical call
+  (`programAnswer`), which is shaped and scrubbed the same way. An error that is not JSON is covered
+  too.
+- **For the result's life (a day).** Every answer to the token shows each of
+  its live pass-only values as `[kept: <id>]`, found as the browser finds a
+  typed secret (`lib/core/value-masks.ts`, which `browser/held.ts` uses too):
+  each word hashed whole (and URL-decoded), then every run of the text that
+  is the value once white space and separators are out and it is upper-cased,
+  in one pass: a value is anchored on a short stretch of itself that does
+  not overlap itself (the least by keyed fingerprint), the run around each
+  place the text has an anchor is fingerprinted in O(1) from the text's
+  prefix fingerprints, and only a matching one is confirmed by an HMAC. A
+  value that repeats itself ("AAAA…", "ABAB…": its period at most half its
+  length) is found as a whole word only, so an answer costs one pass
+  whatever values an assistant made (about 13 ms for 100,000 characters
+  against 300 results, where a window per length took 2.6 s, and a
+  repeating value made it hang); the masker built for a token is kept
+  while its set of results stays the same. A run that starts or ends
+  inside a JSON escape takes the whole escape, so JSON stays JSON. It is
+  applied last to every answer the gateway serves (`tools/serve.ts`'s
+  `mask` hook: execute_<tier>, run_<tier>, PCP's own tools,
+  `check_permission`'s replay, read_result), to a program's and a wrapper's
+  `pcp.call` values and errors (`permissions.ts runCodeCall`) and to what a
+  program's repeat of a call the owner allowed is handed (`askCodeCall`), to
+  `pcp.read` as text and to the `pcp://results` resource. A masking that
+  fails answers "Something went wrong inside PCP." rather than the answer
+  unmasked, and since it runs after the answer was checked against the
+  tool's output schema, a structured answer it changed is checked again: one
+  that no longer fits answers `pass_only` with how to ask for that part as a
+  handle (`MASKED_OUT_OF_SHAPE`). Nothing new is stored: the values are
+  opened from the token's own rows inside the request (one query on the
+  index `tool_result (token_id, pass_only, expires_at)`), and only their
+  hashes stay in memory, per result, in this process (a cache of 4,096
+  results, worked out again when dropped). Every live pass-only result of
+  the token counts, up to `MAX_KEPT_RESULTS_PER_TOKEN`, what a token can hold
+  at all, so minting more of them never pushes one out of the mask; only the
+  token's own cap removes the oldest, and with it the result. Each value is
+  at most `MAX_KEPT_MASK_CHARS` (a whole kept answer rather than a
+  credential is not looked for), and a value shorter than
+  `MIN_KEPT_MASK_CHARS` (8) is not looked for, as it is or normalised:
+  shorter ones would mask ordinary text. An expired result is no longer
+  looked for, and another token's never is. This is best effort, bounded
+  by those limits.
+- **Through a store.** `save_file` with a pass-only handle marks the file in
+  an encrypted store's index: `storage_entry.pass_only`, exported with the
+  index (false in a file from before), and the same mark inside its sealed
+  meta (`storage_entry:<id>`, the row's id as associated data), so a write
+  to the database alone cannot clear it; either one marks the file.
+  `get_file` of it answers a pass-only handle again, with no text, and
+  `share_file` refuses it (`pass_only`), as the conversion to plain does
+  while the store holds one (delete it first). A plain folder refuses the
+  handle (`PLAIN_PASS_ONLY`), since its files are there as they are for
+  whatever reads the folder. The owner's Files pages still open it.
+
+What is still out of PCP's reach: a value a tool transforms before it
+answers (encodes, splits, reverses), one shorter than the minimum, and a
+copy the tool keeps on its own side (a service's files folder, a mail sent
+to oneself) read back once the result has expired.
 Each answer also carries a `resource_link` per handle (`pcp://results/<id>`),
 the mail tools' own included; the gateway's resource template of that name
 gives the text or the file's bytes to the token that kept it, and lists

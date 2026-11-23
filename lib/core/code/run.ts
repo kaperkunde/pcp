@@ -6,6 +6,7 @@ import type { ToolTier } from "../constants"
 import { readFields, type AnswerShape } from "../answers"
 import { isConnectResult } from "../connect"
 import { isPcpError, passOnlyMessage } from "../errors"
+import { maskKeptText } from "../kept-masks"
 import { bareType, isTextType } from "../media-types"
 import type { CodeCallOutcome, PermissionScope } from "../permissions"
 import { REUSE_EXECUTED_MS } from "../permission-rules"
@@ -1131,7 +1132,7 @@ export async function runProgram(
       const ranged = offset !== undefined || length !== undefined
       const start = (offset as number | undefined) ?? 0
       const end = length === undefined ? undefined : start + (length as number)
-      const value =
+      const read =
         as === "base64"
           ? (ranged
               ? opened.bytes().subarray(start, end)
@@ -1143,6 +1144,12 @@ export async function runProgram(
                 new TextDecoder().decode(opened.bytes().subarray(start, end))
               : opened.text().slice(start, end)
             : opened.text()
+      // A text shows the token's pass-only values as [kept: <id>] (#158);
+      // bytes as base64 go on as they are.
+      const value =
+        as === "base64"
+          ? read
+          : await maskKeptText(scope.ctx, scope.tokenId, read)
 
       if (value.length > limits.answerChars) {
         return refuse(
