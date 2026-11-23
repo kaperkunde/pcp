@@ -5393,19 +5393,31 @@ hand the value back, so PCP looks for it (#158, `lib/core/kept-masks.ts`):
   which an internal error is logged with) and the long texts it keeps that
   are not pass-only (a mail body, an answer too long to pass on) show the
   value as `[kept: <id>]`, as it is and in the forms JSON encoders write it
-  (`openapi/redact.ts makeRedactor`). An error that is not JSON is covered
+  (`openapi/redact.ts makeRedactor`). A call the owner allowed once shares
+  its tracker with the value stored for a program's identical call
+  (`programAnswer`), which is shaped and scrubbed the same way. An error that is not JSON is covered
   too.
 - **For the result's life (a day).** Every answer to the token shows each of
   its live pass-only values as `[kept: <id>]`, found as the browser finds a
   typed secret (`lib/core/value-masks.ts`, which `browser/held.ts` uses too):
   each word hashed whole (and URL-decoded), then every run of the text that
   is the value once white space and separators are out and it is upper-cased,
-  picked by a keyed rolling fingerprint and confirmed by an HMAC; a run that
-  starts or ends inside a JSON escape takes the whole escape, so JSON stays
-  JSON. It is applied last to every answer the gateway serves
-  (`tools/serve.ts`'s `mask` hook: execute_<tier>, run_<tier>, PCP's own
-  tools, `check_permission`'s replay, read_result), to a program's and a
-  wrapper's `pcp.call` values and errors (`permissions.ts runCodeCall`), to
+  in one pass: a value is anchored on a short stretch of itself that does
+  not overlap itself (the least by keyed fingerprint), the run around each
+  place the text has an anchor is fingerprinted in O(1) from the text's
+  prefix fingerprints, and only a matching one is confirmed by an HMAC. A
+  value that repeats itself ("AAAA…", "ABAB…": its period at most half its
+  length) is found as a whole word only, so an answer costs one pass
+  whatever values an assistant made (about 13 ms for 100,000 characters
+  against 300 results, where a window per length took 2.6 s, and a
+  repeating value made it hang); the masker built for a token is kept
+  while its set of results stays the same. A run that starts or ends
+  inside a JSON escape takes the whole escape, so JSON stays JSON. It is
+  applied last to every answer the gateway serves (`tools/serve.ts`'s
+  `mask` hook: execute_<tier>, run_<tier>, PCP's own tools,
+  `check_permission`'s replay, read_result), to a program's and a wrapper's
+  `pcp.call` values and errors (`permissions.ts runCodeCall`) and to what a
+  program's repeat of a call the owner allowed is handed (`askCodeCall`), to
   `pcp.read` as text and to the `pcp://results` resource. A masking that
   fails answers "Something went wrong inside PCP." rather than the answer
   unmasked, and since it runs after the answer was checked against the

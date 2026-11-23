@@ -11,11 +11,14 @@ import type { CallToolResult } from "@modelcontextprotocol/server"
  * rolling fingerprint of the normalised form.
  *
  * A text is masked word by word (each word hashed when its length is a
- * value's), then run by run: a window of the normalised value's length
- * slides over the normalised text, and only where its fingerprint is one
- * of a value's is that window hashed, so a long text costs arithmetic per
- * character, not a hash. Everything is this process's own (the key, the
- * base), in memory only: the hashes mean nothing anywhere else.
+ * value's), then run by run, in one pass over the normalised text: where a
+ * value's anchor (a short stretch of it, `anchorOf`) is, the fingerprint
+ * of the run of the value's length around it is taken from the text's
+ * prefix fingerprints in O(1), and only a run whose fingerprint is the
+ * value's is hashed. A long text costs arithmetic per character, not a
+ * hash, however many values there are (#158). Everything is this
+ * process's own (the key, the base), in memory only: the hashes mean
+ * nothing anywhere else.
  */
 
 /** The hashes' key, this process's own. */
@@ -28,6 +31,12 @@ const MODULUS = 33_554_393
 const BASE = randomInt(65_537, MODULUS - 1)
 /** The longest word hashed whole: more than any value masked by word. */
 const MAX_WORD_CHARS = 4_096
+/**
+ * How many normalised characters anchor a value's run: a text is read
+ * once, and only where these match a value's anchor is its whole run's
+ * fingerprint taken. No caller looks for a shorter value than this.
+ */
+const ANCHOR_CHARS = 6
 
 /** A value as it is remembered: its hashes, never itself. */
 export type MaskedValue = {
@@ -36,8 +45,18 @@ export type MaskedValue = {
   /** The value as it is. */
   digest: string
   length: number
-  /** The value with white space and separators out, upper case. */
-  normal: { digest: string; length: number; print: number } | null
+  /**
+   * The value with white space and separators out, upper case: its hash,
+   * length and fingerprint, and where runs of a text are looked for it
+   * (`anchor`), null for a value that repeats itself, which only whole
+   * words find (`anchorOf`).
+   */
+  normal: {
+    digest: string
+    length: number
+    print: number
+    anchor: { offset: number; print: number; repeats: boolean } | null
+  } | null
 }
 
 export function digestOf(value: string): string {
@@ -178,15 +197,87 @@ export function maskedValue(label: string, value: string): MaskedValue {
             digest: digestOf(normal),
             length: normal.length,
             print: fingerprint(normal, 0, normal.length),
+            anchor: anchorOf(normal),
           }
         : null,
   }
 }
 
+/** The smallest period of a text (KMP's failure function). */
+function periodOf(text: string): number {
+  const border = new Int32Array(text.length)
+
+  for (let at = 1, k = 0; at < text.length; at += 1) {
+    while (k > 0 && text[at] !== text[k]) k = border[k - 1]!
+    if (text[at] === text[k]) k += 1
+    border[at] = k
+  }
+
+  return text.length - (text.length > 0 ? border[text.length - 1]! : 0)
+}
+
+/**
+ * Where runs of a text are looked for a normalised value: a stretch of
+ * ANCHOR_CHARS that does not overlap itself (no border), so a text holds
+ * it at most once every ANCHOR_CHARS characters, the least by keyed
+ * fingerprint (values made to share a stretch do not share their anchor
+ * unless that is nearly all they hold), and its offset in the value. Null
+ * for a value shorter than that. `repeats`: the value repeats itself (its
+ * period at most half its length: "AAAA…", "ABAB…"), so a text could hold
+ * it at nearly every place; a caller whose values an assistant can make
+ * leaves those to whole words (`valueMasker`'s `repeating`), which keeps
+ * a pass over a text bounded (#158).
+ */
+function anchorOf(
+  normal: string,
+): { offset: number; print: number; repeats: boolean } | null {
+  if (normal.length < ANCHOR_CHARS) {
+    return null
+  }
+
+  const repeats = periodOf(normal) <= Math.floor(normal.length / 2)
+  let chosen: { offset: number; print: number } | null = null
+
+  for (let offset = 0; offset + ANCHOR_CHARS <= normal.length; offset += 1) {
+    if (
+      periodOf(normal.slice(offset, offset + ANCHOR_CHARS)) === ANCHOR_CHARS
+    ) {
+      const print = fingerprint(normal, offset, ANCHOR_CHARS)
+      if (!chosen || print < chosen.print) chosen = { offset, print }
+    }
+  }
+
+  return {
+    ...(chosen ?? { offset: 0, print: fingerprint(normal, 0, ANCHOR_CHARS) }),
+    repeats,
+  }
+}
+
+/**
+ * The values looked for in runs, by their anchor's fingerprint: for each,
+ * the anchor's offset and the value's length, and there the fingerprints
+ * worth hashing and the hashes that name a value.
+ */
 type Windows = Map<
   number,
-  { prints: Set<number>; labels: Map<string, string>; lead: number }
+  Array<{
+    offset: number
+    length: number
+    prints: Set<number>
+    labels: Map<string, string>
+  }>
 >
+
+/** BASE to the power n, mod MODULUS, for n up to what was asked so far. */
+const POWERS: number[] = [1]
+
+function powerOf(n: number): number {
+  while (POWERS.length <= n) {
+    POWERS.push((POWERS[POWERS.length - 1]! * BASE) % MODULUS)
+  }
+
+  return POWERS[n]!
+}
 
 /**
  * What masks a text with the values, each shown as `render(label)`: every
@@ -202,7 +293,16 @@ export function valueMasker(
   {
     render,
     minNormalChars,
-  }: { render: (label: string) => string; minNormalChars: number },
+    repeating = "runs",
+  }: {
+    render: (label: string) => string
+    minNormalChars: number
+    /**
+     * A value that repeats itself: looked for in runs too, or as a whole
+     * word only, where an assistant can make the values (anchorOf).
+     */
+    repeating?: "runs" | "words"
+  },
 ): ((text: string) => string) | null {
   if (values.length === 0) {
     return null
@@ -226,24 +326,35 @@ export function valueMasker(
   const windows: Windows = new Map()
 
   for (const value of values) {
-    if (!value.normal || value.normal.length < minNormalChars) {
+    if (
+      !value.normal?.anchor ||
+      value.normal.length < Math.max(minNormalChars, ANCHOR_CHARS) ||
+      (repeating === "words" && value.normal.anchor.repeats)
+    ) {
       continue
     }
 
-    const { length, print, digest } = value.normal
-    let window = windows.get(length)
+    const { length, print, digest, anchor } = value.normal
+    const list = windows.get(anchor.print) ?? []
+    windows.set(anchor.print, list)
+    let window = list.find(
+      (entry) => entry.offset === anchor.offset && entry.length === length,
+    )
 
     if (!window) {
-      let lead = 1
-      for (let step = 1; step < length; step += 1) {
-        lead = (lead * BASE) % MODULUS
+      window = {
+        offset: anchor.offset,
+        length,
+        prints: new Set(),
+        labels: new Map(),
       }
-      window = { prints: new Set(), labels: new Map(), lead }
-      windows.set(length, window)
+      list.push(window)
     }
 
     window.prints.add(print)
     window.labels.set(digest, value.label)
+    // Up to the longest, once: every run's fingerprint is then O(1).
+    powerOf(length)
   }
 
   return (text) => {
@@ -274,31 +385,46 @@ function maskRuns(
 ): string {
   const { chars, start, end } = normalised(text)
   const found: Array<{ from: number; to: number; label: string }> = []
+  // The fingerprint of every start of the text: a run's is then
+  // prefix[at + length] - prefix[at] * BASE^length (every product stays
+  // below 2^53, so exact).
+  const prefix = new Int32Array(chars.length + 1)
 
-  for (const [length, { prints, labels, lead }] of windows) {
-    if (chars.length < length) continue
+  for (let at = 0; at < chars.length; at += 1) {
+    prefix[at + 1] = (prefix[at]! * BASE + chars.charCodeAt(at)) % MODULUS
+  }
 
-    let print = fingerprint(chars, 0, length)
+  const printOf = (at: number, length: number) =>
+    (prefix[at + length]! -
+      ((prefix[at]! * powerOf(length)) % MODULUS) +
+      MODULUS) %
+    MODULUS
 
-    for (let at = 0; ; at += 1) {
-      if (prints.has(print)) {
-        const label = labels.get(digestOf(chars.slice(at, at + length)))
+  // One pass: only where a value's anchor is does its run count.
+  for (let at = 0; at + ANCHOR_CHARS <= chars.length; at += 1) {
+    const list = windows.get(printOf(at, ANCHOR_CHARS))
 
-        if (label !== undefined) {
-          found.push({
-            ...outsideEscapes(text, start[at]!, end[at + length - 1]!),
-            label,
-          })
-        }
+    if (!list) continue
+
+    for (const { offset, length, prints, labels } of list) {
+      const from = at - offset
+
+      if (
+        from < 0 ||
+        from + length > chars.length ||
+        !prints.has(printOf(from, length))
+      ) {
+        continue
       }
 
-      if (at + length >= chars.length) break
+      const label = labels.get(digestOf(chars.slice(from, from + length)))
 
-      const out = (chars.charCodeAt(at) * lead) % MODULUS
-      print =
-        (((print - out + MODULUS) % MODULUS) * BASE +
-          chars.charCodeAt(at + length)) %
-        MODULUS
+      if (label !== undefined) {
+        found.push({
+          ...outsideEscapes(text, start[from]!, end[from + length - 1]!),
+          label,
+        })
+      }
     }
   }
 

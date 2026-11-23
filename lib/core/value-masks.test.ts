@@ -1,3 +1,5 @@
+import { randomBytes } from "node:crypto"
+
 import { describe, expect, it } from "vitest"
 
 import { maskedValue, valueMasker } from "./value-masks"
@@ -48,5 +50,61 @@ describe("a value found right after a JSON escape", () => {
     expect(JSON.parse(masker("tok8f3KdPq2ZxW91")(after))).toEqual({
       a: "\\[kept: id1]",
     })
+  })
+})
+
+describe("the pass over a text, with as many values as a token can hold", () => {
+  // 300 results, each in two forms: 600 values of 600 lengths up to 16K.
+  const lengths = Array.from(
+    { length: 600 },
+    (_, index) => 8 + Math.floor((index * 16_376) / 599),
+  )
+  const options = {
+    render: (label: string) => `[kept: ${label}]`,
+    minNormalChars: 8,
+    repeating: "words" as const,
+  }
+
+  function timed(values: ReturnType<typeof maskedValue>[], text: string) {
+    const masker = valueMasker(values, options)!
+    const started = performance.now()
+    const masked = masker(text)
+    return { masked, ms: performance.now() - started }
+  }
+
+  it("stays one pass when the values share a stretch the text repeats", () => {
+    const values = lengths.map((length, index) =>
+      maskedValue(
+        `r${index}`,
+        `QWERTY${randomBytes(length)
+          .toString("hex")
+          .slice(0, length - 6)}`,
+      ),
+    )
+    // Was about 2 s for this before the values were anchored.
+    expect(timed(values, "QWERTY".repeat(16_667)).ms).toBeLessThan(1_000)
+  })
+
+  it("leaves a value that repeats itself to whole words, so a text of it costs a pass", () => {
+    const values = lengths.map((length, index) =>
+      maskedValue(`r${index}`, "A".repeat(length)),
+    )
+    // Did not finish in two minutes before.
+    const { masked, ms } = timed(values, "A".repeat(100_000))
+    expect(ms).toBeLessThan(1_000)
+    expect(masked).toBe("A".repeat(100_000))
+
+    // As a whole word it is still found.
+    expect(valueMasker(values, options)!(`x ${"A".repeat(8)} y`)).toBe(
+      "x [kept: r0] y",
+    )
+  })
+
+  it("still finds a value that does not repeat itself inside a longer word", () => {
+    const value = "tok8f3KdPq2ZxW91mLr"
+    const masker = valueMasker([maskedValue("r1", value)], options)!
+    expect(masker(`prefix${value.toLowerCase()}suffix`)).toBe(
+      "prefix[kept: r1]suffix",
+    )
   })
 })

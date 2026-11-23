@@ -602,6 +602,11 @@ describe("converting a folder on an SSH server", () => {
         file: { $result: kept },
       }),
     )
+    // Found by its sealed mark too, the row's cleared behind PCP's back.
+    await db().storageEntry.updateMany({
+      where: { serverId: id },
+      data: { passOnly: false },
+    })
     await expect(convertStore(ctx, id, "plain", PUBLIC)).rejects.toThrow(
       /token\.txt.*delete them first/,
     )

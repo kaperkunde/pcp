@@ -211,6 +211,8 @@ function scrubErrorWith(error: Error, scrub: (text: string) => string): void {
   }
 }
 
+export type PassOnlyTracker = ReturnType<typeof passOnlyTracker>
+
 // ---- For the result's life -------------------------------------------------
 
 type Remembered = { tokenId: string; expiresAt: number; values: MaskedValue[] }
@@ -245,9 +247,31 @@ function remember(id: string, entry: Remembered, now: number): void {
   cache.set(id, entry)
 }
 
+/** The most tokens whose built masker this process keeps. */
+const MAX_CACHED_MASKERS = 64
+const MASKERS = Symbol.for("pcp.kept-maskers")
+
+/**
+ * The masker last built for each token, with the ids of the results it
+ * was built from (newest first): a new, expired or removed result is
+ * another key, so it is built again.
+ */
+function maskers(): Map<
+  string,
+  { key: string; masker: (text: string) => string }
+> {
+  const holder = globalThis as unknown as Record<
+    symbol,
+    Map<string, { key: string; masker: (text: string) => string }>
+  >
+  holder[MASKERS] ??= new Map()
+  return holder[MASKERS]
+}
+
 /** Forgets what this process worked out (tests). */
 export function forgetKeptMasks(): void {
   remembered().clear()
+  maskers().clear()
 }
 
 /**
@@ -277,6 +301,14 @@ export async function keptMasker(
     return null
   }
 
+  // The same results as last time: the masker built then.
+  const key = rows.map((row) => row.id).join(",")
+  const built = maskers().get(tokenId)
+
+  if (built?.key === key) {
+    return built.masker
+  }
+
   const cache = remembered()
   const values: MaskedValue[] = []
 
@@ -301,10 +333,22 @@ export async function keptMasker(
     values.push(...held.values)
   }
 
-  return valueMasker(values, {
+  const masker = valueMasker(values, {
     render: keptLabel,
     minNormalChars: MIN_KEPT_MASK_CHARS,
+    // An assistant makes these values: one that repeats itself is found as
+    // a whole word only, so no answer costs more than a pass (#158).
+    repeating: "words",
   })
+
+  if (masker) {
+    const all = maskers()
+    all.delete(tokenId)
+    if (all.size >= MAX_CACHED_MASKERS) all.delete(all.keys().next().value!)
+    all.set(tokenId, { key, masker })
+  }
+
+  return masker
 }
 
 /** An answer to the token with its live pass-only values masked. */

@@ -243,6 +243,7 @@ import {
   maskKeptJson,
   maskKeptText,
   passOnlyTracker,
+  type PassOnlyTracker,
 } from "./kept-masks"
 import { namesInWords, secretUses } from "./secret-uses"
 import {
@@ -680,12 +681,19 @@ export async function runCall(
     executor = defaultExecutor,
     deadline = callDeadline(),
     handles,
+    tracked = passOnlyTracker(resultOpener(ctx, tokenId)),
   }: {
     publicUrl: string
     /** The token the call is made for: the one that may read a kept answer. */
     tokenId: string
     /** The owner allowed this very call, its arguments shown to them. */
     ownerAllowed?: boolean
+    /**
+     * What watches the pass-only results the call is handed (#158), for a
+     * caller that shapes the same answer again (a call the owner allowed,
+     * whose value a program's identical call is handed: programAnswer).
+     */
+    tracked?: PassOnlyTracker
     /**
      * Where to note the handles the answer made (path and id), for a call
      * the owner allowed to name them later: from the shaping itself, never
@@ -706,8 +714,7 @@ export async function runCall(
 
   // A pass-only kept result handed to the tool is taken back out of what
   // the call shows (#158), after keep has made its handles from the answer
-  // as it came.
-  const tracked = passOnlyTracker(resultOpener(ctx, tokenId))
+  // as it came (`tracked`).
 
   try {
     const kept = resultKeepers(ctx, tokenId)
@@ -981,14 +988,16 @@ export async function runCodeCall(
  * A program's outcome with the values the call was handed and the token's
  * pass-only values masked (#158).
  */
-async function maskedOutcome(
+async function maskedOutcome<T extends CodeCallOutcome>(
   ctx: VaultContext,
   tokenId: string,
-  tracked: ReturnType<typeof passOnlyTracker>,
-  outcome: CodeCallOutcome,
-): Promise<CodeCallOutcome> {
+  tracked: PassOnlyTracker | null,
+  outcome: T,
+): Promise<T> {
   if ("owner" in outcome) {
-    return { owner: tracked.scrub(outcome.owner) }
+    return tracked
+      ? { ...outcome, owner: tracked.scrub(outcome.owner) }
+      : outcome
   }
 
   return outcome.ok
@@ -997,7 +1006,7 @@ async function maskedOutcome(
         value: await maskKeptJson(
           ctx,
           tokenId,
-          tracked.scrubValue(outcome.value),
+          tracked ? tracked.scrubValue(outcome.value) : outcome.value,
         ),
       }
     : {
@@ -1005,7 +1014,7 @@ async function maskedOutcome(
         error: await maskKeptText(
           ctx,
           tokenId,
-          tracked.scrubText(outcome.error),
+          tracked ? tracked.scrubText(outcome.error) : outcome.error,
         ),
       }
 }
@@ -2527,8 +2536,15 @@ export async function askCodeCall(
   )
 
   if (reused) {
-    // Too long to keep as a value: the text the assistant would read.
-    return reused.outcome ?? { ok: true, value: reused.text }
+    // Too long to keep as a value: the text the assistant would read. As
+    // any value a program is handed, with the token's pass-only values
+    // masked (#158).
+    return maskedOutcome(
+      scope.ctx,
+      scope.tokenId,
+      null,
+      reused.outcome ?? { ok: true, value: reused.text },
+    )
   }
 
   return { owner: await withPermission(scope, ask) }
@@ -2628,15 +2644,23 @@ async function programAnswer(
   ctx: VaultContext,
   row: Row,
   answer: CallToolResult | undefined,
+  tracked: PassOnlyTracker | undefined,
 ): Promise<string | null> {
   if (!answer || answer.isError) {
     return null
   }
 
   try {
-    const keepers = resultKeepers(ctx, row.tokenId)
+    // As runCodeCall does: keep shapes the answer as it came, and the value
+    // the call was handed for a pass-only result is out of the rest and of
+    // the long texts kept beside it (#158).
+    const kept = resultKeepers(ctx, row.tokenId)
+    const keepers = {
+      text: tracked?.keeper(kept.text) ?? kept.text,
+      bytes: kept.bytes,
+    }
     const context = { serverId: row.serverId ?? "", toolName: row.toolName }
-    const outcome = await answerValue(
+    const shaped = await answerValue(
       answer,
       {
         fields: readStoredFields(row.fields),
@@ -2649,6 +2673,11 @@ async function programAnswer(
       },
       { max: resourceLimits().answerChars },
     )
+    const outcome = !tracked
+      ? shaped
+      : shaped.ok
+        ? { ...shaped, value: tracked.scrubValue(shaped.value) }
+        : { ...shaped, error: tracked.scrubText(shaped.error) }
     const json = JSON.stringify(
       outcome.ok
         ? { ok: true, value: outcome.value }
@@ -3160,6 +3189,7 @@ export async function decidePermission(
   const answered: {
     answer?: CallToolResult
     handles: Array<{ path: string; id: string }>
+    tracked?: PassOnlyTracker
   } = { handles: [] }
 
   try {
@@ -3427,7 +3457,9 @@ export async function decidePermission(
   // Allowed once and through: the same token's identical call is answered
   // with this run for a while (reuseExecuted), a program's with its value.
   const reusable = kind === "call" && choice === "allow_once" && !failed
-  const json = reusable ? await programAnswer(ctx, row, answered.answer) : null
+  const json = reusable
+    ? await programAnswer(ctx, row, answered.answer, answered.tracked)
+    : null
 
   await db().permissionRequest.update({
     where: { id: row.id },
@@ -3470,6 +3502,7 @@ async function executeCall(
   answered: {
     answer?: CallToolResult
     handles: Array<{ path: string; id: string }>
+    tracked?: PassOnlyTracker
   } = { handles: [] },
 ): Promise<CallToolResult> {
   if (!row.server) {
@@ -3510,6 +3543,10 @@ async function executeCall(
     ownerAllowed: true,
     executor: noting(wrapped, answered),
     handles: answered.handles,
+    // Shared with programAnswer, which shapes the same answer again.
+    tracked: (answered.tracked = passOnlyTracker(
+      resultOpener(ctx, row.tokenId),
+    )),
   })
 }
 

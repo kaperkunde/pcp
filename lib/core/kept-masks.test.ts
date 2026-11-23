@@ -22,6 +22,7 @@ import {
 } from "./kept-masks"
 import { json, startTestApi, type TestApi } from "./openapi/test-api"
 import {
+  askCodeCall,
   decidePermission,
   runCall,
   runCodeCall,
@@ -32,7 +33,13 @@ import { createServer, getServer } from "./servers"
 import { scratchDatabase } from "./test-db"
 import { describedHandle } from "./test-handles"
 import { writeToolAccess } from "./tool-access"
-import { keepResult, resultOpener } from "./tool-results"
+import { keepResult, openResult, resultOpener } from "./tool-results"
+import {
+  EMPTY_CONFIG,
+  forgetResourceLimits,
+  resourceLimits,
+  saveResourceConfig,
+} from "./resources/state"
 import { setupVault } from "./vault"
 
 // A pass-only kept result (#149) is not read out through a tool that hands
@@ -80,6 +87,7 @@ beforeEach(async () => {
 })
 
 afterEach(async () => {
+  forgetResourceLimits()
   await cleanup()
 })
 
@@ -449,6 +457,96 @@ describe("every later answer to the token, while the result lives", () => {
     expect(replay).toContain("The owner allowed it and it ran.")
     expect(replay).toContain(`Your note: [kept: ${id}]`)
     expect(replay).not.toContain(TOKEN_VALUE)
+  })
+
+  it("keeps the value out of what a program's repeat of a call the owner allowed is handed (#158 review)", async () => {
+    // A small machine's limits, so a long text is kept beside the value.
+    await saveResourceConfig({ ...EMPTY_CONFIG, fileMb: 1 })
+    const id = await passOnly()
+    const long = resourceLimits().answerChars + 1_000
+    const echoing: PermissionExecutor = {
+      ...executor,
+      // An "ask" tool that answers what it was sent, and a long text with it.
+      callTool: async (_ctx, _server, _tool, args, options) => {
+        const sent = await resolveHandles(args, options.open!)
+        const value = {
+          echo: sent.text,
+          report: `${sent.text as string} ${"a".repeat(long)}`,
+        }
+        return {
+          content: [{ type: "text", text: JSON.stringify(value) }],
+        }
+      },
+    }
+    await writeToolAccess(ctx, tokenId, serverId, "show_note", "ask")
+    const server = (await loadGatewayServers(scope)).find(
+      (entry) => entry.id === serverId,
+    )!
+    const ask = {
+      kind: "call" as const,
+      server,
+      tool: server.tools.find((tool) => tool.name === "show_note")!,
+      args: { text: { $result: id } },
+    }
+
+    expect(await askCodeCall(scope, ask)).toHaveProperty("owner")
+    const request = await db().permissionRequest.findFirstOrThrow()
+    await decidePermission(
+      ctx,
+      request.id,
+      "allow_once",
+      { ...PUBLIC },
+      echoing,
+    )
+
+    // The result has gone since, so only what the call itself took out
+    // keeps the value from the program.
+    await db().toolResult.deleteMany({ where: { id } })
+    const again = await askCodeCall(scope, ask)
+
+    expect(again).toMatchObject({
+      ok: true,
+      value: { echo: `[kept: ${id}]` },
+    })
+    expect(JSON.stringify(again)).not.toContain(TOKEN_VALUE)
+
+    // The long text was kept beside it, as an ordinary result: without it.
+    const report = (again as { value: { report: { $result: string } } }).value
+      .report
+    const kept = await openResult(ctx, { tokenId, id: report.$result })
+    expect(kept).toMatchObject({ passOnly: false })
+    expect(kept!.text()).not.toContain(TOKEN_VALUE)
+    expect(kept!.text()).toContain(`[kept: ${id}]`)
+  })
+
+  it("masks the value a program's repeat is handed while the result lives", async () => {
+    const id = await passOnly()
+    says = JSON.stringify({ note: TOKEN_VALUE })
+    await writeToolAccess(ctx, tokenId, serverId, "show_note", "ask")
+    const server = (await loadGatewayServers(scope)).find(
+      (entry) => entry.id === serverId,
+    )!
+    const ask = {
+      kind: "call" as const,
+      server,
+      tool: server.tools.find((tool) => tool.name === "show_note")!,
+      args: {},
+    }
+
+    expect(await askCodeCall(scope, ask)).toHaveProperty("owner")
+    const request = await db().permissionRequest.findFirstOrThrow()
+    await decidePermission(
+      ctx,
+      request.id,
+      "allow_once",
+      { ...PUBLIC },
+      executor,
+    )
+
+    expect(await askCodeCall(scope, ask)).toEqual({
+      ok: true,
+      value: { note: `[kept: ${id}]` },
+    })
   })
 
   it("reaches a program's pcp.call too, its value and its errors", async () => {

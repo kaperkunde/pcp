@@ -40,9 +40,9 @@ export { normalised }
  * response, an address), and every answer about the token's tabs, the logs
  * and evaluate's result mask any word of theirs whose hash is one of these,
  * and any run of their text that is the value once read the normalised way
- * (maskTyped). That run is found by sliding a window of the value's length
- * over the text: a keyed rolling fingerprint picks the few places worth
- * hashing, so a long answer costs arithmetic per character, not a hash.
+ * (maskTyped). That run is found in one pass over the text
+ * (value-masks.ts): keyed fingerprints pick the few places worth hashing,
+ * so a long answer costs arithmetic per character, not a hash.
  */
 
 type Held = MaskedValue & { name: string }

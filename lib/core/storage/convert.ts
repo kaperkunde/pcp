@@ -103,19 +103,10 @@ export async function convertStoreStep(
   // A file saved from a part keep named stays encrypted (#158): a plain
   // folder has nowhere to keep its mark. Said before anything starts.
   if (to === "plain" && loaded.root.converting !== "plain") {
-    // By the row's mark or the sealed one, which a database write alone
-    // cannot clear.
-    const held = (
-      await db().storageEntry.findMany({
-        where: { serverId: server.id, folder: false },
-        select: { id: true, meta: true, passOnly: true },
-      })
-    )
-      .map((row) => ({ row, meta: openMeta(ctx, row) }))
-      .filter(({ row, meta }) => isPassOnlyEntry(row, meta))
+    const held = await passOnlyFiles(ctx, server.id, 6)
 
     if (held.length > 0) {
-      const names = held.slice(0, 5).map(({ meta }) => meta.n)
+      const names = held.slice(0, 5)
       throw new PcpError(
         "state",
         `${server.name} holds files saved from results PCP never reads out (${names.join(", ")}${held.length > 5 ? ", and more" : ""}), which a plain folder cannot keep so: delete them first, then make it plain.`,
@@ -210,6 +201,59 @@ export async function convertStoreStep(
   } finally {
     fs.end()
   }
+}
+
+/** How many entries of the index the pass-only check opens at once. */
+const PASS_ONLY_PAGE = 500
+
+/**
+ * The names of up to `most` files of an encrypted store saved from a
+ * pass-only kept result (#158), by the row's mark or the sealed one, which a
+ * database write alone cannot clear: the marked rows first, then the index
+ * a page at a time, stopping once it found as many.
+ */
+async function passOnlyFiles(
+  ctx: VaultContext,
+  serverId: string,
+  most: number,
+): Promise<string[]> {
+  const found = new Map<string, string>()
+  const select = { id: true, meta: true, passOnly: true } as const
+
+  for (const row of await db().storageEntry.findMany({
+    where: { serverId, folder: false, passOnly: true },
+    select,
+    take: most,
+  })) {
+    found.set(row.id, openMeta(ctx, row).n)
+  }
+
+  let after: string | undefined
+
+  while (found.size < most) {
+    const page = await db().storageEntry.findMany({
+      where: {
+        serverId,
+        folder: false,
+        passOnly: false,
+        ...(after ? { id: { gt: after } } : {}),
+      },
+      select,
+      orderBy: { id: "asc" },
+      take: PASS_ONLY_PAGE,
+    })
+
+    for (const row of page) {
+      const meta = openMeta(ctx, row)
+      if (isPassOnlyEntry(row, meta)) found.set(row.id, meta.n)
+      if (found.size >= most) break
+    }
+
+    if (page.length < PASS_ONLY_PAGE) break
+    after = page[page.length - 1]!.id
+  }
+
+  return [...found.values()]
 }
 
 function skippedWords(skipped: string[]): string {
