@@ -210,6 +210,18 @@ describe("task-phrased search with no provider (#61)", () => {
     expect(topFive("launch a container")).toContain("register_server")
   })
 
+  it("finds register_server for installing, hosting and running software (#166)", () => {
+    for (const query of [
+      "install docker app on my server",
+      "run a container on bazzite",
+      "host a website",
+      "self-host an app",
+      "deploy a container",
+    ]) {
+      expect(topFive(query), query).toContain("register_server")
+    }
+  })
+
   it("still finds an owner's tool by what it does", () => {
     expect(topFive("restart a service")[0]).toBe("coolify-gaaf/restart_service")
     expect(topFive("upload a file")).toContain(

@@ -226,6 +226,7 @@ describe("a site that checks its visitors", () => {
     const text = textOf(answer.result)
 
     expect(answer.challenged).toBe(true)
+    expect(answer.refused).toBe(false)
     expect(answer.result.isError).toBe(true)
     expect(text).toMatch(
       new RegExp(`^URL: .*\nStatus: HTTP 403 Forbidden\n${CHALLENGE_LINE}\n`),
@@ -247,6 +248,7 @@ describe("a site that checks its visitors", () => {
     )
 
     expect(answer.challenged).toBe(false)
+    expect(answer.refused).toBe(true)
     expect(textOf(answer.result)).not.toContain(CHALLENGE_LINE)
   })
 

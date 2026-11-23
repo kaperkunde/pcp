@@ -553,6 +553,16 @@ export type PcpToolCandidate = {
 
 export type SearchKind = "tool" | "pcp" | "skill" | "memory"
 
+/**
+ * Whether a query asks to install, host or run software on a server (#166):
+ * the words people use for what a PCP service is for.
+ */
+export function asksForService(query: string): boolean {
+  return /\b(install(ing|ed)?|deploy(ing|ed)?|(self[- ]?)?host(ing|ed)?|docker|podman|containers?|compose|quadlets?)\b/i.test(
+    query,
+  )
+}
+
 /** What a result of kind pcp says after its line: how it is run. */
 export function pcpToolNote(
   name: string,

@@ -68,6 +68,8 @@ export type FetchAnswer = {
   throttle?: Throttle | null
   /** The bytes of the page it answered. */
   bytes?: number
+  /** The site refused PCP's request (403 or 451) with no check to pass. */
+  refused?: boolean
 }
 
 export type FetchOptions = Pick<SendOptions, "addressCheck"> & {
@@ -337,6 +339,8 @@ async function readAnswer(
 
   return {
     challenged,
+    refused:
+      !challenged && (response.status === 403 || response.status === 451),
     throttle: httpSignal(response.status, response.headers, url.host),
     bytes: bytes.length,
     result: presentPage(

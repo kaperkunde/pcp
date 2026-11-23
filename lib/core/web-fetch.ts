@@ -467,7 +467,9 @@ export async function runFetch(
 
   const result = answer.challenged
     ? withNote(noted, await checkHint(ctx, tokenId))
-    : noted
+    : answer.refused
+      ? withNote(noted, await refusedHint(ctx, tokenId))
+      : noted
 
   await recordFetch(ctx, tokenId, host)
   return result
@@ -490,6 +492,28 @@ async function checkHint(ctx: VaultContext, tokenId: string): Promise<string> {
   }
 
   return "The owner can add the browser on PCP's Browser page; PCP then passes such checks for web_fetch."
+}
+
+/**
+ * What an assistant can do when a site refused web_fetch outright (#168):
+ * PCP's browser opens the page under the owner's own rules for the site, so
+ * try it before saying the page cannot be read.
+ */
+export async function refusedHint(
+  ctx: VaultContext,
+  tokenId: string,
+): Promise<string> {
+  const reached = await tokenReachesBrowser(ctx, tokenId)
+
+  if (reached) {
+    return `The site refused this fetch. Do not give up: open the page in PCP's browser with ${reached.slug}/tabs (action open) and read it with ${reached.slug}/read_page; the owner's own rules for the site apply there.`
+  }
+
+  if (await findBrowserServer(ctx)) {
+    return "The site refused this fetch. PCP's browser may open it: the owner can let this token use it."
+  }
+
+  return "The site refused this fetch. PCP's browser may open it: the owner can add it on PCP's Browser page. A web-reading server of the owner's may also read it."
 }
 
 const CHANGING_METHODS_WARNING =

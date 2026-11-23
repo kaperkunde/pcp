@@ -810,6 +810,66 @@ describe("a site's check of its visitors", () => {
     expect(told.match(/The owner can/g)).toHaveLength(1)
   })
 
+  it("nudges the assistant to PCP's browser when a site refuses the fetch outright (#168)", async () => {
+    const { ctx, tokenId } = await setup()
+    const refusal = (url: string): FetchAnswer => ({
+      result: {
+        content: [
+          {
+            type: "text",
+            text: `URL: ${url}\nStatus: HTTP 403 Forbidden\n\nAccess denied`,
+          },
+        ],
+        isError: true,
+      },
+      challenged: false,
+      refused: true,
+    })
+    const run = () =>
+      runFetch(
+        ctx,
+        tokenId,
+        get("https://shop.example/item"),
+        fakes({ plain: refusal, available: false }).options,
+      )
+
+    // No browser: the owner can add one.
+    const none = textOf(await run())
+    expect(none).toContain("The site refused this fetch.")
+    expect(none).toContain("Browser page")
+
+    // With it, the tab to open and the page to read.
+    await createBrowserServer(ctx)
+    const told = textOf(await run())
+    expect(told).toContain("Do not give up")
+    expect(told).toContain("browser/tabs (action open)")
+    expect(told).toContain("browser/read_page")
+    expect(told).toContain("owner's own rules for the site")
+  })
+
+  it("adds no browser nudge to a page that came or to a check", async () => {
+    const { ctx, tokenId } = await setup()
+    await createBrowserServer(ctx)
+    const ok = await runFetch(
+      ctx,
+      tokenId,
+      get("https://example.com/"),
+      fakes({ plain: page }).options,
+    )
+
+    expect(textOf(ok)).not.toContain("The site refused this fetch")
+    expect(
+      textOf(
+        await runFetch(
+          ctx,
+          tokenId,
+          get("https://walled.example/"),
+          fakes({ available: false }).options,
+        ),
+      ),
+    ).not.toContain("The site refused this fetch")
+  })
+
   it("goes to the browser first for a site it passed lately, and falls back to the plain request", async () => {
     const { ctx, tokenId } = await setup()
     const args = get("https://walled.example/")

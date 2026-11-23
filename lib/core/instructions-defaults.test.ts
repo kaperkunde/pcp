@@ -21,8 +21,8 @@ describe("PCP's suggested instructions", () => {
 
   it("are short, and pass the owner's own check", () => {
     for (const template of INSTRUCTION_TEMPLATES) {
-      // A line per rule, each short: version 8's set-up rule took it past 1,200.
-      expect(template.text.length).toBeLessThanOrEqual(1_300)
+      // A line per rule, each short: version 8's set-up rule took it past 1,200, version 9's two rules past 1,300.
+      expect(template.text.length).toBeLessThanOrEqual(1_600)
       expect(checkInstructions(template.text)).toBe(template.text)
     }
 
@@ -148,6 +148,26 @@ describe("PCP's suggested instructions", () => {
     const mine = `${v7}\n- Answer in Dutch.`
     expect(mergeLines(v7, mine, v8)).toEqual({
       text: `${v8}\n- Answer in Dutch.`,
+      conflicts: 0,
+    })
+  })
+  it("send software to services and a refused fetch to PCP from version 9, offered as a merge (#166, #168)", () => {
+    const v8 = templateText(8)!
+    const v9 = templateText(9)!
+
+    expect(currentTemplate().version).toBe(9)
+    expect(v9).toContain("propose it as a service with register_server")
+    expect(v9).toContain("web_fetch or browser before you say you cannot")
+    // Only those two lines are new.
+    const changed = v9
+      .split("\n")
+      .filter((line) => !v8.split("\n").includes(line))
+    expect(changed).toHaveLength(2)
+    expect(mergeLines(v8, v8, v9)).toEqual({ text: v9, conflicts: 0 })
+
+    const mine = `${v8}\n- Answer in Dutch.`
+    expect(mergeLines(v8, mine, v9)).toEqual({
+      text: `${v9}\n- Answer in Dutch.`,
       conflicts: 0,
     })
   })
