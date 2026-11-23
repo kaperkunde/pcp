@@ -113,7 +113,7 @@ export function sshTools({
 }): CatalogueTool[] {
   return [
     runCommand.listed(
-      `Runs one command on ${host} as ${username} over SSH and returns its exit code, standard output and standard error. The command is run by ${username}'s login shell, without a terminal; each call is a new connection, so nothing (working directory, variables) carries over between calls. Standard input is empty unless stdin or stdin_base64 is given. For a command that writes more than 1 MB or runs past its timeout, PCP asks the server to end it (TERM; OpenSSH does this for every login but root), disconnects and returns what it wrote so far.`,
+      `Runs one command on ${host} as ${username} over SSH and returns its exit code, standard output and standard error. The command is run by ${username}'s login shell, without a terminal; each call is a new connection, so nothing (working directory, variables) carries over between calls. Standard input is empty unless stdin or stdin_base64 is given. For a command that writes more than 1 MB or runs past its timeout, PCP asks the server to end it (TERM; OpenSSH does this for every login but root), disconnects and returns what it wrote so far. For software that keeps running, such as a container, propose a PCP service with register_server (kind service) rather than starting it here.`,
     ),
   ]
 }

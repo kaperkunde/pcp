@@ -9,7 +9,7 @@ import {
 import type { CallToolResult } from "@modelcontextprotocol/server"
 import type { z } from "zod"
 
-import { isPcpError } from "../errors"
+import { isPcpError, PassOnlyError } from "../errors"
 import { ERROR_META_KEY, PCP_META, type ToolErrorCode } from "./outcome"
 import { placeholdersFor, type ValidateOptions } from "./validate"
 
@@ -143,5 +143,9 @@ export function refusalOf(
 
   return error.code === "validation"
     ? argumentsResult(label, [error.message], { notes })
-    : familyError(error.message, error.code, { notes })
+    : familyError(
+        error.message,
+        error instanceof PassOnlyError ? "pass_only" : error.code,
+        { notes },
+      )
 }

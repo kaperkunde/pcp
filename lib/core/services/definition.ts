@@ -718,7 +718,22 @@ export const EXIT_PUBLISH_ADDRESS = "127.0.0.1"
 export type ServicePublish = {
   /** The host's address the ports are bound to: an IP literal. */
   address: string
-  ports: Array<{ container: number; host: number }>
+  ports: Array<{
+    container: number
+    host: number
+    /** PCP picked the host port (the owner or assistant named none). */
+    auto?: boolean
+  }>
+}
+
+/**
+ * What was asked: a port with no host port is one PCP picks, free, when it
+ * starts the container (engine.ts runPublished); one with `auto` is one it
+ * picked before, kept while it is free.
+ */
+export type ServicePublishAsk = {
+  address: string
+  ports: Array<{ container: number; host?: number; auto?: boolean }>
 }
 
 /** Which secret (by id) each variable takes. */
@@ -731,11 +746,13 @@ export type ServiceEnvBindings = Record<string, string>
 export function parsePublish(
   value: unknown,
   definition: ServiceDefinition,
-): ServicePublish {
+): ServicePublishAsk {
   const parsed = z
     .strictObject({
       address: z.string().max(64),
-      ports: z.array(z.strictObject({ container: port, host: port })),
+      ports: z.array(
+        z.strictObject({ container: port, host: port.optional() }),
+      ),
     })
     .safeParse(value)
 
@@ -763,7 +780,7 @@ export function parsePublish(
     )
   }
 
-  const ports: ServicePublish["ports"] = []
+  const ports: ServicePublishAsk["ports"] = []
 
   for (const { container } of definition.ports) {
     const found = parsed.data.ports.find(
@@ -772,8 +789,21 @@ export function parsePublish(
 
     if (!found) {
       throw invalid(
-        `Choose the SSH server's port for the service's port ${container}.`,
+        `Choose the SSH server's port for the service's port ${container}, or leave its host port out and PCP picks a free one.`,
       )
+    }
+
+    if (found.host === undefined) {
+      // A port PCP picks is on the SSH server's own loopback: anywhere
+      // else the network needs a port that stays the same.
+      if (!isLoopback(address)) {
+        throw invalid(
+          `Publishing on ${address} needs a host port for the service's port ${container}: PCP picks a free one only on the SSH server's own loopback (127.0.0.1).`,
+        )
+      }
+
+      ports.push({ container })
+      continue
     }
 
     if (ports.some((entry) => entry.host === found.host)) {
@@ -790,9 +820,10 @@ export function parsePublish(
   return { address, ports }
 }
 
-export function readPublish(json: string): ServicePublish {
+/** The ports as asked, those PCP has not picked yet among them. */
+export function readPublishAsk(json: string): ServicePublishAsk {
   try {
-    const value = JSON.parse(json) as Partial<ServicePublish>
+    const value = JSON.parse(json) as Partial<ServicePublishAsk>
 
     if (typeof value.address === "string" && Array.isArray(value.ports)) {
       return { address: value.address, ports: value.ports }
@@ -802,6 +833,26 @@ export function readPublish(json: string): ServicePublish {
   }
 
   return { address: "127.0.0.1", ports: [] }
+}
+
+/** The ports as published: only those with a host port. */
+export function readPublish(json: string): ServicePublish {
+  const ask = readPublishAsk(json)
+
+  return {
+    address: ask.address,
+    ports: ask.ports.flatMap((entry) =>
+      typeof entry.host === "number"
+        ? [
+            {
+              container: entry.container,
+              host: entry.host,
+              ...(entry.auto ? { auto: true } : {}),
+            },
+          ]
+        : [],
+    ),
+  }
 }
 
 export function readEnvBindings(json: string): ServiceEnvBindings {

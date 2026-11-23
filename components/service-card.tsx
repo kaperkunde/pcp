@@ -47,7 +47,12 @@ export function ServiceCard({ view }: { view: ServiceView }) {
   }
 
   // Read once when the page opens: inside this request, never on a timer.
-  useEffect(check, [view.id])
+  useEffect(() => {
+    if (!view.failure) {
+      check()
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [view.id, view.failure])
 
   function act(
     question: string | null,
@@ -84,8 +89,51 @@ export function ServiceCard({ view }: { view: ServiceView }) {
       .map((entry) => entry.name),
   )
   const publish = view.publish.ports
-    .map((port) => `${view.publish.address}:${port.host} → ${port.container}`)
+    .map(
+      (port) =>
+        `${view.publish.address}:${port.host} → ${port.container}${port.auto ? " (a free port PCP picked)" : ""}`,
+    )
     .join(", ")
+
+  if (view.failure) {
+    return (
+      <ListSection
+        title="Service"
+        description="Its launch failed. PCP took the container and the volumes it made back and kept the service, with what you approved, so a port or a setting can be changed below and it launched again."
+        data-testid="service-card"
+      >
+        <List>
+          <ListRow
+            title="Failed to launch"
+            description={
+              <span
+                className="text-destructive whitespace-pre-wrap"
+                data-testid="service-failure"
+              >
+                {view.failure}
+              </span>
+            }
+          />
+          <ListRow
+            title="Runs on"
+            description={`${view.containerName}, with ${view.engine === "podman" ? "Podman" : "Docker"}${view.engineVersion ? ` ${view.engineVersion}` : ""}. It publishes ${view.ask.ports.map((port) => `${port.container} on ${view.ask.address}:${port.host ?? "a free port PCP picks"}`).join(", ") || "no port"}.`}
+            trailing={
+              view.host ? (
+                <a
+                  className="text-sm text-primary underline-offset-4 hover:underline"
+                  href={`/servers/${view.host.id}`}
+                >
+                  {view.host.name}
+                </a>
+              ) : (
+                <RowValue>Its SSH server was removed</RowValue>
+              )
+            }
+          />
+        </List>
+      </ListSection>
+    )
+  }
 
   return (
     <ListSection

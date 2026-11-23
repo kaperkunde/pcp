@@ -4,6 +4,7 @@ import { revalidatePath } from "next/cache"
 import { redirect } from "next/navigation"
 
 import { invalid } from "@/lib/core/errors"
+import { KeptFailedLaunch } from "@/lib/core/services/services"
 import { renameServerSlug } from "@/lib/core/servers"
 import { saveServiceSettings } from "@/lib/core/services/services"
 import type { ServiceStatus } from "@/lib/core/services/services"
@@ -12,16 +13,23 @@ import {
   checkServiceImage,
   launchService,
   readServiceLogs,
+  relaunchService,
   readServiceStatus,
   recreateService,
   removeService,
   runServiceAction,
   updateService,
 } from "@/lib/core/upstream"
-import { type ActionState, field, guarded } from "@/lib/server/action-state"
+import {
+  type ActionState,
+  field,
+  fields,
+  guarded,
+} from "@/lib/server/action-state"
 import { publicUrlFor } from "@/lib/server/public-url"
 import {
   envFrom,
+  publishFrom,
   serviceInputFrom,
   valuesFrom,
   withNewSecrets,
@@ -54,26 +62,41 @@ export async function launchServiceAction(
 ): Promise<ServerActionResult> {
   const ctx = await requireContext()
   const publicUrl = await publicUrlFor(ctx)
+  // A launch that failed and PCP kept: the page of the service it kept.
+  let kept: string | null = null
   const result = await guarded(async () => {
     const input = serviceInputFrom(formData)
-    const launched = await withNewSecrets(ctx, formData, input.env, (env) =>
-      launchService(
-        ctx,
-        {
-          ...input,
-          env,
-          description: field(formData, "description"),
-          // Another instance of a service takes its definition from there.
-          ...(field(formData, "definitionId")
-            ? { definitionId: field(formData, "definitionId") }
-            : { definition: field(formData, "definition") }),
-        },
-        { publicUrl },
-      ),
-    )
+    try {
+      const launched = await withNewSecrets(ctx, formData, input.env, (env) =>
+        launchService(
+          ctx,
+          {
+            ...input,
+            env,
+            description: field(formData, "description"),
+            // Another instance of a service takes its definition from there.
+            ...(field(formData, "definitionId")
+              ? { definitionId: field(formData, "definitionId") }
+              : { definition: field(formData, "definition") }),
+          },
+          { publicUrl },
+        ),
+      )
 
-    return { id: launched.id, message: launched.message }
+      return { id: launched.id, message: launched.message }
+    } catch (error) {
+      if (error instanceof KeptFailedLaunch) {
+        kept = error.serviceId
+      }
+
+      throw error
+    }
   })
+
+  if (kept) {
+    revalidatePath("/servers")
+    redirect(`/servers/${kept}`)
+  }
 
   if (result.status !== "ok" || !result.id) {
     // A secret typed in for a launch that failed is kept: listed to choose.
@@ -83,6 +106,40 @@ export async function launchServiceAction(
 
   revalidatePath("/servers")
   redirect(`/servers/${result.id}`)
+}
+
+/**
+ * The owner's change to a service whose launch failed (its host ports,
+ * plain values and secrets), and with "Launch again" its launch.
+ */
+export async function relaunchServiceAction(
+  _previous: ServerActionResult,
+  formData: FormData,
+): Promise<ServerActionResult> {
+  const ctx = await requireContext()
+  const id = field(formData, "id")
+  const publicUrl = await publicUrlFor(ctx)
+
+  const result = await guarded(async () => {
+    const containers = fields(formData, "port.container")
+    const launched = await relaunchService(
+      ctx,
+      id,
+      {
+        ...(containers.length > 0
+          ? { ports: publishFrom(formData).ports }
+          : {}),
+        env: envFrom(formData),
+        ...(field(formData, "values") ? { values: valuesFrom(formData) } : {}),
+      },
+      { publicUrl, launch: field(formData, "launch") === "1" },
+    )
+
+    return { message: launched ? launched.message : "Saved." }
+  })
+
+  revalidate(id)
+  return result
 }
 
 export async function saveServiceSettingsAction(

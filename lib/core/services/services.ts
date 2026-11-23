@@ -49,7 +49,15 @@ import { handleOf, type BytesKeeper, type ResultOpener } from "../tool-results"
 import { readCapped } from "../openapi/http"
 import { makeRedactor } from "../openapi/redact"
 import { send, type SendOptions } from "../openapi/transport"
-import { markdownLink } from "../owner-link"
+import {
+  linkLabel,
+  linkLastText,
+  markdownLink,
+  nextMessageCheck,
+} from "../owner-link"
+import type { AccessRule } from "../proposed-access"
+import { noteOwnerAsked } from "../request-log"
+import type { NeedsOwner } from "../tools/outcome"
 import { checkPersonalNote, setPersonalNote } from "../personal-notes"
 import { writeManagedSecret } from "../secrets"
 import {
@@ -70,6 +78,7 @@ import {
   generatedEnv,
   LOCAL_IMAGE,
   EXIT_PUBLISH_ADDRESS,
+  isLoopback,
   parsePublish,
   parseServiceDefinition,
   readEnvBindings,
@@ -85,6 +94,8 @@ import {
   type ServiceEnvBindings,
   type ServicePlainValues,
   type ServicePublish,
+  type ServicePublishAsk,
+  readPublishAsk,
   type ServiceReach,
 } from "./definition"
 import {
@@ -104,9 +115,10 @@ import {
   removeContainer,
   resolveDigest,
   probeContainerFile,
-  runContainer,
+  runPublished,
   runReference,
   type ContainerAction,
+  type EngineFound,
   type ContainerState,
   type ServiceEngine,
   type ServiceEnv,
@@ -136,6 +148,7 @@ import {
   sealedServiceOwn,
   SERVICE_OWN_SELECT,
   type OpenServiceOwn,
+  type ServiceOwn,
 } from "./own-values"
 import { SECRET_META_SELECT, secretName } from "../secret-meta"
 import { toolTier } from "../tool-tiers"
@@ -246,6 +259,12 @@ export type LoadedService = {
   spec: OpenServiceOwn<ServiceSpec>
   definition: ServiceDefinition
   publish: ServicePublish
+  /** The ports as asked: those PCP has not picked yet have no host port. */
+  ask: ServicePublishAsk
+  /** Why its launch failed while PCP keeps it marked failed; else null. */
+  failure: string | null
+  /** What a kept proposal's token gets when it is launched again. */
+  carry: LaunchCarry | null
   env: ServiceEnvBindings
   /** What the owner typed for its plain variables. */
   values: ServicePlainValues
@@ -256,6 +275,20 @@ export type LoadedService = {
   intent: ServiceIntent
   /** The SSH server it runs on; null once that was deleted. */
   host: OpenServer | null
+}
+
+/** The service's own part as it is now, with what a change names over it. */
+function ownPart(
+  loaded: LoadedService,
+  over: Partial<ServiceOwn> = {},
+): ServiceOwn {
+  return {
+    containerName: loaded.spec.containerName,
+    publish: JSON.stringify(loaded.ask),
+    values: JSON.stringify(loaded.values),
+    failure: sealedFailure(loaded.failure, loaded.carry),
+    ...over,
+  }
 }
 
 function engineOf(value: string): ServiceEngine {
@@ -289,6 +322,9 @@ export async function loadService(
     spec: { ...own, hash: opened.hash },
     definition: readServiceDefinition(opened.definition),
     publish: readPublish(own.publish),
+    ask: readPublishAsk(own.publish),
+    failure: readFailure((own as { failure?: string }).failure),
+    carry: readCarry((own as { failure?: string }).failure),
     env: readEnvBindings(spec.env),
     values: readPlainValues(own.values),
     engine: engineOf(spec.engine),
@@ -406,12 +442,17 @@ export type PreparedLaunch = {
   host: OpenServer
   definition: ServiceDefinition
   definitionId: string | null
-  publish: ServicePublish
+  publish: ServicePublishAsk
   env: ServiceEnvBindings
   values: ServicePlainValues
   /** The exit PCP adds for an exit's service, checked free. */
   exit: { name: string; label: string } | null
   containerName: string
+}
+
+/** A launch whose ports are published: every host port a number. */
+type ResolvedLaunch = Omit<PreparedLaunch, "publish"> & {
+  publish: ServicePublish
 }
 
 /**
@@ -573,6 +614,8 @@ async function containerNameFor(
 
 export type LaunchResult = {
   id: string
+  /** The ports as published, PCP's own picks among them. */
+  publish?: ServicePublish
   /** The API endpoint or MCP server it registered. */
   registeredId: string | null
   registeredKind: "openapi" | "mcp" | null
@@ -580,81 +623,296 @@ export type LaunchResult = {
   exitId?: string | null
 }
 
+/** A failed launch PCP kept: the service's server id, for its page's link. */
+export class KeptFailedLaunch extends PcpError {
+  readonly serviceId: string
+
+  constructor(code: PcpError["code"], message: string, serviceId: string) {
+    super(code, message)
+    this.name = "KeptFailedLaunch"
+    this.serviceId = serviceId
+  }
+}
+
+/**
+ * What an assistant's proposal gets once its service is launched: the token
+ * that asked and the levels and tiers the owner left on the page. Kept with
+ * the failed service the proposal made, and applied by its relaunch.
+ */
+export type LaunchCarry = { tokenId: string; access: AccessRule[] }
+
+/** The failure a service keeps, as the own part seals it. */
+export function sealedFailure(
+  message: string | null,
+  carry: LaunchCarry | null = null,
+): string {
+  return message ? JSON.stringify({ message, ...(carry ? { carry } : {}) }) : ""
+}
+
+export function readFailure(json: string | undefined): string | null {
+  if (!json) {
+    return null
+  }
+
+  try {
+    const value = JSON.parse(json) as { message?: unknown }
+    return typeof value.message === "string" ? value.message : "failed"
+  } catch {
+    return "failed"
+  }
+}
+
+export function readCarry(json: string | undefined): LaunchCarry | null {
+  try {
+    const value = JSON.parse(json ?? "") as { carry?: LaunchCarry }
+    return value.carry &&
+      typeof value.carry.tokenId === "string" &&
+      Array.isArray(value.carry.access)
+      ? value.carry
+      : null
+  } catch {
+    return null
+  }
+}
+
+/** Keeps what the owner chose for the token with the failed service. */
+export async function keepLaunchCarry(
+  ctx: VaultContext,
+  id: string,
+  carry: LaunchCarry,
+): Promise<void> {
+  const loaded = await loadService(ctx, id)
+
+  if (!loaded.failure) {
+    return
+  }
+
+  loaded.carry = carry
+  await db().serviceSpec.update({
+    where: { serverId: id },
+    data: sealedServiceOwn(ctx, id, ownPart(loaded)),
+  })
+}
+
+/**
+ * The service's rows, made once the container ran (a launch that went
+ * through) or once a launch failed (kept, marked failed, with no container).
+ */
+async function makeServiceRows(
+  ctx: VaultContext,
+  id: string,
+  prepared: PreparedLaunch,
+  found: EngineFound,
+  publish: ServicePublishAsk,
+  options: {
+    credentialId: string | null
+    failure: string | null
+    rebuilt: boolean
+  },
+): Promise<void> {
+  const slug = await uniqueSlug(
+    ctx,
+    `${slugify(prepared.name) || "service"}-service`,
+  )
+  const definitionRow = prepared.definitionId
+    ? await definitionForNew(ctx, prepared.definitionId, "service")
+    : null
+
+  await db().$transaction([
+    db().mcpServer.create({
+      data: serverCreateData(ctx, {
+        id,
+        vaultId: ctx.vaultId,
+        kind: "service",
+        name: `${prepared.name} service`,
+        slug,
+        description: definitionRow?.description ?? prepared.description,
+        url: SERVICE_URL,
+        authType: "none",
+        authSecretId: options.credentialId,
+        definitionId: definitionRow?.id ?? null,
+      }),
+    }),
+    db().serviceSpec.create({
+      data: {
+        serverId: id,
+        ...sealedServiceDefinition(
+          ctx,
+          id,
+          JSON.stringify(prepared.definition),
+          canonicalJson(prepared.definition),
+        ),
+        hostId: prepared.host.id,
+        engine: found.engine,
+        engineVersion: found.version,
+        ...sealedServiceOwn(ctx, id, {
+          containerName: prepared.containerName,
+          publish: JSON.stringify(publish),
+          values: JSON.stringify(prepared.values),
+          failure: sealedFailure(options.failure),
+        }),
+        env: JSON.stringify(prepared.env),
+        reach: "tunnel",
+        // A failed service is not started by a call or the reconcile pass.
+        intendedState: options.failure ? "stopped" : "running",
+      },
+    }),
+  ])
+  await ensureDefinition(ctx, id)
+
+  // Another of a definition built here: its siblings pin the image built.
+  if (options.rebuilt && definitionRow) {
+    await writeServiceDefinition(ctx, id, prepared.definition)
+  }
+
+  await storeTools(
+    ctx,
+    id,
+    serviceTools({
+      service: prepared.name,
+      host: prepared.host.name,
+      files: prepared.definition.files?.path ?? null,
+    }),
+  )
+
+  if (prepared.note) {
+    await setPersonalNote(ctx, "server", id, prepared.note)
+  }
+}
+
+/** What a service kept as failed is, in words an assistant and the page share. */
+export function failedWords(loaded: LoadedService): string {
+  return `${loaded.server.name} failed to launch and PCP kept it, marked failed, with no container (its definition and settings are saved): you change its host ports or settings on its page and launch it again, or remove it there. It does not start, stop or restart until then. Why it failed: ${(loaded.failure ?? "").slice(0, 600)}`
+}
+
+/** Where a launched service is published, and which ports PCP picked. */
+export function publishedWords(publish: ServicePublish): string {
+  const ports = publish.ports
+    .map(
+      (port) =>
+        `${port.host} → ${port.container}${port.auto ? " (a free port PCP picked)" : ""}`,
+    )
+    .join(", ")
+
+  return ports ? `Published on ${publish.address}: ${ports}.` : ""
+}
+
+/**
+ * What a call to a service whose launch failed answers: needs_owner
+ * (reason "setup"), the link to its page last, and check_server on the
+ * owner's next message, as any answer that hands the owner a page.
+ */
+function failedAnswer(
+  loaded: LoadedService,
+  publicUrl: string,
+): CallToolResult {
+  const pageUrl = pageOf(loaded.server.id, publicUrl)
+  const label = `Change ${loaded.server.name} and launch it again in PCP`
+  const owner: NeedsOwner = {
+    kind: "needs_owner",
+    reason: "setup",
+    url: pageUrl,
+    label: linkLabel(label),
+  }
+
+  noteOwnerAsked()
+
+  return {
+    content: [
+      {
+        type: "text",
+        text: `Not done yet: ${failedWords(loaded)}\n${nextMessageCheck(`check_server with server "${loaded.server.slug}"`, "it is still failed")}\n\n${linkLastText(pageUrl, label)}`,
+      },
+    ],
+    structuredContent: owner,
+  }
+}
+
+/** The words that close a failed launch's error: what PCP kept. */
+const KEPT_WORDS =
+  "PCP kept the service on its page, marked failed: change its host ports or settings there and launch it again."
+
 /**
  * Starts the service and registers what it serves, in one step: finds the
  * engine, pulls the image, runs the container with the variables over
  * standard input, waits for it to be healthy, then makes the service's own
- * server and the endpoint or MCP server. A failure past the container's
- * start removes the container, its volumes and anything made, and says so.
+ * server and the endpoint or MCP server. A failure past that start removes
+ * the container and the volumes this launch made, and keeps the service
+ * (its definition and settings, no container) marked failed, so its page
+ * can change a port and launch it again (`existing`: a failed service
+ * launched again).
  */
 export async function launchServiceOn(
   ctx: VaultContext,
   asked: PreparedLaunch,
   access: ServiceAccess,
+  existing?: LoadedService,
 ): Promise<LaunchResult> {
   const { host, env } = access
   const found = await engineCall(() => detectEngine(host))
-  const id = newId()
-
-  // The image: pulled by digest, or built from the repository when the SSH
-  // server does not have it. Nothing is on the SSH server yet that a
-  // failure here would leave (a build cleans up after itself).
-  const image = await engineCall(() =>
-    ensureImage(host, found.engine, asked.definition),
-  )
-  const rebuilt = image !== asked.definition.image
-  const prepared: PreparedLaunch = rebuilt
-    ? { ...asked, definition: { ...asked.definition, image } }
-    : asked
-  const spec = {
-    serviceId: id,
-    containerName: prepared.containerName,
-    definition: prepared.definition,
-    publish: prepared.publish,
-  }
-
-  // Volumes there already (a service removed before, its data kept) stay
-  // whatever happens; only the ones this launch makes are taken back.
-  const volumeNames = prepared.definition.volumes.map((volume) => volume.name)
-  const kept = await engineCall(() =>
-    existingVolumes(host, found.engine, prepared.containerName, volumeNames),
-  )
-  const madeVolumes = volumeNames.filter((volume) => !kept.includes(volume))
-
+  const id = existing?.server.id ?? newId()
+  let prepared: PreparedLaunch = asked
+  let rebuilt = false
+  let kept: string[] = []
+  let madeVolumes: string[] = []
   let registeredId: string | null = null
   let made = false
   let credentialId: string | null = null
+  // Whether PCP has asked the engine to make the container yet.
+  let touched = false
   // Whether the error already quotes the container's lines.
   let quoted = false
 
   try {
+    // The image: pulled by digest, or built from the repository when the SSH
+    // server does not have it. Nothing is on the SSH server yet that a
+    // failure here would leave (a build cleans up after itself).
+    const image = await engineCall(() =>
+      ensureImage(host, found.engine, asked.definition),
+    )
+    rebuilt = image !== asked.definition.image
+    prepared = rebuilt
+      ? { ...asked, definition: { ...asked.definition, image } }
+      : asked
+    const spec = {
+      serviceId: id,
+      containerName: prepared.containerName,
+      definition: prepared.definition,
+      publish: prepared.publish,
+    }
+
+    // Volumes there already (a service removed before, its data kept) stay
+    // whatever happens; only the ones this launch makes are taken back.
+    const volumeNames = prepared.definition.volumes.map((volume) => volume.name)
+    kept = await engineCall(() =>
+      existingVolumes(host, found.engine, prepared.containerName, volumeNames),
+    )
+    madeVolumes = volumeNames.filter((volume) => !kept.includes(volume))
+
     // `run --detach` makes the container and then starts it: when the
     // start fails (a port in use), the container and its volumes are
     // there, and are taken back below with everything else.
-    await engineCall(() => runContainer(host, found.engine, spec, env))
+    touched = true
+    const ran = await engineCall(() =>
+      runPublished(host, found.engine, spec, env),
+    )
+    // The ports as published: the ones PCP picked are numbers from here on.
+    const live: ResolvedLaunch = { ...prepared, publish: ran }
 
     const health = await waitHealthy(
       host,
       found.engine,
-      prepared.containerName,
-      { ...prepared, reach: "tunnel" },
+      live.containerName,
+      { ...live, reach: "tunnel" },
       access,
     )
 
     if (!health.ok) {
       quoted = true
       throw new EngineError(
-        `${prepared.name} did not become healthy: ${health.detail}${await logExcerpt(host, found.engine, prepared.containerName, env.redact)}`,
+        `${live.name} did not become healthy: ${health.detail}${await logExcerpt(host, found.engine, live.containerName, env.redact)}`,
       )
     }
-
-    const slug = await uniqueSlug(
-      ctx,
-      `${slugify(prepared.name) || "service"}-service`,
-    )
-    const definitionRow = prepared.definitionId
-      ? await definitionForNew(ctx, prepared.definitionId, "service")
-      : null
 
     // An exit's proxy password, which upstream.ts made for this container:
     // kept as the service's own managed secret, for the exit to sign in.
@@ -662,73 +920,55 @@ export async function launchServiceOn(
       credentialId = (
         await writeManagedSecret(ctx, {
           name: proxySecretName(id),
-          description: `The password PCP made for ${prepared.name}'s proxy (an exit).`,
+          description: `The password PCP made for ${live.name}'s proxy (an exit).`,
           value: access.proxyAuth.password,
           kind: "proxy_password",
         })
       ).id
     }
 
-    await db().$transaction([
-      db().mcpServer.create({
-        data: serverCreateData(ctx, {
-          id,
-          vaultId: ctx.vaultId,
-          kind: "service",
-          name: `${prepared.name} service`,
-          slug,
-          description: definitionRow?.description ?? prepared.description,
-          url: SERVICE_URL,
-          authType: "none",
-          authSecretId: credentialId,
-          definitionId: definitionRow?.id ?? null,
+    if (existing) {
+      await db().$transaction([
+        db().serviceSpec.update({
+          where: { serverId: id },
+          data: {
+            engine: found.engine,
+            engineVersion: found.version,
+            ...sealedServiceOwn(ctx, id, {
+              containerName: live.containerName,
+              publish: JSON.stringify(live.publish),
+              values: JSON.stringify(live.values),
+              failure: "",
+            }),
+            env: JSON.stringify(live.env),
+            reach: "tunnel",
+            intendedState: "running",
+          },
         }),
-      }),
-      db().serviceSpec.create({
-        data: {
-          serverId: id,
-          ...sealedServiceDefinition(
-            ctx,
-            id,
-            JSON.stringify(prepared.definition),
-            canonicalJson(prepared.definition),
-          ),
-          hostId: prepared.host.id,
-          engine: found.engine,
-          engineVersion: found.version,
-          ...sealedServiceOwn(ctx, id, {
-            containerName: prepared.containerName,
-            publish: JSON.stringify(prepared.publish),
-            values: JSON.stringify(prepared.values),
-          }),
-          env: JSON.stringify(prepared.env),
-          reach: "tunnel",
-          intendedState: "running",
-        },
-      }),
-    ])
+        ...(credentialId
+          ? [
+              db().mcpServer.update({
+                where: { id },
+                data: { authSecretId: credentialId },
+              }),
+            ]
+          : []),
+      ])
+
+      if (rebuilt) {
+        await writeServiceDefinition(ctx, id, live.definition)
+      }
+    } else {
+      await makeServiceRows(ctx, id, live, found, live.publish, {
+        credentialId,
+        failure: null,
+        rebuilt,
+      })
+    }
+
     made = true
-    await ensureDefinition(ctx, id)
 
-    // Another of a definition built here: its siblings pin the image built.
-    if (rebuilt && definitionRow) {
-      await writeServiceDefinition(ctx, id, prepared.definition)
-    }
-    await storeTools(
-      ctx,
-      id,
-      serviceTools({
-        service: prepared.name,
-        host: prepared.host.name,
-        files: prepared.definition.files?.path ?? null,
-      }),
-    )
-
-    if (prepared.note) {
-      await setPersonalNote(ctx, "server", id, prepared.note)
-    }
-
-    const registered = await register(ctx, prepared, id, access)
+    const registered = await register(ctx, live, id, access)
     const exitId = registered?.kind === "exit" ? registered.id : null
     registeredId =
       registered && registered.kind !== "exit" ? registered.id : null
@@ -744,6 +984,7 @@ export async function launchServiceOn(
 
     return {
       id,
+      publish: live.publish,
       registeredId,
       registeredKind:
         registered && registered.kind !== "exit" ? registered.kind : null,
@@ -751,23 +992,33 @@ export async function launchServiceOn(
     }
   } catch (error) {
     // Read before the container goes: what it wrote is why, often.
-    const lines = quoted
-      ? ""
-      : await logExcerpt(host, found.engine, prepared.containerName, env.redact)
+    const lines =
+      quoted || !touched
+        ? ""
+        : await logExcerpt(
+            host,
+            found.engine,
+            prepared.containerName,
+            env.redact,
+          )
     const undone: string[] = []
     const name = prepared.containerName
     const volumesWord = (list: string[]) =>
       `the volume${list.length === 1 ? "" : "s"} ${list.map((volume) => volumeOnHost(name, volume)).join(", ")}`
 
-    try {
-      await removeContainer(host, found.engine, name, { volumes: madeVolumes })
-      undone.push(
-        `removed the container ${name}${madeVolumes.length > 0 ? ` and ${volumesWord(madeVolumes)} it made` : ""} from ${host.name}`,
-      )
-    } catch (removal) {
-      undone.push(
-        `could not take everything back on ${host.name} (${removal instanceof Error ? removal.message : String(removal)}): remove the container ${name}${madeVolumes.length > 0 ? ` and ${volumesWord(madeVolumes)}` : ""} there by hand`,
-      )
+    if (touched) {
+      try {
+        await removeContainer(host, found.engine, name, {
+          volumes: madeVolumes,
+        })
+        undone.push(
+          `removed the container ${name}${madeVolumes.length > 0 ? ` and ${volumesWord(madeVolumes)} it made` : ""} from ${host.name}`,
+        )
+      } catch (removal) {
+        undone.push(
+          `could not take everything back on ${host.name} (${removal instanceof Error ? removal.message : String(removal)}): remove the container ${name}${madeVolumes.length > 0 ? ` and ${volumesWord(madeVolumes)}` : ""} there by hand`,
+        )
+      }
     }
 
     if (kept.length > 0) {
@@ -780,10 +1031,18 @@ export async function launchServiceOn(
       await deleteServer(ctx, registeredId).catch(() => {})
     }
 
-    if (made) {
-      await dropServiceRow(id)
-      undone.push("took the service out of PCP")
-    } else if (credentialId) {
+    // The proxy password of a launch that did not go through is made again
+    // by the next one.
+    if (credentialId) {
+      if (made || existing) {
+        await db()
+          .mcpServer.updateMany({
+            where: { id, authSecretId: credentialId },
+            data: { authSecretId: null },
+          })
+          .catch(() => {})
+      }
+
       await db()
         .secret.deleteMany({
           where: { id: credentialId, kind: "proxy_password" },
@@ -794,11 +1053,77 @@ export async function launchServiceOn(
     const reason = makeRedactor(env.redact).text(
       `${error instanceof Error ? error.message : String(error)}${lines}`,
     )
+    const failure =
+      `${reason}\n${undone.length > 0 ? `PCP ${undone.join(" and ")}. ` : ""}`.slice(
+        0,
+        3600,
+      )
+    const code = isPcpError(error) ? error.code : "upstream"
 
-    throw new PcpError(
-      isPcpError(error) ? error.code : "upstream",
-      `${reason}\nPCP ${undone.join(" and ")}.`.slice(0, 4000),
-    )
+    // Before PCP asked the engine for anything (an image that cannot be
+    // had, a build that is refused) nothing is there to change on a page:
+    // the error says why, and nothing is kept.
+    if (!touched) {
+      throw new PcpError(code, reason.slice(0, 4000))
+    }
+
+    // An exit is the owner's launch alone, with the name they gave it:
+    // nothing of it is kept to launch again.
+    if (prepared.definition.registers.kind === "exit") {
+      if (made && !existing) {
+        await dropServiceRow(id)
+      }
+
+      throw new PcpError(code, `${failure}`.trim().slice(0, 4000))
+    }
+
+    // The service stays, marked failed, with what was asked and no container.
+    try {
+      if (made || existing) {
+        await db().serviceSpec.update({
+          where: { serverId: id },
+          data: {
+            registeredId: null,
+            intendedState: "stopped",
+            ...sealedServiceOwn(ctx, id, {
+              containerName: prepared.containerName,
+              publish: JSON.stringify(asked.publish),
+              values: JSON.stringify(prepared.values),
+              failure: sealedFailure(failure.trim(), existing?.carry ?? null),
+            }),
+          },
+        })
+      } else {
+        await makeServiceRows(ctx, id, prepared, found, asked.publish, {
+          credentialId: null,
+          failure: failure.trim(),
+          rebuilt,
+        })
+      }
+
+      await setServerStatus(
+        ctx,
+        id,
+        "error",
+        `${prepared.name} failed to launch: ${failure.trim().slice(0, 300)}`,
+        { lastSyncedAt: new Date() },
+      )
+    } catch (keeping) {
+      // Nothing could be kept: say what went wrong, and that nothing is.
+      if (made && !existing) {
+        await dropServiceRow(id)
+      }
+
+      throw new PcpError(
+        code,
+        `${failure}PCP could not keep the service (${keeping instanceof Error ? keeping.message : String(keeping)}).`.slice(
+          0,
+          4000,
+        ),
+      )
+    }
+
+    throw new KeptFailedLaunch(code, `${failure}${KEPT_WORDS}`, id)
   }
 }
 
@@ -857,7 +1182,7 @@ async function dropServiceRow(id: string): Promise<void> {
 /** The endpoint, MCP server or exit the service serves, made as the owner's. */
 async function register(
   ctx: VaultContext,
-  prepared: PreparedLaunch,
+  prepared: ResolvedLaunch,
   serviceId: string,
   access: ServiceAccess,
 ): Promise<{ id: string; kind: "openapi" | "mcp" | "exit" } | null> {
@@ -1416,6 +1741,10 @@ export async function serviceActionOn(
   action: ContainerAction,
   access: ServiceAccess,
 ): Promise<ServiceStatus> {
+  if (loaded.failure) {
+    throw new PcpError("state", failedWords(loaded))
+  }
+
   const before = await serviceStatusOn(loaded, access)
 
   if (before.foreign) {
@@ -1469,6 +1798,47 @@ export async function serviceActionOn(
 }
 
 /**
+ * What the service registered names the port it was published on: when a
+ * remake published another, its address (an MCP server's, an endpoint's
+ * base and schema) follows, the host port part only, the path kept.
+ */
+async function followPublishedPort(
+  loaded: LoadedService,
+  before: ServicePublish,
+): Promise<void> {
+  const registers = loaded.definition.registers
+  const id = loaded.spec.registeredId
+
+  if (!id || (registers.kind !== "mcp" && registers.kind !== "openapi")) {
+    return
+  }
+
+  const was = serviceOrigin(before, "", registers.port, "tunnel")
+  const now = serviceOrigin(loaded.publish, "", registers.port, "tunnel")
+  const registered = await findServer(loaded.ctx, { id })
+
+  if (!was || !now || was === now || !registered) {
+    return
+  }
+
+  const swap = (address: string | null) =>
+    address?.startsWith(was) ? `${now}${address.slice(was.length)}` : address
+
+  await writeServer(loaded.ctx, id, {
+    url: swap(registered.url) ?? registered.url,
+    ...(registered.specUrl ? { specUrl: swap(registered.specUrl) } : {}),
+  })
+}
+
+/** Writes the ports as published to the service's own part. */
+async function saveOwnPublish(loaded: LoadedService): Promise<void> {
+  await db().serviceSpec.update({
+    where: { serverId: loaded.server.id },
+    data: sealedServiceOwn(loaded.ctx, loaded.server.id, ownPart(loaded)),
+  })
+}
+
+/**
  * Makes the container again from the definition and the variables as they
  * are now (after a secret changed, or an update), keeping its volumes. A
  * service reached directly until now is reached through the SSH connection
@@ -1478,6 +1848,10 @@ export async function recreateServiceOn(
   loaded: LoadedService,
   access: ServiceAccess,
 ): Promise<ServiceStatus> {
+  if (loaded.failure) {
+    throw new PcpError("state", failedWords(loaded))
+  }
+
   const name = loaded.spec.containerName
   const reach: ServiceReach = access.forward ? "tunnel" : loaded.reach
 
@@ -1501,8 +1875,11 @@ export async function recreateServiceOn(
   await recordIntent(loaded, "running")
 
   try {
-    await engineCall(() =>
-      runContainer(
+    // The ports PCP picked stay while they are free, and are picked again
+    // when something else took them since; a port the owner chose stays
+    // theirs, and a remake that finds it taken stops.
+    const ran = await engineCall(() =>
+      runPublished(
         access.host,
         loaded.engine,
         {
@@ -1514,6 +1891,14 @@ export async function recreateServiceOn(
         access.env,
       ),
     )
+
+    if (JSON.stringify(ran) !== JSON.stringify(loaded.publish)) {
+      const before = loaded.publish
+      loaded.publish = ran
+      loaded.ask = ran
+      await saveOwnPublish(loaded)
+      await followPublishedPort(loaded, before)
+    }
   } catch (error) {
     throw await failedRecreate(loaded, access, error)
   }
@@ -1697,6 +2082,11 @@ export async function updateServiceOn(
   access: ServiceAccess,
   choice: ServiceUpdateChoice = {},
 ): Promise<{ status: ServiceStatus; image: string; changed: boolean }> {
+  // Nothing of a service whose launch failed is changed before it runs.
+  if (loaded.failure) {
+    throw new PcpError("state", failedWords(loaded))
+  }
+
   // A request asked before the vault's rows were sealed holds the plain
   // SHA-256 of the definition: it still counts.
   if (
@@ -1889,11 +2279,11 @@ export async function saveServiceSettings(
       where: { serverId: id },
       data: {
         env: JSON.stringify(env),
-        ...sealedServiceOwn(ctx, id, {
-          containerName: loaded.spec.containerName,
-          publish: JSON.stringify(loaded.publish),
-          values: JSON.stringify(values),
-        }),
+        ...sealedServiceOwn(
+          ctx,
+          id,
+          ownPart(loaded, { values: JSON.stringify(values) }),
+        ),
       },
     }),
   ])
@@ -1901,6 +2291,143 @@ export async function saveServiceSettings(
   await shareDescription(ctx, id)
 
   return { envChanged }
+}
+
+/**
+ * The owner's changes to a service whose launch failed and is kept: its
+ * host ports (only while it is published on the SSH server's own loopback,
+ * where a port number widens nothing), the values of its plain variables
+ * and the secrets bound to its variables. Not its image, definition, the
+ * container ports it publishes, its address, its variables or its SSH
+ * server: those the owner approved, and a change to them is a fresh
+ * proposal (or a service launched anew).
+ */
+export async function saveFailedService(
+  ctx: VaultContext,
+  id: string,
+  input: {
+    /** The host port of each container port; left out: PCP picks one. */
+    ports?: Array<{ container: number; host?: number }>
+    env?: ServiceEnvBindings
+    values?: ServicePlainValues
+  },
+): Promise<LoadedService> {
+  const loaded = await loadService(ctx, id)
+
+  if (!loaded.failure) {
+    throw new PcpError(
+      "state",
+      `${loaded.server.name} did not fail to launch: change it with its own settings.`,
+    )
+  }
+
+  let ask = loaded.ask
+
+  if (input.ports) {
+    if (!isLoopback(ask.address)) {
+      throw invalid(
+        `${loaded.server.name} is published on ${ask.address}, not only on the SSH server's own loopback: a different port there is a different exposure, so it needs a new proposal (or launch it again yourself).`,
+      )
+    }
+
+    ask = parsePublish(
+      { address: ask.address, ports: input.ports },
+      loaded.definition,
+    )
+  }
+
+  const values = input.values
+    ? checkPlainValues(input.values, loaded.definition)
+    : loaded.values
+  const given = { ...loaded.env, ...input.env }
+  const env = checkEnvBindings(given, loaded.definition, values)
+  const rows = await db().secret.findMany({
+    where: {
+      vaultId: ctx.vaultId,
+      id: { in: [...new Set(Object.values(env))] },
+    },
+    select: { id: true, kind: true },
+  })
+
+  for (const [variable, secretId] of Object.entries(env)) {
+    const kind = rows.find((row) => row.id === secretId)?.kind
+
+    if (
+      kind !== "text" &&
+      !(kind === "generated" && loaded.env[variable] === secretId)
+    ) {
+      throw invalid("Choose text secrets of yours for the service's variables.")
+    }
+  }
+
+  await db().serviceSpec.update({
+    where: { serverId: id },
+    data: {
+      env: JSON.stringify(env),
+      ...sealedServiceOwn(
+        ctx,
+        id,
+        ownPart(loaded, {
+          publish: JSON.stringify(ask),
+          values: JSON.stringify(values),
+        }),
+      ),
+    },
+  })
+
+  return loadService(ctx, id)
+}
+
+/**
+ * Launches a service whose launch failed again, from what it keeps (its
+ * ports and variables as saveFailedService left them). The same launch as
+ * a new one's, on the same rows.
+ */
+export async function relaunchFailedOn(
+  loaded: LoadedService,
+  access: ServiceAccess,
+): Promise<LaunchResult> {
+  if (!loaded.failure) {
+    throw new PcpError(
+      "state",
+      `${loaded.server.name} did not fail to launch: it is launched already.`,
+    )
+  }
+
+  if (!loaded.host) {
+    throw new PcpError(
+      "state",
+      `${loaded.server.name}'s SSH server is no longer in PCP, so it cannot be launched again: remove the service.`,
+    )
+  }
+
+  const generated = await db().secret.findMany({
+    where: {
+      vaultId: loaded.ctx.vaultId,
+      id: { in: Object.values(loaded.env) },
+      kind: "generated",
+    },
+    select: { id: true },
+  })
+  const made = new Set(generated.map((row) => row.id))
+  const asked: PreparedLaunch = {
+    generatedEnv: Object.entries(loaded.env)
+      .filter(([, secretId]) => made.has(secretId))
+      .map(([variable]) => variable),
+    name: loaded.server.name.replace(/ service$/, ""),
+    description: loaded.server.description,
+    note: null,
+    host: loaded.host,
+    definition: loaded.definition,
+    definitionId: loaded.server.definitionId,
+    publish: loaded.ask,
+    env: loaded.env,
+    values: loaded.values,
+    exit: null,
+    containerName: loaded.spec.containerName,
+  }
+
+  return launchServiceOn(loaded.ctx, asked, access, loaded)
 }
 
 /**
@@ -2022,6 +2549,12 @@ export async function callServiceTool(
 
   const { call } = read
   const redact = access.env.redact
+
+  // A launch that failed is kept with no container: say so, and where the
+  // owner changes it and launches it again.
+  if (loaded.failure) {
+    return failedAnswer(loaded, publicUrl)
+  }
 
   // An image update is the owner's: what it finds is a request for them.
   if (call.tool === "update") {
@@ -2580,6 +3113,10 @@ export type ServiceView = {
   host: { id: string; name: string; username: string } | null
   definition: ServiceDefinition
   publish: ServicePublish
+  /** The ports as asked: a port with no host port is one PCP picks. */
+  ask: ServicePublishAsk
+  /** Why its launch failed, while PCP keeps it marked failed; else null. */
+  failure: string | null
   /** Through the SSH connection, or directly from PCP's machine. */
   reach: ServiceReach
   /** Whether it was last started or stopped through PCP. */
@@ -2644,6 +3181,8 @@ export async function serviceView(
       : null,
     definition: loaded.definition,
     publish: loaded.publish,
+    ask: loaded.ask,
+    failure: loaded.failure,
     reach: loaded.reach,
     intent: loaded.intent,
     env: loaded.definition.env.map((entry) => {

@@ -159,6 +159,55 @@ describe("parsePublish", () => {
     ).toBe("::1")
   })
 
+  it("takes a port with no host port on the loopback: PCP picks it", () => {
+    expect(
+      parsePublish(
+        { address: "127.0.0.1", ports: [{ container: 5001 }] },
+        definition,
+      ),
+    ).toEqual({ address: "127.0.0.1", ports: [{ container: 5001 }] })
+    expect(
+      parsePublish(
+        { address: "[::1]", ports: [{ container: 5001 }] },
+        definition,
+      ).ports,
+    ).toEqual([{ container: 5001 }])
+  })
+
+  it("needs a host port where the network reaches it, and still refuses one named twice", () => {
+    expect(() =>
+      parsePublish(
+        { address: "0.0.0.0", ports: [{ container: 5001 }] },
+        definition,
+      ),
+    ).toThrow(/needs a host port/)
+    const two = parseServiceDefinition({
+      ...BASE,
+      ports: [{ container: 5001 }, { container: 5002 }],
+    })
+    expect(() =>
+      parsePublish(
+        {
+          address: "127.0.0.1",
+          ports: [
+            { container: 5001, host: 8000 },
+            { container: 5002, host: 8000 },
+          ],
+        },
+        two,
+      ),
+    ).toThrow(/chosen twice/)
+    expect(
+      parsePublish(
+        {
+          address: "127.0.0.1",
+          ports: [{ container: 5001, host: 8000 }, { container: 5002 }],
+        },
+        two,
+      ).ports,
+    ).toEqual([{ container: 5001, host: 8000 }, { container: 5002 }])
+  })
+
   it.each([
     [
       "a host name",

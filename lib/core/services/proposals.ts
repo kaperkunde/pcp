@@ -25,9 +25,14 @@ import {
   parseServiceDefinition,
   registerAuth,
   type ServiceDefinition,
-  type ServicePublish,
+  type ServicePublishAsk,
 } from "./definition"
-import { serviceOfDefinition, type ServiceLaunchInput } from "./services"
+import {
+  KeptFailedLaunch,
+  keepLaunchCarry,
+  serviceOfDefinition,
+  type ServiceLaunchInput,
+} from "./services"
 
 /**
  * A service an assistant proposes (register_server, kind "service"): a
@@ -72,7 +77,7 @@ export type ServiceChangeAsk = {
     instances: string[]
   }
   host: { id: string; name: string; address: string }
-  publish: ServicePublish
+  publish: ServicePublishAsk
   env: ProposedVariable[]
   /** A secret PCP does not hold yet, which the owner types in. */
   newSecret: string | null
@@ -102,7 +107,7 @@ export type ServiceProposalArgs = {
   /** The SSH server, a row of kind ssh the token sees. */
   sshServerId: string
   publishAddress?: string
-  publishPorts?: Array<{ container: number; host: number }>
+  publishPorts?: Array<{ container: number; host?: number }>
   envSecrets?: Array<{ name: string; secret: string; generate?: unknown }>
   note?: string
   /** tool_access: levels and tiers proposed for what it registers. */
@@ -180,9 +185,9 @@ export async function prepareServiceProposal(
       address: args.publishAddress?.trim() || DEFAULT_PUBLISH_ADDRESS,
       ports: definition.ports.map(({ container }) => ({
         container,
-        host:
-          args.publishPorts?.find((entry) => entry.container === container)
-            ?.host ?? container,
+        // Left out: PCP picks a free port when it starts the container.
+        host: args.publishPorts?.find((entry) => entry.container === container)
+          ?.host,
       })),
     },
     definition,
@@ -368,7 +373,7 @@ export function describeServiceAsk(ask: ServiceChangeAsk): {
       ? `Updates from: ${definition.source}, when you update it on its page`
       : "Updates: by hand only (it names no image to update from)",
     publish.ports.length > 0
-      ? `Published on ${publish.address}: ${publish.ports.map((port) => `${port.host} → ${port.container}`).join(", ")}${publish.address === "0.0.0.0" || publish.address === "::" ? " (every address of the SSH server: anything on its network reaches it)" : isLoopback(publish.address) ? " (the SSH server's own loopback: PCP reaches it through the SSH connection)" : " (that address of the SSH server: anything that reaches it reaches the service)"}`
+      ? `Published on ${publish.address}: ${publish.ports.map((port) => (port.host === undefined ? `a free port PCP picks when it starts → ${port.container}` : `${port.host} → ${port.container}`)).join(", ")}${publish.address === "0.0.0.0" || publish.address === "::" ? " (every address of the SSH server: anything on its network reaches it)" : isLoopback(publish.address) ? " (the SSH server's own loopback: PCP reaches it through the SSH connection)" : " (that address of the SSH server: anything that reaches it reaches the service)"}`
       : "Publishes no port",
     ...ask.env.map((entry) => {
       const declared = definition.env.find((each) => each.name === entry.name)
@@ -438,6 +443,53 @@ export type ServiceLauncher = (
   registeredId: string | null
   message: string
 }>
+
+/**
+ * What the owner's yes gives the token that asked, once what it proposed
+ * runs: a token scoped to chosen servers reaches the service and what it
+ * registered, and the levels and tiers the owner left on the page are
+ * written for it (or kept to apply to the tools first read). Also what a
+ * kept failed service applies when it is launched again.
+ */
+export async function settleLaunch(
+  ctx: VaultContext,
+  {
+    tokenId,
+    serviceId,
+    registeredId,
+    access,
+  }: {
+    tokenId: string
+    serviceId: string
+    registeredId: string | null
+    access: AccessRule[]
+  },
+): Promise<string> {
+  const token = await db().apiToken.findUniqueOrThrow({
+    where: { id: tokenId },
+    select: { allowAllServers: true },
+  })
+
+  if (!token.allowAllServers) {
+    for (const serverId of [serviceId, registeredId]) {
+      if (serverId) {
+        await db().apiTokenServer.upsert({
+          where: { tokenId_serverId: { tokenId, serverId } },
+          create: { tokenId, serverId },
+          update: {},
+        })
+      }
+    }
+  }
+
+  return registeredId
+    ? await settleChosenAccess(ctx, {
+        serverId: registeredId,
+        tokenId,
+        rules: access,
+      })
+    : ""
+}
 
 /**
  * The owner said yes: launches exactly what they were shown, with the
@@ -529,7 +581,17 @@ export async function applyServiceChange(
     })
   } catch (error) {
     // What the owner typed stays theirs: said so, never dropped unseen.
-    if (saved) {
+    // A service PCP kept is bound to it: its page, last in the error, is
+    // where they go on.
+    if (error instanceof KeptFailedLaunch) {
+      // What the owner chose for the token goes with the service PCP kept,
+      // and is applied once it is launched again.
+      await keepLaunchCarry(ctx, error.serviceId, { tokenId, access }).catch(
+        () => {},
+      )
+    }
+
+    if (saved && !(error instanceof KeptFailedLaunch)) {
       throw new PcpError(
         isPcpError(error) ? error.code : "upstream",
         `${isPcpError(error) ? error.message : "Something went wrong inside PCP while launching it."}\nThe new secret is kept in PCP as "${saved.name}": an assistant that asks again can name it, and you can choose it when you launch the service yourself, or delete it on the Secrets page.`,
@@ -549,31 +611,12 @@ export async function applyServiceChange(
     await setPersonalNote(ctx, "server", launched.id, ask.note).catch(() => {})
   }
 
-  const token = await db().apiToken.findUniqueOrThrow({
-    where: { id: tokenId },
-    select: { allowAllServers: true },
+  const levels = await settleLaunch(ctx, {
+    tokenId,
+    serviceId: launched.id,
+    registeredId: launched.registeredId,
+    access,
   })
-
-  // A token scoped to chosen servers reaches what it just launched.
-  if (!token.allowAllServers) {
-    for (const serverId of [launched.id, launched.registeredId]) {
-      if (serverId) {
-        await db().apiTokenServer.upsert({
-          where: { tokenId_serverId: { tokenId, serverId } },
-          create: { tokenId, serverId },
-          update: {},
-        })
-      }
-    }
-  }
-
-  const levels = launched.registeredId
-    ? await settleChosenAccess(ctx, {
-        serverId: launched.registeredId,
-        tokenId,
-        rules: access,
-      })
-    : ""
   const service = await getServer(ctx, launched.id)
   const registered = launched.registeredId
     ? await getServer(ctx, launched.registeredId).catch(() => null)

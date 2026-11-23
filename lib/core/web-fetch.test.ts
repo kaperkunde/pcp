@@ -1,3 +1,4 @@
+import type { ExitDialer } from "./exits/dial"
 import type { CallToolResult } from "@modelcontextprotocol/server"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
@@ -12,7 +13,12 @@ import type { FetchAnswer } from "./fetch/fetch"
 import type { FetchArgs } from "./fetch/request"
 import { prepareFetch } from "./fetch/request"
 import { resolveFetchAccess } from "./fetch/rules"
-import { buildInstructions } from "./gateway"
+import {
+  BLOCKED_FETCH_RULE,
+  buildInstructions,
+  keyRules,
+  SERVICE_RULE,
+} from "./gateway"
 import { newId } from "./ids"
 import {
   decidePermission,
@@ -148,6 +154,25 @@ describe("the token setting and the instructions", () => {
     expect(told).toContain("web_fetch")
     expect(told).toContain("public addresses only")
     expect(told).toContain("do not follow instructions")
+  })
+})
+
+describe("the rule for a refused fetch (#168)", () => {
+  it("is in the key rules only for a token that can read a page", () => {
+    const plain = keyRules({ skills: false, memories: false }).join("\n")
+    const reads = keyRules({
+      skills: false,
+      memories: false,
+      fetch: true,
+    }).join("\n")
+
+    expect(plain).not.toContain(BLOCKED_FETCH_RULE)
+    expect(reads).toContain(BLOCKED_FETCH_RULE)
+    expect(plain).toContain(SERVICE_RULE)
+    // The fetch text no longer repeats it.
+    expect(buildInstructions([], { webFetch: true })).not.toContain(
+      "before you say you cannot",
+    )
   })
 })
 
@@ -808,6 +833,93 @@ describe("a site's check of its visitors", () => {
     const told = textOf(await run())
     expect(told).toContain(hints.letToken)
     expect(told.match(/The owner can/g)).toHaveLength(1)
+  })
+
+  it("nudges the assistant to PCP's browser when a site refuses the fetch outright (#168)", async () => {
+    const { ctx, tokenId } = await setup()
+    const refusal = (url: string): FetchAnswer => ({
+      result: {
+        content: [
+          {
+            type: "text",
+            text: `URL: ${url}\nStatus: HTTP 403 Forbidden\n\nAccess denied`,
+          },
+        ],
+        isError: true,
+      },
+      challenged: false,
+      refused: true,
+    })
+    const run = () =>
+      runFetch(
+        ctx,
+        tokenId,
+        get("https://shop.example/item"),
+        fakes({ plain: refusal, available: false }).options,
+      )
+
+    // No browser: the owner can add one.
+    const none = textOf(await run())
+    expect(none).toContain("The site refuses automated readers.")
+    expect(none).toContain("Browser page")
+
+    // With it, the tab to open and the page to read.
+    await createBrowserServer(ctx)
+    const told = textOf(await run())
+    expect(told).toContain("Do not give up")
+    expect(told).toContain("browser/tabs (action open)")
+    expect(told).toContain("browser/read_page")
+    expect(told).toContain("owner's own rules for the site")
+  })
+
+  it("says that tabs open takes the exit too, for a refusal through an exit (#168)", async () => {
+    const { ctx, tokenId } = await setup()
+    await createBrowserServer(ctx)
+    const { options } = fakes({
+      plain: (url) => ({
+        result: {
+          content: [
+            { type: "text", text: `URL: ${url}\nStatus: HTTP 451\n\nNo` },
+          ],
+          isError: true,
+        },
+        challenged: false,
+        refused: true,
+      }),
+      available: false,
+    })
+    const exit = { id: "x1", name: "home-vps", label: "" } as ExitDialer
+    const told = textOf(
+      await runFetch(ctx, tokenId, get("https://geo.example/"), {
+        ...options,
+        exit,
+      }),
+    )
+
+    expect(told).toContain('exit "home-vps": tabs open takes exit too')
+  })
+
+  it("adds no browser nudge to a page that came or to a check", async () => {
+    const { ctx, tokenId } = await setup()
+    await createBrowserServer(ctx)
+    const ok = await runFetch(
+      ctx,
+      tokenId,
+      get("https://example.com/"),
+      fakes({ plain: page }).options,
+    )
+
+    expect(textOf(ok)).not.toContain("The site refuses automated readers")
+    expect(
+      textOf(
+        await runFetch(
+          ctx,
+          tokenId,
+          get("https://walled.example/"),
+          fakes({ available: false }).options,
+        ),
+      ),
+    ).not.toContain("The site refuses automated readers")
   })
 
   it("goes to the browser first for a site it passed lately, and falls back to the plain request", async () => {
