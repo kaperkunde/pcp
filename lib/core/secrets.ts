@@ -19,6 +19,7 @@ import {
   secretNameWhere,
 } from "./secret-meta"
 import { clearAlerts, writeServer } from "./server-meta"
+import { resultOpener } from "./tool-results"
 import { blockingUses, namesInWords, secretUses } from "./secret-uses"
 import { parseTotpSeed, totpCode, totpSeedProblem } from "./totp"
 
@@ -286,6 +287,59 @@ export function validateSecretValue(
   }
 
   return kind === "totp" ? totpSeedProblem(value) : null
+}
+
+/**
+ * A new secret's value from one of the requesting token's own kept results
+ * (request_secret's and rotate_secret's `value_from`, #174). The one place a
+ * kept result becomes a secret's value, and a sanctioned consumer of a
+ * pass-only result as a tool's arguments are (`resultOpener`, never
+ * `refusePassOnly`, which stops the readers): only the token's own, live
+ * rows open, only inside the request that writes the secret, and the value
+ * goes nowhere but to the caller that stores it. A file's bytes must be
+ * valid UTF-8; the text must be a value validateSecretValue takes and
+ * show on screen as it is (no control or hidden characters but a line
+ * break or tab). Never quotes the value, in a problem or anywhere.
+ */
+export type ValueFromResult =
+  { ok: true; value: string } | { ok: false; gone: boolean; problem: string }
+
+export async function readSecretValueFromResult(
+  ctx: VaultContext,
+  tokenId: string,
+  resultId: string,
+): Promise<ValueFromResult> {
+  const opened = await resultOpener(ctx, tokenId)(resultId)
+
+  if (!opened) {
+    return {
+      ok: false,
+      gone: true,
+      problem:
+        "The kept result the value was to come from is not there for this token any more: it expired (results are kept for a day) or was never this token's. Nothing was saved.",
+    }
+  }
+
+  let value: string
+
+  try {
+    value = new TextDecoder("utf-8", { fatal: true }).decode(opened.bytes())
+  } catch {
+    return {
+      ok: false,
+      gone: false,
+      problem:
+        "The kept result is not text (it is not valid UTF-8), so it cannot be a secret's value. Nothing was saved.",
+    }
+  }
+
+  const problem =
+    validateSecretValue(value) ??
+    (hiddenCharacter(value)
+      ? "The kept result holds a character that does not show on screen (a control character, a carriage return or a hidden one), so it cannot be a secret's value. Nothing was saved."
+      : null)
+
+  return problem ? { ok: false, gone: false, problem } : { ok: true, value }
 }
 
 /**

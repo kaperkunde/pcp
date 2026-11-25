@@ -3899,7 +3899,8 @@ and a picker of the vault's servers, services and wrappers to add
 **An assistant's proposals** (`lib/core/secret-changes.ts`), PCP's own
 tools behind execute: `edit_secret` (name, description, login name, note;
 never the value), `rotate_secret` (a new value the owner types, or PCP
-makes from a recipe on their yes: `generate-password.ts`), and
+makes from a recipe on their yes: `generate-password.ts`, or reads from one
+of the token's own kept results, `value_from`: `secret-from-result.ts`), and
 `change_secret_scope` (sites to add or take away, with `subdomains`, and
 consumers by short name), all Write, and `delete_secret`, Destructive. Each
 is a `secret_change` request (`action` edit, rotate, scope or delete, `via`

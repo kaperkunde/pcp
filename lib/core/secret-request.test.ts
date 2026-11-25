@@ -9,8 +9,10 @@ import { buildGatewayServer } from "./gateway"
 import { decidePermission, getPermissionView } from "./permissions"
 import { secretNameWhere } from "./secret-meta"
 import { createSecret, readSecretValue } from "./secrets"
+import { readRequestLog } from "./request-log"
 import { entryCall } from "./test-handles"
 import { scratchDatabase } from "./test-db"
+import { keepResult } from "./tool-results"
 import { setupVault } from "./vault"
 
 // PCP's own request_secret (#162), as an assistant meets it through
@@ -22,6 +24,7 @@ const PUBLIC_URL = "http://localhost:3000"
 let cleanup: () => Promise<void>
 let ctx: VaultContext
 let client: Client
+let tokenId: string
 
 beforeEach(async () => {
   ;({ cleanup } = await scratchDatabase())
@@ -35,6 +38,7 @@ beforeEach(async () => {
     serverIds: [],
   })
   const scope = { ...(await resolveApiToken(token))!, publicUrl: PUBLIC_URL }
+  tokenId = scope.tokenId
   const [clientSide, serverSide] = InMemoryTransport.createLinkedPair()
   await buildGatewayServer(scope, []).connect(serverSide)
   client = new Client({ name: "test", version: "1.0.0" })
@@ -177,5 +181,178 @@ describe("request_secret, PCP's own", () => {
     }
 
     expect(await db().permissionRequest.count()).toBe(0)
+  })
+})
+
+describe("request_secret with value_from", () => {
+  const KEPT = "sk-kept-ABCD-1234567890"
+
+  async function keep(text = KEPT, token = tokenId) {
+    const kept = await keepResult(ctx, {
+      tokenId: token,
+      serverId: null,
+      toolName: "create_key",
+      text,
+      mediaType: "text/plain",
+      passOnly: true,
+    })
+
+    return { $result: kept.id }
+  }
+
+  it("stores a pass-only result of the token as the secret, once the owner agrees, and never shows it", async () => {
+    const handle = await keep()
+    const asked = await request({
+      name: "Docling key",
+      purpose: "The key another tool just made.",
+      value_from: handle,
+    })
+
+    expect(asked.isError, asked.text).toBe(false)
+    expect(asked.text).toContain("The value is the kept result you named")
+    const { row, view } = await newest()
+    expect(view.valueFrom).toMatchObject({
+      id: handle.$result,
+      source: "create_key",
+      length: KEPT.length,
+      passOnly: true,
+      expired: false,
+    })
+    expect(view.lines.join("\n")).toContain(
+      `The value is a result of create_key that the assistant kept (${KEPT.length} characters, pass-only); the assistant never saw it`,
+    )
+
+    // A typed value or a recipe beside it is no answer.
+    for (const options of [
+      { secretValue: "typed" },
+      { generate: { format: "hex" } },
+    ]) {
+      const refused = await decidePermission(ctx, row.id, "allow_once", {
+        publicUrl: PUBLIC_URL,
+        ...options,
+      })
+      expect(refused.isError).toBe(true)
+    }
+
+    const done = await decidePermission(ctx, row.id, "allow_once", {
+      publicUrl: PUBLIC_URL,
+    })
+    expect(done.isError).not.toBe(true)
+    expect(JSON.stringify(done)).toContain("the kept result you named")
+    expect(JSON.stringify(done)).not.toContain("PCP made its value itself")
+    const secret = await db().secret.findFirstOrThrow({
+      where: secretNameWhere(ctx, "Docling key"),
+    })
+    expect(await readSecretValue(ctx, secret.id)).toBe(KEPT)
+
+    const checked = await client.callTool(
+      entryCall("check_permission", { id: row.id }),
+    )
+    const rows = await db().permissionRequest.findMany()
+    for (const where of [
+      asked.text,
+      JSON.stringify(done),
+      JSON.stringify(checked),
+      JSON.stringify(rows),
+      JSON.stringify(await newest()),
+      JSON.stringify(await readRequestLog(ctx)),
+    ]) {
+      expect(where).not.toContain(KEPT)
+    }
+  })
+
+  it("is refused before the owner is asked: another token's result, generate with it, codes, a name PCP holds", async () => {
+    const other = await createApiToken(ctx, {
+      name: "Other",
+      allowAllServers: true,
+      serverIds: [],
+    })
+    const theirs = await keep(
+      KEPT,
+      (await resolveApiToken(other.token))!.tokenId,
+    )
+    await createSecret(ctx, { name: "Taken", value: "v" })
+
+    for (const [args, refused] of [
+      [
+        { name: "A", purpose: "x", value_from: theirs },
+        /not there for this token/,
+      ],
+      [
+        {
+          name: "B",
+          purpose: "x",
+          value_from: await keep(),
+          generate: { format: "hex" },
+        },
+        /generate|do not fit/,
+      ],
+      [
+        {
+          name: "C",
+          purpose: "x",
+          kind: "totp",
+          origins: ["https://x.example"],
+          value_from: await keep(),
+        },
+        /seed|do not fit/,
+      ],
+      [
+        { name: "Taken", purpose: "x", value_from: await keep() },
+        /never writes over one/,
+      ],
+      [
+        { name: "D", purpose: "x", value_from: await keep("") },
+        /Enter the secret's value/,
+      ],
+    ] as const) {
+      const asked = await request(args)
+
+      expect(asked.isError, JSON.stringify(args)).toBe(true)
+      expect(asked.text).toMatch(refused)
+      expect(asked.text).not.toContain(KEPT)
+    }
+
+    expect(await db().permissionRequest.count()).toBe(0)
+  })
+
+  it("writes nothing when the result expired before the owner answered, and the outcome says so", async () => {
+    const handle = await keep()
+    await request({ name: "Late key", purpose: "x", value_from: handle })
+    const { row } = await newest()
+    await db().toolResult.update({
+      where: { id: handle.$result },
+      data: { expiresAt: new Date(Date.now() - 1000) },
+    })
+    expect((await newest()).view.valueFrom?.expired).toBe(true)
+
+    const done = await decidePermission(ctx, row.id, "allow_once", {
+      publicUrl: PUBLIC_URL,
+    })
+
+    expect(JSON.stringify(done)).toContain("Nothing was saved")
+    expect(
+      await db().secret.count({ where: secretNameWhere(ctx, "Late key") }),
+    ).toBe(0)
+    const checked = await client.callTool(
+      entryCall("check_permission", { id: row.id }),
+    )
+    expect(JSON.stringify(checked)).toContain("Nothing was saved")
+  })
+
+  it("never writes over a secret the owner added while it waited", async () => {
+    await request({ name: "Raced", purpose: "x", value_from: await keep() })
+    const { row } = await newest()
+    await createSecret(ctx, { name: "Raced", value: "owners-own" })
+
+    const done = await decidePermission(ctx, row.id, "allow_once", {
+      publicUrl: PUBLIC_URL,
+    })
+
+    expect(done.isError).toBe(true)
+    const secret = await db().secret.findFirstOrThrow({
+      where: secretNameWhere(ctx, "Raced"),
+    })
+    expect(await readSecretValue(ctx, secret.id)).toBe("owners-own")
   })
 })
