@@ -281,6 +281,31 @@ function ProviderForm({
         />
       </Field>
 
+      {provider !== "voyage" ? (
+        <div className="flex flex-col gap-1">
+          <label className="flex cursor-pointer items-center gap-2 text-sm">
+            <Checkbox
+              name="inputType"
+              defaultChecked={
+                config &&
+                config.provider !== "voyage" &&
+                config.provider === provider
+                  ? Boolean(config.inputType)
+                  : false
+              }
+            />
+            Tell the model whether a text is a query or a document
+          </label>
+          <p className="text-xs text-muted-foreground">
+            Sends input_type, as Voyage AI takes it. Turn it on for a model that
+            embeds a question and a passage differently (an instruction-tuned
+            one, behind text-embeddings-inference or vLLM). Leave it off if the
+            server does not know the field, as OpenAI&apos;s does not. Changing
+            it embeds your items again.
+          </p>
+        </div>
+      ) : null}
+
       <fieldset className="m-0 flex flex-col gap-2 border-0 p-0">
         <legend className="text-[15px] text-foreground">
           What the provider may read

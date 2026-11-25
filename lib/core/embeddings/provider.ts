@@ -33,6 +33,8 @@ export type EmbeddingsRequest = {
   url: string
   /** Voyage AI's body (input_type), or OpenAI's. */
   style: "voyage" | "openai"
+  /** An OpenAI-style body that also carries input_type, as Voyage AI's does. */
+  inputType?: boolean
   /** Left out of the body when empty. */
   model: string
   headers: Record<string, string>
@@ -52,7 +54,9 @@ export async function requestEmbeddings(
   const body = JSON.stringify({
     input: texts,
     ...(request.model ? { model: request.model } : {}),
-    ...(request.style === "voyage" ? { input_type: input } : {}),
+    ...(request.style === "voyage" || request.inputType
+      ? { input_type: input }
+      : {}),
   })
   let response: Response
 
