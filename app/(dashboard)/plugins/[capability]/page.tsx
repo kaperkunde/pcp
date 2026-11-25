@@ -85,7 +85,7 @@ export default async function CapabilityPage({
           Assistants call <code className="font-mono">{cap.tool}</code>, which
           uses a server or API endpoint you have that can do the work, at the
           levels you give each token: one you have not allowed yet asks you
-          first, as any other tool does. Launch one below; once it runs, the
+          first, as any other tool does. Set one up below; once it is there, the
           assistant can try again.
         </p>
       </Card>
@@ -273,7 +273,8 @@ function OfferCard({
       {offer.state === "launch" && offer.href ? (
         <div>
           <ButtonLink href={offer.href} size="sm">
-            Launch {offer.item.title}
+            {offer.item.kind === "endpoint" ? "Add" : "Launch"}{" "}
+            {offer.item.title}
           </ButtonLink>
         </div>
       ) : offer.state === "have" && offer.href ? (

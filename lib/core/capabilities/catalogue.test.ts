@@ -62,7 +62,9 @@ describe("the catalogue", () => {
       } else {
         expect(entry.item, entry.id).not.toBeUndefined()
         expect(
-          (entry.images?.length ?? 0) > 0 || entry.setting !== undefined,
+          (entry.images?.length ?? 0) > 0 ||
+            entry.setting !== undefined ||
+            entry.item?.kind === "endpoint",
           entry.id,
         ).toBe(true)
       }
@@ -82,6 +84,7 @@ describe("the catalogue", () => {
     ).toEqual(["ssh"])
     expect(named("transcribe this voice memo")).toEqual(["whisper"])
     expect(named("go out through my VPN")).toEqual(["vpn_exit"])
+    expect(named("make a picture for the blog post")).toEqual(["images"])
     expect(named("what is the weather")).toEqual([])
   })
 

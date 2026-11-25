@@ -159,7 +159,7 @@ export async function itemOffers(
     )
     const offers = await Promise.all(
       items.map(async (item): Promise<ItemOffer> => {
-        const ref = { kind: "service" as const, name: item.name }
+        const ref = { kind: item.kind ?? ("service" as const), name: item.name }
         const root = itemRoot(ref)
 
         if (!listing.items.some((entry) => entry.root === root)) {

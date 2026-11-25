@@ -5742,6 +5742,27 @@ that provider failing: "the renderer answered with no picture"). The input
 goes by its first bytes too: a picture is pointed to `view_image`, and
 anything but a PDF is refused, whatever type it was kept as. No common item does it yet, so its setup answer names none.
 
+`generate_image` makes pictures from a prompt, or changes the ones it is
+given (`images`, by handle): a Write tool, the one capability that spends
+money, so a repeat is held by the duplicate guard (unlike the others, it
+declares no `GUARD_NEVER`). Its providers are `generate_image` and
+`edit_image` operations (`providers.ts`): a tool found by its name or
+description and a `prompt` argument, with no file input for a generation
+and the pictures' own list (never a mask) for an edit. A setting is sent
+only where the provider's argument takes it (`inEnum`: a size or quality
+its enum lacks is left out and named in `ignored`); a required `model` takes
+the schema's own default. The answer is read as a picture by its first bytes
+(base64 PCP kept as a file on sight, or an image block) and bounded by
+`MAX_GENERATED_IMAGE_BYTES`; a link to a picture is that provider failing.
+`store` and `folder` also save each picture through the store's own
+`save_file` (`gateway.ts runStoreTool`, the same levels, tier and
+validator), checked before anything is spent; a save that fails is said in
+`saved`, one that needs the owner hands over their link and says not to make
+the pictures again. The common item is an API endpoint
+(`endpoints/openai-images/` in the common repository: `CommonItem.kind`
+"endpoint", added with the owner's own key on the import page), not a
+service.
+
 `view_image` (`lib/core/view-image.ts`) is PCP's own Read tool, not a
 capability: it calls no provider. It shows the assistant one of its kept
 files as MCP image content, so the model's own vision reads it rather than

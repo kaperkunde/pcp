@@ -4,6 +4,7 @@ import { capabilitiesNamed, itemOfImage } from "./list"
 import {
   findProviders,
   hasProvider,
+  OPERATIONS,
   optionPath,
   type CandidateTool,
 } from "./providers"
@@ -308,7 +309,7 @@ describe("finding providers", () => {
     })
     const sign = findProviders("sign", pdfServer)[0]!
     expect(sign.tool.tool).toBe("add_signature_image")
-    expect(sign.input.path).toEqual(["input_path"])
+    expect(sign.input!.path).toEqual(["input_path"])
     expect(sign.image?.path).toEqual(["image_path"])
   })
 
@@ -647,5 +648,130 @@ describe("a PDF's page as a picture", () => {
       output: ["output_path"],
       step: { kind: "mcp", put: "put_file", get: "get_file" },
     })
+  })
+})
+
+// ---- generate_image ------------------------------------------------------
+
+const PROMPT_BODY = {
+  prompt: { type: "string" },
+  model: { type: "string", default: "gpt-image-2" },
+  n: { type: "integer" },
+  size: { type: "string" },
+  quality: { type: "string", enum: ["low", "medium", "high", "auto"] },
+  background: { type: "string", enum: ["transparent", "opaque", "auto"] },
+}
+
+/** An API endpoint as PCP generates one for OpenAI's Images API. */
+const imagesApi = [
+  tool(
+    "images",
+    "create_image",
+    "Generate an image\n\nMake a picture from a text prompt.\n\nPOST /images/generations",
+    {
+      type: "object",
+      properties: {
+        body: {
+          type: "object",
+          required: ["prompt"],
+          properties: PROMPT_BODY,
+        },
+      },
+      required: ["body"],
+    },
+  ),
+  tool(
+    "images",
+    "create_image_edit",
+    "Edit an image\n\nChange pictures you give it.\n\nPOST /images/edits",
+    {
+      type: "object",
+      properties: {
+        body: {
+          type: "object",
+          required: ["image[]", "prompt"],
+          properties: {
+            "image[]": { type: "array", items: FILE },
+            ...PROMPT_BODY,
+          },
+        },
+      },
+      required: ["body"],
+    },
+  ),
+]
+
+describe("generate_image's providers", () => {
+  it("finds an images API's generations and edits by their words and arguments", () => {
+    const made = findProviders("generate_image", imagesApi)
+    const edited = findProviders("edit_image", imagesApi)
+
+    expect(made.map((p) => p.tool.tool)).toEqual(["create_image"])
+    expect(made[0]!.input).toBeNull()
+    expect(made[0]!.props.prompt!.path).toEqual(["body", "prompt"])
+    expect(edited.map((p) => p.tool.tool)).toEqual(["create_image_edit"])
+    expect(edited[0]!.input).toEqual({
+      kind: "handle",
+      path: ["body", "image[]"],
+      many: true,
+    })
+    expect(hasProvider("generate_image", imagesApi)).toBe(true)
+  })
+
+  it("finds an MCP image server by the same words", () => {
+    const server = [
+      tool(
+        "painter",
+        "generate_image",
+        "Generate a picture from a text prompt.",
+        {
+          type: "object",
+          properties: { prompt: { type: "string" }, size: { type: "string" } },
+          required: ["prompt"],
+        },
+      ),
+    ]
+
+    expect(findProviders("generate_image", server)).toHaveLength(1)
+    expect(findProviders("edit_image", server)).toHaveLength(0)
+  })
+
+  it("leaves out look-alikes: no prompt, an edit, a description, a tool that needs a file", () => {
+    const others = [
+      tool("a", "generate_image", "Generate an image.", {
+        type: "object",
+        properties: { text_input: { type: "string" } },
+      }),
+      tool("b", "describe_image", "Describe the image for a prompt.", {
+        type: "object",
+        properties: { prompt: { type: "string" } },
+      }),
+      tool("c", "edit_image", "Edit an image from a prompt.", {
+        type: "object",
+        properties: { prompt: { type: "string" } },
+      }),
+      tool("d", "generate_image", "Generate an image.", {
+        type: "object",
+        properties: { prompt: { type: "string" }, seed_file: FILE },
+        required: ["prompt", "seed_file"],
+      }),
+    ]
+
+    expect(findProviders("generate_image", others)).toEqual([])
+  })
+
+  it("names an option's argument only where the value fits its enum", () => {
+    const [provider] = findProviders("generate_image", imagesApi)
+    const quality = OPERATIONS.generate_image.options.quality!
+
+    expect(optionPath(provider!, quality, "high")).toEqual(["body", "quality"])
+    expect(optionPath(provider!, quality, "ultra")).toBeNull()
+    expect(
+      optionPath(
+        provider!,
+        OPERATIONS.generate_image.options.size!,
+        "1024x1024",
+      ),
+    ).toEqual(["body", "size"])
   })
 })

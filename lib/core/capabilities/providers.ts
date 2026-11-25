@@ -40,6 +40,8 @@ export type OperationId =
   | "merge"
   | "sign"
   | "page_image"
+  | "generate_image"
+  | "edit_image"
 
 /** One of the token's tools, as detection reads it. */
 export type CandidateTool = {
@@ -84,8 +86,8 @@ type Prop = { path: string[]; schema: Record<string, unknown> }
 export type Provider = {
   operation: OperationId
   tool: CandidateTool
-  /** Where the main file goes (several, for merge). */
-  input: FileSlot
+  /** Where the main file goes (several, for merge); none where there is none. */
+  input: FileSlot | null
   /** Where a second file goes: sign's picture of a signature. */
   image: FileSlot | null
   /** It takes PDFs only (its file argument says pdf). */
@@ -119,6 +121,16 @@ export type OperationOption = {
    */
   item?: string
   /**
+   * The value must be one the argument's enum holds (a size, a quality):
+   * the option is left out, and said to be, where it does not.
+   */
+  inEnum?: boolean
+  /**
+   * Where the caller gives none, the argument's own default is sent (a
+   * required model whose schema names one).
+   */
+  useDefault?: boolean
+  /**
    * The value counts from 1 (a page): an argument that counts from 0, by
    * its name or description, gets one less (countsFromZero).
    */
@@ -134,7 +146,7 @@ type Operation = {
   nameNot?: RegExp
   /** Names that do this, ranked higher. */
   nameBonus?: RegExp
-  inputs: "one" | "many" | "pdf+image"
+  inputs: "none" | "one" | "many" | "pdf+image" | "images"
   /**
    * What it answers with: a value, a file it writes, or a picture, which it
    * writes (to an output path) or answers with (an image, kept as a handle).
@@ -144,6 +156,8 @@ type Operation = {
   extension?: string
   /** Arguments it sets where the tool has them. */
   options: Record<string, OperationOption>
+  /** Options the tool must have an argument for. */
+  needs?: string[]
 }
 
 const OCR =
@@ -152,6 +166,26 @@ const OCR =
 /** Tools that are about a job, not the work: polling, chunks, setup. */
 const NOT_THE_WORK =
   /async|status|poll|task|batch|chunk|health|languages?$|backend|llm|template|ai_|auto_/i
+
+/** The options generating and editing a picture share. */
+const IMAGE_OPTIONS: Record<string, OperationOption> = {
+  prompt: { names: ["prompt"], type: "string" },
+  model: { names: ["model"], type: "string", useDefault: true },
+  size: { names: ["size"], type: "string", inEnum: true },
+  quality: { names: ["quality"], type: "string", inEnum: true },
+  background: { names: ["background"], type: "string", inEnum: true },
+  n: { names: ["n", "num_images", "count"], type: "integer" },
+  // Asked for where the provider's schema offers it (it answers base64).
+  response_format: {
+    names: ["response_format"],
+    type: "string",
+    item: "b64_json",
+  },
+}
+
+/** Tools that are about a picture but are not making one. */
+const NOT_MAKING_IMAGES =
+  /edit|variation|inpaint|outpaint|upscal|mask|remove|vision|caption|describe|analy|ocr|extract|list|status|job|history|download|delete|cancel|queue|get_|search|resize|convert|compress/i
 
 export const OPERATIONS: Record<OperationId, Operation> = {
   read: {
@@ -289,6 +323,43 @@ export const OPERATIONS: Record<OperationId, Operation> = {
         item: "png",
       },
     },
+  },
+  generate_image: {
+    id: "generate_image",
+    capability: "generate_image",
+    match: [
+      {
+        name: /generate_?images?|images?_?generat|create_?images?|make_?images?|text_?to_?images?|imagine|draw|paint|illustrat|dall_?e|gpt_?image|txt2img/i,
+        schema: /"prompt"/,
+      },
+      {
+        text: [
+          /\b(generat|creat|mak|draw|paint|render|produc)\w*\b[^.]{0,60}\b(images?|pictures?|illustrations?|photos?|artwork)\b/i,
+        ],
+        schema: /"prompt"/,
+      },
+    ],
+    nameNot: NOT_MAKING_IMAGES,
+    inputs: "none",
+    output: "image",
+    options: IMAGE_OPTIONS,
+    needs: ["prompt"],
+  },
+  edit_image: {
+    id: "edit_image",
+    capability: "generate_image",
+    match: [
+      {
+        name: /edit_?images?|images?_?edit|inpaint|images?_?to_?images?|img2img/i,
+        schema: /"prompt"/,
+      },
+    ],
+    nameNot:
+      /variation|outpaint|upscal|mask$|remove|vision|caption|describe|analy|ocr|extract|list|status|job|history|download|delete|cancel|queue|get_|search|resize|convert|compress/i,
+    inputs: "images",
+    output: "image",
+    options: IMAGE_OPTIONS,
+    needs: ["prompt"],
   },
 }
 
@@ -616,7 +687,28 @@ function inputsOf(
   op: Operation,
   slots: Slots,
   step: FileStep | null,
-): { input: FileSlot; image: FileSlot | null; pdfOnly: boolean } | null {
+): {
+  input: FileSlot | null
+  image: FileSlot | null
+  pdfOnly: boolean
+} | null {
+  if (op.inputs === "none") {
+    return { input: null, image: null, pdfOnly: false }
+  }
+
+  // The pictures to change: a list or one, never a mask, never a path.
+  if (op.inputs === "images") {
+    const fits = (entry: { name: string }) => !/mask/i.test(entry.name)
+    const listed = slots.handles.filter(fits)
+    const found =
+      listed.find((entry) => entry.slot.kind === "handle" && entry.slot.many) ??
+      listed[0] ??
+      slots.base64.find(fits) ??
+      null
+
+    return found ? { input: found.slot, image: null, pdfOnly: false } : null
+  }
+
   const usablePaths = step ? slots.paths : []
   // One file goes where one goes, or as a list of one where only a list
   // does (an upload's `files`); several go only where a list does.
@@ -721,7 +813,17 @@ export function findProviders(
         continue
       }
 
-      const output = files.input.kind === "path" ? slots.output : null
+      const output = files.input?.kind === "path" ? slots.output : null
+
+      // An option the tool must have an argument for (a prompt).
+      if (
+        op.needs?.some((key) => {
+          const option = op.options[key]!
+          return !option.names.some((name) => props[name])
+        })
+      ) {
+        continue
+      }
 
       // A picture may come back in the answer instead.
       if (op.output === "file" && !output) {
@@ -730,7 +832,7 @@ export function findProviders(
       }
 
       const filled: string[][] = [
-        files.input.path,
+        ...(files.input ? [files.input.path] : []),
         ...(files.image ? [files.image.path] : []),
         ...(output ? [output] : []),
         ...Object.values(op.options).flatMap((option) => {
@@ -750,7 +852,7 @@ export function findProviders(
         (matched.words ? 2 : 0) +
         (item && itemNames.has(item) ? 2 : 0) +
         (tool.access === "allowed" ? 1 : 0) +
-        (files.input.kind === "path" ? 0 : 1) +
+        (files.input?.kind === "path" ? 0 : 1) +
         (op.output === "value" && output ? -3 : 0)
       const found: Provider = {
         operation,
@@ -759,7 +861,7 @@ export function findProviders(
         image: files.image,
         pdfOnly: files.pdfOnly,
         output,
-        step: files.input.kind === "path" ? step : null,
+        step: files.input?.kind === "path" ? step : null,
         props,
         item,
         score,
@@ -836,6 +938,7 @@ export function setAt(
 export function optionPath(
   provider: Provider,
   option: OperationOption,
+  value?: unknown,
 ): string[] | null {
   for (const name of option.names) {
     const prop = provider.props[name]
@@ -854,6 +957,14 @@ export function optionPath(
       continue
     }
 
+    if (option.inEnum && value !== undefined) {
+      const allowed = enumOf(prop.schema)
+
+      if (allowed && !allowed.includes(value)) {
+        continue
+      }
+    }
+
     if (option.item !== undefined) {
       const allowed = enumOf(
         option.type === "array" ? itemsOf(prop.schema) : prop.schema,
@@ -865,6 +976,25 @@ export function optionPath(
     }
 
     return prop.path
+  }
+
+  return null
+}
+
+/**
+ * The default a provider's own schema names for an option's argument (a
+ * model it needs and says which), with where it goes; null when none.
+ */
+export function defaultFor(
+  provider: Provider,
+  option: OperationOption,
+): { path: string[]; value: string } | null {
+  for (const name of option.names) {
+    const prop = provider.props[name]
+
+    if (prop && typeof prop.schema.default === "string") {
+      return { path: prop.path, value: prop.schema.default }
+    }
   }
 
   return null

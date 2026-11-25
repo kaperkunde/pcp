@@ -620,7 +620,10 @@ storageConnect`), never in the background, and SFTP for nothing else;
   `services/limits.ts`; a new command, tool or argument gets a test against
   the fake engine (`services/fake-docker.ts`, `services.test.ts`).
 - Capabilities (`lib/core/capabilities/`): `read_image`, `edit_pdf` and
-  `convert_document` (also a PDF's page to a picture, `to: "png"`) are
+  `convert_document` (also a PDF's page to a picture, `to: "png"`) and
+  `generate_image` (Write, spends money: held by the duplicate guard, its
+  `store`/`folder` saving through the store's own `save_file`; its common
+  item is an API endpoint, `CommonItem.kind`) are
   PCP's own tools for every token; `view_image` (`view-image.ts`) is PCP's
   own Read tool beside them, not a capability: it shows a kept picture
   itself and calls no provider. The work is a

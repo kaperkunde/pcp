@@ -40,3 +40,21 @@ export const MAX_ANSWER_CHARS = 400_000
 
 /** The most numbers a disagreement names. */
 export const MAX_NAMED_NUMBERS = 8
+
+/** generate_image's prompt, in characters. */
+export const MAX_PROMPT_CHARS = 4_000
+
+/** generate_image makes at most this many pictures in one call. */
+export const MAX_GENERATED_IMAGES = 4
+
+/** generate_image's edit takes at most this many pictures to change. */
+export const MAX_EDIT_IMAGES = 8
+
+/**
+ * The largest picture generate_image keeps from a provider's answer, in
+ * bytes; a larger one is dropped and the provider counts as having failed.
+ */
+export const MAX_GENERATED_IMAGE_BYTES = 25 * 1024 * 1024
+
+/** generate_image tries at most this many providers, best first. */
+export const MAX_IMAGE_PROVIDERS = 2

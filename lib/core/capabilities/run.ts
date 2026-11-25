@@ -14,9 +14,16 @@ import {
   type Outcome,
 } from "../tools/outcome"
 import { capabilityPage, type Capability, type CommonItem } from "./list"
-import { MAX_READ_PROVIDERS, MAX_TRIED_PROVIDERS, PAGE_DPI } from "./limits"
+import {
+  MAX_GENERATED_IMAGE_BYTES,
+  MAX_IMAGE_PROVIDERS,
+  MAX_READ_PROVIDERS,
+  MAX_TRIED_PROVIDERS,
+  PAGE_DPI,
+} from "./limits"
 import {
   countsFromZero,
+  defaultFor,
   OPERATIONS,
   optionPath,
   providerName,
@@ -148,6 +155,31 @@ export const CONVERT_OUTPUT = z.discriminatedUnion("kind", [
   CONVERTED,
   PAGE_IMAGE,
 ])
+
+/** What generate_image makes: pictures, as handles, and where they were put. */
+export const IMAGES = z.object({
+  kind: z.literal("images"),
+  operation: z.enum(["generate", "edit"]),
+  provider: z.string(),
+  /** The pictures, as handles to pass on or to view_image. */
+  images: z.array(RESULT_HANDLE),
+  /** Settings the provider did not take (a size it has no such value for). */
+  ignored: z.array(z.string()),
+  /** Where each was also saved (store and path), when asked for. */
+  saved: z.array(
+    z.object({
+      store: z.string(),
+      path: z.string().nullable(),
+      error: z.string().nullable(),
+    }),
+  ),
+  failed: z.array(z.object({ provider: z.string(), error: z.string() })),
+})
+
+export const GENERATE_OUTPUT = z.discriminatedUnion("kind", [
+  NEEDS_OWNER,
+  IMAGES,
+])
 export const EDIT_OUTPUT = z.discriminatedUnion("kind", [NEEDS_OWNER, EDITED])
 
 // ---- Setup -----------------------------------------------------------------
@@ -185,7 +217,7 @@ export function setupOutcome(
     },
     `Not done yet: ${why} ${
       items.length > 0
-        ? `PCP's page at the link below offers ${itemNames(items)} for the owner to launch on one of their SSH servers, in a few clicks. Once it runs, call ${cap.tool} again with the same arguments: it uses what they launched, at the levels they give this token.`
+        ? `PCP's page at the link below offers ${itemNames(items)} ${items.every((item) => item.kind === "endpoint") ? "for the owner to add with their own key, in a few clicks" : "for the owner to launch on one of their SSH servers, in a few clicks"}. Once it is set up, call ${cap.tool} again with the same arguments: it uses what they set up, at the levels they give this token.`
         : `PCP's page at the link below says what the owner can add for it. Once they have, call ${cap.tool} again with the same arguments: it uses what they added, at the levels they give this token.`
     } ${nextMessageCheck(`${cap.tool} again`, "nothing is set up yet")}\n\n${linkLastText(url, cap.label)}`,
   )
@@ -194,7 +226,7 @@ export function setupOutcome(
 // ---- One provider ------------------------------------------------------------
 
 type ProviderRun =
-  | { ok: true; value: unknown; files: Handle[] }
+  | { ok: true; value: unknown; files: Handle[]; ignored?: string[] }
   | { ok: false; error: string }
   | { owner: CallToolResult }
   | { skipped: string }
@@ -310,6 +342,14 @@ export async function runProvider(
     return { skipped: "it takes PDFs only" }
   }
 
+  if (
+    provider.operation === "edit_image" &&
+    files.main.length > 1 &&
+    !(provider.input?.kind === "handle" && provider.input.many)
+  ) {
+    return { skipped: "it takes one picture" }
+  }
+
   const server = provider.tool.server
   const all = [...files.main, ...(files.image ? [files.image] : [])]
   const viaService = provider.step?.kind === "service"
@@ -392,7 +432,7 @@ export async function runProvider(
   }
 
   const stopped =
-    (await place(provider.input, files.main, 0)) ??
+    (provider.input ? await place(provider.input, files.main, 0) : null) ??
     (provider.image && files.image
       ? await place(provider.image, [files.image], files.main.length)
       : null)
@@ -413,9 +453,24 @@ export async function runProvider(
     setAt(args, provider.output, output)
   }
 
+  const ignored: string[] = []
+
   for (const [key, option] of Object.entries(op.options)) {
     const value = options[key]
-    const path = value === undefined ? null : optionPath(provider, option)
+    const path =
+      value === undefined ? null : optionPath(provider, option, value)
+
+    if (value !== undefined && !path && option.inEnum) {
+      ignored.push(key)
+    }
+
+    if (value === undefined && option.useDefault) {
+      const named = defaultFor(provider, option)
+
+      if (named) {
+        setAt(args, named.path, named.value)
+      }
+    }
 
     if (path) {
       setAt(
@@ -452,7 +507,7 @@ export async function runProvider(
   }
 
   if (!output) {
-    return { ok: true, value: answer.value, files: [] }
+    return { ok: true, value: answer.value, files: [], ignored }
   }
 
   const step = provider.step!
@@ -613,6 +668,7 @@ async function firstThatWorks(
     value: unknown,
     files: Handle[],
     failed: Array<{ provider: string; error: string }>,
+    ignored: string[],
   ) => Outcome | null | Promise<Outcome | null>,
 ): Promise<Outcome> {
   const failed: Array<{ provider: string; error: string }> = []
@@ -635,7 +691,13 @@ async function firstThatWorks(
       continue
     }
 
-    const answer = await done(provider, run.value, run.files, failed)
+    const answer = await done(
+      provider,
+      run.value,
+      run.files,
+      failed,
+      run.ignored ?? [],
+    )
 
     if (answer) {
       return answer
@@ -779,5 +841,97 @@ export function editPdf(
         ...(value !== undefined && value !== null ? { answer: value } : {}),
         failed,
       }),
+  )
+}
+
+/** The pictures a generated answer may be, by their first bytes. */
+const MADE_PICTURES = new Set([
+  "image/png",
+  "image/jpeg",
+  "image/webp",
+  "image/gif",
+])
+
+/** Every handle an answer holds, in order, to a few levels deep. */
+function allHandles(value: unknown, depth = 0, found: Handle[] = []): Handle[] {
+  if (isHandle(value)) {
+    found.push(value)
+  } else if (depth <= 4 && value !== null && typeof value === "object") {
+    for (const part of Object.values(value as Record<string, unknown>)) {
+      allHandles(part, depth + 1, found)
+    }
+  }
+
+  return found
+}
+
+/**
+ * generate_image: the best provider that makes the pictures (or changes the
+ * ones given), which come back as handles: what the provider answered
+ * (base64 PCP kept as files, an image block) that is a picture by its first
+ * bytes (`pictureType` sniffs the token's kept result) and no larger than
+ * MAX_GENERATED_IMAGE_BYTES; anything else is that provider failing.
+ */
+export function generateImages(
+  cap: Capability,
+  operation: "generate" | "edit",
+  providers: Provider[],
+  files: InputFile[],
+  options: Record<string, unknown>,
+  bridge: Bridge,
+  publicUrl: string,
+  pictureType: (handle: Handle) => Promise<string | null>,
+): Promise<Outcome> {
+  const tried = providers.slice(0, MAX_IMAGE_PROVIDERS)
+
+  return firstThatWorks(
+    cap,
+    tried,
+    { main: files },
+    options,
+    bridge,
+    publicUrl,
+    async (provider, value, _files, failed, ignored) => {
+      const images: Handle[] = []
+      let refused: string | null = null
+
+      for (const handle of allHandles(value)) {
+        const type = await pictureType(handle)
+
+        if (!type || !MADE_PICTURES.has(type)) {
+          continue
+        }
+
+        if (
+          typeof handle.size === "number" &&
+          handle.size > MAX_GENERATED_IMAGE_BYTES
+        ) {
+          refused = `a picture larger than ${MAX_GENERATED_IMAGE_BYTES / 1024 / 1024} MiB`
+          continue
+        }
+
+        images.push(handle)
+      }
+
+      if (images.length === 0) {
+        failed.push({
+          provider: providerName(provider),
+          error: refused
+            ? `it answered with ${refused}.`
+            : "it answered with no picture PCP could keep (a link to one is not enough: it must answer the picture itself, as base64 or an image).",
+        })
+        return null
+      }
+
+      return ok({
+        kind: "images",
+        operation,
+        provider: providerName(provider),
+        images,
+        ignored,
+        saved: [],
+        failed,
+      })
+    },
   )
 }

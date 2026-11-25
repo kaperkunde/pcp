@@ -86,6 +86,7 @@ const OWN_TOOLS = [
   "view_image",
   "convert_document",
   "edit_pdf",
+  "generate_image",
   // PCP's own store, and the others by store (#90).
   "list_folder",
   "find_files",
@@ -283,6 +284,7 @@ describe("PCP's own tools", () => {
         "delete_wrapper",
         "edit_secret",
         "edit_pdf",
+        "generate_image",
         "get_endpoint",
         "get_server_limits",
         "get_version",
@@ -426,6 +428,7 @@ describe("PCP's own tools", () => {
       view_image: /^View an image/,
       convert_document: /document/,
       edit_pdf: /PDF/,
+      generate_image: /^Make an image from /,
       list_folder: /^List files in a folder/,
       find_files: /^Find files by name/,
       get_file: /^Get a file as a handle/,
