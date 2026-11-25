@@ -65,6 +65,8 @@ export type CatalogueEntry = {
   serverKinds?: ServerKind[]
   /** A common item's item; null when PCP's common items have none yet. */
   item?: CommonItem | null
+  /** Other common items that do the same, offered after `item` on its page. */
+  alternatives?: CommonItem[]
   /**
    * The image repositories that are it, by the last part of their name
    * (imageName): a service the token sees that runs one is it set up,
@@ -88,6 +90,14 @@ const CLAUDE_SESSIONS: CommonItem = {
   about:
     "Your Claude Code cloud sessions on your own claude.ai login: list them, see what one is doing, send it a message, answer its permission prompts, archive it or start a new one on a repository. It uses Claude Code's unofficial sessions API, for your own use only.",
   sources: ["claude-sessions-mcp"],
+}
+
+const VOYAGE_NANO: CommonItem = {
+  name: "voyage-4-nano",
+  title: "Voyage 4 nano embeddings",
+  about:
+    "MongoDB's voyage-4-nano, a small multilingual embedding model, on CPU behind an OpenAI-compatible API; it embeds a search and the text searched differently. About 1.5 GB of memory, fastest on a recent CPU. PCP adds its API as an endpoint and can use it for search, on Settings → Search.",
+  sources: ["voyage-nano-embeddings"],
 }
 
 const EMBEDDINGS: CommonItem = {
@@ -244,7 +254,7 @@ export const CATALOGUE: readonly CatalogueEntry[] = [
     title: "Search by meaning",
     does: "Lets search find tools, skills and memories by what they mean, not only by their words, with text embeddings made on your own server.",
     takes:
-      "An SSH server you added to PCP with Docker or Podman on it, where you launch PCP's common item Text Embeddings Inference and then choose it on Settings → Search.",
+      "An SSH server you added to PCP with Docker or Podman on it, where you launch PCP's common item Voyage 4 nano embeddings (or Text Embeddings Inference, lighter) and then choose it on Settings → Search.",
     queryWords: [
       "embedding",
       "semantic search",
@@ -256,7 +266,8 @@ export const CATALOGUE: readonly CatalogueEntry[] = [
     label: "Set up search by meaning in PCP",
     how: LAUNCH_ITEM,
     setting: "embeddings",
-    item: EMBEDDINGS,
+    item: VOYAGE_NANO,
+    alternatives: [EMBEDDINGS],
   },
   {
     id: "vpn_exit",
