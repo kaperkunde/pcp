@@ -38,6 +38,8 @@ export type SecretUseVia =
   | "wrapper_binding"
   /** A linked repository's sign-in to GitHub. */
   | "repo"
+  /** The vault's Google sign-in: its client's secret. */
+  | "google_account"
 
 /**
  * Something that uses a secret: a server that sends it, a wrapper with a
@@ -53,6 +55,8 @@ export type SecretUse = {
   /** In plain words: "server", "API endpoint", "mail account", … */
   kind: string
   via: SecretUseVia
+  /** Not a server: the vault's Google sign-in, which has no server row. */
+  account?: true
 }
 
 /** Everything that uses one secret, and the sites the browser types it at. */
@@ -78,6 +82,18 @@ export function kindWords(kind: string): string {
 }
 
 const SERVER = { ...SERVER_META_SELECT, kind: true } as const
+
+/** The vault's Google sign-in as something that uses a secret. */
+function googleUse(id: string, via: SecretUseVia): SecretUse {
+  return {
+    id,
+    name: "Google account",
+    slug: "google",
+    kind: "Google account",
+    via,
+    account: true,
+  }
+}
 
 /**
  * What uses each of these secrets, by secret id: every server that sends
@@ -106,6 +122,8 @@ export async function secretUses(
       oauthClientFor: { select: SERVER },
       oauthTokensFor: { select: SERVER },
       repos: true,
+      accountClientFor: { select: { id: true } },
+      accountTokensFor: { select: { id: true } },
       browserOrigins: {
         select: {
           secretId: true,
@@ -123,7 +141,7 @@ export async function secretUses(
   )
   const add = (secretId: string, use: SecretUse) => {
     const found = uses.get(secretId)
-    const key = `${use.via === "repo" ? "repo" : "server"}:${use.id}`
+    const key = `${use.via === "repo" ? "repo" : use.via === "google_account" ? "account" : "server"}:${use.id}`
 
     if (found && !found.has(key)) {
       found.set(key, use)
@@ -150,6 +168,14 @@ export async function secretUses(
     }
     for (const each of row.oauthTokensFor) {
       add(row.id, server(each, "oauth_tokens"))
+    }
+    // The Google sign-in: not a server, so named as itself. Its tokens are
+    // kept in a managed secret, which deleting disconnects (not blocking).
+    for (const account of row.accountClientFor) {
+      add(row.id, googleUse(account.id, "google_account"))
+    }
+    for (const account of row.accountTokensFor) {
+      add(row.id, googleUse(account.id, "oauth_tokens"))
     }
     for (const repo of row.repos) {
       let slug: string

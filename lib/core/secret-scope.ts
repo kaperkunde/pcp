@@ -93,9 +93,12 @@ export async function ensureSecretScopes(ctx: VaultContext): Promise<void> {
 
   for (const { id, kind } of pending) {
     const uses = scopedUses(usage.get(id)?.uses ?? [])
-    const serverIds = [...new Set(uses.map((use) => use.id))]
+    // Rows name servers: the Google sign-in is in scope by using the secret.
+    const serverIds = [
+      ...new Set(uses.filter((use) => !use.account).map((use) => use.id)),
+    ]
     // PCP's own secrets are for what they were made for, never anywhere.
-    const anywhere = serverIds.length === 0 && isOwnerSecretKind(kind)
+    const anywhere = uses.length === 0 && isOwnerSecretKind(kind)
 
     // A wrapper whose definition did not read may use it: "nothing uses
     // it" is not known, so it waits for a request where they all read.

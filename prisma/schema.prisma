@@ -48,6 +48,7 @@ model Vault {
   exits              Exit[]
   toolTiers          ToolTier[]
   embeddingVectors   EmbeddingVector[]
+  oauthAccounts      OAuthAccount[]
 
   @@map("vault")
 }
@@ -638,14 +639,16 @@ model Secret {
   /// key works it out from its uses (none: anywhere).
   scopeAnywhere    Boolean?  @default(false) @map("scope_anywhere")
 
-  authFor        McpServer[]               @relation("ServerAuthSecret")
-  authHeaderFor  ServerAuthHeader[]
-  oauthClientFor McpServer[]               @relation("ServerOAuthClientSecret")
-  oauthTokensFor McpServer[]               @relation("ServerOAuthTokens")
-  repos          Repo[]
-  browserOrigins SecretBrowserOrigin[]
-  allowances     ApiTokenSecretAllowance[]
-  scope          SecretScope[]
+  authFor          McpServer[]               @relation("ServerAuthSecret")
+  authHeaderFor    ServerAuthHeader[]
+  oauthClientFor   McpServer[]               @relation("ServerOAuthClientSecret")
+  oauthTokensFor   McpServer[]               @relation("ServerOAuthTokens")
+  repos            Repo[]
+  browserOrigins   SecretBrowserOrigin[]
+  allowances       ApiTokenSecretAllowance[]
+  scope            SecretScope[]
+  accountClientFor OAuthAccount[]            @relation("AccountClientSecret")
+  accountTokensFor OAuthAccount[]            @relation("AccountTokens")
 
   @@unique([vaultId, nameKey])
   @@map("secret")
@@ -744,25 +747,31 @@ model McpServer {
   /// optional pre-registered client. Without one PCP registers itself
   /// (dynamically, RFC 7591, or with its client metadata document) when the
   /// server allows it.
-  plainOauthClientId         String?   @map("oauth_client_id")
-  oauthClientSecretId        String?   @map("oauth_client_secret_id")
-  oauthClientSecret          Secret?   @relation("ServerOAuthClientSecret", fields: [oauthClientSecretId], references: [id], onDelete: SetNull)
-  plainOauthScope            String?   @map("oauth_scope")
+  plainOauthClientId         String?       @map("oauth_client_id")
+  oauthClientSecretId        String?       @map("oauth_client_secret_id")
+  oauthClientSecret          Secret?       @relation("ServerOAuthClientSecret", fields: [oauthClientSecretId], references: [id], onDelete: SetNull)
+  plainOauthScope            String?       @map("oauth_scope")
   /// oauth: extra parameters for the sign-in address, as a query string
   /// (lib/core/oauth-client.ts), for providers that only hand out a refresh
   /// token, or anything else, when the sign-in asks for it.
-  plainOauthAuthorizeParams  String?   @map("oauth_authorize_params")
+  plainOauthAuthorizeParams  String?       @map("oauth_authorize_params")
   /// oauth: the managed secret holding PCP's registration with the server
   /// and, once connected, its token set.
-  oauthTokensId              String?   @map("oauth_tokens_id")
-  oauthTokens                Secret?   @relation("ServerOAuthTokens", fields: [oauthTokensId], references: [id], onDelete: SetNull)
+  oauthTokensId              String?       @map("oauth_tokens_id")
+  oauthTokens                Secret?       @relation("ServerOAuthTokens", fields: [oauthTokensId], references: [id], onDelete: SetNull)
   /// oauth: when the current token set was obtained; null until connected.
-  oauthConnectedAt           DateTime? @map("oauth_connected_at")
+  oauthConnectedAt           DateTime?     @map("oauth_connected_at")
+  /// The account whose sign-in this server uses (authType "google": one
+  /// Google sign-in for the vault's Google Workspace servers, lib/core/
+  /// google/). Its oauthConnectedAt follows the account's state. Null for
+  /// every other server; only the owner's Google page sets it.
+  accountId                  String?       @map("account_id")
+  account                    OAuthAccount? @relation(fields: [accountId], references: [id], onDelete: SetNull)
   /// openapi + oauth: where the owner signs in and where PCP exchanges the
   /// code and renews the token, from the schema's oauth2 flow as the owner
   /// approved it. MCP servers discover theirs instead.
-  plainOauthAuthorizationUrl String?   @map("oauth_authorization_url")
-  plainOauthTokenUrl         String?   @map("oauth_token_url")
+  plainOauthAuthorizationUrl String?       @map("oauth_authorization_url")
+  plainOauthTokenUrl         String?       @map("oauth_token_url")
 
   /// What the last contact with the server found: unknown | ok |
   /// auth_required | client_required (an OAuth server PCP cannot register
@@ -1312,6 +1321,51 @@ model StoragePending {
 
 /// An OAuth authorization in flight: the state parameter sent to the
 /// authorization server and the PKCE verifier to redeem the code with.
+/// A provider sign-in the owner made once for several servers (provider
+/// "google": lib/core/google/). `meta` is JSON under the vault's key
+/// ("oauth_account:<id>"): the owner's OAuth client ID, the products they
+/// chose, the scopes Google granted and the Google account's email when
+/// known. The client's secret is one of the owner's text secrets; the
+/// tokens are a managed secret (kind oauth) that only secrets.ts and
+/// upstream.ts decrypt. Servers bound to it (mcp_server.account_id) send its
+/// access token.
+model OAuthAccount {
+  id             String    @id
+  vaultId        String    @map("vault_id")
+  vault          Vault     @relation(fields: [vaultId], references: [id], onDelete: Cascade)
+  /// google
+  provider       String
+  meta           Bytes
+  clientSecretId String?   @map("client_secret_id")
+  clientSecret   Secret?   @relation("AccountClientSecret", fields: [clientSecretId], references: [id], onDelete: SetNull)
+  tokensId       String?   @map("tokens_id")
+  tokens         Secret?   @relation("AccountTokens", fields: [tokensId], references: [id], onDelete: SetNull)
+  /// disconnected | connected | needs_reconnect
+  status         String    @default("disconnected")
+  connectedAt    DateTime? @map("connected_at")
+  createdAt      DateTime  @default(now()) @map("created_at")
+  updatedAt      DateTime  @updatedAt @map("updated_at")
+
+  servers McpServer[]
+  states  OAuthAccountState[]
+
+  @@unique([vaultId, provider])
+  @@map("oauth_account")
+}
+
+/// A sign-in in flight for an account: the PKCE verifier and what was asked,
+/// encrypted ("oauth_account_state:<id>"), found by the state parameter.
+model OAuthAccountState {
+  id        String       @id
+  accountId String       @map("account_id")
+  account   OAuthAccount @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  data      Bytes
+  createdAt DateTime     @default(now()) @map("created_at")
+  expiresAt DateTime     @map("expires_at")
+
+  @@map("oauth_account_state")
+}
+
 model OAuthState {
   id           String    @id
   serverId     String    @map("server_id")

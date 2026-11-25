@@ -67,7 +67,7 @@ export type AuthType = "none" | "header" | "oauth" | "basic"
  * What a stored server signs in with: an AuthType, or an SSH server's key
  * (PCP's own, in a managed secret), which only the SSH server's page sets.
  */
-export type StoredAuthType = AuthType | "key"
+export type StoredAuthType = AuthType | "key" | "google"
 
 export type ServerKind =
   | "mcp"
@@ -968,7 +968,9 @@ function summarize(row: {
     lastSyncedAt: row.lastSyncedAt,
     statusAt: row.statusAt,
     toolCount: row._count.tools,
-    connected: row.authType !== "oauth" || row.oauthConnectedAt !== null,
+    connected:
+      (row.authType !== "oauth" && row.authType !== "google") ||
+      row.oauthConnectedAt !== null,
   }
 }
 
@@ -1072,6 +1074,13 @@ export async function updateServer(
     throw new PcpError(
       "state",
       `This is ${kindNoun(existing.kind)}; change it in its own settings.`,
+    )
+  }
+
+  if (existing.authType === "google") {
+    throw new PcpError(
+      "state",
+      "This server signs in through your Google account: change it on the Google page.",
     )
   }
 

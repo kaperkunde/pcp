@@ -448,7 +448,8 @@ export async function clearAlertAfterSuccess(
   if (
     !STALE_AFTER_SUCCESS.includes(server.status) ||
     // An OAuth server that needs connecting is not made well by one call.
-    (server.status === "auth_required" && server.authType === "oauth")
+    (server.status === "auth_required" &&
+      (server.authType === "oauth" || server.authType === "google"))
   ) {
     return
   }
@@ -503,7 +504,11 @@ export async function clearAlerts(
     select: { id: true, status: true, authType: true },
   })
   const clearable = rows.filter(
-    (row) => !(row.status === "auth_required" && row.authType === "oauth"),
+    (row) =>
+      !(
+        row.status === "auth_required" &&
+        (row.authType === "oauth" || row.authType === "google")
+      ),
   )
 
   for (const row of clearable) {

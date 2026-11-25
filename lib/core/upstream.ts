@@ -198,6 +198,14 @@ import {
 } from "./tools/limits"
 import { applyPendingAccess } from "./proposed-access"
 import { PCP_VERSION } from "./version"
+import { googleEndpoints, googleFetch } from "./google/endpoints"
+import {
+  RECONNECT_MESSAGE,
+  requireGoogleAccountById,
+  syncBoundServers,
+  writeGoogleAccount,
+  type GoogleAccount,
+} from "./google/meta"
 import { syncWrapperTools } from "./wrappers/catalogue"
 import {
   findPlaceholders,
@@ -250,7 +258,10 @@ export function managedSecretName(server: Pick<OpenServer, "id">): string {
 export function needsConnecting(
   server: Pick<OpenServer, "authType" | "oauthConnectedAt">,
 ): boolean {
-  return server.authType === "oauth" && server.oauthConnectedAt === null
+  return (
+    (server.authType === "oauth" || server.authType === "google") &&
+    server.oauthConnectedAt === null
+  )
 }
 
 /** Where the owner's browser starts connecting an OAuth server. */
@@ -928,6 +939,410 @@ export async function forgetOAuthTokens(
   })
 }
 
+// ---- Google account -------------------------------------------------------
+
+/**
+ * The vault's Google sign-in (lib/core/google/): the tokens are a managed
+ * secret, read here and nowhere else, and the client's secret is the one
+ * the owner picked on the Google page. Every Google server bound to the
+ * account sends its access token as a bearer header; the token is renewed
+ * here, one renewal at a time, and a refusal of the refresh token (revoked,
+ * or the client changed) marks the account as needing the owner and the
+ * bound servers as not connected.
+ */
+
+type GoogleTokens = {
+  access_token: string
+  refresh_token?: string
+  /** When the access token runs out, ms since the epoch. */
+  expires_at: number
+  /** Space-separated scopes it carries, as Google said. */
+  scope: string
+  /** When it was obtained, ms since the epoch. */
+  obtained_at: number
+}
+
+const GOOGLE_TOKEN_TIMEOUT_MS = 20_000
+/** A token newer than this is not renewed again because a call was refused. */
+const GOOGLE_FRESH_MS = 5_000
+
+const googleRenewals = new Map<string, Promise<GoogleTokens>>()
+
+async function readGoogleTokens(
+  ctx: VaultContext,
+  account: Pick<GoogleAccount, "tokensId">,
+): Promise<GoogleTokens | null> {
+  if (!account.tokensId) {
+    return null
+  }
+
+  try {
+    const parsed = JSON.parse(
+      await revealSecret(ctx, account.tokensId),
+    ) as Partial<GoogleTokens>
+
+    return typeof parsed.access_token === "string" && parsed.access_token
+      ? {
+          access_token: parsed.access_token,
+          ...(typeof parsed.refresh_token === "string" && parsed.refresh_token
+            ? { refresh_token: parsed.refresh_token }
+            : {}),
+          expires_at: Number(parsed.expires_at) || 0,
+          scope: typeof parsed.scope === "string" ? parsed.scope : "",
+          obtained_at: Number(parsed.obtained_at) || 0,
+        }
+      : null
+  } catch {
+    return null
+  }
+}
+
+async function storeGoogleTokens(
+  ctx: VaultContext,
+  account: GoogleAccount,
+  tokens: GoogleTokens,
+): Promise<void> {
+  const { id } = await writeManagedSecret(ctx, {
+    name: `google/${account.id}`,
+    description: "Tokens PCP holds for your Google sign-in.",
+    value: JSON.stringify(tokens),
+  })
+
+  if (account.tokensId !== id) {
+    await writeGoogleAccount(ctx, account.id, { tokensId: id })
+  }
+}
+
+/** Google refused the sign-in: the owner connects it again. */
+async function googleNeedsReconnect(
+  ctx: VaultContext,
+  account: GoogleAccount,
+): Promise<never> {
+  if (account.tokensId) {
+    await deleteManagedSecret(ctx, account.tokensId)
+  }
+
+  await writeGoogleAccount(ctx, account.id, {
+    status: "needs_reconnect",
+    tokensId: null,
+  })
+  await syncBoundServers(ctx, account.id, {
+    connected: false,
+    message: RECONNECT_MESSAGE,
+  })
+
+  throw new UnauthorizedError("Google needs to be connected in PCP.")
+}
+
+type GoogleAnswer = {
+  access_token?: unknown
+  refresh_token?: unknown
+  expires_in?: unknown
+  scope?: unknown
+  error?: unknown
+  error_description?: unknown
+}
+
+/**
+ * A request to Google's token address with the owner's client. The answer's
+ * tokens are never echoed in a message: an error says what Google called
+ * the problem, in its short words.
+ */
+async function googleTokenRequest(
+  ctx: VaultContext,
+  account: GoogleAccount,
+  params: Record<string, string>,
+): Promise<GoogleAnswer & { access_token: string; expires_in: number }> {
+  if (!account.clientId || !account.clientSecretId) {
+    throw new PcpError(
+      "state",
+      "Google needs its client ID and secret on its page in PCP.",
+    )
+  }
+
+  const secret = await readSecretValue(ctx, account.clientSecretId)
+  const redact = makeRedactor([secret, ...Object.values(params)])
+  let response: Response
+
+  try {
+    response = await googleFetch()(googleEndpoints().token, {
+      method: "POST",
+      headers: {
+        "content-type": "application/x-www-form-urlencoded",
+        accept: "application/json",
+      },
+      body: new URLSearchParams({
+        client_id: account.clientId,
+        client_secret: secret,
+        ...params,
+      }).toString(),
+      signal: AbortSignal.timeout(GOOGLE_TOKEN_TIMEOUT_MS),
+    })
+  } catch (error) {
+    throw new PcpError(
+      "upstream",
+      redact.text(
+        `Google could not be reached to sign in: ${error instanceof Error ? error.message : String(error)}`,
+      ),
+    )
+  }
+
+  let body: GoogleAnswer = {}
+
+  try {
+    body = (await response.json()) as GoogleAnswer
+  } catch {
+    // Not JSON: only the status is said.
+  }
+
+  if (!response.ok) {
+    const code = typeof body.error === "string" ? body.error : ""
+    const description =
+      typeof body.error_description === "string" ? body.error_description : ""
+    const throttle = httpThrottle(response.status, response.headers, "Google")
+
+    // The refresh token or the code is no longer good: nothing the owner
+    // did not do, or a code used twice. Not a throttle, not a failure to
+    // reach Google.
+    if (code === "invalid_grant" || code === "invalid_client") {
+      throw Object.assign(
+        new PcpError(
+          "unauthorized",
+          redact.text(
+            `Google refused PCP's sign-in (${code}${description ? `: ${description.slice(0, 200)}` : ""}).`,
+          ),
+        ),
+        { googleCode: code },
+      )
+    }
+
+    throw withThrottle(
+      new PcpError(
+        "upstream",
+        redact.text(
+          `Google refused the sign-in request (HTTP ${response.status}${code ? `: ${code}` : ""}${description ? `, ${description.slice(0, 200)}` : ""}).`,
+        ),
+      ),
+      throttle,
+    )
+  }
+
+  if (typeof body.access_token !== "string" || !body.access_token) {
+    throw new PcpError("upstream", "Google's answer had no access token.")
+  }
+
+  return {
+    ...body,
+    access_token: body.access_token,
+    expires_in: Number(body.expires_in) > 0 ? Number(body.expires_in) : 3600,
+  }
+}
+
+function googleTokensFrom(
+  answer: Awaited<ReturnType<typeof googleTokenRequest>>,
+  previous: GoogleTokens | null,
+  now = Date.now(),
+): GoogleTokens {
+  const refresh =
+    typeof answer.refresh_token === "string" && answer.refresh_token
+      ? answer.refresh_token
+      : previous?.refresh_token
+
+  return {
+    access_token: answer.access_token,
+    ...(refresh ? { refresh_token: refresh } : {}),
+    expires_at: now + answer.expires_in * 1000,
+    scope:
+      typeof answer.scope === "string" ? answer.scope : (previous?.scope ?? ""),
+    obtained_at: now,
+  }
+}
+
+/**
+ * The sign-in's last step: the code Google sent back, exchanged for tokens
+ * (kept as a managed secret), and the account's email when Google says it.
+ * A new sign-in that brings no refresh token keeps the old one.
+ */
+export async function exchangeGoogleCode(
+  ctx: VaultContext,
+  accountId: string,
+  {
+    code,
+    verifier,
+    redirectUri,
+  }: { code: string; verifier: string; redirectUri: string },
+): Promise<{ granted: string[]; email: string | null }> {
+  const account = await requireGoogleAccountById(ctx, accountId)
+  const previous = await readGoogleTokens(ctx, account)
+  const answer = await googleTokenRequest(ctx, account, {
+    grant_type: "authorization_code",
+    code,
+    code_verifier: verifier,
+    redirect_uri: redirectUri,
+  })
+  const tokens = googleTokensFrom(answer, previous)
+
+  if (!tokens.refresh_token) {
+    throw new PcpError(
+      "upstream",
+      "Google did not give PCP a way to stay signed in (no refresh token). Remove PCP under your Google account's third-party access and connect again.",
+    )
+  }
+
+  await storeGoogleTokens(ctx, account, tokens)
+
+  let email: string | null = null
+
+  try {
+    const reply = await googleFetch()(googleEndpoints().userinfo, {
+      headers: { authorization: `Bearer ${tokens.access_token}` },
+      signal: AbortSignal.timeout(GOOGLE_TOKEN_TIMEOUT_MS),
+    })
+    const info = reply.ok
+      ? ((await reply.json()) as { email?: unknown })
+      : undefined
+
+    email =
+      typeof info?.email === "string" && info.email.length <= 320
+        ? info.email
+        : null
+  } catch {
+    // The email is a nicety: the sign-in stands without it.
+  }
+
+  return { granted: tokens.scope.split(/\s+/).filter(Boolean), email }
+}
+
+/**
+ * The access token a Google server's call carries. Renewed first when it is
+ * about to run out, or when a call was refused with it (`renew`); concurrent
+ * renewals share one request, and a token Google gave a moment ago is not
+ * renewed again for a refusal. Without a sign-in, or one Google no longer
+ * honours, the account needs connecting (UnauthorizedError).
+ */
+export async function googleAccessToken(
+  ctx: VaultContext,
+  accountId: string | null,
+  { renew = false }: { renew?: boolean } = {},
+): Promise<{ access: string; refresh: string | undefined }> {
+  const signIn = "Google needs to be connected in PCP."
+
+  if (!accountId) {
+    throw new UnauthorizedError(signIn)
+  }
+
+  const account = await requireGoogleAccountById(ctx, accountId)
+
+  if (account.status !== "connected") {
+    throw new UnauthorizedError(signIn)
+  }
+
+  const held = await readGoogleTokens(ctx, account)
+
+  if (!held) {
+    return googleNeedsReconnect(ctx, account)
+  }
+
+  const usable = (tokens: GoogleTokens) =>
+    tokens.expires_at - RENEW_MARGIN_MS > Date.now()
+
+  if (!renew && usable(held)) {
+    return { access: held.access_token, refresh: held.refresh_token }
+  }
+
+  if (
+    renew &&
+    usable(held) &&
+    Date.now() - held.obtained_at < GOOGLE_FRESH_MS
+  ) {
+    return { access: held.access_token, refresh: held.refresh_token }
+  }
+
+  let flight = googleRenewals.get(account.id)
+
+  if (!flight) {
+    flight = (async () => {
+      if (!held.refresh_token) {
+        return googleNeedsReconnect(ctx, account)
+      }
+
+      try {
+        const answer = await googleTokenRequest(ctx, account, {
+          grant_type: "refresh_token",
+          refresh_token: held.refresh_token,
+        })
+        // Rotated refresh tokens are kept; the usual answer has none.
+        const tokens = googleTokensFrom(answer, held)
+        await storeGoogleTokens(ctx, account, tokens)
+
+        return tokens
+      } catch (error) {
+        if (
+          error instanceof PcpError &&
+          (error as { googleCode?: string }).googleCode !== undefined
+        ) {
+          return googleNeedsReconnect(ctx, account)
+        }
+
+        throw error
+      }
+    })().finally(() => googleRenewals.delete(account.id))
+    googleRenewals.set(account.id, flight)
+  }
+
+  const tokens = await flight
+
+  return { access: tokens.access_token, refresh: tokens.refresh_token }
+}
+
+/**
+ * Ends PCP's sign-in: Google is asked to revoke it (best effort: PCP's copy
+ * goes either way), the tokens are deleted, and the account and its servers
+ * read as not connected.
+ */
+export async function revokeGoogleSignIn(
+  ctx: VaultContext,
+  accountId: string,
+): Promise<{ revoked: boolean }> {
+  const account = await requireGoogleAccountById(ctx, accountId)
+  const held = await readGoogleTokens(ctx, account)
+  let revoked = false
+
+  if (held) {
+    try {
+      const reply = await googleFetch()(googleEndpoints().revoke, {
+        method: "POST",
+        headers: { "content-type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({
+          token: held.refresh_token ?? held.access_token,
+        }).toString(),
+        signal: AbortSignal.timeout(GOOGLE_TOKEN_TIMEOUT_MS),
+      })
+      revoked = reply.ok
+    } catch {
+      // Revoking is Google's to do; PCP lets go of its copy regardless.
+    }
+  }
+
+  if (account.tokensId) {
+    await deleteManagedSecret(ctx, account.tokensId)
+  }
+
+  await writeGoogleAccount(ctx, account.id, {
+    status: "disconnected",
+    connectedAt: null,
+    tokensId: null,
+    granted: [],
+    email: null,
+  })
+  await syncBoundServers(ctx, account.id, {
+    connected: false,
+    message: "Google is not connected: open Google in PCP and choose Connect.",
+  })
+
+  return { revoked }
+}
+
 /**
  * What PCP sends to authenticate to a server: the headers its secrets go in
  * (the first on the server row, any further ones after it), and the values
@@ -956,6 +1371,19 @@ async function credential(
 ): Promise<Credential> {
   if (server.authType === "basic") {
     return basicCredential(ctx, server)
+  }
+
+  // A Google server sends the access token of the vault's Google sign-in,
+  // renewed here; the SDK's OAuth is not involved.
+  if (server.authType === "google") {
+    const token = await googleAccessToken(ctx, server.accountId, { renew })
+    const value = `Bearer ${token.access}`
+
+    return {
+      headers: { Authorization: value },
+      redact: [token.access, value, ...(token.refresh ? [token.refresh] : [])],
+      login: null,
+    }
   }
 
   // An MCP server's OAuth token is the SDK transport's to send; an API
@@ -1377,7 +1805,7 @@ async function failureSecrets(
 export async function openUpstream(
   ctx: VaultContext,
   server: OpenServer,
-  { publicUrl }: { publicUrl: string },
+  { publicUrl, renew = false }: { publicUrl: string; renew?: boolean },
 ): Promise<UpstreamConnection> {
   const provider =
     server.authType === "oauth"
@@ -1387,7 +1815,7 @@ export async function openUpstream(
         })
       : null
 
-  const { headers, redact } = await credential(ctx, server)
+  const { headers, redact } = await credential(ctx, server, { renew })
   const sent = await oauthTokens(provider)
   const secrets = async () => [
     ...redact,
@@ -2619,6 +3047,8 @@ async function dispatchKind(
     timeoutMs,
   }: CallOptions,
   placed: string[],
+  /** A Google server's call again, with its token renewed first. */
+  googleRenewed = false,
 ): Promise<CallToolResult> {
   if (server.kind === "wrapper") {
     throw new PcpError(
@@ -2765,7 +3195,10 @@ async function dispatchKind(
   let connection: UpstreamConnection | null = null
 
   try {
-    connection = await openUpstream(ctx, server, { publicUrl })
+    connection = await openUpstream(ctx, server, {
+      publicUrl,
+      renew: googleRenewed,
+    })
     const result = await connection.client.callTool(
       { name: toolName, arguments: resolved },
       // A moment past the gate's limit, so the gate answers first and the
@@ -2777,6 +3210,39 @@ async function dispatchKind(
     // quoting the request) must not hand its credential to the assistant.
     return scrubResult(result, await connection.secrets())
   } catch (error) {
+    // Google took the access token it was sent for one that has run out: it
+    // is renewed once and the call made again (a second refusal is its own).
+    if (
+      server.authType === "google" &&
+      !googleRenewed &&
+      SdkHttpError.isInstance(error) &&
+      error.data?.status === 401
+    ) {
+      await connection?.close()
+      connection = null
+
+      return dispatchKind(
+        ctx,
+        server,
+        toolName,
+        args,
+        {
+          publicUrl,
+          tokenId,
+          keep,
+          keepBytes,
+          open,
+          signal,
+          deadline,
+          runId,
+          pace,
+          timeoutMs,
+        },
+        placed,
+        true,
+      )
+    }
+
     // The server answered, with a JSON-RPC error: it is up, and the call
     // got there and was turned down. A tool error in its words, never "could
     // not be reached", and nothing about the server's state changes.
@@ -2891,9 +3357,11 @@ function describeFailure(
     return {
       status: "auth_required",
       message:
-        server.authType === "oauth"
-          ? `${server.name} needs to be connected: open it in PCP and choose Connect.`
-          : `${server.name} rejected the credentials PCP sent.`,
+        server.authType === "google"
+          ? RECONNECT_MESSAGE
+          : server.authType === "oauth"
+            ? `${server.name} needs to be connected: open it in PCP and choose Connect.`
+            : `${server.name} rejected the credentials PCP sent.`,
     }
   }
 
@@ -2958,6 +3426,14 @@ export function refusalReason(
 function refusedMessage(server: OpenServer, said: string): string {
   if (server.authType === "header") {
     return `${server.name} refused the secret PCP sent (${said}). Check the secret under Advanced on its page, then choose Refresh tools.`
+  }
+
+  if (server.authType === "google" && said.startsWith("HTTP 401")) {
+    return `${server.name} did not accept the sign-in PCP sent (${said}). Open Google in PCP and connect it again.`
+  }
+
+  if (server.authType === "google") {
+    return `${server.name} refused PCP's request although PCP is signed in to Google (${said}). Enable both this product's API and its MCP API (${new URL(server.url).hostname}) in the Google Cloud project your client belongs to (APIs & Services, then Library), and check that its permission was granted on Google's page in PCP. Then choose Refresh tools.`
   }
 
   if (server.authType !== "oauth") {

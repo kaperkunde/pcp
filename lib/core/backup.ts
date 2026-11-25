@@ -234,6 +234,7 @@ async function readVault(vaultId: string): Promise<ExportPayloadJson> {
           serverDefinitions: (await tx.serverDefinition.findMany(byVault)).map(
             rowJson,
           ),
+          oauthAccounts: (await tx.oAuthAccount.findMany(byVault)).map(rowJson),
           servers: (await tx.mcpServer.findMany(byVault)).map(rowJson),
           serverAuthHeaders: (await tx.serverAuthHeader.findMany(byServer)).map(
             rowJson,
@@ -596,6 +597,10 @@ async function writeExport(
         await inChunks(tables.serverDefinitions, (data) =>
           tx.serverDefinition.createMany({ data }),
         )
+        // After the secrets they name, before the servers that use them.
+        await inChunks(tables.oauthAccounts, (data) =>
+          tx.oAuthAccount.createMany({ data }),
+        )
         await inChunks(tables.servers, (data) =>
           tx.mcpServer.createMany({ data }),
         )
@@ -746,6 +751,9 @@ export async function wipeVault(
   // session's): it signs in again after a restore.
   await tx.oAuthCredential.deleteMany(byVault)
   await tx.oAuthState.deleteMany(byServer)
+  // Google's sign-in: the account, its sign-ins in flight, and (below) the
+  // servers bound to it and the secrets it names.
+  await tx.oAuthAccountState.deleteMany({ where: { account: { vaultId } } })
   await tx.openApiSpec.deleteMany(byServer)
   await tx.wrapperSpec.deleteMany(byServer)
   await tx.serviceSpec.deleteMany(byServer)
@@ -759,6 +767,7 @@ export async function wipeVault(
   await tx.serverAuthHeader.deleteMany(byServer)
   await tx.secretScope.deleteMany({ where: { secret: { vaultId } } })
   await tx.mcpServer.deleteMany(byVault)
+  await tx.oAuthAccount.deleteMany(byVault)
   await tx.secretBrowserOrigin.deleteMany({ where: { secret: { vaultId } } })
   await tx.serverDefinition.deleteMany(byVault)
   await tx.secret.deleteMany(byVault)

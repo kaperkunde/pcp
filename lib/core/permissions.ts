@@ -851,7 +851,7 @@ async function ownerFirst(
   if (
     isPcpError(error) &&
     error.code === "unauthorized" &&
-    server.authType === "oauth"
+    (server.authType === "oauth" || server.authType === "google")
   ) {
     return connectResult(server, publicUrl)
   }
