@@ -136,8 +136,11 @@ import { summarize } from "./search"
 import {
   createSecretNamedAfter,
   deleteSecret,
+  readSecretValueFromResult,
+  secretNameTaken,
   validateSecretValue,
 } from "./secrets"
+import { shownValueFrom, type SecretValueFromShown } from "./secret-from-result"
 import { oauthRedirectUrl } from "./oauth-client"
 import {
   applySkillChange,
@@ -537,6 +540,8 @@ export type PermissionView = {
   conflicts: Array<{ id: string; tokenName: string; url: string }>
   createdAt: Date
   expiresAt: Date
+  /** When the owner answered; for a running request, when it was allowed. */
+  decidedAt: Date | null
   outcome: string | null
   outcomeIsError: boolean
   decisions: Array<{ value: PermissionDecision; label: string }>
@@ -597,6 +602,12 @@ export type PermissionView = {
    * answered.
    */
   secretChange: SecretChangeShown | null
+  /**
+   * request_secret or rotate_secret with `value_from` (#174): where the
+   * value comes from and whether that kept result is still there. Never the
+   * value. Null for other requests and once answered.
+   */
+  valueFrom: SecretValueFromShown | null
   /**
    * A proposal that names one of the owner's secrets outside its scope
    * (secret-scope.ts): "also allows <secret> for <consumer>", ticked; the
@@ -1116,7 +1127,7 @@ function describeAsk(ask: PermissionAsk): {
       }
     case "secret_request":
       return {
-        target: `secret_request:${ask.input.name}`,
+        target: `secret_request:${ask.input.name}${ask.input.valueFrom ? `\n${ask.input.valueFrom.id}` : ""}`,
         args: ask.input as Record<string, unknown>,
       }
     case "secret_sites_change":
@@ -1127,7 +1138,7 @@ function describeAsk(ask: PermissionAsk): {
     case "secret_change":
       return {
         // The secret as it was: asked again once it changed, a new request.
-        target: `secret_change:${ask.input.action}:${ask.input.secretId}:${ask.input.basis}\n${JSON.stringify([ask.input.edit ?? null, ask.input.generate ?? null, ask.input.scope ?? null])}`,
+        target: `secret_change:${ask.input.action}:${ask.input.secretId}:${ask.input.basis}\n${JSON.stringify([ask.input.edit ?? null, ask.input.generate ?? null, ask.input.scope ?? null])}${ask.input.valueFrom ? `\n${ask.input.valueFrom.id}` : ""}`,
         args: ask.input as Record<string, unknown>,
       }
     case "script_use":
@@ -1936,6 +1947,7 @@ async function toView(
       status === "pending" ? await conflictsOf(ctx, row, publicUrl) : [],
     createdAt: row.createdAt,
     expiresAt: row.expiresAt,
+    decidedAt: row.decidedAt,
     outcome: readResult(ctx, row),
     outcomeIsError: row.resultIsError,
     decisions:
@@ -1999,6 +2011,16 @@ async function toView(
     secretChange:
       kind === "secret_change" && status === "pending"
         ? await showSecretChange(ctx, readArgs(ctx, row) as SecretChangeAsk)
+        : null,
+    valueFrom:
+      status === "pending" &&
+      (kind === "secret_request" || kind === "secret_change")
+        ? await shownValueFrom(
+            ctx,
+            row.tokenId,
+            (readArgs(ctx, row) as SecretRequestAsk | SecretChangeAsk)
+              .valueFrom,
+          )
         : null,
     alsoAllows:
       status !== "pending"
@@ -2286,8 +2308,15 @@ function outcomeOf(view: PermissionView): CallToolResult {
       )
     case "declined":
       return text(view.outcome ?? "The owner said no, so nothing ran.")
-    case "running":
-      return text("The owner allowed it; it is running now.")
+    case "running": {
+      const since = view.decidedAt
+        ? `, ${ageText(Date.now() - view.decidedAt.getTime()).replace(/ ago$/, "")} since it was allowed`
+        : ""
+
+      return text(
+        `The owner allowed it; it is still running${since}. This is not its answer yet: call check_permission with id "${view.id}" again right away, it waits for the run to finish.`,
+      )
+    }
     case "withdrawn":
       return text(
         "You withdrew this request, so the owner was not asked any more and nothing ran.",
@@ -2325,13 +2354,15 @@ function pendingText(view: PermissionView, detail?: string): string {
     return `Not done yet: the owner saves tool levels themselves.\n\n${summaryText(view)}${detail ? `\n\n${detail}` : ""}\n\nThe owner opens the link below signed in to PCP. Your levels are filled in there and each change is marked; they can adjust any of them, and nothing changes until they save. ${nextMessageCheck(`check_permission with id "${view.id}"`)} It says what they saved (and waits a little if they are still on it). The request stays open until ${view.expiresAt.toISOString()}.\n\n${linkLastText(view.url, view.title)}`
   }
 
-  const typed = view.secretToEnter
-    ? view.secretToEnter.clientId
-      ? ` They type the client secret of their OAuth client in there, if it has one; do not ask them for it here.`
-      : view.secretToEnter.login
-        ? ` They type the password for ${view.secretToEnter.login} in there, and it is saved as the secret "${view.secretToEnter.name}"; do not ask them for it here.`
-        : ` They type the value of the secret "${view.secretToEnter.name}" in there; do not ask them for it here.`
-    : ""
+  const typed = view.valueFrom
+    ? ` The value is the kept result you named: PCP reads it only when they save, and they never type it; do not ask them for it here.`
+    : view.secretToEnter
+      ? view.secretToEnter.clientId
+        ? ` They type the client secret of their OAuth client in there, if it has one; do not ask them for it here.`
+        : view.secretToEnter.login
+          ? ` They type the password for ${view.secretToEnter.login} in there, and it is saved as the secret "${view.secretToEnter.name}"; do not ask them for it here.`
+          : ` They type the value of the secret "${view.secretToEnter.name}" in there; do not ask them for it here.`
+      : ""
 
   const told = {
     ...view,
@@ -3016,6 +3047,45 @@ export async function decidePermission(
   // request that names a new secret: it is stored and never passes through
   // the page, the assistant, the request's arguments or its outcome.
   let typedValue = secretValue
+  // A value from one of the token's kept results (#174): read in secrets.ts,
+  // here, in the request that writes it, and used as a typed one is.
+  const fromAsk =
+    kind === "secret_request" || kind === "secret_change"
+      ? (readArgs(ctx, row) as SecretRequestAsk | SecretChangeAsk).valueFrom
+      : null
+  let fromResult = false
+
+  if (fromAsk) {
+    if (secretValue || (generate !== undefined && generate !== null)) {
+      return text(
+        "The value comes from a result the assistant kept: it is not typed or made here. Answer without one, or answer Not now.",
+        true,
+      )
+    }
+
+    const requested =
+      kind === "secret_request"
+        ? (readArgs(ctx, row) as SecretRequestAsk)
+        : null
+
+    // Never written over a name PCP holds (the owner added one since).
+    if (requested && (await secretNameTaken(ctx, requested.name))) {
+      return text(
+        `A secret called "${requested.name}" exists now, and nothing is written over it. Answer Not now; the assistant can ask again by another name.`,
+        true,
+      )
+    }
+
+    // Nothing is read until the owner agreed (declines returned above).
+    const read = await readSecretValueFromResult(ctx, row.tokenId, fromAsk.id)
+
+    if (!read.ok) {
+      return finishUnrun(ctx, row, publicUrl, read.problem)
+    }
+
+    typedValue = read.value
+    fromResult = true
+  }
 
   if (newSecret && generate !== undefined && generate !== null) {
     if (newSecret.defaultRecipe === null) {
@@ -3042,7 +3112,7 @@ export async function decidePermission(
     const problem = await checkSecretChangeAnswer(
       ctx,
       readArgs(ctx, row) as SecretChangeAsk,
-      { keep: sites?.keep, value: secretValue, generate },
+      { keep: sites?.keep, value: typedValue, generate },
     )
 
     if (problem) {
@@ -3332,7 +3402,9 @@ export async function decidePermission(
                                                 level: secretLevel(choice),
                                                 loginName,
                                                 generated:
-                                                  typedValue !== secretValue,
+                                                  typedValue !== secretValue &&
+                                                  !fromResult,
+                                                fromResult,
                                               },
                                             ),
                                           )
@@ -3357,8 +3429,9 @@ export async function decidePermission(
                                                   ) as SecretChangeAsk,
                                                   {
                                                     keep: sites?.keep,
-                                                    value: secretValue,
+                                                    value: typedValue,
                                                     generate,
+                                                    fromResult,
                                                   },
                                                   {
                                                     remakeServices:
@@ -4806,9 +4879,16 @@ export async function listAnsweredRequests(
     since,
     limit = MAX_ANSWERED_LISTED,
     skip,
-  }: { since: Date; limit?: number; skip?: ReadonlySet<string> },
+    stillRunning,
+  }: {
+    since: Date
+    limit?: number
+    skip?: ReadonlySet<string>
+    /** Told while running: skipped only while the request still runs. */
+    stillRunning?: ReadonlySet<string>
+  },
 ): Promise<{
-  seen: { id: string; decidedAt: Date }[]
+  seen: { id: string; decidedAt: Date; status: string }[]
   answered: AnsweredRequest[]
   more: number
 }> {
@@ -4819,15 +4899,20 @@ export async function listAnsweredRequests(
       status: { in: [...ANSWERED_STATUSES] },
       decidedAt: { gte: since },
     },
-    select: { id: true, decidedAt: true },
+    select: { id: true, decidedAt: true, status: true },
     orderBy: { decidedAt: "desc" },
     take: MAX_ANSWERED_SEEN,
   })
   const seen = found.map((row) => ({
     id: row.id,
     decidedAt: row.decidedAt ?? since,
+    status: row.status,
   }))
-  const fresh = seen.filter((row) => !skip?.has(row.id))
+  const fresh = seen.filter(
+    (row) =>
+      !skip?.has(row.id) &&
+      !(row.status === "running" && stillRunning?.has(row.id)),
+  )
   const picked = fresh.slice(0, Math.max(0, limit))
 
   if (picked.length === 0) {

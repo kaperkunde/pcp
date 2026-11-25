@@ -297,6 +297,7 @@ export default async function PermissionPage({
                     }
                   : view.secretToEnter
               }
+              valueFrom={view.valueFrom}
               allowForFixed={
                 view.kind === "secret_use" || view.kind === "secret_request"
               }

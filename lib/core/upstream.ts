@@ -1159,6 +1159,7 @@ export async function embeddingProvider(
       request = {
         url: embeddingsUrl(config.url),
         style: "openai",
+        inputType: config.inputType,
         model: config.model,
         ...(config.secretId
           ? await bearerFromTextSecret(ctx, config.secretId)
@@ -1185,6 +1186,7 @@ export async function embeddingProvider(
       request = {
         url: embeddingsUrl(server.url),
         style: "openai",
+        inputType: config.inputType,
         model: config.model,
         headers,
         redact,
@@ -1206,6 +1208,8 @@ export async function embeddingProvider(
       config.provider === "endpoint" ? config.serverId : "",
       request.url,
       config.model,
+      // Another input_type setting is another vector space: embedded again.
+      ...(request.inputType ? ["input_type"] : []),
     ].join("\n"),
     async embed(texts, input, signal) {
       const paced = await paceEmbeddings(ctx, pace, {

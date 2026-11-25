@@ -1,6 +1,12 @@
 import type { ServerKind } from "../servers"
 import { stem, tokenize } from "../search"
-import { DOCLING, PDF_MCP, type CapabilityId, type CommonItem } from "./list"
+import {
+  DOCLING,
+  OPENAI_IMAGES,
+  PDF_MCP,
+  type CapabilityId,
+  type CommonItem,
+} from "./list"
 
 /**
  * The catalogue: what PCP can set up for the owner when they ask for it in
@@ -20,6 +26,7 @@ export const CATALOGUE_IDS = [
   "browser",
   "pdf",
   "documents",
+  "images",
   "claude_sessions",
   "embeddings",
   "vpn_exit",
@@ -185,6 +192,32 @@ export const CATALOGUE: readonly CatalogueEntry[] = [
     images: ["docling-serve", "docling-serve-cpu", "docling-serve-cu124"],
     item: DOCLING,
     capability: "convert_document",
+  },
+  {
+    id: "images",
+    title: "Image generation",
+    does: "Makes pictures from a description, or changes the ones you give it: illustrations, feature images, logos and mock-ups, kept as files an assistant can send, show you or save in a store.",
+    takes:
+      "An image service of your own with an API (PCP's common item OpenAI Images is one) and its API key, which you type in on PCP's page; every picture is billed to that account.",
+    queryWords: [
+      "generate image",
+      "generate picture",
+      "make image",
+      "make picture",
+      "create image",
+      "create picture",
+      "draw",
+      "illustration",
+      "feature image",
+      "text to image",
+      "image generation",
+    ],
+    kind: "common_item",
+    page: "/plugins/generate_image",
+    label: "Set up image generation in PCP",
+    how: 'Hand the owner the link to its page in PCP, where they read the API endpoint and add it with their own key ("I\'d add OpenAI Images; approve it here").',
+    item: OPENAI_IMAGES,
+    capability: "generate_image",
   },
   {
     id: "claude_sessions",

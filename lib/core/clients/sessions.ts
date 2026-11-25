@@ -49,6 +49,12 @@ type SessionState = {
    * while they are at or after answeredSince so a second look skips them.
    */
   answeredTold: Map<string, number>
+  /**
+   * Requests told (or read through check_permission) while they were still
+   * running, by id, with when the owner allowed them. They are told again
+   * once they have finished, and the cursor stays at or before the oldest.
+   */
+  answeredRunning: Map<string, number>
 }
 
 const sessions = new Map<string, SessionState>()
@@ -66,6 +72,7 @@ function fresh(now: number): SessionState {
     mirrored: false,
     answeredSince: null,
     answeredTold: new Map(),
+    answeredRunning: new Map(),
   }
 }
 
@@ -134,59 +141,73 @@ export function noteMirrored(key: string, now = Date.now()): void {
 
 /**
  * Where to look for answers to the token's requests from, and the ones
- * this session was told already. A session's first look starts `windowMs`
- * back, so a conversation begun after the owner answered still hears of it.
+ * this session was told already (`told`; `running` are those told while
+ * they still ran: skipped only while they do). A session's first look
+ * starts `windowMs` back, so a conversation begun after the owner answered
+ * still hears of it.
  */
 export function answeredCursor(
   key: string,
   windowMs: number,
   now = Date.now(),
-): { since: number; told: ReadonlySet<string> } {
+): { since: number; told: ReadonlySet<string>; running: ReadonlySet<string> } {
   const state = current(key, now)
   state.answeredSince ??= now - windowMs
 
   return {
     since: state.answeredSince,
     told: new Set(state.answeredTold.keys()),
+    running: new Set(state.answeredRunning.keys()),
   }
 }
 
 /**
  * Answers the session has heard of (told in a note, or read through
- * check_permission): not told again. `at` is when the owner answered.
+ * check_permission): not told again. `at` is when the owner answered. One
+ * that was still `running` is told again once it has finished.
  */
 export function noteAnswersTold(
   key: string,
-  answers: { id: string; at: number }[],
+  answers: { id: string; at: number; running?: boolean }[],
   now = Date.now(),
 ): void {
   const state = current(key, now)
 
-  for (const { id, at } of answers) {
+  for (const { id, at, running } of answers) {
     state.answeredTold.delete(id)
-    state.answeredTold.set(id, at)
+    state.answeredRunning.delete(id)
+
+    if (running) {
+      state.answeredRunning.set(id, at)
+    } else {
+      state.answeredTold.set(id, at)
+    }
   }
 
-  while (state.answeredTold.size > MAX_ANSWERED_TOLD) {
-    state.answeredTold.delete(state.answeredTold.keys().next().value as string)
+  for (const map of [state.answeredTold, state.answeredRunning]) {
+    while (map.size > MAX_ANSWERED_TOLD) {
+      map.delete(map.keys().next().value as string)
+    }
   }
 }
 
 /**
  * A look for answers ran at `now` and found `seen`, all told now: the next
- * look starts ANSWERED_SLACK_MS before this one, and the ids of answers
- * given before that are let go, since no look finds them again.
+ * look starts ANSWERED_SLACK_MS before this one (never after the oldest
+ * request told while it ran, which is found again once it has finished),
+ * and the ids of answers given before that are let go, since no look finds
+ * them again.
  */
 export function lookedForAnswers(
   key: string,
-  seen: { id: string; at: number }[],
+  seen: { id: string; at: number; running?: boolean }[],
   now = Date.now(),
 ): void {
   noteAnswersTold(key, seen, now)
   const state = current(key, now)
   state.answeredSince = Math.max(
     state.answeredSince ?? 0,
-    now - ANSWERED_SLACK_MS,
+    Math.min(now - ANSWERED_SLACK_MS, ...state.answeredRunning.values()),
   )
 
   for (const [id, at] of state.answeredTold) {

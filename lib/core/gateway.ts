@@ -251,6 +251,7 @@ import {
   recipeArg,
   type SecretRequestArgs,
 } from "./secret-request"
+import { valueFromArg } from "./secret-from-result"
 import {
   MAX_SCOPE_CHANGES,
   prepareSecretDelete,
@@ -306,13 +307,18 @@ import {
 import { setUpEntries, signinServices } from "./capabilities/catalogue-state"
 import {
   MAX_ANSWER_CHARS as MAX_CAPABILITY_ANSWER_CHARS,
+  MAX_EDIT_IMAGES,
+  MAX_GENERATED_IMAGES,
   MAX_MERGED_FILES,
+  MAX_PROMPT_CHARS,
 } from "./capabilities/limits"
 import {
   CONVERT_OUTPUT,
   convertDocument,
   EDIT_OUTPUT,
   editPdf,
+  GENERATE_OUTPUT,
+  generateImages,
   pdfPageImage,
   READ_IMAGE_OUTPUT,
   readImage,
@@ -1336,16 +1342,25 @@ export function buildGatewayServer(
 
     const key = scope.client.sessionKey
     const now = Date.now()
-    const { since, told } = answeredCursor(key, ANSWERED_WINDOW_MS, now)
+    const { since, told, running } = answeredCursor(
+      key,
+      ANSWERED_WINDOW_MS,
+      now,
+    )
     const { seen, answered, more } = await listAnsweredRequests(scope, {
       since: new Date(since),
       limit: MAX_ANSWERED_NOTED,
       skip: told,
+      stillRunning: running,
     })
 
     lookedForAnswers(
       key,
-      seen.map((row) => ({ id: row.id, at: row.decidedAt.getTime() })),
+      seen.map((row) => ({
+        id: row.id,
+        at: row.decidedAt.getTime(),
+        running: row.status === "running",
+      })),
       now,
     )
     return answeredNote(answered, more, new Date(now))
@@ -3979,6 +3994,274 @@ export function buildGatewayServer(
     },
   })
 
+  register({
+    name: "generate_image",
+    title: "Generate an image",
+    description: `Make an image from a prompt: generate, draw or illustrate a picture (a feature image, logo, mock-up, diagram), or with images change the pictures you give it. Size, quality, background and n (several variations) shape it. The pictures come back as file handles, {"$result": …}, to pass to view_image, send_email's attachments, save_file or an API's file field; store (and folder) also save them in a store. It spends money on the owner's account with an image service, a provider this token may use (an API endpoint or server the owner added): each call makes new pictures and is billed, so call it again only when you want more (rerun with a reason). Each provider call follows this token's levels and runs at most at this tool's tier: one the owner has not allowed yet answers with their link. With no provider installed it answers with a link for the owner to set one up; once they have, call it again. ${OWNER_LINK_RULE}`,
+    input: z
+      .object({
+        prompt: z
+          .string()
+          .min(1)
+          .max(MAX_PROMPT_CHARS)
+          .describe(
+            "What the picture shows, in plain words: subject, style, colours, composition, any text in it. With images, what to change.",
+          ),
+        images: z
+          .array(fileArg("A picture to change"))
+          .min(1)
+          .max(MAX_EDIT_IMAGES)
+          .optional()
+          .describe(
+            "Pictures to change or build on (an edit), by file handle; left out, a new picture is made from the prompt alone.",
+          ),
+        size: z
+          .string()
+          .regex(/^(auto|\d{2,5}x\d{2,5})$/)
+          .optional()
+          .describe(
+            'The picture\'s size: "auto" or WIDTHxHEIGHT in pixels, commonly "1024x1024" (square), "1536x1024" (landscape) or "1024x1536" (portrait). A provider that has no such size leaves it out, and the answer says so.',
+          ),
+        quality: z
+          .enum(["low", "medium", "high", "auto"])
+          .optional()
+          .describe(
+            "How much effort: low is cheaper and faster, high costs more. Left out, the provider chooses.",
+          ),
+        n: z
+          .number()
+          .int()
+          .min(1)
+          .max(MAX_GENERATED_IMAGES)
+          .optional()
+          .describe(
+            `How many pictures, 1 to ${MAX_GENERATED_IMAGES} (1 when left out); each is billed.`,
+          ),
+        background: z
+          .enum(["transparent", "opaque", "auto"])
+          .optional()
+          .describe(
+            "transparent for a picture to place on other things (a logo, an icon); the provider may need a PNG or WebP for it.",
+          ),
+        model: z
+          .string()
+          .min(1)
+          .max(100)
+          .optional()
+          .describe(
+            "The provider's own model, by its name; left out, the one its endpoint is set up with.",
+          ),
+        store: z
+          .string()
+          .min(1)
+          .max(128)
+          .optional()
+          .describe(
+            "Also save the pictures in this store, by its short name (a server of kind storage); with folder and no store, PCP's own. Needs save_file at the owner's levels for this token.",
+          ),
+        folder: z
+          .string()
+          .max(500)
+          .optional()
+          .describe(
+            "With store: the folder to save in, relative to the top of the store (it must exist); left out, the top.",
+          ),
+        file_name: z
+          .string()
+          .regex(/^[A-Za-z0-9][A-Za-z0-9 ._-]{0,80}$/)
+          .optional()
+          .describe(
+            "With store: the name to save under, without an extension (several get -1, -2 …); left out, generated- and the first letters of the picture's id.",
+          ),
+      })
+      .meta({
+        allOf: [
+          // A name or a folder says where, so it goes with a place.
+          {
+            if: { required: ["file_name"] },
+            then: {
+              anyOf: [{ required: ["store"] }, { required: ["folder"] }],
+            },
+          },
+        ],
+      }),
+    output: GENERATE_OUTPUT,
+    annotations: { ...CAPABILITY_HINTS, idempotentHint: false },
+    async run(
+      args: {
+        prompt: string
+        images?: Array<{ $result: string }>
+        size?: string
+        quality?: string
+        n?: number
+        background?: string
+        model?: string
+        store?: string
+        folder?: string
+        file_name?: string
+      },
+      ctx,
+    ) {
+      const cap = capability("generate_image")
+      const wanted = args.store !== undefined || args.folder !== undefined
+      let place: { target: GatewayServer; folder: string } | null = null
+
+      // Where it is saved is checked before anything is spent.
+      if (wanted) {
+        const dest = await uploadDestination(args.store, args.folder)
+
+        if (dest && "refused" in dest) {
+          return failure(dest.refused, "not_found")
+        }
+
+        const target = await storeServer(args.store)
+
+        if ("refused" in target || !dest) {
+          return failure(
+            "refused" in target ? target.refused : "No store.",
+            "not_found",
+          )
+        }
+
+        place = { target, folder: dest.folder }
+      }
+
+      const given = args.images ? await inputFiles(args.images) : []
+
+      if (!Array.isArray(given)) {
+        return given
+      }
+
+      const edit = given.length > 0
+      const providers =
+        (await providersFor(cap.id))[edit ? "edit_image" : "generate_image"] ??
+        []
+
+      if (providers.length === 0) {
+        return setupOutcome(
+          cap,
+          scope.publicUrl,
+          edit
+            ? "no tool this token can use changes a picture from a prompt."
+            : "no tool this token can use makes a picture from a prompt.",
+        )
+      }
+
+      const made = await generateImages(
+        cap,
+        edit ? "edit" : "generate",
+        providers,
+        given,
+        {
+          prompt: args.prompt,
+          response_format: "b64_json",
+          ...(args.size !== undefined ? { size: args.size } : {}),
+          ...(args.quality !== undefined ? { quality: args.quality } : {}),
+          ...(args.n !== undefined ? { n: args.n } : {}),
+          ...(args.background !== undefined
+            ? { background: args.background }
+            : {}),
+          ...(args.model !== undefined ? { model: args.model } : {}),
+        },
+        bridgeFor("generate_image", ctx.signal),
+        scope.publicUrl,
+        (handle) => sniffResult(handle.$result),
+      )
+
+      if (!place || made.type !== "ok") {
+        return made
+      }
+
+      return saveGenerated(made, place, args.file_name, ctx.signal)
+    },
+  })
+
+  /**
+   * generate_image's pictures also saved in a store: each through the
+   * store's own save_file, as execute_<tier> would run it (the token's level,
+   * the tier, the validator). A save that fails is said beside the pictures,
+   * which are kept; one that waits for the owner hands over their link.
+   */
+  async function saveGenerated(
+    made: Extract<Outcome, { type: "ok" }>,
+    place: { target: GatewayServer; folder: string },
+    fileName: string | undefined,
+    signal: AbortSignal | undefined,
+  ): Promise<Outcome> {
+    const value = made.value as { images: Array<{ $result: string }> }
+    const tier =
+      ownTiers.save_file ??
+      tierFromAnnotations(STORAGE_INPUTS.save_file.annotations)
+    const saved: Array<{
+      store: string
+      path: string | null
+      error: string | null
+    }> = []
+
+    for (const [index, image] of value.images.entries()) {
+      const type = await sniffResult(image.$result)
+      const extension =
+        type === "image/jpeg" ? "jpg" : (type ?? "image/png").slice(6)
+      const base = fileName ?? `generated-${image.$result.slice(0, 8)}`
+      const name = `${base}${value.images.length > 1 ? `-${index + 1}` : ""}.${extension}`
+      const path = place.folder ? `${place.folder}/${name}` : name
+      const at = Date.now()
+      const out = await runStoreTool(
+        "save_file",
+        tier,
+        place.target,
+        { path, file: { $result: image.$result } },
+        signal,
+      )
+
+      const waiting =
+        out.type === "needs_owner" ||
+        (out.type === "result" &&
+          !out.result.isError &&
+          permissionLinkIn(out.result, scope.publicUrl) !== null)
+      const failed =
+        out.type === "error"
+          ? out.message
+          : out.type === "result" && out.result.isError
+            ? out.result.content
+                .map((part) => (part.type === "text" ? part.text : ""))
+                .join(" ")
+            : null
+
+      void appendRequestLog({
+        vaultId: scope.ctx.vaultId,
+        dek: scope.ctx.dek,
+        tokenId: scope.tokenId,
+        tool: "generate_image",
+        server: place.target.slug,
+        upstreamTool: "save_file",
+        ok: failed === null,
+        ms: Date.now() - at,
+        ...(waiting ? { asked: true } : {}),
+        ...(failed !== null ? { error: "The call failed." } : {}),
+      })
+
+      if (waiting) {
+        return withLead(
+          `generate_image made ${value.images.length} picture${value.images.length === 1 ? "" : "s"}, kept as ${value.images.map((entry) => JSON.stringify({ $result: entry.$result })).join(", ")}, but saving to ${place.target.slug} needs the owner first. Once they answered, call save_file with that handle and the path ${path}; do not call generate_image again, which would make and bill new pictures.`,
+          out,
+        )
+      }
+
+      saved.push(
+        failed === null
+          ? { store: place.target.slug, path, error: null }
+          : {
+              store: place.target.slug,
+              path: null,
+              error: failed.slice(0, 300),
+            },
+      )
+    }
+
+    return ok({ ...(made.value as object), saved })
+  }
+
   /**
    * The server of the store a call names: by short name or name among the
    * stores this token reaches, or PCP's own when it names none (made here
@@ -4076,6 +4359,43 @@ export function buildGatewayServer(
     }
   }
 
+  /**
+   * One of a store's own tools, called as execute_<tier> would call it: the
+   * token's level for it, the entry's tier, the one validator, the owner
+   * asked where the level says so. The stores' tools run through it, and so
+   * does generate_image's save to a store.
+   */
+  async function runStoreTool(
+    name: StorageToolName,
+    ownTier: ToolTier,
+    target: GatewayServer,
+    args: Record<string, unknown>,
+    signal: AbortSignal | undefined,
+  ): Promise<Outcome> {
+    const row = await db()
+      .mcpTool.findFirst({
+        where: toolNameWhere(scope.ctx, target.id, name),
+        select: TOOL_SCHEMA_SELECT,
+      })
+      .then((found) => found && openTool(scope.ctx, found))
+
+    if (!row) {
+      return failure(
+        `${target.name} has no ${name}${target.readOnly ? ": it is read-only in PCP" : ""}.`,
+        target.readOnly ? "forbidden" : "not_found",
+      )
+    }
+
+    return callResolved(target.slug, name, row, args, {
+      tier: ownTier,
+      fields: readFields(undefined),
+      decode: readFields(undefined, "decode"),
+      keep: readFields(undefined, "keep"),
+      fix: "Fix them and call again.",
+      ...(signal ? { signal } : {}),
+    })
+  }
+
   /** The words of PCP's own store tools, each opening with what it does. */
   const STORE_TOOL_WORDS: Record<StorageToolName, string> = {
     list_folder:
@@ -4136,28 +4456,7 @@ export function buildGatewayServer(
 
         ctx.logAs({ server: target.slug, upstreamTool: name })
 
-        const row = await db()
-          .mcpTool.findFirst({
-            where: toolNameWhere(scope.ctx, target.id, name),
-            select: TOOL_SCHEMA_SELECT,
-          })
-          .then((found) => found && openTool(scope.ctx, found))
-
-        if (!row) {
-          return failure(
-            `${target.name} has no ${name}${target.readOnly ? ": it is read-only in PCP" : ""}.`,
-            target.readOnly ? "forbidden" : "not_found",
-          )
-        }
-
-        return callResolved(target.slug, name, row, rest, {
-          tier: ownTier,
-          fields: readFields(undefined),
-          decode: readFields(undefined, "decode"),
-          keep: readFields(undefined, "keep"),
-          fix: "Fix them and call again.",
-          ...(ctx.signal ? { signal: ctx.signal } : {}),
-        })
+        return runStoreTool(name, ownTier, target, rest, ctx.signal)
       },
     })
   }
@@ -4289,6 +4588,7 @@ export function buildGatewayServer(
             answered.map((request) => ({
               id: request.id,
               at: request.decidedAt.getTime(),
+              running: request.status === "running",
             })),
           )
         }
@@ -4333,17 +4633,26 @@ export function buildGatewayServer(
         return passOn(result)
       }
 
-      // Its outcome is read here: the session's note does not tell it again.
-      if (scope.client) {
-        noteAnswersTold(scope.client.sessionKey, [
-          { id: args.id, at: Date.now() },
-        ])
-      }
-
       const view = await getPermissionView(scope.ctx, args.id, {
         publicUrl: scope.publicUrl,
         tokenId: scope.tokenId,
       })
+
+      // Its outcome is read here: the session's note does not tell it again,
+      // unless it was still running: that is told once it has finished.
+      if (scope.client) {
+        const running = view?.status === "running"
+
+        noteAnswersTold(scope.client.sessionKey, [
+          {
+            id: args.id,
+            at: running
+              ? (view.decidedAt?.getTime() ?? Date.now())
+              : Date.now(),
+            running,
+          },
+        ])
+      }
 
       return ok(
         {
@@ -4854,7 +5163,7 @@ export function buildGatewayServer(
   register({
     name: "request_secret",
     title: "Ask the owner for a secret",
-    description: `Request a new secret or password from the owner: a password, an API key or token, or a sign-in's one-time codes, stored on PCP's page so its value never passes through you or the conversation. They type it in, or have PCP make it (generate: a password, or a token of letters and digits, hex or base64url, for a key a server or service is to be given), and check the login name and the sites. origins, optional, are the sites the browser may type it at; with none, the browser types it only after asking the owner each time: Once types it that one time, Always at this site adds the site (change_secret_scope proposes sites). Name it in register_server's secret or env_secrets, or a wrapper's secrets, to have it sent there once the owner approves. Answers "Not done yet" with a link. ${OWNER_LINK_RULE} ${nextMessageCheck("check_permission with the id it gave")} Never ask for the value in the conversation. A name PCP already holds is refused: name that one instead.`,
+    description: `Request a new secret or password from the owner: a password, an API key or token, or a sign-in's one-time codes, stored on PCP's page so its value never passes through you or the conversation. They type it in, or have PCP make it (generate: a password, or a token of letters and digits, hex or base64url, for a key a server or service is to be given), and check the login name and the sites. origins, optional, are the sites the browser may type it at; with none, the browser types it only after asking the owner each time: Once types it that one time, Always at this site adds the site (change_secret_scope proposes sites). Name it in register_server's secret or env_secrets, or a wrapper's secrets, to have it sent there once the owner approves. Answers "Not done yet" with a link. ${OWNER_LINK_RULE} ${nextMessageCheck("check_permission with the id it gave")} Never ask for the value in the conversation. A name PCP already holds is refused: name that one instead. To store a value PCP kept for you (a token another tool answered with, a handle {"$result": …} even a pass-only one), pass it as value_from instead of generate: the owner approves on PCP's page and you never see it.`,
     input: z
       .object({
         name: z
@@ -4893,6 +5202,7 @@ export function buildGatewayServer(
         generate: recipeArg(
           "Ask PCP to make the value rather than the owner typing one: a password for a sign-up or a password change, or a token (format alphanumeric, hex or base64url) for a key a server or service is to be set up with. Made on PCP's machine and stored at once; the owner can change the recipe on the page and see the value under Secrets, and you never get it. Not for totp.",
         ).optional(),
+        value_from: valueFromArg().optional(),
       })
       .meta({
         allOf: [
@@ -4901,16 +5211,25 @@ export function buildGatewayServer(
             then: {
               required: ["origins"],
               not: {
-                anyOf: [{ required: ["username"] }, { required: ["generate"] }],
+                anyOf: [
+                  { required: ["username"] },
+                  { required: ["generate"] },
+                  { required: ["value_from"] },
+                ],
               },
             },
           },
+          { not: { required: ["generate", "value_from"] } },
         ],
       }),
     output: NEEDS_OWNER,
     annotations: PROPOSES,
     async run(args: SecretRequestArgs) {
-      const prepared = await prepareSecretRequest(scope.ctx, args)
+      const prepared = await prepareSecretRequest(
+        scope.ctx,
+        args,
+        scope.tokenId,
+      )
 
       if ("refused" in prepared) {
         return failure(prepared.refused)
@@ -5001,18 +5320,23 @@ export function buildGatewayServer(
   register({
     name: "rotate_secret",
     title: "Propose a new value for a secret",
-    description: `Rotate a secret's value: the owner types a new one on PCP's page, or has PCP make it (generate: a password, or a token of letters and digits, hex or base64url), so it never passes through you or the conversation. Always asks the owner, whatever this token may do: answers "Not done yet" with a link. ${OWNER_LINK_RULE} Once they save it, every server, account and wrapper that uses the secret sends the new value, and a service that takes it is made again with it. ${nextMessageCheck("check_permission with the id it gave")} For a key that leaked or a password the site wants changed. Not for a secret PCP made for something of its own.`,
-    input: z.object({
-      name: secretNameArg,
-      reason: secretReasonArg,
-      generate: recipeArg(
-        "Ask PCP to make the new value rather than the owner typing one: a password, or a token (format alphanumeric, hex or base64url). Made on PCP's machine when the owner agrees, never shown to you. Not for one-time codes.",
-      ).optional(),
-    }),
+    description: `Rotate a secret's value: the owner types a new one on PCP's page, or has PCP make it (generate: a password, or a token of letters and digits, hex or base64url), or it is one PCP kept for you (value_from: a handle {"$result": …} of a token another tool answered with, even a pass-only one), so it never passes through you or the conversation. Always asks the owner, whatever this token may do: answers "Not done yet" with a link. ${OWNER_LINK_RULE} Once they save it, every server, account and wrapper that uses the secret sends the new value, and a service that takes it is made again with it. ${nextMessageCheck("check_permission with the id it gave")} For a key that leaked or a password the site wants changed. Not for a secret PCP made for something of its own.`,
+    input: z
+      .object({
+        name: secretNameArg,
+        reason: secretReasonArg,
+        generate: recipeArg(
+          "Ask PCP to make the new value rather than the owner typing one: a password, or a token (format alphanumeric, hex or base64url). Made on PCP's machine when the owner agrees, never shown to you. Not for one-time codes.",
+        ).optional(),
+        value_from: valueFromArg().optional(),
+      })
+      .meta({ allOf: [{ not: { required: ["generate", "value_from"] } }] }),
     output: NEEDS_OWNER,
     annotations: PROPOSES,
     async run(args: SecretRotateArgs) {
-      return secretAsked(await prepareSecretRotate(scope.ctx, args))
+      return secretAsked(
+        await prepareSecretRotate(scope.ctx, args, scope.tokenId),
+      )
     },
   })
 

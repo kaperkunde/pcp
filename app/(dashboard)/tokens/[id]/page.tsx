@@ -143,6 +143,7 @@ export default async function TokenPage({
             warning: request.warning,
             decisions: request.decisions,
             secret: request.secretToEnter,
+            valueFrom: request.valueFrom,
             allowForFixed:
               request.kind === "secret_use" ||
               request.kind === "secret_request",

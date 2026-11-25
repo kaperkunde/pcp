@@ -24,8 +24,10 @@ import {
 } from "./secrets"
 import { serverCreateData, writeServer } from "./server-meta"
 import { createServer } from "./servers"
+import { readRequestLog } from "./request-log"
 import { entryCall } from "./test-handles"
 import { scratchDatabase } from "./test-db"
+import { keepBytes, keepResult } from "./tool-results"
 import { setupVault } from "./vault"
 
 // An assistant's proposals about one of the owner's secrets (#162):
@@ -344,6 +346,228 @@ describe("rotate_secret", () => {
         })
       ).text,
     ).toMatch(/PCP does not make one/)
+  })
+})
+
+describe("rotate_secret with value_from", () => {
+  const KEPT = "kept-token-ZXCV-0987654321"
+
+  /** A result of the requesting token's own, pass-only as keep makes one. */
+  async function keep(
+    text = KEPT,
+    options: { token?: string; passOnly?: boolean } = {},
+  ) {
+    const kept = await keepResult(ctx, {
+      tokenId: options.token ?? tokenId,
+      serverId: null,
+      toolName: "mint_token",
+      text,
+      mediaType: "text/plain",
+      passOnly: options.passOnly ?? true,
+    })
+
+    return { $result: kept.id }
+  }
+
+  it("takes a pass-only result of the token as the new value, on the owner's yes, and never shows it", async () => {
+    const server = await upstream(keyId)
+    await writeServer(ctx, server.id, {
+      status: "auth_required",
+      statusMessage: "rejected the credentials",
+    })
+    const handle = await keep()
+    const asked = await call("rotate_secret", {
+      name: "Linear key",
+      reason: "The key was reissued.",
+      value_from: handle,
+    })
+    const { row, view } = await newest()
+
+    expect(asked.isError, asked.text).toBe(false)
+    expect(view.valueFrom).toMatchObject({
+      id: handle.$result,
+      source: "mint_token",
+      length: KEPT.length,
+      passOnly: true,
+      expired: false,
+    })
+    expect(view.secretChange?.rows[0]!.after).toContain("mint_token")
+    expect(view.lines.join("\n")).not.toContain(KEPT)
+
+    const done = await decide(row.id, { publicUrl: PUBLIC_URL })
+    expect(done.isError, textOf(done)).not.toBe(true)
+    expect(textOf(done)).toContain("from the kept result you named")
+    expect(textOf(done)).toContain("Made again with it: 1 of 1 services.")
+
+    // The value is the kept one, and the old one is gone.
+    expect(await readSecretValue(ctx, keyId)).toBe(KEPT)
+    const stored = await db().secret.findFirstOrThrow({ where: { id: keyId } })
+    expect(Buffer.from(stored.ciphertext).toString("utf8")).not.toContain(VALUE)
+    expect(remade).toEqual([keyId])
+    expect(
+      (await db().mcpServer.findUniqueOrThrow({ where: { id: server.id } }))
+        .status,
+    ).toBe("ok")
+
+    // Nowhere it could have been left: the answer, the request as the
+    // assistant checks it, the request's stored rows or the log.
+    const checked = await call("check_permission", { id: row.id })
+    const rows = await db().permissionRequest.findMany()
+    const log = await readRequestLog(ctx)
+    for (const where of [
+      JSON.stringify(done),
+      checked.text,
+      asked.text,
+      JSON.stringify(await newest()),
+      JSON.stringify(rows),
+      JSON.stringify(log),
+    ]) {
+      expect(where).not.toContain(KEPT)
+    }
+    expect(Buffer.from(rows[0]!.argsCiphertext).toString("utf8")).not.toContain(
+      KEPT,
+    )
+  })
+
+  it("refuses another token's result before anything is asked, and an id it never had", async () => {
+    const other = await createApiToken(ctx, {
+      name: "Other",
+      allowAllServers: true,
+      serverIds: [],
+    })
+    const otherScope = (await resolveApiToken(other.token))!
+    const theirs = await keep(KEPT, { token: otherScope.tokenId })
+
+    for (const handle of [theirs, { $result: "nope" }]) {
+      const asked = await call("rotate_secret", {
+        name: "Linear key",
+        reason: "Leaked.",
+        value_from: handle,
+      })
+
+      expect(asked.isError).toBe(true)
+      expect(asked.text).toContain("not there for this token")
+      expect(asked.text).not.toContain(KEPT)
+    }
+
+    expect(await db().permissionRequest.count()).toBe(0)
+  })
+
+  it("refuses generate with it, a value that is not text or is empty or too long or has control characters", async () => {
+    const handle = await keep()
+    const both = await call("rotate_secret", {
+      name: "Linear key",
+      reason: "Leaked.",
+      value_from: handle,
+      generate: { format: "hex" },
+    })
+    expect(both.isError).toBe(true)
+
+    const bytes = await keepBytes(ctx, {
+      tokenId,
+      serverId: null,
+      toolName: "download",
+      bytes: Buffer.from([0xff, 0xfe, 0x41, 0x80]),
+      mediaType: "application/octet-stream",
+      name: null,
+    })
+    const bad: Array<[unknown, RegExp]> = [
+      [{ $result: bytes.id }, /not valid UTF-8|not text/],
+      [await keep(""), /Enter the secret's value/],
+      [await keep("x".repeat(64 * 1024 + 1)), /too large/],
+      [await keep("bell\u0007here"), /does not show on screen/],
+      [await keep("two\r\nlines"), /does not show on screen/],
+      [{ ...(await keep()), as: "base64" }, /handle alone|These arguments/],
+    ]
+
+    for (const [value_from, why] of bad) {
+      const asked = await call("rotate_secret", {
+        name: "Linear key",
+        reason: "Leaked.",
+        value_from,
+      })
+
+      expect(asked.isError, JSON.stringify(value_from)).toBe(true)
+      expect(asked.text).toMatch(why)
+    }
+
+    expect(await db().permissionRequest.count()).toBe(0)
+    expect(await readSecretValue(ctx, keyId)).toBe(VALUE)
+  })
+
+  it("refuses one-time codes, and a typed value or recipe beside it", async () => {
+    await createSecret(ctx, {
+      name: "Codes",
+      value: "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ",
+      kind: "totp",
+    })
+    const codes = await call("rotate_secret", {
+      name: "Codes",
+      reason: "New seed.",
+      value_from: await keep(),
+    })
+    expect(codes.isError).toBe(true)
+
+    await call("rotate_secret", {
+      name: "Linear key",
+      reason: "Leaked.",
+      value_from: await keep(),
+    })
+    const { row } = await newest()
+
+    for (const options of [
+      { secretValue: "typed-instead" },
+      { generate: { format: "hex" } },
+    ]) {
+      const refused = await decide(row.id, {
+        publicUrl: PUBLIC_URL,
+        ...options,
+      })
+      expect(refused.isError).toBe(true)
+    }
+
+    expect(await readSecretValue(ctx, keyId)).toBe(VALUE)
+  })
+
+  it("writes nothing when the result expired before the owner answered, and says so", async () => {
+    const handle = await keep()
+    await call("rotate_secret", {
+      name: "Linear key",
+      reason: "Reissued.",
+      value_from: handle,
+    })
+    const { row } = await newest()
+    await db().toolResult.update({
+      where: { id: handle.$result },
+      data: { expiresAt: new Date(Date.now() - 1000) },
+    })
+
+    const shown = await newest()
+    expect(shown.view.valueFrom?.expired).toBe(true)
+
+    const done = await decide(row.id, { publicUrl: PUBLIC_URL })
+    expect(textOf(done)).toContain("not there for this token any more")
+    expect(textOf(done)).toContain("Nothing was saved")
+    expect(await readSecretValue(ctx, keyId)).toBe(VALUE)
+    expect(remade).toEqual([])
+    const checked = await call("check_permission", { id: row.id })
+    expect(checked.text).toContain("Nothing was saved")
+  })
+
+  it("is a request of its own per result, not the one already waiting", async () => {
+    await call("rotate_secret", {
+      name: "Linear key",
+      reason: "Leaked.",
+      value_from: await keep("first-kept-value"),
+    })
+    const first = await newest()
+    await call("rotate_secret", {
+      name: "Linear key",
+      reason: "Leaked.",
+      value_from: await keep("second-kept-value"),
+    })
+
+    expect((await newest()).row.id).not.toBe(first.row.id)
   })
 })
 

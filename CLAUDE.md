@@ -620,7 +620,10 @@ storageConnect`), never in the background, and SFTP for nothing else;
   `services/limits.ts`; a new command, tool or argument gets a test against
   the fake engine (`services/fake-docker.ts`, `services.test.ts`).
 - Capabilities (`lib/core/capabilities/`): `read_image`, `edit_pdf` and
-  `convert_document` (also a PDF's page to a picture, `to: "png"`) are
+  `convert_document` (also a PDF's page to a picture, `to: "png"`) and
+  `generate_image` (Write, spends money: held by the duplicate guard, its
+  `store`/`folder` saving through the store's own `save_file`; its common
+  item is an API endpoint, `CommonItem.kind`) are
   PCP's own tools for every token; `view_image` (`view-image.ts`) is PCP's
   own Read tool beside them, not a capability: it shows a kept picture
   itself and calls no provider. The work is a
@@ -684,7 +687,8 @@ embeddingProvider`, which hands `embeddings/provider.ts` the header;
   kept, an answer with no JSON kept whole, `[kept: <path>]` in the text
   beside the JSON, and out of sight in an error's JSON (one that is not
   JSON shows as it came). Its result is `pass_only`: only a tool's arguments
-  (`resultOpener`) and the owner's page open it; every reader (read_result,
+  (`resultOpener`), a secret's value on the owner's yes (`secrets.ts
+readSecretValueFromResult`, #174) and the owner's page open it; every reader (read_result,
   the resource, `pcp.read`/`image`/`frames`, view_image, links, a
   capability's input, the browser's `upload_file`) refuses it with code `pass_only`, and a new reader
   calls `refusePassOnly`. A tool that echoes it is masked (#158,
@@ -985,7 +989,18 @@ embeddingProvider`, which hands `embeddings/provider.ts` the header;
   (`generate`, its `format` `password`, `alphanumeric`, `hex` or
   `base64url`: `generate-password.ts`, a CSPRNG, in `decidePermission`,
   stored at once and never handed back; the owner reveals it under
-  Secrets), and never writes over a name PCP holds. Its page keeps the
+  Secrets), or to take a value the token kept (`value_from`, #174:
+  `{"$result": id}`, one of the requesting token's own results, pass-only
+  too; never with `generate`, never for `totp`; `secret-from-result.ts`),
+  and never writes over a name PCP holds. The request stores the handle's id,
+  its source tool and length, never the value; the page shows where it came
+  from and that the assistant never saw it, and the value is read only by
+  `secrets.ts readSecretValueFromResult` (UTF-8 text, no hidden characters,
+  within the secret length limit) in `decidePermission`, after the owner's
+  yes, as a tool's arguments are by `resultOpener` and never through
+  `refusePassOnly` (which stops the readers): a result that expired by then
+  writes nothing and the outcome says so, and a typed value or recipe beside
+  it is refused. `rotate_secret` takes it the same way. Its page keeps the
   sites out of a password manager's reach (boxes outside the login form,
   `data-1p-ignore`). An assistant changes a secret's sites only by
   proposing it (`change_secret_scope`, below; `update_secret_sites` is its

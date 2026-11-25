@@ -4,6 +4,7 @@ import { checkSecretRequest } from "./browser-secrets"
 import type { SecretRequestAsk } from "./browser/types"
 import type { VaultContext } from "./context"
 import { isPcpError } from "./errors"
+import { prepareValueFrom } from "./secret-from-result"
 import {
   MAX_GENERATE_EXCLUDE,
   MAX_GENERATED_LENGTH,
@@ -74,6 +75,8 @@ export type SecretRequestArgs = {
   username?: string
   origins?: string[]
   generate?: unknown
+  /** A kept result's handle (#174, secret-from-result.ts); never with generate. */
+  value_from?: unknown
 }
 
 /**
@@ -86,18 +89,45 @@ export type SecretRequestArgs = {
 export async function prepareSecretRequest(
   ctx: VaultContext,
   args: SecretRequestArgs,
+  tokenId?: string,
 ): Promise<{ ask: SecretRequestAsk } | { refused: string }> {
   try {
-    return {
-      ask: await checkSecretRequest(ctx, null, {
-        name: args.name,
-        purpose: args.purpose,
-        ...(args.origins ? { origins: args.origins } : {}),
-        ...(args.kind ? { kind: args.kind } : {}),
-        ...(args.username !== undefined ? { username: args.username } : {}),
-        ...(args.generate !== undefined ? { generate: args.generate } : {}),
-      }),
+    if (args.value_from !== undefined) {
+      if (args.generate !== undefined) {
+        return {
+          refused:
+            "value_from and generate are two ways to give the value: leave one out.",
+        }
+      }
+
+      if (args.kind === "totp") {
+        return {
+          refused:
+            "One-time codes come from the site's seed, which the owner types: leave value_from out.",
+        }
+      }
     }
+
+    const ask = await checkSecretRequest(ctx, null, {
+      name: args.name,
+      purpose: args.purpose,
+      ...(args.origins ? { origins: args.origins } : {}),
+      ...(args.kind ? { kind: args.kind } : {}),
+      ...(args.username !== undefined ? { username: args.username } : {}),
+      ...(args.generate !== undefined ? { generate: args.generate } : {}),
+    })
+
+    if (args.value_from === undefined) {
+      return { ask }
+    }
+
+    // The requesting token's own kept result, checked before the owner is
+    // asked; the request keeps its id and where it came from, never a value.
+    const from = tokenId
+      ? await prepareValueFrom(ctx, tokenId, args.value_from)
+      : { refused: "value_from needs the token that asks." }
+
+    return "refused" in from ? from : { ask: { ...ask, valueFrom: from.from } }
   } catch (error) {
     if (isPcpError(error)) {
       return { refused: error.message }
