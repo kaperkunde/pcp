@@ -645,6 +645,31 @@ export async function deleteSecret(ctx: VaultContext, id: string) {
         statusMessage: "",
       })
     }
+
+    // The Google sign-in that kept its tokens here is no longer connected,
+    // nor are the servers that send them.
+    const accounts = await db().oAuthAccount.findMany({
+      where: { vaultId: ctx.vaultId, tokensId: id },
+      select: { id: true },
+    })
+
+    for (const account of accounts) {
+      await db().oAuthAccount.update({
+        where: { id: account.id },
+        data: { status: "disconnected", connectedAt: null },
+      })
+
+      for (const server of await db().mcpServer.findMany({
+        where: { vaultId: ctx.vaultId, accountId: account.id },
+        select: { id: true },
+      })) {
+        await writeServer(ctx, server.id, {
+          oauthConnectedAt: null,
+          status: "unknown",
+          statusMessage: "",
+        })
+      }
+    }
   }
 
   await db().secret.delete({ where: { id } })

@@ -1047,6 +1047,35 @@ readSecretValueFromResult`, #174) and the owner's page open it; every reader (re
   use remains, which the owner changes on its own page. Add a test for
   each new field an assistant can set and each new consumer
   (`secret-changes.test.ts`, `secret-scope.test.ts`).
+- The Google sign-in (`lib/core/google/`, the owner's page `/servers/google`,
+  kaperkunde/pcp#179) is one `oauth_account` row (provider `google`) the
+  owner makes with their own Google client: its sealed `meta`
+  (`oauth_account:<id>`: client ID, products chosen, scopes granted, email),
+  its client secret one of their text secrets (`resolveSecretRef` with the
+  `google_account` use, the owner's pick on the page being the grant, and
+  `secretUses` naming the account as a consumer), its tokens a managed
+  secret. Only the owner connects, changes, disconnects or removes it
+  (Server Actions in `lib/actions/google.ts`): no tool, no `register_server`
+  argument and no linked repository's document makes or changes one. The
+  tokens are read, renewed (one renewal at a time, a token newer than
+  `GOOGLE_FRESH_MS` not renewed again for a refusal) and sent only in
+  `upstream.ts` (`googleAccessToken`, `exchangeGoogleCode`,
+  `revokeGoogleSignIn`, `credential()`); the sign-in sends no `resource`
+  and asks for `access_type=offline`, `prompt=consent`,
+  `include_granted_scopes` and PKCE S256, only what the chosen products lack
+  once connected. Each chosen product Google granted is an MCP server of
+  `authType` `google` bound to the account (`mcp_server.account_id`), its
+  `oauthConnectedAt` following the account's state (so `needsConnecting`
+  and `connectResult` work as for any server, linking to `/servers/google`);
+  the products and their scopes are the one static table `google/products.ts`,
+  and every address PCP reaches is `google/endpoints.ts` (public addresses
+  only). A refused refresh token (`invalid_grant`) marks the account
+  `needs_reconnect`, deletes its tokens and makes the servers read as not
+  connected; a 429 is a `pcpThrottle` for the gate. Tools keep the normal
+  levels (nothing is allowed by connecting). The account is in the export
+  (`oauthAccounts`), in `wipeVault`, and its flows in flight are pruned with
+  `oauth_state`. Add a test for each new product, scope or way a call gets
+  its token (`google/google.test.ts`).
 - PCP's own authorization server (`lib/core/oauth-server/`), for apps that
   sign in to `/mcp` with a URL alone (claude.ai's connectors, ChatGPT), is
   PCP's and never a relay's: whoever issues the tokens could mint one for

@@ -11,6 +11,7 @@ import type {
   McpServer,
   McpTool,
   Memory,
+  OAuthAccount,
   OpenApiSpec,
   PermissionRequest,
   Repo,
@@ -470,11 +471,31 @@ const McpServerRow = renamedFrom(
     // The server's own call limits, sealed (lib/core/gate/): absent from
     // older exports, whose servers follow their kind's defaults.
     limits: bytesOrNull.default(null),
+    // The Google sign-in a server sends the token of (lib/core/google/),
+    // added with it: absent from older exports, which had none.
+    accountId: id.nullable().default(null),
     // The sealed values: absent from older files, whose servers hold them in
     // the plain columns until the vault's rows are sealed.
     meta: bytesOrNull.default(null),
   }),
 )
+
+// The vault's Google sign-in (lib/core/google/), added with it: absent from
+// older exports, which had none. Its meta is sealed under the vault's key;
+// the client's secret and its tokens are secret rows of the same file. A
+// sign-in in flight (oauth_account_state) is not exported.
+const OAuthAccountRow = z.strictObject({
+  id,
+  vaultId: id,
+  provider: str,
+  meta: bytes,
+  clientSecretId: id.nullable(),
+  tokensId: id.nullable(),
+  status: str,
+  connectedAt: dateOrNull,
+  createdAt: date,
+  updatedAt: date,
+})
 
 // Definitions, added with the owner's notes: absent from older exports.
 const ServerDefinitionRow = renamedFrom(
@@ -796,6 +817,7 @@ export const PayloadSchema = z.strictObject({
     secretBrowserOrigins: z.array(SecretBrowserOriginRow).default([]),
     secretScopes: z.array(SecretScopeRow).default([]),
     serverDefinitions: z.array(ServerDefinitionRow).default([]),
+    oauthAccounts: z.array(OAuthAccountRow).default([]),
     servers: z.array(McpServerRow),
     serverAuthHeaders: z.array(ServerAuthHeaderRow),
     tools: z.array(McpToolRow),
@@ -938,6 +960,7 @@ export function checkReferences(payload: ExportPayload): void {
   const tokens = idsOf(tables.apiTokens, "token")
   const secrets = idsOf(tables.secrets, "secret")
   const servers = idsOf(tables.servers, "server")
+  const accounts = idsOf(tables.oauthAccounts, "Google sign-in")
   const definitions = idsOf(tables.serverDefinitions, "server definition")
   idsOf(tables.keyGrants, "key")
   idsOf(tables.tools, "tool")
@@ -1046,7 +1069,13 @@ export function checkReferences(payload: ExportPayload): void {
     }
   }
 
+  for (const account of tables.oauthAccounts) {
+    pointsAt(account.clientSecretId, secrets, "a Google client's secret")
+    pointsAt(account.tokensId, secrets, "a Google sign-in's tokens")
+  }
+
   for (const server of tables.servers) {
+    pointsAt(server.accountId, accounts, "a server's Google sign-in")
     pointsAt(server.authSecretId, secrets, "a server's secret")
     pointsAt(server.oauthClientSecretId, secrets, "a server's client secret")
     pointsAt(server.oauthTokensId, secrets, "a server's OAuth tokens")
@@ -1275,6 +1304,7 @@ export const FORMAT_COVERS_SCHEMA: {
     z.output<typeof SecretBrowserOriginRow>
   >
   secretScope: Covers<SecretScope, z.output<typeof SecretScopeRow>>
+  oauthAccount: Covers<OAuthAccount, z.output<typeof OAuthAccountRow>>
   server: Covers<McpServer, z.output<typeof McpServerRow>>
   serverDefinition: Covers<
     ServerDefinition,
@@ -1313,6 +1343,7 @@ export const FORMAT_COVERS_SCHEMA: {
   secret: true,
   secretBrowserOrigin: true,
   secretScope: true,
+  oauthAccount: true,
   server: true,
   serverDefinition: true,
   serverAuthHeader: true,

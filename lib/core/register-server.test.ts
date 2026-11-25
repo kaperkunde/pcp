@@ -221,6 +221,36 @@ describe("what an assistant is told", () => {
   })
 })
 
+describe("Google's sign-in is the owner's alone", () => {
+  it("is no authentication register_server takes, and no tool of PCP's sets Google up", async () => {
+    const refused = await register({
+      kind: "mcp",
+      name: "Google Gmail",
+      url: "https://gmailmcp.googleapis.com/mcp/v1",
+      auth_type: "google",
+    })
+
+    expect(refused.isError).toBe(true)
+    expect(await db().permissionRequest.count()).toBe(0)
+    expect(await db().oAuthAccount.count()).toBe(0)
+
+    // Nor is there a tool to make, change or end the account: the owner's
+    // Google page is the only way, and a bound server is not proposed.
+    const { tools } = await listEveryTool(client)
+
+    expect(
+      tools.filter((tool) => /google|oauth_account/i.test(tool.name)),
+    ).toEqual([])
+    expect(
+      tools.flatMap((tool) =>
+        Object.keys(
+          (tool.inputSchema.properties as Record<string, unknown>) ?? {},
+        ),
+      ),
+    ).not.toContain("account_id")
+  })
+})
+
 describe("proposing a mail account", () => {
   it("asks for a JMAP account from the server's address, with the password typed in on PCP", async () => {
     const asked = await register({

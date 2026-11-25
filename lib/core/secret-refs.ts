@@ -8,7 +8,7 @@ import type { OwnerSecretKind } from "./secrets"
  * The one way a field that takes a secret by name finds it (#162): a
  * server's header or basic login, an OAuth client's secret, a service's
  * variable, a wrapper's place, what the browser types, a mail or calendar
- * account's sign-in, a linked repository's document. Each names its
+ * account's sign-in, the Google sign-in's client, a linked repository's document. Each names its
  * consumer (`use`), and the use decides which of the vault's secrets it may
  * name:
  *
@@ -44,6 +44,7 @@ export const SECRET_REF_USES = [
   "browser_type",
   "mail",
   "caldav",
+  "google_account",
 ] as const
 
 export type SecretRefUseKind = (typeof SECRET_REF_USES)[number]
@@ -78,6 +79,8 @@ export type SecretRefUse = SecretRefConsumer &
     | { kind: "mail" }
     /** A calendar account's password or token. */
     | { kind: "caldav" }
+    /** The client secret of the owner's Google sign-in (lib/core/google/). */
+    | { kind: "google_account" }
   )
 
 export type ResolvedSecret = {
@@ -104,6 +107,7 @@ export function secretKindsFor(use: SecretRefUse): readonly OwnerSecretKind[] {
     case "service_env":
     case "mail":
     case "caldav":
+    case "google_account":
       return ["text"]
   }
 }

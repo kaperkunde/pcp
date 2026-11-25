@@ -388,13 +388,26 @@ export async function disconnectOAuth(
   serverId: string,
 ): Promise<void> {
   const server = await getServer(ctx, serverId)
+
+  if (server.authType === "google") {
+    throw new PcpError(
+      "state",
+      "This server signs in through your Google account: disconnect Google on its page.",
+    )
+  }
+
   await forgetOAuthTokens(ctx, server)
 }
 
 export async function pruneOAuthStates(): Promise<number> {
+  const now = new Date()
   const { count } = await db().oAuthState.deleteMany({
-    where: { expiresAt: { lt: new Date() } },
+    where: { expiresAt: { lt: now } },
+  })
+  // The Google sign-in's unfinished flows go the same way.
+  const google = await db().oAuthAccountState.deleteMany({
+    where: { expiresAt: { lt: now } },
   })
 
-  return count
+  return count + google.count
 }

@@ -13,6 +13,8 @@ import { appendRequestLog, logDays } from "./request-log"
 import { createSecret } from "./secrets"
 import { createSshExit, writeExitAccess } from "./exits/exits"
 import { createSshServer } from "./ssh/hosts"
+import { saveGoogleSettings, startGoogleConnect } from "./google/account"
+import { loadGoogleAccount } from "./google/meta"
 import { createServer } from "./servers"
 import { createSkill, setTokenSkills } from "./skills"
 import { createSession, resolveSession } from "./sessions"
@@ -147,6 +149,30 @@ async function populate() {
     origin: "https://shop.example",
     level: "always",
   })
+  // The vault's Google sign-in: its account, a sign-in in flight and a
+  // server bound to it (nothing here reaches Google).
+  await saveGoogleSettings(
+    ctx,
+    {
+      clientId: "1234-abc.apps.googleusercontent.com",
+      clientSecretValue: "google-client-secret",
+      products: ["gmail"],
+    },
+    { publicUrl: "https://pcp.example" },
+  )
+  await startGoogleConnect(ctx, { publicUrl: "https://pcp.example" })
+  await db().mcpServer.create({
+    data: serverCreateData(ctx, {
+      id: "google1",
+      vaultId,
+      kind: "mcp",
+      name: "Google Gmail",
+      slug: "google-gmail",
+      url: "https://gmailmcp.googleapis.com/mcp/v1",
+      authType: "google",
+      accountId: (await loadGoogleAccount(ctx))!.id,
+    }),
+  })
   await createMemory(ctx, { path: "notes.md", text: "Remember this." })
   const skill = await createSkill(ctx, {
     name: "release-notes",
@@ -238,6 +264,8 @@ describe("deleteVault", { timeout: 30_000 }, () => {
     expect(before.upload_link).toBe(1)
     expect(before.tool_tier).toBe(1)
     expect(before.embedding_vector).toBe(1)
+    expect(before.oauth_account).toBe(1)
+    expect(before.oauth_account_state).toBe(1)
 
     await deleteVault(ctx)
 

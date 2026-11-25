@@ -1,5 +1,6 @@
 import type { Metadata } from "next"
 import { loadResourceLimits } from "@/lib/core/resources/state"
+import Link from "next/link"
 import { notFound } from "next/navigation"
 
 import { BrowserDescribeForm } from "@/components/browser-describe-form"
@@ -146,7 +147,16 @@ export default async function ServerPage({
   // PCP's own store has no folder to choose: nothing to set but its
   // tools' levels.
   const settings =
-    storage?.backend === "local" ? null : storage ? (
+    server.authType === "google" ? (
+      <p className="text-[13px] leading-relaxed text-muted-foreground">
+        This server signs in through your Google account, so its address and
+        sign-in are set on the{" "}
+        <Link href="/servers/google" className="text-primary hover:underline">
+          Google page
+        </Link>
+        , not here.
+      </p>
+    ) : storage?.backend === "local" ? null : storage ? (
       <StorageFolderForm
         initial={{
           id: server.id,
@@ -416,7 +426,8 @@ export default async function ServerPage({
           statusMessage: server.statusMessage,
           statusAt: server.statusAt,
           connected:
-            server.authType !== "oauth" || server.oauthConnectedAt !== null,
+            (server.authType !== "oauth" && server.authType !== "google") ||
+            server.oauthConnectedAt !== null,
           lastSyncedAt: server.lastSyncedAt,
           oauthConnection,
           oauthAuthorizeParams: server.oauthAuthorizeParams ?? "",

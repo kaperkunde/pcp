@@ -63,6 +63,20 @@ once you chose a provider on Settings → Search. Its instructions say so too.
    its calls, failures and answer times over the last minute, hour and day.
    An assistant can propose limits; you see them beside its request and
    save them as you leave them.
+
+   For Google Workspace, **Add → Google** signs in to Google once for all of
+   Google's own servers. You make a Google client of your own (the page links
+   Google's page for it and shows the redirect address to give it), tick the
+   products you want (Gmail, Calendar, search, Drive, Docs, Sheets, Slides,
+   Tasks and contacts, and Chat and Classroom if you like) and choose
+   **Connect**: one Google consent covers them all, and PCP keeps a server
+   for each product, signed in through that one sign-in and renewed on its
+   own. Gmail can draft mail but not send it, and Drive can write only the
+   files PCP made or you opened with it. Every tool starts at **Ask you
+   first**. Adding a product later asks Google only for what it lacks;
+   **Disconnect Google** revokes PCP's access at Google. Only you set this up:
+   an assistant that needs it is sent to the page.
+
 3. **API endpoints.** Add an API by giving PCP its OpenAPI 3 schema, as a URL or
    an uploaded JSON or YAML file. PCP turns each operation into a tool, with the
    arguments the schema describes, and tells you what it left out (cookies, for

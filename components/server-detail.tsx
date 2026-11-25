@@ -10,6 +10,8 @@ import {
   type ReactNode,
 } from "react"
 
+import Link from "next/link"
+
 import { CopyableValue } from "@kaperkunde/ui/copy-button"
 import { FormError, FormNote } from "@kaperkunde/ui/form-status"
 import { ItemAboutRows } from "@/components/item-about"
@@ -62,7 +64,7 @@ export type ServerDetailProps = {
     publicOnly: boolean
     specSource: "url" | "upload" | null
     specUrl: string | null
-    authType: AuthType
+    authType: AuthType | "google"
     status: ServerStatus
     statusMessage: string
     /** When the alert last happened. */
@@ -230,6 +232,16 @@ export function ServerDetail({
               <Button variant="secondary" onClick={() => openAdvanced()}>
                 Edit
               </Button>
+            ) : null}
+            {server.authType === "google" ? (
+              <Link
+                href="/servers/google"
+                className={buttonVariants({
+                  variant: server.connected ? "secondary" : "default",
+                })}
+              >
+                {server.connected ? "Manage Google" : "Connect Google"}
+              </Link>
             ) : null}
             {oauth ? (
               // A plain anchor, not next/link: the route redirects to the
@@ -475,6 +487,27 @@ function SignInRow({
     server.kind === "storage"
   ) {
     return null
+  }
+
+  if (server.authType === "google") {
+    return (
+      <ListRow
+        title="Sign-in"
+        description={
+          server.connected
+            ? "Signed in through your Google account, which PCP renews on its own."
+            : "Not signed in: Google is connected once for all its servers, on its own page."
+        }
+        trailing={
+          <Link
+            href="/servers/google"
+            className="text-[13px] text-primary hover:underline"
+          >
+            {server.connected ? "Manage" : "Connect"}
+          </Link>
+        }
+      />
+    )
   }
 
   if (server.authType === "oauth") {

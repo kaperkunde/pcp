@@ -58,7 +58,10 @@ describe("the catalogue", () => {
       expect(entry.queryWords.length, entry.id).toBeGreaterThan(0)
 
       if (entry.kind === "builtin") {
-        expect(entry.serverKinds?.length, entry.id).toBeGreaterThan(0)
+        expect(
+          (entry.serverKinds?.length ?? 0) > 0 || entry.account !== undefined,
+          entry.id,
+        ).toBe(true)
       } else {
         expect(entry.item, entry.id).not.toBeUndefined()
         expect(
@@ -114,7 +117,7 @@ describe("the catalogue", () => {
   })
 
   it("never offers an assistant to propose an exit or an SSH server", () => {
-    for (const id of ["vpn_exit", "ssh"]) {
+    for (const id of ["vpn_exit", "ssh", "google"]) {
       const entry = CATALOGUE.find((e) => e.id === id)!
       expect(entry.ownerOnly, id).toBe(true)
       expect(entry.how, id).toMatch(/^Only the owner/)
@@ -405,6 +408,31 @@ describe("what a token has", () => {
     expect((await tokenHas()).has("embeddings")).toBe(true)
   })
 
+  it("has Google when a server bound to the owner's Google sign-in is among its tools", async () => {
+    const other = await serverOfKind("mcp")
+    const account = await db().oAuthAccount.create({
+      data: {
+        id: "google-account",
+        vaultId: ctx.vaultId,
+        provider: "google",
+        meta: new Uint8Array([1]),
+      },
+    })
+
+    expect((await tokenHas()).has("google")).toBe(false)
+
+    const google = await serverOfKind("mcp")
+    await db().mcpServer.update({
+      where: { id: google },
+      data: { authType: "google", accountId: account.id },
+    })
+    expect((await tokenHas()).has("google")).toBe(true)
+
+    // Not for a token that does not reach one: nothing is learnt of the rest.
+    scope = await tokenScope({ serverIds: [other] })
+    expect((await tokenHas()).has("google")).toBe(false)
+  })
+
   it("has the browser only once Chromium is on this machine", async () => {
     await serverOfKind("browser")
     expect((await tokenHas()).has("browser")).toBe(false)
@@ -448,6 +476,21 @@ describe("search", () => {
     )
     // A token that reaches every server is not told to ask for access.
     expect(text).not.toContain(LIMITED_TOKEN_NOTE)
+  })
+
+  it("sends the owner to the Google page for Google, which only they set up", async () => {
+    const text = await search({ query: "connect my Google Drive" })
+
+    expect(text).toContain("can set up: Google Workspace")
+    expect(text).toContain("Only the owner sets it up")
+    expect(text).not.toContain("register_server (kind")
+    expect(text).toContain(
+      `[Connect Google in PCP](${PUBLIC_URL}/servers/google)`,
+    )
+    // Gmail alone still means a mail account, as before.
+    expect(await search({ query: "I'd like to add my Gmail" })).not.toContain(
+      "can set up: Google Workspace",
+    )
   })
 
   it("tells a limited token the owner may have it, out of its reach", async () => {
