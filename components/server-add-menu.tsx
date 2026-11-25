@@ -33,6 +33,12 @@ const CHOICES: Array<{
     caption: "From an OpenAPI schema",
   },
   {
+    kind: "mcp",
+    href: "/servers/google",
+    title: "Google",
+    caption: "Gmail, Calendar, Drive and more, with one sign-in",
+  },
+  {
     kind: "jmap",
     href: "/servers/mail/new",
     title: "Mail account",
