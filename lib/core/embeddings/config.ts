@@ -38,6 +38,13 @@ export type EmbeddingsConfig =
       model: string
       /** A text secret sent as a bearer token, when it takes one. */
       secretId: string | null
+      /**
+       * Send input_type "query" / "document" as Voyage AI does, for a server
+       * whose model embeds the two apart (an instruction-tuned one behind
+       * text-embeddings-inference or vLLM). Off when left out: a server
+       * that does not know the field may refuse it.
+       */
+      inputType?: boolean
       embed: EmbeddedKinds
     }
   | {
@@ -49,6 +56,13 @@ export type EmbeddingsConfig =
       serverId: string
       /** Left empty for a server that has one model (text-embeddings-inference). */
       model: string
+      /**
+       * Send input_type "query" / "document" as Voyage AI does, for a server
+       * whose model embeds the two apart (an instruction-tuned one behind
+       * text-embeddings-inference or vLLM). Off when left out: a server
+       * that does not know the field may refuse it.
+       */
+      inputType?: boolean
       embed: EmbeddedKinds
     }
 
@@ -72,12 +86,14 @@ const ConfigSchema = z.discriminatedUnion("provider", [
     url: z.string().min(1).max(EMBED_MAX_URL_CHARS),
     model: Model.min(1),
     secretId: Id.nullable(),
+    inputType: z.boolean().optional(),
     embed: Embed,
   }),
   z.strictObject({
     provider: z.literal("endpoint"),
     serverId: Id,
     model: Model,
+    inputType: z.boolean().optional(),
     embed: Embed,
   }),
 ])
@@ -192,7 +208,7 @@ export async function checkEmbeddingsConfig(
       if (input.secretId) await textSecret(input.secretId, "the API key")
       const url = checkEmbeddingsUrl(input.url)
       embeddingsUrl(url)
-      return { ...input, url, model }
+      return withInputType({ ...input, url, model })
     }
     case "endpoint": {
       const server = await db().mcpServer.findFirst({
@@ -204,9 +220,15 @@ export async function checkEmbeddingsConfig(
         throw invalid("Choose one of your API endpoints.")
       }
 
-      return { ...input, model }
+      return withInputType({ ...input, model })
     }
   }
+}
+
+/** `inputType` kept only when on: off is the same as left out. */
+function withInputType<T extends { inputType?: boolean }>(config: T): T {
+  const { inputType, ...rest } = config
+  return (inputType ? { ...rest, inputType: true } : rest) as T
 }
 
 /**

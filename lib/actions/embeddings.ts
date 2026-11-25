@@ -42,6 +42,7 @@ function readConfig(formData: FormData): EmbeddingsConfig {
   }
   const model = field(formData, "model")
   const secretId = field(formData, "secretId")
+  const inputType = field(formData, "inputType") === "on"
 
   switch (provider) {
     case "voyage":
@@ -53,12 +54,13 @@ function readConfig(formData: FormData): EmbeddingsConfig {
         url: field(formData, "url"),
         model,
         secretId: secretId || null,
+        inputType,
         embed,
       }
     case "endpoint": {
       const serverId = field(formData, "serverId")
       if (!serverId) throw invalid("Choose the API endpoint.")
-      return { provider, serverId, model, embed }
+      return { provider, serverId, model, inputType, embed }
     }
   }
 }

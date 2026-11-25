@@ -430,6 +430,44 @@ describe("the provider", () => {
     expect(provider.fingerprint).not.toContain("sk-1")
   })
 
+  it("sends input_type only when the owner turned it on, and rebuilds vectors then", async () => {
+    const base_config: EmbeddingsConfig = {
+      provider: "openai",
+      url: `${base}/v1`,
+      model: "m",
+      secretId: null,
+      embed: { tools: true, skills: true, memories: true },
+    }
+    const off = await embeddingProvider(ctx, base_config)
+    const on = await embeddingProvider(ctx, { ...base_config, inputType: true })
+
+    await off.embed(["a"], "query", AbortSignal.timeout(5_000))
+    await on.embed(["a"], "query", AbortSignal.timeout(5_000))
+    await on.embed(["a"], "document", AbortSignal.timeout(5_000))
+
+    expect(received.map((entry) => entry.body)).toEqual([
+      { input: ["a"], model: "m" },
+      { input: ["a"], model: "m", input_type: "query" },
+      { input: ["a"], model: "m", input_type: "document" },
+    ])
+    expect(on.fingerprint).not.toBe(off.fingerprint)
+
+    // Off is the same as left out, and stored that way.
+    expect(
+      await checkEmbeddingsConfig(ctx, { ...base_config, inputType: false }),
+    ).toEqual(base_config)
+    const checked = await checkEmbeddingsConfig(ctx, {
+      ...base_config,
+      inputType: true,
+    })
+    await writeEmbeddingsConfig(ctx, checked)
+    expect(await readEmbeddingsConfig(ctx)).toEqual({
+      ...base_config,
+      inputType: true,
+    })
+    await writeEmbeddingsConfig(ctx, null)
+  })
+
   it("takes an API endpoint's address and credential", async () => {
     const secret = await createSecret(ctx, { name: "tei", value: "tei-key" })
     await db().mcpServer.create({
