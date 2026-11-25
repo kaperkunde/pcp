@@ -23,7 +23,7 @@ import {
 
 /** Words that make a tool worth reading the schema of. */
 const WORTH_READING =
-  /ocr|optical|tesseract|convert|export|markdown|text|form|flatten|merge|combine|sign|pdf|document|image|scan|read|extract|file|render|page/i
+  /ocr|optical|tesseract|convert|export|markdown|text|form|flatten|merge|combine|sign|pdf|document|image|scan|read|extract|file|render|page|generat|draw|paint|picture|illustrat|prompt|edit/i
 
 export async function candidateTools(
   ctx: VaultContext,

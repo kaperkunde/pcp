@@ -4,7 +4,8 @@ import { stem, tokenize } from "../search"
  * Capabilities: things an assistant asks for by what they are (read the
  * text in a picture, fill in a PDF's form, turn a document into Markdown
  * or a PDF's page into a picture) rather than by a tool's name. Each is one of PCP's own tools, always
- * there for every token (read_image, edit_pdf, convert_document); what does
+ * there for every token (read_image, edit_pdf, convert_document,
+ * generate_image); what does
  * the work is a provider: a tool among the token's own that the words in
  * providers.ts find, called at the token's own levels and tiers as
  * execute_* would (gateway.ts forwardCall). With no provider, the tool
@@ -18,12 +19,20 @@ export const CAPABILITY_IDS = [
   "read_image",
   "pdf_edit",
   "convert_document",
+  "generate_image",
 ] as const
 
 export type CapabilityId = (typeof CAPABILITY_IDS)[number]
 
 /** A common item (kaperkunde/pcp-gg-common) that provides a capability. */
 export type CommonItem = {
+  /**
+   * What it is there: a service (the default), whose file is
+   * services/<name>.yaml and which the owner launches on an SSH server, or
+   * an API endpoint, whose folder is endpoints/<name>/ and which the owner
+   * adds with a secret of their own. Left out in older code: a service.
+   */
+  kind?: "service" | "endpoint"
   /** Its name there: the service's file is services/<name>.yaml. */
   name: string
   /** What the owner reads it as. */
@@ -70,6 +79,19 @@ export const PDF_MCP: CommonItem = {
   about:
     "Reads, fills, flattens, merges, signs and OCRs PDFs (English and Dutch), in Kaperkunde's reviewed fork. It works only on files in its own data volume, and makes no network requests.",
   sources: ["pdf-mcp-server", "pdf-mcp"],
+}
+
+/**
+ * OpenAI's Images API as an API endpoint (endpoints/openai-images/ in the
+ * common repository): generations and edits, with the owner's own key.
+ */
+export const OPENAI_IMAGES: CommonItem = {
+  kind: "endpoint",
+  name: "openai-images",
+  title: "OpenAI Images",
+  about:
+    "OpenAI's Images API as an API endpoint: makes pictures from a prompt and edits the ones you give it. It needs your own OpenAI API key, which you type in on PCP's page; every picture is billed to that account.",
+  sources: [],
 }
 
 export const CAPABILITIES: readonly Capability[] = [
@@ -152,6 +174,32 @@ export const CAPABILITIES: readonly Capability[] = [
       "render pdf",
     ],
     items: [DOCLING, PDF_MCP],
+  },
+  {
+    id: "generate_image",
+    tool: "generate_image",
+    title: "Generate images",
+    summary:
+      "Makes a picture from a prompt, or changes the pictures you give it: an illustration, a feature image, a logo, a mock-up.",
+    explain:
+      "An assistant describes the picture and gets it back as a file to look at, send, or keep in a store; nothing passes through the assistant itself. It spends money: the provider is an image service with your own account, and each picture is billed there. PCP asks you first, as for any other tool you have not allowed.",
+    label: "Set up image generation in PCP",
+    queryWords: [
+      "generate image",
+      "generate picture",
+      "make image",
+      "make picture",
+      "create image",
+      "create picture",
+      "draw",
+      "illustration",
+      "feature image",
+      "text to image",
+      "image generation",
+      "dall e",
+      "logo",
+    ],
+    items: [OPENAI_IMAGES],
   },
 ]
 

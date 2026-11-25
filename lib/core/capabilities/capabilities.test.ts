@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto"
+import { randomBytes, randomUUID } from "node:crypto"
 import { Client, InMemoryTransport } from "@modelcontextprotocol/client"
 import type { CallToolResult } from "@modelcontextprotocol/server"
 import sharp from "sharp"
@@ -16,8 +16,9 @@ import type { PermissionExecutor } from "../permissions"
 import { appendRequestLog } from "../request-log"
 import { createServer } from "../servers"
 import { scratchDatabase } from "../test-db"
-import { writeToolAccess } from "../tool-access"
+import { setServerToolAccess, writeToolAccess } from "../tool-access"
 import { setToolTier } from "../tool-tiers"
+import { ensureOwnStore } from "../storage/roots"
 import { keepBytes, openResult } from "../tool-results"
 import { setupVault } from "../vault"
 import { PROVIDER_FILES } from "./run"
@@ -852,5 +853,411 @@ describe("read_image with include_image", () => {
       "text",
       "image",
     ])
+  })
+})
+
+// ---- generate_image ------------------------------------------------------
+
+const IMAGE_BODY = {
+  prompt: { type: "string" },
+  model: { type: "string", default: "gpt-image-2" },
+  n: { type: "integer" },
+  size: { type: "string" },
+  quality: { type: "string", enum: ["low", "medium", "high", "auto"] },
+  background: { type: "string", enum: ["transparent", "opaque", "auto"] },
+}
+
+/** An images API as PCP generates its tools: generations and an edit. */
+const IMAGES_API: FakeTool[] = [
+  {
+    name: "create_image",
+    description:
+      "Generate an image\n\nMake a picture from a text prompt.\n\nPOST /images/generations",
+    schema: {
+      type: "object",
+      properties: {
+        body: { type: "object", required: ["prompt"], properties: IMAGE_BODY },
+      },
+      required: ["body"],
+    },
+    annotations: WRITES,
+  },
+  {
+    name: "create_image_edit",
+    description:
+      "Edit an image\n\nChange pictures you give it.\n\nPOST /images/edits",
+    schema: {
+      type: "object",
+      properties: {
+        body: {
+          type: "object",
+          required: ["image[]", "prompt"],
+          properties: {
+            "image[]": { type: "array", items: FILE },
+            ...IMAGE_BODY,
+          },
+        },
+      },
+      required: ["body"],
+    },
+    annotations: WRITES,
+  },
+]
+
+/** A picture large enough that PCP keeps it as a file on sight (noise). */
+async function smallPng(): Promise<string> {
+  return (
+    await sharp(randomBytes(48 * 48 * 3), {
+      raw: { width: 48, height: 48, channels: 3 },
+    })
+      .png()
+      .toBuffer()
+  ).toString("base64")
+}
+
+describe("generate_image with no provider", () => {
+  it("answers with the owner's link to its page, last, and says it asked", async () => {
+    const answer = await call("generate_image", { prompt: "A red kite" })
+
+    expect(answer.isError).toBe(false)
+    expect(answer.structured).toMatchObject({
+      kind: "needs_owner",
+      reason: "setup",
+      url: `${PUBLIC_URL}/plugins/generate_image`,
+      label: "Set up image generation in PCP",
+      capability: "generate_image",
+    })
+    expect(answer.text.trimEnd().split("\n").at(-1)).toBe(
+      `[Set up image generation in PCP](${PUBLIC_URL}/plugins/generate_image)`,
+    )
+    expect(answer.text).toContain("add with their own key")
+    expect(ran).toEqual([])
+    expect(vi.mocked(appendRequestLog)).toHaveBeenCalledWith(
+      expect.objectContaining({ tool: "generate_image", asked: true }),
+    )
+  })
+
+  it("is named in search before it is set up", async () => {
+    const client = await connect()
+    const found = (await client.callTool({
+      name: "search",
+      arguments: { query: "draw an illustration for the blog" },
+    })) as CallToolResult
+    await client.close()
+
+    expect(
+      found.content
+        .map((part) => (part.type === "text" ? part.text : ""))
+        .join("\n"),
+    ).toMatch(/not installed: Generate images \(pcp generate_image\)/)
+  })
+
+  it("says an edit has no provider where only generations are there", async () => {
+    await server("images", IMAGES_API.slice(0, 1))
+    const id = await keptFile("kite.png", "image/png")
+
+    const answer = await call("generate_image", {
+      prompt: "Make it blue",
+      images: [{ $result: id }],
+    })
+
+    expect(answer.structured).toMatchObject({ reason: "setup" })
+    expect(answer.text).toContain("changes a picture")
+    expect(ran).toEqual([])
+  })
+})
+
+describe("generate_image with an images API", () => {
+  it("makes pictures, keeps each as a handle, and sends only what the API takes", async () => {
+    await server("images", IMAGES_API)
+    const b64 = await smallPng()
+    answers["images/create_image"] = json({
+      created: 1,
+      data: [{ b64_json: b64 }, { b64_json: b64 }],
+      usage: { total_tokens: 10 },
+    })
+
+    const answer = await call("generate_image", {
+      prompt: "A red kite over dunes",
+      size: "1536x1024",
+      quality: "low",
+      n: 2,
+      background: "opaque",
+    })
+
+    expect(answer.isError, answer.text).toBe(false)
+    expect(answer.structured).toMatchObject({
+      kind: "images",
+      operation: "generate",
+      provider: "images/create_image",
+      ignored: [],
+      saved: [],
+    })
+    const images = answer.structured.images as Array<{ $result: string }>
+    expect(images).toHaveLength(2)
+
+    const kept = await openResult(scope.ctx, {
+      tokenId: scope.tokenId,
+      id: images[0]!.$result,
+    })
+    expect(kept!.mediaType).toBe("image/png")
+    expect(kept!.bytes().subarray(1, 4).toString()).toBe("PNG")
+
+    // The model comes from the schema's default; nothing it lacks is sent.
+    expect(ran).toEqual([
+      {
+        server: "images",
+        tool: "create_image",
+        args: {
+          body: {
+            prompt: "A red kite over dunes",
+            model: "gpt-image-2",
+            size: "1536x1024",
+            quality: "low",
+            n: 2,
+            background: "opaque",
+          },
+        },
+      },
+    ])
+    expect(vi.mocked(appendRequestLog)).toHaveBeenCalledWith(
+      expect.objectContaining({
+        tool: "generate_image",
+        server: "images",
+        upstreamTool: "create_image",
+        ok: true,
+      }),
+    )
+  })
+
+  it("says which setting the provider has no such value for, and leaves it out", async () => {
+    await server("images", [
+      {
+        ...IMAGES_API[0]!,
+        schema: {
+          type: "object",
+          properties: {
+            body: {
+              type: "object",
+              required: ["prompt"],
+              properties: {
+                prompt: { type: "string" },
+                quality: { type: "string", enum: ["standard", "hd"] },
+              },
+            },
+          },
+        },
+      },
+    ])
+    answers["images/create_image"] = json({
+      data: [{ b64_json: await smallPng() }],
+    })
+
+    const answer = await call("generate_image", {
+      prompt: "A kite",
+      quality: "high",
+      model: "other-model",
+    })
+
+    expect(answer.structured).toMatchObject({
+      kind: "images",
+      ignored: ["quality"],
+    })
+    expect(ran[0]!.args).toEqual({ body: { prompt: "A kite" } })
+  })
+
+  it("changes the pictures it is given, by their handles", async () => {
+    await server("images", IMAGES_API)
+    const a = await keptFile("a.png", "image/png")
+    const b = await keptFile("b.png", "image/png")
+    answers["images/create_image_edit"] = json({
+      data: [{ b64_json: await smallPng() }],
+    })
+
+    const answer = await call("generate_image", {
+      prompt: "Make the sky blue",
+      images: [{ $result: a }, { $result: b }],
+    })
+
+    expect(answer.structured).toMatchObject({
+      kind: "images",
+      operation: "edit",
+      provider: "images/create_image_edit",
+    })
+    expect(ran).toEqual([
+      {
+        server: "images",
+        tool: "create_image_edit",
+        args: {
+          body: {
+            "image[]": [{ $result: a }, { $result: b }],
+            prompt: "Make the sky blue",
+            model: "gpt-image-2",
+          },
+        },
+      },
+    ])
+  })
+
+  it("takes a picture an MCP image server answers with as an image", async () => {
+    await server("painter", [
+      {
+        name: "generate_image",
+        description: "Generate a picture from a text prompt.",
+        schema: {
+          type: "object",
+          properties: { prompt: { type: "string" } },
+          required: ["prompt"],
+        },
+        annotations: WRITES,
+      },
+    ])
+    const data = await smallPng()
+    answers["painter/generate_image"] = () => ({
+      content: [{ type: "image", data, mimeType: "image/png" }],
+    })
+
+    const answer = await call("generate_image", { prompt: "A lighthouse" })
+
+    expect(answer.structured).toMatchObject({
+      kind: "images",
+      provider: "painter/generate_image",
+    })
+    expect((answer.structured.images as unknown[]).length).toBe(1)
+  })
+
+  it("fails a provider that answers with a link instead of a picture", async () => {
+    await server("images", IMAGES_API)
+    answers["images/create_image"] = json({
+      data: [{ url: "https://cdn.example.com/x.png" }],
+    })
+
+    const answer = await call("generate_image", { prompt: "A kite" })
+
+    expect(answer.isError).toBe(true)
+    expect(answer.text).toMatch(
+      /images\/create_image: it answered with no picture/,
+    )
+  })
+
+  it("passes on the owner's link when the provider's tool asks, and runs nothing", async () => {
+    await server("images", IMAGES_API, { create_image: "ask" })
+
+    const answer = await call("generate_image", { prompt: "A kite" })
+
+    expect(answer.structured).toMatchObject({
+      kind: "needs_owner",
+      reason: "permission",
+    })
+    expect(answer.text).toContain("images/create_image, which needs the owner")
+    expect(ran).toEqual([])
+  })
+
+  it("is not made twice by a repeat: the guard answers, and rerun with a reason makes it again", async () => {
+    await server("images", IMAGES_API)
+    answers["images/create_image"] = json({
+      data: [{ b64_json: await smallPng() }],
+    })
+
+    const first = await call("generate_image", { prompt: "A kite" })
+    const second = await call("generate_image", { prompt: "A kite" })
+
+    expect(first.isError).toBe(false)
+    expect(second.isError).toBe(true)
+    expect(second.text).toMatch(/rerun/)
+    expect(ran).toHaveLength(1)
+  })
+
+  it("refuses a prompt, a count or a size past its limits before anything runs", async () => {
+    await server("images", IMAGES_API)
+
+    for (const args of [
+      { prompt: "x".repeat(4_001) },
+      { prompt: "A kite", n: 5 },
+      { prompt: "A kite", size: "huge" },
+      { prompt: "" },
+    ]) {
+      const answer = await call("generate_image", args)
+      expect(answer.isError, JSON.stringify(args).slice(0, 40)).toBe(true)
+    }
+
+    expect(ran).toEqual([])
+  })
+})
+
+describe("generate_image saving to a store", () => {
+  it("also saves each picture in PCP's own store, through its save_file at the token's levels", async () => {
+    const own = await ensureOwnStore(ctx)
+    await setServerToolAccess(ctx, scope.tokenId, own, "allowed")
+    await server("images", IMAGES_API)
+    const b64 = await smallPng()
+    answers["images/create_image"] = json({
+      data: [{ b64_json: b64 }, { b64_json: b64 }],
+    })
+
+    const answer = await call("generate_image", {
+      prompt: "A kite",
+      n: 2,
+      folder: "",
+      file_name: "cover",
+    })
+
+    expect(answer.isError, answer.text).toBe(false)
+    expect(answer.structured.saved).toEqual([
+      { store: "pcp-files", path: "cover-1.png", error: null },
+      { store: "pcp-files", path: "cover-2.png", error: null },
+    ])
+    // The fake executor stands in for the store: its calls are what ran.
+    const images = answer.structured.images as Array<{ $result: string }>
+    expect(ran.filter((entry) => entry.tool === "save_file")).toEqual([
+      {
+        server: "pcp-files",
+        tool: "save_file",
+        args: { path: "cover-1.png", file: { $result: images[0]!.$result } },
+      },
+      {
+        server: "pcp-files",
+        tool: "save_file",
+        args: { path: "cover-2.png", file: { $result: images[1]!.$result } },
+      },
+    ])
+    expect(vi.mocked(appendRequestLog)).toHaveBeenCalledWith(
+      expect.objectContaining({
+        tool: "generate_image",
+        server: "pcp-files",
+        upstreamTool: "save_file",
+      }),
+    )
+  })
+
+  it("refuses a store the token has not got before any money is spent", async () => {
+    await server("images", IMAGES_API)
+
+    const answer = await call("generate_image", {
+      prompt: "A kite",
+      store: "nowhere",
+    })
+
+    expect(answer.isError).toBe(true)
+    expect(answer.text).toMatch(/no store called nowhere/i)
+    expect(ran).toEqual([])
+  })
+
+  it("keeps the pictures and hands over the owner's link when saving asks", async () => {
+    await ensureOwnStore(ctx)
+    await server("images", IMAGES_API)
+    answers["images/create_image"] = json({
+      data: [{ b64_json: await smallPng() }],
+    })
+
+    const answer = await call("generate_image", {
+      prompt: "A kite",
+      folder: "",
+    })
+
+    expect(answer.text).toContain("saving to pcp-files needs the owner first")
+    expect(answer.text).toContain("do not call generate_image again")
+    expect(ran).toHaveLength(1)
+    expect(await db().storageEntry.count()).toBe(0)
   })
 })

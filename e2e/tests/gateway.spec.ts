@@ -120,6 +120,7 @@ test("issues an API token and describes the servers behind it", async ({
       "view_image",
       "convert_document",
       "edit_pdf",
+      "generate_image",
       // PCP's own store, and the others by store (#90).
       "list_folder",
       "find_files",
