@@ -138,6 +138,11 @@ export function describeSecretRequestAsk(ask: SecretRequestAsk): {
         ? "One-time codes (TOTP): the seed the site showed when you set them up, base32 or an otpauth:// link. PCP types the code of the moment."
         : "A password or other text, typed as it is.",
       ...(ask.username ? [`Login name: ${ask.username}`] : []),
+      ...(ask.valueFrom
+        ? [
+            `The value is a result of ${ask.valueFrom.source} that the assistant kept (${ask.valueFrom.length.toLocaleString("en")} characters${ask.valueFrom.passOnly ? ", pass-only" : ""}); the assistant never saw it, and it is not shown here.`,
+          ]
+        : []),
       ...(ask.generate
         ? [
             `It asks PCP to make a new ${(ask.generate.format ?? "password") === "password" ? "password" : "token"}: ${describeRecipe(ask.generate)}. Nobody sees it but you, on the Secrets page.`,
@@ -147,8 +152,9 @@ export function describeSecretRequestAsk(ask: SecretRequestAsk): {
         ? `Sites: ${ask.origins.join(", ")}`
         : "No sites yet: the browser types it only after asking you each time (Once, or Always at this site, which adds the site). It is sent to a server, a service or a wrapper only where you approve one that names it, which you are shown as also allowing it there.",
     ],
-    warning:
-      ask.origins.length > 0
+    warning: ask.valueFrom
+      ? "PCP reads the value from the kept result only when you save, and stores it under Secrets. You never see it here: check where it came from, and that you expect that tool to have answered with it."
+      : ask.origins.length > 0
         ? "Type the value here, on PCP's page, never in the conversation. The assistant gets the secret's name only, and PCP types it only at the sites you leave in."
         : "Type the value here, on PCP's page, never in the conversation, or have PCP make it. The assistant gets the secret's name only.",
   }

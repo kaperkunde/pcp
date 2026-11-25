@@ -1,5 +1,6 @@
 import type { PasswordRecipe, ToolAccess } from "../constants"
 import type { FetchArgs } from "../fetch/request"
+import type { SecretValueFrom } from "../secret-from-result"
 import type { SecretChangeAsk } from "../secret-changes"
 import type { ServiceUpdateAsk } from "../services/updates"
 import type {
@@ -143,6 +144,11 @@ export type SecretRequestAsk = {
   username?: string | null
   /** The password PCP is asked to make, which the page starts from. */
   generate?: PasswordRecipe | null
+  /**
+   * The value is one of the token's kept results (#174, secret-from-result.ts):
+   * its id and where it came from, never the value.
+   */
+  valueFrom?: SecretValueFrom | null
 }
 
 /** A site an assistant proposes for one of the owner's secrets. */

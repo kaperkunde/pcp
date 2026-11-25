@@ -23,6 +23,7 @@ import { List } from "@kaperkunde/ui/list"
 import { SwitchRow } from "@kaperkunde/ui/switch"
 import { decidePermissionAction } from "@/lib/actions/permissions"
 import type { SecretSitesShown } from "@/lib/core/browser-secrets"
+import type { SecretValueFromShown } from "@/lib/core/secret-from-result"
 import type { SecretScopeChangeShown } from "@/lib/core/secret-changes"
 import type { AlsoAllow } from "@/lib/core/secret-scope-asks"
 import { AlsoAllowBoxes } from "@/components/also-allow-boxes"
@@ -136,6 +137,7 @@ export function PermissionDecision({
   sites = null,
   scopeChanges = null,
   alsoAllows = [],
+  valueFrom = null,
 }: {
   advance?: boolean
   id: string
@@ -175,6 +177,11 @@ export function PermissionDecision({
     stale: boolean
   } | null
   alsoAllows?: AlsoAllow[]
+  /**
+   * The value is one of the assistant's kept results (#174): nothing is typed
+   * or made here; the page says where it came from, and that it expired.
+   */
+  valueFrom?: SecretValueFromShown | null
 }) {
   const { submit, pending, error, setError, done } = useAnswer(
     { request: id },
@@ -195,6 +202,7 @@ export function PermissionDecision({
   // an OAuth client's secret (the provider issues it).
   const canMake = Boolean(
     secret &&
+    !valueFrom &&
     !secret.exists &&
     secret.kind !== "totp" &&
     !secret.clientId &&
@@ -233,6 +241,7 @@ export function PermissionDecision({
       agrees &&
       !secret.exists &&
       !secret.optional &&
+      !valueFrom &&
       !secretValue &&
       !(canMake && generate)
     ) {
@@ -361,7 +370,28 @@ export function PermissionDecision({
     setRecipe((current) => ({ ...current, [key]: value }))
   }
 
-  const valueField = secret ? (
+  const valueField = valueFrom ? (
+    <div
+      className="flex flex-col gap-1 rounded-xl bg-field p-4 text-sm ring-1 ring-separator"
+      data-testid="value-from"
+    >
+      <span className="font-medium">
+        Value from a result the assistant kept
+      </span>
+      <span className="break-words">
+        Made by {valueFrom.source}, {valueFrom.length.toLocaleString("en")}{" "}
+        characters{valueFrom.passOnly ? ", kept pass-only" : ""}. The assistant
+        never saw it, and it is not shown here: PCP reads it when you save, and
+        stores it encrypted under Secrets.
+      </span>
+      {valueFrom.expired ? (
+        <span className="text-warning" role="alert">
+          That result has expired, so nothing can be saved from it. Answer Not
+          now; the assistant can keep the value again and ask again.
+        </span>
+      ) : null}
+    </div>
+  ) : secret ? (
     <Field
       label={
         secret.label ??
@@ -459,23 +489,25 @@ export function PermissionDecision({
             />
           </Field>
           {generate ? null : valueField}
-          <List>
-            <SwitchRow
-              id={`permission-${id}-generate`}
-              label="Have PCP make a new password"
-              description={
-                <>
-                  {secret?.generate ? "The assistant asked for this. " : null}
-                  For a sign-up or a password change: PCP makes it when you
-                  save, nobody sees it on the way, and you can reveal it under
-                  Secrets to keep a copy.
-                </>
-              }
-              checked={generate}
-              onChange={(event) => setGenerate(event.target.checked)}
-              disabled={pending}
-            />
-          </List>
+          {valueFrom ? null : (
+            <List>
+              <SwitchRow
+                id={`permission-${id}-generate`}
+                label="Have PCP make a new password"
+                description={
+                  <>
+                    {secret?.generate ? "The assistant asked for this. " : null}
+                    For a sign-up or a password change: PCP makes it when you
+                    save, nobody sees it on the way, and you can reveal it under
+                    Secrets to keep a copy.
+                  </>
+                }
+                checked={generate}
+                onChange={(event) => setGenerate(event.target.checked)}
+                disabled={pending}
+              />
+            </List>
+          )}
           {generate ? (
             <RecipeFields
               id={id}

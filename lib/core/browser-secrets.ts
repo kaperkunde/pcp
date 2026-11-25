@@ -1311,6 +1311,7 @@ export async function applySecretRequest(
     level,
     loginName,
     generated = false,
+    fromResult = false,
   }: {
     value?: string
     origins?: string[]
@@ -1319,6 +1320,8 @@ export async function applySecretRequest(
     loginName?: string
     /** The value is one PCP made, on the owner's Generate. */
     generated?: boolean
+    /** The value is the kept result the request named (#174), not typed. */
+    fromResult?: boolean
   },
 ): Promise<string> {
   const origins = parseOrigins(chosen ?? ask.origins)
@@ -1361,12 +1364,14 @@ export async function applySecretRequest(
   }
 
   if (origins.length === 0) {
-    return `The owner saved the secret "${secret.name}". It has no sites yet, so the browser types it only after asking the owner each time: Once types it that one time, Always at this site adds the site (change_secret_scope proposes sites). To send it to a server, a service or a wrapper, name it where a secret is taken (register_server's secret or env_secrets, a wrapper's secrets), which the owner approves. You never see its value.${generated ? " PCP made its value itself; the owner can see it on the Secrets page." : ""}`
+    return `The owner saved the secret "${secret.name}". It has no sites yet, so the browser types it only after asking the owner each time: Once types it that one time, Always at this site adds the site (change_secret_scope proposes sites). To send it to a server, a service or a wrapper, name it where a secret is taken (register_server's secret or env_secrets, a wrapper's secrets), which the owner approves. You never see its value.${generated ? " PCP made its value itself; the owner can see it on the Secrets page." : fromResult ? " Its value is the kept result you named; you still never see it." : ""}`
   }
 
   const made = generated
     ? " PCP made its value itself (a new password, which the owner can see on the Secrets page); use it where the site asks for a new password."
-    : ""
+    : fromResult
+      ? " Its value is the kept result you named; you still never see it."
+      : ""
 
   const where = origins.join(", ")
   const uses =

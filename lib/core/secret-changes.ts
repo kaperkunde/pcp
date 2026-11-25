@@ -24,6 +24,7 @@ import {
   generatePassword,
 } from "./generate-password"
 import { hiddenCharacter, withoutPresentation } from "./memories"
+import { prepareValueFrom, type SecretValueFrom } from "./secret-from-result"
 import {
   openSecretMeta,
   SECRET_META_SELECT,
@@ -107,6 +108,11 @@ export type SecretChangeAsk = {
   }
   /** rotate: the value the assistant asked PCP to make, if any. */
   generate?: PasswordRecipe | null
+  /**
+   * rotate: the new value is one of the token's kept results (#174,
+   * secret-from-result.ts): its id and source, never the value.
+   */
+  valueFrom?: SecretValueFrom | null
   /** scope: sites and consumers to add or take away. */
   scope?: {
     addSites: ProposedSecretSite[]
@@ -382,11 +388,14 @@ export type SecretRotateArgs = {
   name: string
   reason: string
   generate?: unknown
+  /** A kept result's handle (#174, secret-from-result.ts); never with generate. */
+  value_from?: unknown
 }
 
 export async function prepareSecretRotate(
   ctx: VaultContext,
   args: SecretRotateArgs,
+  tokenId?: string,
 ): Promise<{ ask: SecretChangeAsk } | { refused: string }> {
   const row = await ownerSecret(ctx, args.name)
 
@@ -395,6 +404,33 @@ export async function prepareSecretRotate(
   }
 
   return refusedIn(async () => {
+    if (args.value_from !== undefined) {
+      if (args.generate !== undefined) {
+        throw invalid(
+          "value_from and generate are two ways to give the new value: leave one out.",
+        )
+      }
+
+      if (row.kind === "totp") {
+        throw invalid(
+          "One-time codes come from the site's seed, which the owner types: leave value_from out.",
+        )
+      }
+    }
+
+    // The requesting token's own kept result, checked before the owner is
+    // asked; the request keeps its id and where it came from, never a value.
+    const from =
+      args.value_from === undefined
+        ? null
+        : tokenId
+          ? await prepareValueFrom(ctx, tokenId, args.value_from)
+          : { refused: "value_from needs the token that asks." }
+
+    if (from && "refused" in from) {
+      throw invalid(from.refused)
+    }
+
     if (args.generate !== undefined && row.kind === "totp") {
       throw invalid(
         "One-time codes come from the site's seed: PCP does not make one. Leave generate out, and the owner types the new seed.",
@@ -411,6 +447,7 @@ export async function prepareSecretRotate(
           args.generate !== undefined
             ? checkPasswordRecipe(args.generate)
             : null,
+        ...(from ? { valueFrom: from.from } : {}),
       },
     }
   })
@@ -757,9 +794,11 @@ export async function showSecretChange(
     rows.push({
       label: row?.kind === "totp" ? "Seed" : "Value",
       before: "the one it has now",
-      after: ask.generate
-        ? `a new one PCP makes: ${describeRecipe(ask.generate)}`
-        : "a new one you type below",
+      after: ask.valueFrom
+        ? `a kept result of ${ask.valueFrom.source} (${ask.valueFrom.length.toLocaleString("en")} characters, never shown)`
+        : ask.generate
+          ? `a new one PCP makes: ${describeRecipe(ask.generate)}`
+          : "a new one you type below",
     })
   }
 
@@ -899,7 +938,9 @@ export function describeSecretChangeAsk(
     lines,
     warning:
       ask.action === "rotate"
-        ? "Type the new value here, on PCP's page, never in the conversation. Everything that uses the secret gets the new value; a service that takes it is made again with it."
+        ? ask.valueFrom
+          ? "The new value is a result the assistant kept, which PCP reads only when you save: the assistant never saw it, and it is shown nowhere. Everything that uses the secret gets the new value; a service that takes it is made again with it."
+          : "Type the new value here, on PCP's page, never in the conversation. Everything that uses the secret gets the new value; a service that takes it is made again with it."
         : ask.action === "delete"
           ? "Deleting it cannot be undone. Whatever uses it has to be changed first."
           : ask.action === "edit" && ask.edit?.name !== undefined
@@ -917,6 +958,8 @@ export type SecretChangeAnswer = {
   value?: string
   /** rotate: "Have PCP make it", the recipe; wins over a typed value. */
   generate?: unknown
+  /** rotate: `value` is the kept result the request named (#174), not typed. */
+  fromResult?: boolean
 }
 
 /**
@@ -1077,7 +1120,7 @@ export async function applySecretChange(
       const failed = remade.filter((each) => !each.ok)
 
       return [
-        `The owner gave the secret "${name}" a new value${generated ? " that PCP made itself" : ""}; you never get it.`,
+        `The owner gave the secret "${name}" a new value${generated ? " that PCP made itself" : answer.fromResult ? " from the kept result you named" : ""}; you never get it.`,
         "Everything that uses it sends the new one from now on.",
         ...(remade.length > 0
           ? [

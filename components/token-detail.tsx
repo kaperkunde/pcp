@@ -32,6 +32,7 @@ import type {
 } from "@/lib/core/constants"
 import type { ShownText } from "@/lib/core/permission-rules"
 import type { ServerKind } from "@/lib/core/servers"
+import type { SecretValueFromShown } from "@/lib/core/secret-from-result"
 import type { ActionState } from "@/lib/server/action-state"
 
 export type WaitingRequest = {
@@ -64,6 +65,8 @@ export type WaitingRequest = {
     generate?: PasswordRecipe | null
     defaultRecipe?: PasswordRecipe | null
   } | null
+  /** request_secret's value from a kept result (#174), never typed. */
+  valueFrom?: SecretValueFromShown | null
   /** "Allow for" has one length (a secret the browser types: an hour). */
   allowForFixed?: boolean
   /** A memory to share: the toggle for reading it in every conversation. */
@@ -153,6 +156,7 @@ export function TokenWaiting({ waiting }: { waiting: WaitingRequest[] }) {
                 revision={item.revision}
                 decisions={item.decisions}
                 secret={item.secret}
+                valueFrom={item.valueFrom}
                 every={item.every}
                 privateAddresses={item.privateAddresses}
                 // The page lists them all: answered, the owner stays here.

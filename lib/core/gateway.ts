@@ -251,6 +251,7 @@ import {
   recipeArg,
   type SecretRequestArgs,
 } from "./secret-request"
+import { valueFromArg } from "./secret-from-result"
 import {
   MAX_SCOPE_CHANGES,
   prepareSecretDelete,
@@ -4854,7 +4855,7 @@ export function buildGatewayServer(
   register({
     name: "request_secret",
     title: "Ask the owner for a secret",
-    description: `Request a new secret or password from the owner: a password, an API key or token, or a sign-in's one-time codes, stored on PCP's page so its value never passes through you or the conversation. They type it in, or have PCP make it (generate: a password, or a token of letters and digits, hex or base64url, for a key a server or service is to be given), and check the login name and the sites. origins, optional, are the sites the browser may type it at; with none, the browser types it only after asking the owner each time: Once types it that one time, Always at this site adds the site (change_secret_scope proposes sites). Name it in register_server's secret or env_secrets, or a wrapper's secrets, to have it sent there once the owner approves. Answers "Not done yet" with a link. ${OWNER_LINK_RULE} ${nextMessageCheck("check_permission with the id it gave")} Never ask for the value in the conversation. A name PCP already holds is refused: name that one instead.`,
+    description: `Request a new secret or password from the owner: a password, an API key or token, or a sign-in's one-time codes, stored on PCP's page so its value never passes through you or the conversation. They type it in, or have PCP make it (generate: a password, or a token of letters and digits, hex or base64url, for a key a server or service is to be given), and check the login name and the sites. origins, optional, are the sites the browser may type it at; with none, the browser types it only after asking the owner each time: Once types it that one time, Always at this site adds the site (change_secret_scope proposes sites). Name it in register_server's secret or env_secrets, or a wrapper's secrets, to have it sent there once the owner approves. Answers "Not done yet" with a link. ${OWNER_LINK_RULE} ${nextMessageCheck("check_permission with the id it gave")} Never ask for the value in the conversation. A name PCP already holds is refused: name that one instead. To store a value PCP kept for you (a token another tool answered with, a handle {"$result": …} even a pass-only one), pass it as value_from instead of generate: the owner approves on PCP's page and you never see it.`,
     input: z
       .object({
         name: z
@@ -4893,6 +4894,7 @@ export function buildGatewayServer(
         generate: recipeArg(
           "Ask PCP to make the value rather than the owner typing one: a password for a sign-up or a password change, or a token (format alphanumeric, hex or base64url) for a key a server or service is to be set up with. Made on PCP's machine and stored at once; the owner can change the recipe on the page and see the value under Secrets, and you never get it. Not for totp.",
         ).optional(),
+        value_from: valueFromArg().optional(),
       })
       .meta({
         allOf: [
@@ -4901,16 +4903,25 @@ export function buildGatewayServer(
             then: {
               required: ["origins"],
               not: {
-                anyOf: [{ required: ["username"] }, { required: ["generate"] }],
+                anyOf: [
+                  { required: ["username"] },
+                  { required: ["generate"] },
+                  { required: ["value_from"] },
+                ],
               },
             },
           },
+          { not: { required: ["generate", "value_from"] } },
         ],
       }),
     output: NEEDS_OWNER,
     annotations: PROPOSES,
     async run(args: SecretRequestArgs) {
-      const prepared = await prepareSecretRequest(scope.ctx, args)
+      const prepared = await prepareSecretRequest(
+        scope.ctx,
+        args,
+        scope.tokenId,
+      )
 
       if ("refused" in prepared) {
         return failure(prepared.refused)
@@ -5001,18 +5012,23 @@ export function buildGatewayServer(
   register({
     name: "rotate_secret",
     title: "Propose a new value for a secret",
-    description: `Rotate a secret's value: the owner types a new one on PCP's page, or has PCP make it (generate: a password, or a token of letters and digits, hex or base64url), so it never passes through you or the conversation. Always asks the owner, whatever this token may do: answers "Not done yet" with a link. ${OWNER_LINK_RULE} Once they save it, every server, account and wrapper that uses the secret sends the new value, and a service that takes it is made again with it. ${nextMessageCheck("check_permission with the id it gave")} For a key that leaked or a password the site wants changed. Not for a secret PCP made for something of its own.`,
-    input: z.object({
-      name: secretNameArg,
-      reason: secretReasonArg,
-      generate: recipeArg(
-        "Ask PCP to make the new value rather than the owner typing one: a password, or a token (format alphanumeric, hex or base64url). Made on PCP's machine when the owner agrees, never shown to you. Not for one-time codes.",
-      ).optional(),
-    }),
+    description: `Rotate a secret's value: the owner types a new one on PCP's page, or has PCP make it (generate: a password, or a token of letters and digits, hex or base64url), or it is one PCP kept for you (value_from: a handle {"$result": …} of a token another tool answered with, even a pass-only one), so it never passes through you or the conversation. Always asks the owner, whatever this token may do: answers "Not done yet" with a link. ${OWNER_LINK_RULE} Once they save it, every server, account and wrapper that uses the secret sends the new value, and a service that takes it is made again with it. ${nextMessageCheck("check_permission with the id it gave")} For a key that leaked or a password the site wants changed. Not for a secret PCP made for something of its own.`,
+    input: z
+      .object({
+        name: secretNameArg,
+        reason: secretReasonArg,
+        generate: recipeArg(
+          "Ask PCP to make the new value rather than the owner typing one: a password, or a token (format alphanumeric, hex or base64url). Made on PCP's machine when the owner agrees, never shown to you. Not for one-time codes.",
+        ).optional(),
+        value_from: valueFromArg().optional(),
+      })
+      .meta({ allOf: [{ not: { required: ["generate", "value_from"] } }] }),
     output: NEEDS_OWNER,
     annotations: PROPOSES,
     async run(args: SecretRotateArgs) {
-      return secretAsked(await prepareSecretRotate(scope.ctx, args))
+      return secretAsked(
+        await prepareSecretRotate(scope.ctx, args, scope.tokenId),
+      )
     },
   })
 
