@@ -50,6 +50,26 @@ export async function setUpEntries(
     }
   }
 
+  // One sign-in for several servers: set up once a server bound to it is
+  // among the token's (never read from the rest of the vault).
+  const accountEntries = CATALOGUE.filter((entry) => entry.account)
+
+  if (accountEntries.length > 0 && ids.length > 0) {
+    const bound = await db().mcpServer.count({
+      where: {
+        vaultId: ctx.vaultId,
+        id: { in: ids },
+        accountId: { not: null },
+      },
+    })
+
+    if (bound > 0) {
+      for (const entry of accountEntries) {
+        done.add(entry.id)
+      }
+    }
+  }
+
   // Search by meaning is the owner's choice of a provider, not a service.
   done.delete("embeddings")
 

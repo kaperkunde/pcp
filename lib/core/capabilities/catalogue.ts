@@ -34,6 +34,7 @@ export const CATALOGUE_IDS = [
   "mail",
   "calendar",
   "ssh",
+  "google",
   "whisper",
 ] as const
 
@@ -63,6 +64,11 @@ export type CatalogueEntry = {
   how: string
   /** A builtin's server kinds: one of them in the vault is it set up. */
   serverKinds?: ServerKind[]
+  /**
+   * A builtin that is one sign-in for several servers (lib/core/google/):
+   * set up when a server bound to that account is among the token's.
+   */
+  account?: "google"
   /** A common item's item; null when PCP's common items have none yet. */
   item?: CommonItem | null
   /** Other common items that do the same, offered after `item` on its page. */
@@ -372,6 +378,33 @@ export const CATALOGUE: readonly CatalogueEntry[] = [
     label: "Add an SSH server in PCP",
     how: "Only the owner adds one (register_server has no kind for it): hand them the link, then help with what runs there.",
     serverKinds: ["ssh"],
+    ownerOnly: true,
+  },
+  {
+    id: "google",
+    title: "Google Workspace",
+    does: "Reaches your Gmail, Calendar, Drive, Docs, Sheets, Slides, Tasks and contacts (and Chat and Classroom when you choose them) through Google's own servers, with one Google sign-in for all of them; mail is drafted, never sent.",
+    takes:
+      "A Google client of your own, made on Google's page for personal clients (it takes a few minutes), and one Google sign-in; you do both on PCP's Google page, and the assistant never sees a key or token.",
+    queryWords: [
+      "google",
+      "google workspace",
+      "google drive",
+      "google docs",
+      "google sheets",
+      "google slides",
+      "google calendar",
+      "google tasks",
+      "google contacts",
+      "google chat",
+      "google classroom",
+      "workspace",
+    ],
+    kind: "builtin",
+    page: "/servers/google",
+    label: "Connect Google in PCP",
+    how: "Only the owner sets it up (register_server has no kind for it): hand them the link, then help with what they ask once its tools are there.",
+    account: "google",
     ownerOnly: true,
   },
   {

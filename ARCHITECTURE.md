@@ -53,7 +53,12 @@ associated data (a ciphertext cannot be moved to another row):
 - OAuth token sets and the clients PCP registered (a `secret` row of kind
   `oauth`, owned by the server that uses it); an OAuth client secret the
   owner gives PCP is one of their own `text` secrets,
-- the PKCE verifier of an authorization in flight (`oauth_state`),
+- the PKCE verifier of an authorization in flight (`oauth_state`, and
+  `oauth_account_state` for the Google sign-in),
+- the Google sign-in's own details (`oauth_account.meta`: the owner's client
+  ID, the products chosen, the scopes granted, the account's email); its
+  tokens are a `secret` row of kind `oauth` and its client secret one of the
+  owner's `text` secrets,
 - a memory's path and text (`memory.ciphertext`, as one JSON value),
 - a tool answer or a file kept for `read_result` and handles
   (`tool_result.ciphertext`),
