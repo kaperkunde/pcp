@@ -383,6 +383,14 @@ describe("what a token has", () => {
     expect(has.has("claude_sessions")).toBe(false)
   })
 
+  it("offers Voyage 4 nano for search by meaning, and Text Embeddings Inference after it", () => {
+    const entry = CATALOGUE.find((item) => item.id === "embeddings")
+    expect(entry?.item?.name).toBe("voyage-4-nano")
+    expect(entry?.alternatives?.map((item) => item.name)).toEqual([
+      "text-embeddings-inference",
+    ])
+  })
+
   it("has search by meaning only when the owner chose a provider", async () => {
     await serviceOf(`ghcr.io/huggingface/text-embeddings-inference@${DIGEST}`)
     expect((await tokenHas()).has("embeddings")).toBe(false)

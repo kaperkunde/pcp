@@ -139,7 +139,7 @@ export default async function CapabilityPage({
  */
 async function EntryPage({ entry }: { entry: CatalogueEntry }) {
   const ctx = await requireContext()
-  const items = entry.item ? [entry.item] : []
+  const items = entry.item ? [entry.item, ...(entry.alternatives ?? [])] : []
   const { repoId, offers, running, problem } = await itemOffers(ctx, items)
 
   return (
