@@ -1336,16 +1336,25 @@ export function buildGatewayServer(
 
     const key = scope.client.sessionKey
     const now = Date.now()
-    const { since, told } = answeredCursor(key, ANSWERED_WINDOW_MS, now)
+    const { since, told, running } = answeredCursor(
+      key,
+      ANSWERED_WINDOW_MS,
+      now,
+    )
     const { seen, answered, more } = await listAnsweredRequests(scope, {
       since: new Date(since),
       limit: MAX_ANSWERED_NOTED,
       skip: told,
+      stillRunning: running,
     })
 
     lookedForAnswers(
       key,
-      seen.map((row) => ({ id: row.id, at: row.decidedAt.getTime() })),
+      seen.map((row) => ({
+        id: row.id,
+        at: row.decidedAt.getTime(),
+        running: row.status === "running",
+      })),
       now,
     )
     return answeredNote(answered, more, new Date(now))
@@ -4289,6 +4298,7 @@ export function buildGatewayServer(
             answered.map((request) => ({
               id: request.id,
               at: request.decidedAt.getTime(),
+              running: request.status === "running",
             })),
           )
         }
@@ -4333,17 +4343,26 @@ export function buildGatewayServer(
         return passOn(result)
       }
 
-      // Its outcome is read here: the session's note does not tell it again.
-      if (scope.client) {
-        noteAnswersTold(scope.client.sessionKey, [
-          { id: args.id, at: Date.now() },
-        ])
-      }
-
       const view = await getPermissionView(scope.ctx, args.id, {
         publicUrl: scope.publicUrl,
         tokenId: scope.tokenId,
       })
+
+      // Its outcome is read here: the session's note does not tell it again,
+      // unless it was still running: that is told once it has finished.
+      if (scope.client) {
+        const running = view?.status === "running"
+
+        noteAnswersTold(scope.client.sessionKey, [
+          {
+            id: args.id,
+            at: running
+              ? (view.decidedAt?.getTime() ?? Date.now())
+              : Date.now(),
+            running,
+          },
+        ])
+      }
 
       return ok(
         {

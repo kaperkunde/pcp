@@ -78,6 +78,7 @@ describe("sessions", () => {
     expect(answeredCursor(one, hour, now)).toEqual({
       since: now - hour,
       told: new Set(),
+      running: new Set(),
     })
 
     // An answer given just before the look, and one long before: both told.
@@ -107,6 +108,54 @@ describe("sessions", () => {
     expect(answeredCursor(one, hour, now + 9_000)).toEqual({
       since: now + 9_000 - hour,
       told: new Set(),
+      running: new Set(),
     })
+  })
+
+  it("tell a request seen while it ran again once it finished, and hold the cursor back for it", () => {
+    const one = key()
+    const now = Date.now()
+    const hour = 60 * 60_000
+    const allowed = now - 10 * 60_000
+
+    answeredCursor(one, hour, now)
+    lookedForAnswers(
+      one,
+      [
+        { id: "slow", at: allowed, running: true },
+        { id: "quick", at: now - 1_000 },
+      ],
+      now,
+    )
+
+    // Still running: not told as done, and the next look reaches back to it.
+    const during = answeredCursor(one, hour, now + 5 * 60_000)
+    expect(during.since).toBe(allowed)
+    expect(during.running).toEqual(new Set(["slow"]))
+    expect(during.told).toEqual(new Set(["quick"]))
+    lookedForAnswers(
+      one,
+      [{ id: "slow", at: allowed, running: true }],
+      now + 5 * 60_000,
+    )
+    expect(answeredCursor(one, hour, now + 5 * 60_000).since).toBe(allowed)
+
+    // A check_permission that still found it running is no more than that.
+    noteAnswersTold(
+      one,
+      [{ id: "slow", at: allowed, running: true }],
+      now + 6 * 60_000,
+    )
+    expect(answeredCursor(one, hour, now + 6 * 60_000).told).not.toContain(
+      "slow",
+    )
+
+    // Told once it finished: skipped from then on, and the cursor moves on.
+    lookedForAnswers(one, [{ id: "slow", at: allowed }], now + 10 * 60_000)
+    const after = answeredCursor(one, hour, now + 10 * 60_000)
+    expect(after.running).toEqual(new Set())
+    // Given before the new cursor, no look finds it again: let go.
+    expect(after.told.has("slow")).toBe(false)
+    expect(after.since).toBe(now + 10 * 60_000 - ANSWERED_SLACK_MS)
   })
 })

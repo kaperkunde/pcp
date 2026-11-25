@@ -537,6 +537,8 @@ export type PermissionView = {
   conflicts: Array<{ id: string; tokenName: string; url: string }>
   createdAt: Date
   expiresAt: Date
+  /** When the owner answered; for a running request, when it was allowed. */
+  decidedAt: Date | null
   outcome: string | null
   outcomeIsError: boolean
   decisions: Array<{ value: PermissionDecision; label: string }>
@@ -1936,6 +1938,7 @@ async function toView(
       status === "pending" ? await conflictsOf(ctx, row, publicUrl) : [],
     createdAt: row.createdAt,
     expiresAt: row.expiresAt,
+    decidedAt: row.decidedAt,
     outcome: readResult(ctx, row),
     outcomeIsError: row.resultIsError,
     decisions:
@@ -2286,8 +2289,15 @@ function outcomeOf(view: PermissionView): CallToolResult {
       )
     case "declined":
       return text(view.outcome ?? "The owner said no, so nothing ran.")
-    case "running":
-      return text("The owner allowed it; it is running now.")
+    case "running": {
+      const since = view.decidedAt
+        ? `, ${ageText(Date.now() - view.decidedAt.getTime()).replace(/ ago$/, "")} since it was allowed`
+        : ""
+
+      return text(
+        `The owner allowed it; it is still running${since}. This is not its answer yet: call check_permission with id "${view.id}" again right away, it waits for the run to finish.`,
+      )
+    }
     case "withdrawn":
       return text(
         "You withdrew this request, so the owner was not asked any more and nothing ran.",
@@ -4806,9 +4816,16 @@ export async function listAnsweredRequests(
     since,
     limit = MAX_ANSWERED_LISTED,
     skip,
-  }: { since: Date; limit?: number; skip?: ReadonlySet<string> },
+    stillRunning,
+  }: {
+    since: Date
+    limit?: number
+    skip?: ReadonlySet<string>
+    /** Told while running: skipped only while the request still runs. */
+    stillRunning?: ReadonlySet<string>
+  },
 ): Promise<{
-  seen: { id: string; decidedAt: Date }[]
+  seen: { id: string; decidedAt: Date; status: string }[]
   answered: AnsweredRequest[]
   more: number
 }> {
@@ -4819,15 +4836,20 @@ export async function listAnsweredRequests(
       status: { in: [...ANSWERED_STATUSES] },
       decidedAt: { gte: since },
     },
-    select: { id: true, decidedAt: true },
+    select: { id: true, decidedAt: true, status: true },
     orderBy: { decidedAt: "desc" },
     take: MAX_ANSWERED_SEEN,
   })
   const seen = found.map((row) => ({
     id: row.id,
     decidedAt: row.decidedAt ?? since,
+    status: row.status,
   }))
-  const fresh = seen.filter((row) => !skip?.has(row.id))
+  const fresh = seen.filter(
+    (row) =>
+      !skip?.has(row.id) &&
+      !(row.status === "running" && stillRunning?.has(row.id)),
+  )
   const picked = fresh.slice(0, Math.max(0, limit))
 
   if (picked.length === 0) {

@@ -3022,6 +3022,55 @@ describe("an assistant withdrawing its own request", () => {
   })
 })
 
+describe("a request still running after the owner allowed it", () => {
+  it("says it is still going and to call check_permission again, and is found again once done", async () => {
+    const { scope, server } = await setup()
+
+    await withPermission(scope, call(server, "add_numbers", { a: 1 }))
+    const row = await db().permissionRequest.findFirstOrThrow({
+      where: { tokenId: scope.tokenId },
+    })
+    await db().permissionRequest.update({
+      where: { id: row.id },
+      data: {
+        status: "running",
+        decidedAt: new Date(Date.now() - 3 * 60_000),
+      },
+    })
+
+    const said = textOf(await checkPermission(scope, row.id, { waitMs: 0 }))
+    expect(said).toContain("still running, 3 minutes since it was allowed")
+    expect(said).toContain(`call check_permission with id "${row.id}" again`)
+    expect(said).not.toContain("next message")
+    expect(said).not.toContain(`/permissions/${row.id}`)
+
+    const since = new Date(Date.now() - 60 * 60_000)
+    const whileRunning = await listAnsweredRequests(scope, {
+      since,
+      stillRunning: new Set([row.id]),
+    })
+    expect(whileRunning.answered).toEqual([])
+    expect(whileRunning.seen).toEqual([
+      expect.objectContaining({ id: row.id, status: "running" }),
+    ])
+    // Not told while running, so it is told in full the first time.
+    const first = await listAnsweredRequests(scope, { since })
+    expect(first.answered.map((request) => request.status)).toEqual(["running"])
+    expect(first.answered[0]!.outcome).toContain("still running")
+
+    await db().permissionRequest.update({
+      where: { id: row.id },
+      data: { status: "executed" },
+    })
+    // Told while it ran: told again now that it has finished.
+    const done = await listAnsweredRequests(scope, {
+      since,
+      stillRunning: new Set([row.id]),
+    })
+    expect(done.answered.map((request) => request.status)).toEqual(["executed"])
+  })
+})
+
 describe("a request closed because what it was about went away", () => {
   it("closes only the pending, unexpired rows it names, and says so", async () => {
     const { ctx, scope, server } = await setup()
