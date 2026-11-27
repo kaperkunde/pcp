@@ -270,7 +270,9 @@ so in the summary; the bump itself waits for the request.
   while it keeps its turn: the sign-ins are saved at most every
   `PROFILE_ACTION_SAVE_INTERVAL_MS` after an action (a save reads the whole
   storage state, seconds on a site with a big IndexedDB; #190), at once only
-  for a cleared check, a hand-over's end and the browser's close. An action
+  for a cleared check, a hand-over's end, the owner's Browser page as it
+  opens (`browserOverview`'s `fresh`, never its refreshes) and the browser's
+  close. An action
   held more than a second (`HELD_NOTE_MS`) starts its answer with one line,
   `Held 4.2 s: waiting for its turn at <site> under <the setting that decided
 it> 0.3 s, saving the browser's sign-ins 3.9 s.` (`heldLine`); a new wait
