@@ -521,6 +521,41 @@ describe("the gate a type call passes", () => {
     await admit("password", later(2_000), "t2")
   })
 
+  it("keeps a sign-in's window across bundles built apart (the owner's page and /mcp)", async () => {
+    const start = new Date()
+    await grantSecretUse(
+      ctx,
+      { tokenId, secretId, origin: SHOP, level: "once" },
+      start,
+    )
+    await admitSecretUse(
+      ctx,
+      {
+        tokenId,
+        serverId,
+        name: "Shop password",
+        use: { ...pageAt(SHOP), tabId: "t1" },
+        part: "username",
+      },
+      start,
+    )
+
+    // Another copy of the module, as the gateway's route has.
+    vi.resetModules()
+    const other = await import("./browser-secrets")
+    await other.admitSecretUse(
+      ctx,
+      {
+        tokenId,
+        serverId,
+        name: "Shop password",
+        use: { ...pageAt(SHOP), tabId: "t1" },
+        part: "password",
+      },
+      new Date(start.getTime() + 1_000),
+    )
+  })
+
   it("refuses a secret it does not hold, or one the browser does not type", async () => {
     await expect(
       admitSecretUse(ctx, {

@@ -906,7 +906,20 @@ async function takeAllowance(
  * again), each window used up by that one other part, so a second sign-in
  * asks the owner again.
  */
-const signInWindows = new Map<string, { part: SecretPart; until: number }>()
+type SignInWindows = Map<string, { part: SecretPart; until: number }>
+
+const WINDOWS = Symbol.for("pcp.browser.signInWindows")
+
+/**
+ * On globalThis: the owner's page (which types the first part when they
+ * answer) and the gateway's route are bundled apart, and each would
+ * otherwise have a map of its own, so the other part asked again.
+ */
+function windows(): SignInWindows {
+  const holder = globalThis as unknown as { [WINDOWS]?: SignInWindows }
+
+  return (holder[WINDOWS] ??= new Map())
+}
 
 function windowKey(
   tokenId: string,
@@ -918,15 +931,15 @@ function windowKey(
 }
 
 function openSignInWindow(key: string, part: SecretPart, now: Date): void {
-  for (const [other, window] of signInWindows) {
-    if (window.until <= now.getTime()) signInWindows.delete(other)
+  for (const [other, window] of windows()) {
+    if (window.until <= now.getTime()) windows().delete(other)
   }
 
-  while (signInWindows.size >= MAX_SECRET_SIGN_IN_WINDOWS) {
-    signInWindows.delete(signInWindows.keys().next().value!)
+  while (windows().size >= MAX_SECRET_SIGN_IN_WINDOWS) {
+    windows().delete(windows().keys().next().value!)
   }
 
-  signInWindows.set(key, {
+  windows().set(key, {
     part,
     until: now.getTime() + SECRET_SIGN_IN_WINDOW_MS,
   })
@@ -934,22 +947,22 @@ function openSignInWindow(key: string, part: SecretPart, now: Date): void {
 
 /** The other part of a sign-in begun on a once allowance, used up if so. */
 function takeSignInWindow(key: string, part: SecretPart, now: Date): boolean {
-  const window = signInWindows.get(key)
+  const window = windows().get(key)
 
   if (!window || window.until <= now.getTime() || window.part === part) {
     return false
   }
 
-  signInWindows.delete(key)
+  windows().delete(key)
   return true
 }
 
 /** Sign-ins begun for these, ended: the owner took the allowance or the site away. */
 function endSignInWindows(tokenId: string | null, secretId: string): void {
-  for (const key of signInWindows.keys()) {
+  for (const key of windows().keys()) {
     const [token, secret] = key.split("\n")
     if (secret === secretId && (tokenId === null || token === tokenId)) {
-      signInWindows.delete(key)
+      windows().delete(key)
     }
   }
 }
