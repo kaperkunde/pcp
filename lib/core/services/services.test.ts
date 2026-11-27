@@ -29,7 +29,7 @@ import {
 import { secretUses } from "../secret-uses"
 import { deleteServer, getServer, updateServer } from "../servers"
 import { startFakeSsh, type FakeSsh } from "../ssh/fake-server"
-import { createSshServer } from "../ssh/hosts"
+import { createSshServer, forgetSshHostKey } from "../ssh/hosts"
 import { scratchDatabase } from "../test-db"
 import { closeAllSshConnections } from "../ssh/client"
 import {
@@ -48,8 +48,12 @@ import {
   serviceStateLine,
   syncServerTools,
   updateService,
+  webSearchProvider,
 } from "../upstream"
 import { setupVault } from "../vault"
+import { checkWebSearchConfig } from "../websearch/config"
+import { requestSearch } from "../websearch/request"
+import { forgetSearches, runWebSearch } from "../websearch/search"
 import {
   forgetResourceLimits,
   getResourceConfig,
@@ -187,7 +191,11 @@ async function startHttp(port = 0) {
       return
     }
 
-    const answer = answers[request.url ?? ""] ?? { status: 404, body: "no" }
+    const url = request.url ?? ""
+    const answer = answers[url.startsWith("/search?") ? "/search" : url] ?? {
+      status: 404,
+      body: "no",
+    }
     response.writeHead(answer.status, { "content-type": "application/json" })
     response.end(answer.body)
   })
@@ -3147,5 +3155,155 @@ describe("a tunnel to a service", () => {
 
     await dial("192.168.1.5", 8001)
     expect(opened).toEqual(["192.168.1.5:8001"])
+  })
+})
+
+describe("web_search through a service of the owner's (SearXNG)", () => {
+  const SEARXNG: ServiceDefinitionInput = {
+    image: `docker.io/searxng/searxng@${DIGEST}`,
+    source: "docker.io/searxng/searxng:latest",
+    ports: [{ container: 8080 }],
+    env: [],
+    volumes: [],
+    health: { kind: "http", port: 8080, path: "/healthz" },
+    registers: { kind: "none" },
+  }
+  const RESULTS = JSON.stringify({
+    results: [{ title: "PCP", url: "https://pcp.gg/", content: "A gateway" }],
+  })
+
+  async function searxng(): Promise<string> {
+    const hostId = await pinnedHost()
+    answers["/healthz"] = { status: 200, body: "OK" }
+    answers["/search"] = { status: 200, body: RESULTS }
+    const launched = await launchService(
+      ctx,
+      {
+        name: "Search",
+        description: "A private search.",
+        hostId,
+        definition: SEARXNG,
+        publish: {
+          address: "127.0.0.1",
+          ports: [{ container: 8080, host: httpPort }],
+        },
+        env: {},
+      },
+      FAST,
+    )
+    forgetSearches()
+    return launched.id
+  }
+
+  const input = { query: "pcp gateway" }
+  const prepare = (
+    c: VaultContext,
+    config: Parameters<typeof webSearchProvider>[1],
+  ) => webSearchProvider(c, config, PUBLIC.publicUrl)
+
+  beforeEach(() => setup())
+  afterEach(teardown)
+
+  it("answers results through the SSH connection, at the health check's port", async () => {
+    const id = await searxng()
+    const config = await checkWebSearchConfig(ctx, {
+      provider: "searxng",
+      secretId: null,
+      service: id,
+    })
+    const prepared = await prepare(ctx, config)
+
+    expect(config).toEqual({ provider: "searxng", secretId: null, service: id })
+    expect(prepared.label).toBe("Search service")
+    expect(prepared.base).toBe(`http://127.0.0.1:${httpPort}`)
+    expect(prepared.host).toBe(`service.${id}`)
+
+    const before = ssh.forwards.length
+    const outcome = await runWebSearch(ctx, input, {
+      prepare,
+      config,
+      publicUrl: PUBLIC.publicUrl,
+    })
+
+    expect(outcome).toMatchObject({
+      type: "results",
+      provider: "Search service",
+      cached: false,
+      results: [{ title: "PCP", url: "https://pcp.gg/" }],
+    })
+    expect(ssh.forwards.length).toBeGreaterThan(before)
+  })
+
+  it("starts a service left running when it finds it stopped, and searches again", async () => {
+    const id = await searxng()
+    const config = { provider: "searxng", secretId: null, service: id } as const
+    docker.update((state) => {
+      state.containers["pcp-search"]!.state = "exited"
+    })
+
+    const outcome = await runWebSearch(ctx, input, {
+      prepare,
+      config,
+      publicUrl: PUBLIC.publicUrl,
+    })
+
+    expect(outcome).toMatchObject({ type: "results" })
+    expect(docker.state().calls).toContainEqual(["start", "pcp-search"])
+  }, 30_000)
+
+  it("leaves one stopped through PCP stopped", async () => {
+    const id = await searxng()
+    const config = { provider: "searxng", secretId: null, service: id } as const
+    await runServiceAction(ctx, id, "stop", FAST)
+
+    const prepared = await prepare(ctx, config)
+    const answer = await requestSearch(
+      prepared,
+      { query: "pcp", limit: 3 },
+      AbortSignal.timeout(10_000),
+    )
+
+    expect(answer).toMatchObject({ kind: "failed", unreached: true })
+    expect(docker.state().calls).not.toContainEqual(["start", "pcp-search"])
+    expect(docker.state().containers["pcp-search"]!.state).toBe("exited")
+  })
+
+  it("refuses a service that is not the owner's, or not a service", async () => {
+    const id = await searxng()
+    const hostId = (await db().serviceSpec.findFirstOrThrow()).hostId!
+
+    await expect(
+      checkWebSearchConfig(ctx, {
+        provider: "searxng",
+        secretId: null,
+        service: "no-such-service",
+      }),
+    ).rejects.toThrow(/Choose one of your services/)
+    await expect(
+      checkWebSearchConfig(ctx, {
+        provider: "searxng",
+        secretId: null,
+        service: hostId,
+      }),
+    ).rejects.toThrow(/Choose one of your services/)
+    await expect(
+      checkWebSearchConfig(ctx, {
+        provider: "searxng",
+        secretId: null,
+        service: "",
+      }),
+    ).rejects.toThrow(/Choose one of your services/)
+    expect(id).not.toBe(hostId)
+  })
+
+  it("is refused before it connects when the SSH server's host key is not pinned", async () => {
+    const id = await searxng()
+    await forgetSshHostKey(
+      ctx,
+      (await db().serviceSpec.findFirstOrThrow()).hostId!,
+    )
+    await expect(
+      prepare(ctx, { provider: "searxng", secretId: null, service: id }),
+    ).rejects.toThrow(/has not pinned/)
   })
 })

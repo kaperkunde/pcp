@@ -36,6 +36,12 @@ export type PreparedSearch = {
   redact: string[]
   /** Which addresses it may reach (public only, PCP's own never). */
   sendOptions: SendOptions
+  /**
+   * A search run as a service of the owner's: started again once when a
+   * request finds it unreachable and the owner left it running (upstream.ts
+   * wakes it). True when it did, so the request is made once more.
+   */
+  wake?: () => Promise<boolean>
 }
 
 export type SearchAnswer =
@@ -48,9 +54,31 @@ export type SearchAnswer =
       bytes: number
       /** The key was refused: the owner has to look at the setting. */
       unauthorized: boolean
+      /** No connection was made at all (a stopped service's reason). */
+      unreached?: boolean
     }
 
 export async function requestSearch(
+  prepared: PreparedSearch,
+  params: SearchParams,
+  signal: AbortSignal,
+): Promise<SearchAnswer> {
+  const answer = await requestOnce(prepared, params, signal)
+
+  if (
+    answer.kind === "failed" &&
+    answer.unreached &&
+    prepared.wake &&
+    !signal.aborted &&
+    (await prepared.wake().catch(() => false))
+  ) {
+    return requestOnce(prepared, params, signal)
+  }
+
+  return answer
+}
+
+async function requestOnce(
   prepared: PreparedSearch,
   params: SearchParams,
   signal: AbortSignal,
@@ -99,6 +127,7 @@ export async function requestSearch(
 
     return failed(
       `${prepared.label} could not be reached: ${scrub.text(describeFetchError(error, WEB_SEARCH_TIMEOUT_MS))}`,
+      { unreached: true },
     )
   }
 
