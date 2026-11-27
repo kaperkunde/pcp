@@ -7,6 +7,7 @@ import { readServiceDefinition } from "../services/definition"
 import { itemOfImage, type CapabilityId } from "./list"
 import { MAX_SCHEMAS_READ } from "./limits"
 import {
+  mightProvide,
   providersOf,
   type CandidateTool,
   type OperationId,
@@ -28,8 +29,9 @@ const WORTH_READING =
 export async function candidateTools(
   ctx: VaultContext,
   servers: GatewayServer[],
+  id?: CapabilityId,
 ): Promise<CandidateTool[]> {
-  const listed = servers
+  const worth = servers
     .filter((server) => server.kind !== "browser")
     .flatMap((server) =>
       visibleTools(server)
@@ -40,7 +42,21 @@ export async function candidateTools(
         )
         .map((tool) => ({ server, tool })),
     )
-    .slice(0, MAX_SCHEMAS_READ)
+  // The ones whose name or words already fit the capability come first, so
+  // the bound never leaves them out (a vault with hundreds of tools that
+  // mention a file or a page).
+  const fits = (entry: (typeof worth)[number]) =>
+    id !== undefined &&
+    mightProvide(id, {
+      tool: entry.tool.name,
+      title: entry.tool.title,
+      description:
+        entry.tool.descriptionOverride ?? entry.tool.description ?? "",
+    })
+  const listed = [
+    ...worth.filter(fits),
+    ...worth.filter((entry) => !fits(entry)),
+  ].slice(0, MAX_SCHEMAS_READ)
 
   if (listed.length === 0) {
     return []
@@ -133,7 +149,7 @@ export async function capabilityProviders(
   servers: GatewayServer[],
   id: CapabilityId,
 ): Promise<Partial<Record<OperationId, Provider[]>>> {
-  const tools = await candidateTools(ctx, servers)
+  const tools = await candidateTools(ctx, servers, id)
 
   if (tools.length === 0) {
     return {}

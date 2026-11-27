@@ -883,6 +883,35 @@ export function findProviders(
   )
 }
 
+/**
+ * Whether a tool could be one of the capability's providers by its name and
+ * words alone, before its schema is read: candidates.ts reads these first,
+ * so a vault with many tools never leaves the right one out of the bound.
+ */
+export function mightProvide(
+  id: CapabilityId,
+  tool: Pick<CandidateTool, "tool" | "title" | "description">,
+): boolean {
+  const candidate = { ...tool, schema: null } as CandidateTool
+  const text = textOf(candidate)
+
+  return operationsOf(id).some((operation) => {
+    const op = OPERATIONS[operation]
+
+    if (op.nameNot?.test(tool.tool)) {
+      return false
+    }
+
+    return op.match.some(
+      (alternative) =>
+        (!alternative.name || alternative.name.test(tool.tool)) &&
+        (!alternative.text ||
+          alternative.text.every((word) => word.test(text))) &&
+        Boolean(alternative.name ?? alternative.text),
+    )
+  })
+}
+
 /** Every provider of a capability, by operation. */
 export function providersOf(
   id: CapabilityId,
