@@ -81,6 +81,7 @@ export async function approveSignInAction(
               runCode: field(formData, "runCode") === "on",
               manageWrappers: field(formData, "manageWrappers") === "on",
               shareFiles: field(formData, "shareFiles") === "on",
+              builtinTools: fields(formData, "builtinTools"),
             },
           },
       publicUrl,

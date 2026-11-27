@@ -17,11 +17,12 @@ import { cn } from "@/lib/utils"
 /** The settings updateTokenAction writes, apart from the expiry. */
 export type TokenSettings = Pick<
   ApiTokenSummary,
-  "id" | "name" | "allowAllServers" | "servers" | TokenOption
+  "id" | "name" | "allowAllServers" | "servers" | "builtinTools" | TokenOption
 >
 
 /** What a form shows; everything else it sends unchanged. */
-export type TokenSettingsField = "name" | "expires" | "scope" | TokenOption
+export type TokenSettingsField =
+  "name" | "expires" | "scope" | "builtin" | TokenOption
 
 /**
  * A form for some of a token's settings, saved with its own button.
@@ -121,6 +122,16 @@ export function TokenSettingsForm({
             ))}
           </>
         )}
+        {shows.includes("builtin")
+          ? null
+          : token.builtinTools.map((name) => (
+              <input
+                key={name}
+                type="hidden"
+                name="builtinTools"
+                value={name}
+              />
+            ))}
         {TOKEN_OPTION_NAMES.filter(
           (option) => !shows.includes(option) && token[option],
         ).map((option) => (

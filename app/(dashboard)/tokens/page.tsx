@@ -98,6 +98,7 @@ function TokenRow({ token, now }: { token: ApiTokenSummary; now: Date }) {
         token.runCode ? "Runs code" : null,
         token.shareFiles ? "Moves files by link" : null,
         token.manageWrappers ? "Proposes wrappers" : null,
+        token.builtinTools.includes("web_search") ? "Searches the web" : null,
       ].filter((feature): feature is string => feature !== null)
 
   return (

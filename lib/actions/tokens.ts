@@ -91,6 +91,7 @@ export async function createTokenAction(
       runCode: field(formData, "runCode") === "on",
       manageWrappers: field(formData, "manageWrappers") === "on",
       shareFiles: field(formData, "shareFiles") === "on",
+      builtinTools: fields(formData, "builtinTools"),
       expiresAt:
         days > 0 ? new Date(Date.now() + days * 24 * 60 * 60 * 1000) : null,
     })
@@ -170,6 +171,7 @@ export async function updateTokenAction(
       runCode: field(formData, "runCode") === "on",
       manageWrappers: field(formData, "manageWrappers") === "on",
       shareFiles: field(formData, "shareFiles") === "on",
+      builtinTools: fields(formData, "builtinTools"),
       expiresAt,
     }
     await updateApiToken(session.ctx, id, input, { ownerConfirmed: reviving })
