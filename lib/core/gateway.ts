@@ -8291,6 +8291,7 @@ export function buildGatewayServer(
 
         const outcome = await runWebSearch(scope.ctx, args, {
           prepare: webSearchProvider,
+          publicUrl: scope.publicUrl,
           signal: ctx.signal,
         })
 

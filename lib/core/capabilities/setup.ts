@@ -140,12 +140,35 @@ export async function itemOffers(
 ): Promise<Omit<CapabilityOffers, "capability">> {
   const running = await runningItems(ctx, items)
   const repo = await commonRepository(ctx)
+  // One the vault has already, however it was added (imported from the
+  // common items, or proposed by an assistant from the item's own schema
+  // address): its own page, whether or not the common items are linked.
+  const have = new Map(
+    await Promise.all(
+      items.map(
+        async (item) =>
+          [
+            item.name,
+            await findLocalItem(ctx, {
+              kind: item.kind ?? "service",
+              name: item.name,
+            }),
+          ] as const,
+      ),
+    ),
+  )
+  const had = (item: CommonItem): ItemOffer | null => {
+    const local = have.get(item.name)
+    return local ? { item, href: `/servers/${local.id}`, state: "have" } : null
+  }
 
   if (!repo) {
     return {
       repoId: null,
       commit: null,
-      offers: items.map((item) => ({ item, href: null, state: "launch" })),
+      offers: items.map(
+        (item) => had(item) ?? { item, href: null, state: "launch" },
+      ),
       running,
       problem: null,
     }
@@ -161,15 +184,14 @@ export async function itemOffers(
       items.map(async (item): Promise<ItemOffer> => {
         const ref = { kind: item.kind ?? ("service" as const), name: item.name }
         const root = itemRoot(ref)
+        const local = had(item)
+
+        if (local) {
+          return local
+        }
 
         if (!listing.items.some((entry) => entry.root === root)) {
           return { item, href: null, state: "absent" }
-        }
-
-        const local = await findLocalItem(ctx, ref)
-
-        if (local) {
-          return { item, href: `/servers/${local.id}`, state: "have" }
         }
 
         return {
@@ -197,7 +219,9 @@ export async function itemOffers(
     return {
       repoId: repo.id,
       commit: null,
-      offers: items.map((item) => ({ item, href: null, state: "absent" })),
+      offers: items.map(
+        (item) => had(item) ?? { item, href: null, state: "absent" },
+      ),
       running,
       problem: error.message,
     }

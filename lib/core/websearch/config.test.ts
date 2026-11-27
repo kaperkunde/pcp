@@ -2,12 +2,14 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest"
 
 import type { VaultContext } from "../context"
 import { createSecret } from "../secrets"
+import { setSetting } from "../settings"
 import { scratchDatabase } from "../test-db"
 import { setupVault } from "../vault"
 import {
   checkSearchUrl,
   checkWebSearchConfig,
   readWebSearchConfig,
+  SETTING_WEB_SEARCH,
   webSearchOverview,
   writeWebSearchConfig,
 } from "./config"
@@ -28,6 +30,25 @@ afterEach(async () => {
 })
 
 describe("the web search provider setting", () => {
+  it("still reads a SearXNG setting made with an address, before services", async () => {
+    await setSetting(
+      ctx,
+      SETTING_WEB_SEARCH,
+      JSON.stringify({
+        provider: "searxng",
+        secretId: null,
+        url: "http://192.168.1.20:8080",
+      }),
+    )
+
+    expect(await readWebSearchConfig(ctx)).toEqual({
+      provider: "searxng",
+      secretId: null,
+      url: "http://192.168.1.20:8080",
+    })
+    expect((await webSearchOverview(ctx)).services).toEqual([])
+  })
+
   it("is none until the owner chooses one, and reads back what they saved", async () => {
     expect(await readWebSearchConfig(ctx)).toBeNull()
 

@@ -229,7 +229,16 @@ so in the summary; the bump itself waits for the request.
   (http(s) addresses, bounded, no hidden characters); pacing and the gate are
   kept per provider host (`search.ts`); the query is never logged or stored
   (an in-memory answer under a hash, five minutes). A new provider gets a
-  line in `providers.test.ts` and `request.test.ts`.
+  line in `providers.test.ts` and `request.test.ts`. SearXNG is an address
+  the owner typed (`url`, public-only as before) or one of their services
+  (`service`, the owner's pick on the card, checked to be a service of the
+  vault, never beside `url`): `upstream.ts searchService` reaches it only
+  through the SSH connection (`tunnelToService`, `serviceDial`: pinned host,
+  the key a request handed in, the port the definition's health check names,
+  else its first), never from PCP's machine, and the place pacing and the gate
+  keep is the service. A request that finds it unreachable starts it once
+  (`wake`, `wakeLoaded`, as embeddings do), only while its `intended_state`
+  is "running".
 - Built-in tools in programs (#164, `lib/core/program-tools.ts`): a wrapper's
   program and a `run_<tier>` program call PCP's own tools only from that one
   list (data tools, never an admin or owner tool) and only those ticked in the

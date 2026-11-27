@@ -127,6 +127,7 @@ export default async function CapabilityPage({
           offer={offer}
           linked={repoId !== null}
           problem={problem}
+          forId={cap.id}
         />
       ))}
     </PageColumn>
@@ -229,6 +230,7 @@ async function EntryPage({ entry }: { entry: CatalogueEntry }) {
           offer={offer}
           linked={repoId !== null}
           problem={problem}
+          forId={entry.id}
         />
       ))}
     </PageColumn>
@@ -251,16 +253,24 @@ function CommonItemsCard({ forId }: { forId: string }) {
   )
 }
 
-/** One common item: launch it, open the one you have, or say it is gone. */
+/**
+ * One common item: launch it, open the one you have, or say it is gone.
+ * With PCP's common items not linked yet, its own button links them and
+ * comes back here, where it can then be added.
+ */
 function OfferCard({
   offer,
   linked,
   problem,
+  forId,
 }: {
   offer: ItemOffer
   linked: boolean
   problem: string | null
+  forId: string
 }) {
+  const verb = offer.item.kind === "endpoint" ? "Add" : "Launch"
+
   return (
     <Card className="gap-3 sm:p-6" data-testid="plugin-offer">
       <div className="flex flex-wrap items-center gap-2">
@@ -273,9 +283,21 @@ function OfferCard({
       {offer.state === "launch" && offer.href ? (
         <div>
           <ButtonLink href={offer.href} size="sm">
-            {offer.item.kind === "endpoint" ? "Add" : "Launch"}{" "}
-            {offer.item.title}
+            {verb} {offer.item.title}
           </ButtonLink>
+        </div>
+      ) : offer.state === "launch" && !linked ? (
+        <div className="flex flex-col items-start gap-2">
+          <AddCommonRepoButton
+            forCapability={forId}
+            variant="default"
+            label={`${verb} ${offer.item.title}`}
+          />
+          <p className="text-sm text-muted-foreground">
+            This first adds PCP&apos;s common items, then brings you back here
+            to read {offer.item.title} whole and{" "}
+            {verb === "Add" ? "type in what it needs" : "launch it"}.
+          </p>
         </div>
       ) : offer.state === "have" && offer.href ? (
         <div>

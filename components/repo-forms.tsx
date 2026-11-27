@@ -500,13 +500,15 @@ function ActionButton({
 export function AddCommonRepoButton({
   forCapability,
   variant = "secondary",
+  label = "Add PCP's common items",
 }: {
   forCapability?: string
   variant?: "secondary" | "default"
+  label?: string
 } = {}) {
   return (
     <ActionButton
-      label="Add PCP's common items"
+      label={label}
       pendingLabel="Adding…"
       variant={variant}
       run={() => addCommonRepoAction(forCapability)}

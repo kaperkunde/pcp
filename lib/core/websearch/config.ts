@@ -4,6 +4,9 @@ import type { VaultContext } from "../context"
 import { db } from "../db"
 import { invalid } from "../errors"
 import { byName, SECRET_META_SELECT, secretName } from "../secret-meta"
+import { SERVER_META_SELECT, serverName } from "../server-meta"
+import { openServiceSpec } from "../spec-rows"
+import { readServiceDefinition } from "../services/definition"
 import { getSetting, setSetting } from "../settings"
 import { WEB_SEARCH_MAX_URL_SETTING_CHARS } from "./limits"
 import {
@@ -29,6 +32,12 @@ export type WebSearchConfig = {
   secretId: string | null
   /** A search the owner runs: its address. */
   url?: string
+  /**
+   * A search the owner runs as a PCP service (a SearXNG container on one
+   * of their SSH servers): the service's id, reached through the SSH
+   * connection. Instead of `url`, never beside it.
+   */
+  service?: string
 }
 
 const Id = z.string().min(1).max(100)
@@ -37,6 +46,7 @@ const ConfigSchema = z.strictObject({
   provider: z.enum(WEB_SEARCH_PROVIDERS),
   secretId: Id.nullable(),
   url: z.string().min(1).max(WEB_SEARCH_MAX_URL_SETTING_CHARS).optional(),
+  service: Id.optional(),
 })
 
 /**
@@ -121,6 +131,23 @@ export async function checkWebSearchConfig(
   }
 
   if (info.ownAddress) {
+    if (input.service !== undefined) {
+      const service = await db().mcpServer.findFirst({
+        where: { id: input.service, vaultId: ctx.vaultId, kind: "service" },
+        select: { id: true },
+      })
+
+      if (!service) {
+        throw invalid("Choose one of your services.")
+      }
+
+      return {
+        provider: input.provider,
+        secretId: input.secretId,
+        service: service.id,
+      }
+    }
+
     if (!input.url) {
       throw invalid("Enter your search server's address.")
     }
@@ -152,12 +179,17 @@ export type WebSearchOverview = {
   config: WebSearchConfig | null
   /** The vault's text secrets, to choose an API key from. */
   secrets: Array<{ id: string; name: string }>
+  /**
+   * The vault's services, to run a search server from: those whose image,
+   * source or name reads as SearXNG first.
+   */
+  services: Array<{ id: string; name: string; likely: boolean }>
 }
 
 export async function webSearchOverview(
   ctx: VaultContext,
 ): Promise<WebSearchOverview> {
-  const [config, secrets] = await Promise.all([
+  const [config, secrets, services] = await Promise.all([
     readWebSearchConfig(ctx),
     db()
       .secret.findMany({
@@ -169,7 +201,47 @@ export async function webSearchOverview(
           .map((row) => ({ id: row.id, name: secretName(ctx, row) }))
           .sort(byName),
       ),
+    db()
+      .mcpServer.findMany({
+        where: { vaultId: ctx.vaultId, kind: "service" },
+        select: { ...SERVER_META_SELECT, serviceSpec: true },
+      })
+      .then((rows) =>
+        rows
+          .map(({ serviceSpec, ...row }) => {
+            const name = serverName(ctx, row)
+            return {
+              id: row.id,
+              name,
+              likely: looksLikeSearxng(ctx, name, serviceSpec),
+            }
+          })
+          .sort(
+            (a, b) =>
+              Number(b.likely) - Number(a.likely) ||
+              a.name.localeCompare(b.name),
+          ),
+      ),
   ])
 
-  return { config, secrets }
+  return { config, secrets, services }
+}
+
+/** Whether a service's image, source or name says SearXNG: a hint only. */
+function looksLikeSearxng(
+  ctx: VaultContext,
+  name: string,
+  spec: Parameters<typeof openServiceSpec>[1] | null,
+): boolean {
+  try {
+    const definition = spec
+      ? readServiceDefinition(openServiceSpec(ctx, spec).definition)
+      : null
+
+    return /searx/i.test(
+      [name, definition?.image, definition?.source].filter(Boolean).join(" "),
+    )
+  } catch {
+    return /searx/i.test(name)
+  }
 }
