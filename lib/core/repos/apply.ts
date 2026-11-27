@@ -1,3 +1,4 @@
+import { isProgramTool, OWN_SERVER_SLUG } from "../program-tools"
 import type { VaultContext } from "../context"
 import { db } from "../db"
 import {
@@ -283,7 +284,14 @@ async function wrapperProblems(
     const split = splitRef(ref)!
     const server = bySlug.get(split.slug)
 
-    if (!server) {
+    // pcp/<tool>: one of PCP's own tools a program may call (#164).
+    if (!server && split.slug === OWN_SERVER_SLUG) {
+      if (!isProgramTool(split.tool)) {
+        problems.push(
+          `${root} uses ${ref}, which is not one of PCP's own tools a program may call.`,
+        )
+      }
+    } else if (!server) {
       problems.push(
         `${root} uses ${ref}, but this vault has no server called ${split.slug}.`,
       )

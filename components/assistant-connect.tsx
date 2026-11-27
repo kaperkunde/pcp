@@ -1,5 +1,6 @@
 "use client"
 
+import { BuiltinToolFields } from "@/components/builtin-tool-fields"
 import { Check, Copy, Lock, Plus, type LucideIcon } from "lucide-react"
 import { useRouter } from "next/navigation"
 import { useActionState, useRef, useState, type FormEvent } from "react"
@@ -196,8 +197,13 @@ function ConnectSteps({
   const chosen = (key: string) =>
     draft?.find(([name]) => name === key)?.[1] ?? null
   const ticked = (key: string) => draft?.some(([name]) => name === key) ?? false
+  const builtinChosen = (draft ?? [])
+    .filter(([name]) => name === "builtinTools")
+    .map(([, value]) => value)
   const moreChosen =
-    TOKEN_OPTION_NAMES.some(ticked) || Boolean(chosen("expiresIn"))
+    TOKEN_OPTION_NAMES.some(ticked) ||
+    builtinChosen.length > 0 ||
+    Boolean(chosen("expiresIn"))
 
   return (
     <form onSubmit={review} className="flex flex-col gap-6">
@@ -251,6 +257,7 @@ function ConnectSteps({
           chosen={chosen}
           ticked={ticked}
           moreChosen={moreChosen}
+          builtinChosen={builtinChosen}
           serverIds={(draft ?? [])
             .filter(([name]) => name === "serverIds")
             .map(([, value]) => value)}
@@ -274,6 +281,7 @@ function TokenFields({
   chosen,
   ticked,
   moreChosen,
+  builtinChosen,
   serverIds,
 }: {
   app: App
@@ -282,6 +290,7 @@ function TokenFields({
   chosen: (key: string) => string | null
   ticked: (key: string) => boolean
   moreChosen: boolean
+  builtinChosen: string[]
 }) {
   return (
     <>
@@ -324,6 +333,7 @@ function TokenFields({
             defaultChecked={ticked(option)}
           />
         ))}
+        <BuiltinToolFields selected={builtinChosen} idPrefix="token-builtin" />
         <div className="flex min-h-14 flex-wrap items-center gap-3.5 px-4 py-2.5">
           <label
             htmlFor="token-expires"

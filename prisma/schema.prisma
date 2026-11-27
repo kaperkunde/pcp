@@ -154,6 +154,12 @@ model ApiToken {
   /// by link (share_result, receive_file; lib/core/file-links.ts), so a
   /// file's bytes never pass through it. Off unless the owner turns it on.
   shareFiles           Boolean   @default(false) @map("share_files")
+  /// The names of PCP's own tools (lib/core/program-tools.ts) the owner let
+  /// this token's programs (run_<tier>'s and its wrappers') call through
+  /// pcp.call("pcp", …), and let it call directly where the tool needs the
+  /// grant (web_search): a JSON array of names, none unless the owner ticks
+  /// some.
+  builtinTools         String    @default("[]") @map("builtin_tools")
   expiresAt            DateTime? @map("expires_at")
   revokedAt            DateTime? @map("revoked_at")
   createdAt            DateTime  @default(now()) @map("created_at")

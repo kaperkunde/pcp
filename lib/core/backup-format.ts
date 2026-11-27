@@ -194,6 +194,9 @@ const ApiTokenRow = renamedFrom(
     runCode: z.boolean().default(false),
     manageWrappers: z.boolean().default(false),
     shareFiles: z.boolean().default(false),
+    // PCP's own tools the token's programs may call (a JSON array of
+    // names); an older file's tokens have none.
+    builtinTools: z.string().default("[]"),
     expiresAt: dateOrNull,
     revokedAt: dateOrNull,
     createdAt: date,

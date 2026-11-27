@@ -580,6 +580,46 @@ describe("restoring", { timeout: 60_000 }, () => {
     expect((await resolveApiToken(token))!.memoryMigration).toBe(true)
   })
 
+  it("carries a token's built-in tools, and restores a file from before them as none", async () => {
+    const { ctx, token } = await populate()
+    const { tokenId } = (await resolveApiToken(token))!
+    await db().apiToken.update({
+      where: { id: tokenId },
+      data: { builtinTools: '["web_search","move"]' },
+    })
+    const file = await exportVault(ctx, EXPORT_PASSWORD)
+
+    await db().apiToken.update({
+      where: { id: tokenId },
+      data: { builtinTools: "[]" },
+    })
+    const { payload: read } = await readExport(file, EXPORT_PASSWORD)
+    await restoreExport(
+      read,
+      { into: "vault", ctx },
+      { restoreHostSettings: false },
+    )
+    expect((await resolveApiToken(token))!.builtinTools).toEqual([
+      "web_search",
+      "move",
+    ])
+
+    const older = structuredClone(await openRaw(file, EXPORT_PASSWORD))
+    for (const row of older.tables.apiTokens as Record<string, unknown>[]) {
+      delete row.builtinTools
+    }
+    const { payload: old } = await readExport(
+      await encodeExport(older, EXPORT_PASSWORD),
+      EXPORT_PASSWORD,
+    )
+    await restoreExport(
+      old,
+      { into: "vault", ctx },
+      { restoreHostSettings: false },
+    )
+    expect((await resolveApiToken(token))!.builtinTools).toEqual([])
+  })
+
   it("carries what a waiting request is about, and restores a file from before it as nothing", async () => {
     const { ctx, token } = await populate()
     const { tokenId } = (await resolveApiToken(token))!

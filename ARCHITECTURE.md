@@ -2425,6 +2425,41 @@ version of PCP's suggested instructions they were copied or merged from.
   settle. An export carries both columns as they are; an older file
   restores them as not set yet.
 
+## Web search and PCP's own tools in programs
+
+`web_search(query, limit?, region?, language?, freshness?)` is one of PCP's
+own tools (Read tier), registered only for a token whose `api_token.builtin_tools`
+(a JSON array of names, none by default) holds `web_search`; the owner ticks it
+on the token's create form or page. The provider is the vault's setting
+`webSearch` (`websearch/config.ts`: `brave`, `tavily`, `exa`, `serper` or
+`searxng`, with a text secret by id and, for SearXNG, an address; Settings →
+Web search, `lib/actions/web-search.ts`, which tries one search before it
+saves). With none set the tool answers `needs_owner` reason `setup` with a
+link to `/settings#web-search`. Each provider is an adapter of two pure
+functions (`websearch/providers.ts`: the request, and the results read from an
+untrusted answer: http(s) addresses only, hidden characters out, texts
+bounded); the HTTP is `websearch/request.ts`, which is handed its finished
+header by `upstream.ts webSearchProvider` (the only place the key is read)
+and follows no redirect. `websearch/search.ts` keeps a bounded in-memory
+answer for five minutes under a hash, takes pacing (`paceSite`, class
+`web_fetch`) and the gate (`siteCooling`, `recordSite`) per provider host, as
+web fetch's request path does, and logs nothing of the query. Pacing and
+the gate therefore apply at one more place.
+
+**Built-in tools in programs (#164).** `program-tools.ts` is the one list of
+PCP's own tools a program may call (data tools only, each with its tier) and
+`api_token.builtin_tools` is which of them a token's programs may. A
+`run_<tier>` program reaches one as `pcp.call("pcp", tool, args)`, a wrapper
+as `pcp/<tool>` in its `calls`, stored as `serverId` `pcp`
+(`OWN_SERVER_ID`). Both go through the gateway's `ownProgramCall`, which checks
+the list, the token's box, the tool being there for the token and the entry's
+tier, then serves it as execute_<tier> would: the one validator, the duplicate
+guard (`guardedOwnTool`) and the request log's line (`serveTool`). A wrapper
+tool's tier counts the tool's own (the owner's choice in Settings → PCP's own
+tools, else its list tier). A call the owner allowed on PCP's page has no
+token's request to run in, so it refuses `pcp/…` calls. A token may reach no
+server when it has a built-in tool.
+
 ## Web fetch
 
 A token made with "fetch web pages" (`api_token.web_fetch`, off unless the

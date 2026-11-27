@@ -1,3 +1,4 @@
+import { OWN_SERVER_ID } from "./program-tools"
 import { allowanceHolds, loadToolAllowances } from "./allowances"
 import type { ResolvedToken } from "./api-tokens"
 import type { DetectedClient } from "./clients/detect"
@@ -185,8 +186,14 @@ async function applyWrappers(
       // A wrapper on the owner's approval is held to its own level alone:
       // the calls it lists were approved with it.
       for (const call of op.callLevels === "approved" ? [] : op.calls) {
+        // PCP's own tools (pcp/<tool>) have no level of their own: whether
+        // the token may call one is its own setting, refused by name when
+        // the program calls it (wrappers/run.ts), so it never blocks the
+        // wrapper's tool here.
         const inner =
-          levels.get(accessKey(call.serverId, call.tool)) ?? "blocked"
+          call.serverId === OWN_SERVER_ID
+            ? "allowed"
+            : (levels.get(accessKey(call.serverId, call.tool)) ?? "blocked")
 
         if (STRICTNESS[inner] > STRICTNESS[access]) {
           access = inner
