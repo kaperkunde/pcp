@@ -656,7 +656,14 @@ one way an assistant's JavaScript runs in a page is `evaluate`, and it asks you
 per site, showing the whole script: **Run it once**, or **Allow scripts at this
 site** for the token (the token's page lists those, and takes them back). It
 is refused while a field holds a secret PCP typed, and while it runs the tab
-reaches its own site only.
+reaches its own site's domain only (any host under the same registrable domain,
+like `api.example.com` from `www.example.com`, never an IP address or a host
+under a public suffix such as `github.io`) and the other hosts you allowed for
+that site. An assistant that needs another domain names its hosts in `reach`:
+you see them on the request, tick the ones to allow, and **Run it once** lets
+this run reach them while **Allow scripts at this site** keeps them for that
+site's scripts (the token's page lists them). Anything else is refused, and the
+answer names it.
 Files go in and out as results PCP keeps for the token for a day, encrypted,
 never as files on the machine: `download` keeps the file a page offers (a
 download nobody asked for is refused) and `upload_file` puts kept ones, a

@@ -181,6 +181,12 @@ export type ScriptUseAsk = {
   url: string
   title: string
   script: string
+  /**
+   * Hosts beyond the site's own registrable domain that the script's call
+   * named (evaluate's `reach`) and nothing allows yet: the owner ticks the
+   * ones to let it reach, for this run or kept for the site's scripts.
+   */
+  reach?: string[]
 }
 
 /**

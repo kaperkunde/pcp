@@ -417,7 +417,7 @@ describe.skipIf(!executable)(
         other: "refused",
         socket: "refused",
       })
-      expect(textOf(ran)).toContain("It reached for other sites")
+      expect(textOf(ran)).toContain("It reached for sites it may not reach")
       await new Promise((resolve) => setTimeout(resolve, 300))
       expect(elsewhere.requests.length).toBe(before)
       expect(sockets.upgrades).toEqual([])
@@ -433,6 +433,72 @@ describe.skipIf(!executable)(
       await new Promise((resolve) => setTimeout(resolve, 600))
       expect(elsewhere.requests.map((request) => request.url)).toContain(
         "/after",
+      )
+    })
+
+    it("does not widen an IP address or localhost to a host of the same machine", async () => {
+      const tab = await open("/app")
+      await writeScriptAccess(ctx, tokenId, new URL(api.origin).host, "allowed")
+      const port = new URL(elsewhere.origin).port
+      const before = elsewhere.requests.length
+
+      const ran = await call("evaluate", {
+        tab,
+        script: `fetch("http://localhost:${port}/leak").then(() => "ok", () => "refused")`,
+      })
+      expect(textOf(ran)).toContain('"refused"')
+      expect(textOf(ran)).toContain(`localhost:${port}`)
+      expect(elsewhere.requests.length).toBe(before)
+    })
+
+    it("takes reach as host names only, never an address or an IP", async () => {
+      const tab = await open("/app")
+      await writeScriptAccess(ctx, tokenId, new URL(api.origin).host, "allowed")
+
+      for (const reach of [
+        ["127.0.0.1"],
+        ["localhost"],
+        ["https://x.example"],
+      ]) {
+        const refused = await call("evaluate", { tab, script: "1", reach })
+        expect(refused.isError).toBe(true)
+        expect(textOf(refused)).toContain("reach names hosts only")
+      }
+    })
+
+    it("asks the owner for the hosts it names in reach, even where scripts are allowed", async () => {
+      const tab = await open("/app")
+      const site = new URL(api.origin).host
+      await writeScriptAccess(ctx, tokenId, site, "allowed")
+
+      const asked = await owner(
+        call("evaluate", {
+          tab,
+          script: "1",
+          reach: ["cdn.example.net", "CDN.example.net"],
+        }),
+      )
+      expect(asked.ask).toMatchObject({
+        kind: "script_use",
+        input: { site, script: "1", reach: ["cdn.example.net"] },
+      })
+
+      // What the owner ticked once lets exactly that call through.
+      allowScriptOnce({
+        tokenId,
+        tabId: tab,
+        site,
+        script: "1",
+        reach: ["cdn.example.net"],
+      })
+      const once = await call("evaluate", {
+        tab,
+        script: "1",
+        reach: ["cdn.example.net"],
+      })
+      expect(textOf(once)).toContain("Result (JSON):\n1")
+      await owner(
+        call("evaluate", { tab, script: "1", reach: ["cdn.example.net"] }),
       )
     })
 

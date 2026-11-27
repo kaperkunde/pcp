@@ -1,7 +1,15 @@
 import type { CallToolResult } from "@modelcontextprotocol/server"
 
-import { decideScript, scriptSiteOf, takeScriptOnce } from "../browser-scripts"
+import {
+  allowedReach,
+  decideScript,
+  reachHosts,
+  scriptReaches,
+  scriptSiteOf,
+  takeScriptOnce,
+} from "../browser-scripts"
 import type { VaultContext } from "../context"
+import { isPcpSite } from "../fetch/fetch"
 import { siteKey } from "../fetch/rules"
 import { handleOf, type ResultKeeper } from "../tool-results"
 import { familyError, textAnswer } from "../tools/family"
@@ -35,9 +43,12 @@ import { OwnerNeeded } from "./types"
  *   request that shows them the site, the page and the whole script.
  * - Refused while a field of the page holds a secret PCP typed (held.ts),
  *   as screenshot is.
- * - While it runs, the tab reaches its own site only: the tab's DevTools
- *   session pauses every request its frames and workers make and fails the
- *   ones to another site; the gate (runtime.ts mayOpen) keeps its main
+ * - While it runs, the tab reaches its own site's registrable domain (any
+ *   host of the same eTLD+1, never an IP address, localhost, a public suffix
+ *   or PCP's own address) and the extra hosts the owner allowed for the
+ *   site (browser-scripts.ts scriptReaches); the tab's DevTools session
+ *   pauses every request its frames and workers make and fails the ones to
+ *   any other site; the gate (runtime.ts mayOpen) keeps its main
  *   frame and popups there, a popup it opens is closed, and the proxies
  *   hold every new connection to another site until it is done, then
  *   refuse the ones it reached for (a WebSocket, which request interception
@@ -142,20 +153,26 @@ type Paused = {
 }
 
 /**
- * Runs `work` with the tab kept at its site: its other-site requests
- * refused, its popups closed, and the proxies holding connections
+ * Runs `work` with the tab kept to what the script may reach (`reaches`):
+ * its requests elsewhere refused, its popups closed, and the proxies holding connections
  * elsewhere until it is done. Answers with the hosts it reached for.
  */
 async function keptAtSite<T>(
   vaultId: string,
   tab: Tab,
   site: string,
+  extras: ReadonlySet<string>,
   work: () => Promise<T>,
 ): Promise<{ value: T; reached: string[] }> {
+  const publicUrl = runningBrowser(vaultId)?.publicUrl ?? undefined
+  const reaches = (host: string) =>
+    scriptReaches(site, host, extras) &&
+    !isPcpSite(new URL(`https://${host}`), publicUrl)
   let finish = () => {}
   const reached = new Set<string>()
   const script: ScriptRun = {
     site,
+    reaches,
     refused: new Set(),
     listeners: new Set(),
     done: new Promise<void>((resolve) => {
@@ -167,7 +184,7 @@ async function keptAtSite<T>(
       const url = new URL(address)
       if (!/^(https?|wss?):$/.test(url.protocol)) return null
       const other = siteKey(url)
-      return other === site ? null : other
+      return reaches(other) ? null : other
     } catch {
       return null
     }
@@ -280,6 +297,7 @@ export async function evaluateInTab(
   scope: EvaluateScope,
   tab: Tab,
   script: string,
+  reach: readonly string[] = [],
 ): Promise<CallToolResult> {
   const held = await heldSecret(tab.page)
 
@@ -306,10 +324,27 @@ export async function evaluateInTab(
     )
   }
 
-  if (
-    level !== "allowed" &&
-    !takeScriptOnce({ tokenId: scope.tokenId, tabId: tab.id, site, script })
-  ) {
+  const named = reachHosts(reach)
+
+  if (!named) {
+    return refused(
+      "reach names hosts only (like api.example.com), at most 10, never an address, an IP address or localhost.",
+    )
+  }
+
+  // The extra hosts the owner allowed for this site, and the ones this call
+  // names that nothing allows yet: the owner is asked for those.
+  const kept = await allowedReach(scope.ctx, scope.tokenId, site)
+  const unasked = named.filter((host) => !scriptReaches(site, host, kept))
+  const once = {
+    tokenId: scope.tokenId,
+    tabId: tab.id,
+    site,
+    script,
+    reach: named,
+  }
+
+  if ((level !== "allowed" || unasked.length > 0) && !takeScriptOnce(once)) {
     throw new OwnerNeeded({
       kind: "script_use",
       input: {
@@ -319,15 +354,19 @@ export async function evaluateInTab(
         url: address,
         title: await tabTitle(tab),
         script,
+        ...(unasked.length > 0 ? { reach: unasked } : {}),
       },
     })
   }
+
+  // What the owner agreed to for this run, beside what they kept.
+  const extras = new Set([...kept, ...named])
 
   let outcome: { value: Evaluated; reached: string[] }
   const started = Date.now()
 
   try {
-    outcome = await keptAtSite(scope.vaultId, tab, site, () =>
+    outcome = await keptAtSite(scope.vaultId, tab, site, extras, () =>
       bounded(run(tab, script), EVALUATE_TIMEOUT_MS + 1_000, "evaluate"),
     )
   } catch (error) {
@@ -354,7 +393,7 @@ export async function evaluateInTab(
     `Tab ${tab.id}: ran the script at ${site}.`,
     ...(outcome.reached.length > 0
       ? [
-          `It reached for other sites, which were refused while it ran: ${outcome.reached.slice(0, 10).join(", ")}.`,
+          `It reached for sites it may not reach (only ${site}'s own domain and what the owner allowed), which were refused while it ran: ${outcome.reached.slice(0, 10).join(", ")}.`,
         ]
       : []),
   ]

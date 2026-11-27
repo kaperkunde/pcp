@@ -3808,6 +3808,7 @@ async function runTool(
           },
           current,
           args.script as string,
+          (args.reach as string[] | undefined) ?? [],
         ),
       )
     case "console_log":

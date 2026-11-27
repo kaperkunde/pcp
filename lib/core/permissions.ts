@@ -205,6 +205,7 @@ import {
   dropScriptOnce,
   scriptDigest,
   writeScriptAccess,
+  writeScriptReach,
 } from "./browser-scripts"
 import {
   applySecretRequest,
@@ -616,6 +617,13 @@ export type PermissionView = {
    * Empty for other requests and once answered.
    */
   alsoAllows: AlsoAllow[]
+  /**
+   * script_use: the hosts the script asked to reach beyond its site's own
+   * domain, one box each, ticked to start; the yes sends the ones left
+   * ticked (decidePermission's `sites.keep`). Empty for other requests and
+   * once answered.
+   */
+  scriptReach: string[]
   /**
    * A new or changed server's levels and tiers the assistant proposed
    * (proposed-access.ts), for the page to show filled in and editable
@@ -1144,7 +1152,7 @@ function describeAsk(ask: PermissionAsk): {
       }
     case "script_use":
       return {
-        target: `script_use:${ask.input.site}\n${ask.input.tabId}\n${scriptDigest(ask.input.script)}`,
+        target: `script_use:${ask.input.site}\n${ask.input.tabId}\n${scriptDigest(ask.input.script)}\n${[...(ask.input.reach ?? [])].sort().join(",")}`,
         args: ask.input as Record<string, unknown>,
       }
     case "tab_pace":
@@ -2034,6 +2042,10 @@ async function toView(
         : kind === "repo_change"
           ? await repoChangeAlsoAllows(ctx, readArgs(ctx, row) as RepoChangeAsk)
           : await alsoAllowsOf(ctx, kind, readArgs(ctx, row)),
+    scriptReach:
+      status === "pending" && kind === "script_use"
+        ? ((readArgs(ctx, row) as ScriptUseAsk).reach ?? [])
+        : [],
     offersPrivateAddresses:
       kind === "register" &&
       registersPrivateAddress(readArgs(ctx, row) as RegisterArgs),
@@ -3385,6 +3397,7 @@ export async function decidePermission(
                                         choice,
                                         publicUrl,
                                         executor,
+                                        sites?.keep,
                                       )
                                     : kind === "exit_use"
                                       ? await executeExitUse(
@@ -3767,6 +3780,7 @@ async function executeScriptUse(
   choice: PermissionDecision,
   publicUrl: string,
   executor: PermissionExecutor,
+  ticked: readonly string[] | undefined,
 ): Promise<CallToolResult> {
   if (!row.server || row.server.kind !== "browser") {
     return text("The browser was removed from PCP, so nothing ran.", true)
@@ -3791,15 +3805,22 @@ async function executeScriptUse(
   }
 
   const asked = readArgs(ctx, row) as ScriptUseAsk
+  // The hosts the owner ticked, of the ones the request showed and no
+  // others: nothing the answer carries adds a host.
+  const reach = (asked.reach ?? []).filter((host) =>
+    (ticked ?? []).includes(host),
+  )
   const once = {
     tokenId: row.tokenId,
     tabId: asked.tabId,
     site: asked.site,
     script: asked.script,
+    reach,
   }
 
   if (choice === "always") {
     await writeScriptAccess(ctx, row.tokenId, asked.site, "allowed")
+    await writeScriptReach(ctx, row.tokenId, asked.site, reach)
   } else {
     allowScriptOnce(once)
   }
@@ -3809,7 +3830,11 @@ async function executeScriptUse(
       ctx,
       row.server,
       "evaluate",
-      { tab: asked.tabId, script: asked.script },
+      {
+        tab: asked.tabId,
+        script: asked.script,
+        ...(reach.length > 0 ? { reach } : {}),
+      },
       { publicUrl, tokenId: row.tokenId, ownerAllowed: true, executor },
     )
   } finally {

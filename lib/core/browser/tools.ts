@@ -954,7 +954,7 @@ const INPUTS: readonly BrowserToolInput[] = [
   {
     name: "evaluate",
     title: "Run JavaScript in the page",
-    description: `Runs JavaScript in the tab's page and answers with its result as JSON: an expression, statements (the last one's value; await works), or a function's text, which is called with nothing. For what the other tools do not reach: a value the page keeps, a canvas app's state. The owner decides per site and is shown the whole script: unless they allowed scripts at the tab's site for this token, it answers "Not done yet" with a link. ${OWNER_LINK_RULE} While it runs the tab reaches its own site only: requests to any other are refused. It is refused while a field holds a secret PCP typed. At most ${EVALUATE_TIMEOUT_MS / 1000} seconds; a long result comes back as a handle to a result PCP keeps for this token.`,
+    description: `Runs JavaScript in the tab's page and answers with its result as JSON: an expression, statements (the last one's value; await works), or a function's text, which is called with nothing. For what the other tools do not reach: a value the page keeps, a canvas app's state. The owner decides per site and is shown the whole script: unless they allowed scripts at the tab's site for this token, it answers "Not done yet" with a link. ${OWNER_LINK_RULE} While it runs the tab reaches its own site's domain (any host under the same registrable domain, like api.example.com from www.example.com) and nothing else: requests to any other site are refused, and the answer names them. If the script needs another domain (a CDN, an API elsewhere), name its hosts in reach and the owner is asked to allow them; they are never allowed by naming them. It is refused while a field holds a secret PCP typed. At most ${EVALUATE_TIMEOUT_MS / 1000} seconds; a long result comes back as a handle to a result PCP keeps for this token.`,
     input: z.strictObject({
       tab,
       script: z
@@ -963,6 +963,13 @@ const INPUTS: readonly BrowserToolInput[] = [
         .max(MAX_SCRIPT_CHARS)
         .describe(
           "The JavaScript: an expression (document.title), statements whose last value is the result (await works), or a function's text (() => …), which is called. Its result is answered as JSON; a promise is awaited.",
+        ),
+      reach: z
+        .array(z.string().min(1).max(260))
+        .max(10)
+        .optional()
+        .describe(
+          "Hosts of other domains the script needs to reach while it runs, like cdn.example.net: names only, no scheme, path or IP address. Hosts under the tab's own registrable domain need no mention. The owner is asked to allow each; one they did not allow stays refused.",
         ),
     }),
     annotations: ACTS,

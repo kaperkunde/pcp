@@ -137,6 +137,7 @@ export function PermissionDecision({
   sites = null,
   scopeChanges = null,
   alsoAllows = [],
+  scriptReach = [],
   valueFrom = null,
 }: {
   advance?: boolean
@@ -177,6 +178,12 @@ export function PermissionDecision({
     stale: boolean
   } | null
   alsoAllows?: AlsoAllow[]
+  /**
+   * A script's request for hosts beyond its site's own domain: one box each,
+   * ticked to start. Run it once lets this run reach the ticked ones, Allow
+   * scripts at this site keeps them for the site; none is a need.
+   */
+  scriptReach?: string[]
   /**
    * The value is one of the assistant's kept results (#174): nothing is typed
    * or made here; the page says where it came from, and that it expired.
@@ -223,6 +230,7 @@ export function PermissionDecision({
   const [alsoKeep, setAlsoKeep] = useState<string[]>(() =>
     alsoAllows.map((also) => also.key),
   )
+  const [reachKeep, setReachKeep] = useState<string[]>(scriptReach)
   const [accessRows, setAccessRows] = useState<AccessRow[]>(() =>
     access ? initialAccessRows(access) : [],
   )
@@ -307,6 +315,7 @@ export function PermissionDecision({
             sites ||
             scopeChanges ||
             alsoAllows.length > 0 ||
+            scriptReach.length > 0 ||
             (canMake && generate))
           ? {
               ...(credential ? { loginName: username } : {}),
@@ -315,7 +324,9 @@ export function PermissionDecision({
                 ? { sites: { basis: sites.basis, keep: siteKeep } }
                 : scopeChanges
                   ? { sites: { keep: siteKeep } }
-                  : {}),
+                  : scriptReach.length > 0
+                    ? { sites: { keep: reachKeep } }
+                    : {}),
               ...(alsoAllows.length > 0 ? { alsoAllow: alsoKeep } : {}),
             }
           : undefined,
@@ -689,6 +700,34 @@ export function PermissionDecision({
         onChange={setAlsoKeep}
         disabled={pending}
       />
+      {scriptReach.length > 0 ? (
+        <fieldset className="m-0 flex flex-col gap-3 border-0 p-0">
+          <legend className="mb-1 text-sm font-medium">
+            Other hosts the script asks to reach
+          </legend>
+          <p className="m-0 text-sm text-muted-foreground">
+            Outside this site&apos;s own domain, which it reaches anyway. Tick
+            the ones to let it reach; the rest stay refused.
+          </p>
+          {scriptReach.map((host) => (
+            <Label key={host} className="items-start font-normal">
+              <Checkbox
+                className="mt-0.5"
+                checked={reachKeep.includes(host)}
+                onChange={(event) =>
+                  setReachKeep(
+                    event.target.checked
+                      ? [...reachKeep, host]
+                      : reachKeep.filter((each) => each !== host),
+                  )
+                }
+                disabled={pending}
+              />
+              <span className="break-words">Let it reach {host}</span>
+            </Label>
+          ))}
+        </fieldset>
+      ) : null}
       {limits ? (
         <fieldset className="m-0 flex flex-col gap-3 border-0 p-0">
           <legend className="mb-1 text-[15px] text-foreground">
