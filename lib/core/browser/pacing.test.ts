@@ -46,6 +46,24 @@ import { isOwnerNeeded, type OwnerNeeded } from "./types"
 // assistant sets within the owner's bounds, or the owner allows past them,
 // in memory with the tab only. Skipped where no Chromium is installed.
 
+// A save of the sign-ins reads the whole storage state out of Chromium; on a
+// site with a big local database that takes seconds. Stood in for here by a
+// save that takes `slowSave.ms`, counted in `slowSave.saves`.
+const slowSave = vi.hoisted(() => ({ ms: 0, saves: 0 }))
+
+vi.mock("./profile", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./profile")>()
+
+  return {
+    ...actual,
+    saveProfile: async (...args: Parameters<typeof actual.saveProfile>) => {
+      slowSave.saves += 1
+      await new Promise((resolve) => setTimeout(resolve, slowSave.ms))
+      return actual.saveProfile(...args)
+    },
+  }
+})
+
 const executable = await chromiumExecutable()
 const PUBLIC_URL = "http://pcp.test"
 const PAUSE_MS = 400
@@ -67,6 +85,8 @@ let tokenId: string
 let server: OpenServer
 
 beforeEach(async () => {
+  slowSave.ms = 0
+  slowSave.saves = 0
   vi.stubEnv("PCP_PACING", "")
   resetPacing()
   ;({ cleanup } = await scratchDatabase())
@@ -405,6 +425,52 @@ describe.skipIf(!executable)(
           async () => (await db().permissionRequest.findFirstOrThrow()).status,
         )
         .toBe("closed")
+    })
+
+    it("is not held by saving the sign-ins after every action, whatever the tab's pace", async () => {
+      // #190: every changing action (and tabs close) saved the whole
+      // profile, forced, while it held its turn, so a quick tab pace made no
+      // difference: each action took as long as a save.
+      slowSave.ms = 1_200
+      const { tab, ref } = await open()
+      await call("tabs", {
+        action: "pace",
+        tab,
+        pace: { actions: { min_ms: 20, max_ms: 40 } },
+      })
+
+      const started = Date.now()
+
+      for (let tap = 0; tap < 4; tap += 1) {
+        const done = await call("click", { tab, ref })
+        expect(done.isError, textOf(done)).toBeFalsy()
+        expect(textOf(done)).not.toContain("Held")
+      }
+
+      expect(Date.now() - started).toBeLessThan(3_000)
+      expect(slowSave.saves).toBe(0)
+
+      const closed = await call("tabs", { action: "close", tab })
+      expect(textOf(closed)).not.toContain("Held")
+      expect(slowSave.saves).toBe(0)
+    })
+
+    it("says what held an action more than a second, with the setting and the milliseconds", async () => {
+      await setPacingClass(ctx, "browser_act", {
+        minIntervalMs: 1_300,
+        jitterMs: 0,
+        burst: null,
+      })
+      const { tab, ref } = await open()
+      await call("click", { tab, ref })
+      const held = textOf(await call("click", { tab, ref }))
+
+      expect(held).toMatch(
+        /^Held 1\.\d s: waiting for its turn at 127\.0\.0\.1:\d+ under the owner's pace for the browser \(actions in a page 1\.3 s\) 1\.\d s\./,
+      )
+      // A quick one says nothing.
+      await setPacingClass(ctx, "browser_act", "unpaced")
+      expect(textOf(await call("click", { tab, ref }))).not.toContain("Held")
     })
 
     it("refuses a pace whose shortest wait is past its longest", async () => {

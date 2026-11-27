@@ -30,11 +30,11 @@ export const MAX_SECRET_TEMPLATE_CHARS = 200
 export const WRAPPER_RUN_TIMEOUT_MS = 2 * 60_000
 /**
  * One run of a browser flow's tool (definition.ts isFlowTool): longer, as
- * its steps wait for pages and for the browser's pacing between actions,
- * and still under run_code's RUN_TIMEOUT_MS, so a flow called from a
- * program ends before the program does.
+ * its steps wait for pages and for the browser's pacing between actions, and
+ * a flow of a few dozen actions on a slow shop takes minutes. Called from a
+ * run_code program it still ends with the program's own run (its deadline).
  */
-export const FLOW_RUN_TIMEOUT_MS = 2.5 * 60_000
+export const FLOW_RUN_TIMEOUT_MS = 10 * 60_000
 /** How deep a secret placeholder may sit in a call's arguments. */
 export const MAX_PLACEHOLDER_DEPTH = 64
 /** Values one call's arguments may have, looked through for placeholders. */

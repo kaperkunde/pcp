@@ -49,6 +49,20 @@ export const MAX_IMPORT_COOKIES = 3_000
 export const MAX_IMPORT_ORIGINS = 500
 /** A profile is saved at most this often while input streams in. */
 export const PROFILE_SAVE_INTERVAL_MS = 2_000
+/**
+ * After a browser action, the sign-ins are saved at most this often. A save
+ * reads the whole storage state out of Chromium (IndexedDB included),
+ * encrypts it and writes it, which on a site with a big local database takes
+ * seconds: done after every action it was every action's wait, whatever its
+ * pace. The browser's close, a hand-over's end and an explicit save still
+ * write at once.
+ */
+export const PROFILE_ACTION_SAVE_INTERVAL_MS = 30_000
+/**
+ * An action that was held longer than this says what held it and for how
+ * long, in one line at the start of its answer.
+ */
+export const HELD_NOTE_MS = 1_000
 /** read_page's text per call, unless the assistant asks for another length. */
 export const DEFAULT_READ_CHARS = 20_000
 export const MAX_READ_CHARS = 50_000

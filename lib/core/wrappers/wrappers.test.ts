@@ -10,7 +10,7 @@ import { serverNamed, toolNamed } from "../test-servers"
 
 import { createApiToken, resolveApiToken } from "../api-tokens"
 import { createBrowserServer } from "../browser/server"
-import { MAX_CALLS_PER_RUN, RUN_TIMEOUT_MS } from "../code/limits"
+import { MAX_CALLS_PER_RUN } from "../code/limits"
 import type { Executor } from "../code/types"
 import { DEFAULT_TOOL_ACCESS } from "../constants"
 import type { VaultContext } from "../context"
@@ -2265,13 +2265,13 @@ describe("a browser flow", () => {
     ])
   })
 
-  it("runs longer than other wrappers, and still ends before a program that calls it", async () => {
+  it("runs longer than other wrappers, up to ten minutes", async () => {
     const actual = await vi.importActual<typeof import("./limits")>("./limits")
 
     expect(actual.FLOW_RUN_TIMEOUT_MS).toBeGreaterThan(
       actual.WRAPPER_RUN_TIMEOUT_MS,
     )
-    expect(actual.FLOW_RUN_TIMEOUT_MS).toBeLessThan(RUN_TIMEOUT_MS)
+    expect(actual.FLOW_RUN_TIMEOUT_MS).toBe(10 * 60_000)
     expect(wrapperRunTimeout(true)).toBe(FLOW_RUN_TIMEOUT_MS)
     expect(wrapperRunTimeout(false)).toBe(WRAPPER_RUN_TIMEOUT_MS)
 

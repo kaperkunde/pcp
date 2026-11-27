@@ -58,20 +58,20 @@ export const PACING_DEFAULTS: Record<PacingClass, PacingPolicy> = {
    * select_option, upload_file, download by a click, handle_dialog,
    * evaluate and scroll (which makes a page load more, as long
    * lists do). A person moves from one field or button to the next in a
-   * few hundred milliseconds, so that: 150 ms, and up to 450 more at
-   * random, after the previous action on the site ended. type fills a
+   * moment, so that: 30 ms, and up to 270 more at random (30 to 300 ms),
+   * after the previous action on the site ended. type fills a
    * field in one go, so there is no pause per key. The pause caps how many
    * go out, so no burst limit on top.
    */
-  browser_act: { minIntervalMs: 150, jitterMs: 450, burst: null },
+  browser_act: { minIntervalMs: 30, jitterMs: 270, burst: null },
   /**
    * The browser opening a page: navigate, back, tabs opening one, and
    * download by an address. It first waits for the page the tab shows to
    * finish loading (browser/call.ts pacedTurn), not for a fixed time, then
-   * 400 ms and up to 800 more at random, as a person glances at a page
-   * before they leave it.
+   * 250 ms and up to 650 more at random (a quarter to nine tenths of a
+   * second), as a person glances at a page before they leave it.
    */
-  browser_navigate: { minIntervalMs: 400, jitterMs: 800, burst: null },
+  browser_navigate: { minIntervalMs: 250, jitterMs: 650, burst: null },
   /**
    * Web fetch's requests, every redirect it follows on a site and the read
    * through the browser included: a second between requests, with a little
@@ -166,11 +166,11 @@ export const PACE_KEY_OF: Record<BrowserPacingClass, keyof BrowserPace> = {
  * What an assistant may give a tab, or a wrapper, without asking the owner,
  * per class, unless the owner set bounds of their own (Settings → Pacing,
  * the vault's `pacing` setting's `assistant`): from a third of PCP's
- * default down to a few times it up. Faster or slower asks the owner (a
+ * default down to a few times it up (an action pace down to 20 ms). Faster or slower asks the owner (a
  * tab: a tab_pace request; a wrapper: its wrapper_change page says so).
  */
 export const ASSISTANT_PACE_BOUNDS: Record<BrowserPacingClass, PaceRange> = {
-  browser_act: { minMs: 50, maxMs: 5_000 },
+  browser_act: { minMs: 20, maxMs: 5_000 },
   browser_navigate: { minMs: 150, maxMs: 10_000 },
 }
 

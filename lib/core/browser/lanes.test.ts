@@ -297,10 +297,10 @@ describe.skipIf(!executable)("pacing a tab", { timeout: 60_000 }, () => {
 
     const went = await call("navigate", { tab, url: `${api.origin}/b` })
     expect(textOf(went)).toContain("Page /b")
-    expect(waits).toEqual([400])
+    expect(waits).toEqual([250])
 
     await call("press_key", { tab, key: "Tab" })
-    expect(waits).toEqual([400, 150])
+    expect(waits).toEqual([250, 30])
   })
 })
 
