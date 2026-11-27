@@ -12,6 +12,7 @@ import {
   MAX_ERROR_EXCERPT,
   MAX_FILE_RESPONSE_BYTES,
   MAX_FILE_NAME_CHARS,
+  MAX_JSON_RESPONSE_BYTES,
   MAX_RESPONSE_BYTES,
   MAX_STRUCTURED_CHARS,
 } from "./limits"
@@ -181,6 +182,7 @@ async function sendCall(
     seen,
     timeoutMs = CALL_TIMEOUT_MS,
     maxResponseBytes = MAX_RESPONSE_BYTES,
+    maxJsonBytes = MAX_JSON_RESPONSE_BYTES,
     redact = [],
     publicOnly = false,
     addressCheck,
@@ -191,6 +193,12 @@ async function sendCall(
   }: {
     timeoutMs?: number
     maxResponseBytes?: number
+    /**
+     * A JSON answer's cap (with maxFileBytes over it), larger than
+     * maxResponseBytes: one cut short no longer parses, and it may carry
+     * files as base64.
+     */
+    maxJsonBytes?: number
     /** Credential values to remove from whatever the API answers. */
     redact?: string[]
     /**
@@ -289,7 +297,12 @@ async function sendCall(
   let truncated: boolean
 
   try {
-    ;({ bytes, truncated } = await readCapped(response, maxResponseBytes))
+    ;({ bytes, truncated } = await readCapped(
+      response,
+      isJson(type)
+        ? Math.max(maxResponseBytes, Math.min(maxJsonBytes, maxFileBytes))
+        : maxResponseBytes,
+    ))
   } catch (error) {
     throw new PcpError(
       "upstream",

@@ -306,9 +306,41 @@ describe("executeCall", () => {
       res.setHeader("content-type", "application/json")
       res.end(JSON.stringify({ items: "y".repeat(5000) }))
     })
-    const outcome = await executeCall(get("/big"), { maxResponseBytes: 100 })
+    const outcome = await executeCall(get("/big"), {
+      maxResponseBytes: 100,
+      maxJsonBytes: 100,
+    })
     expect(outcome.result.structuredContent).toBeUndefined()
     expect(text(outcome)).toMatch(/truncated by PCP/)
+  })
+
+  it("reads a JSON answer past the text cap, so a picture in it stays whole", async () => {
+    const b64 = "iVBORw0KGgo" + "A".repeat(3000)
+    api = await startTestApi((_, res) => {
+      res.setHeader("content-type", "application/json")
+      res.end(JSON.stringify({ data: [{ b64_json: b64 }] }))
+    })
+    const outcome = await executeCall(get("/images"), {
+      maxResponseBytes: 1000,
+      maxJsonBytes: 10_000,
+    })
+    expect(text(outcome)).not.toMatch(/truncated by PCP/)
+    expect(JSON.parse(text(outcome))).toEqual({ data: [{ b64_json: b64 }] })
+
+    // Past the JSON cap too it is cut as before, never parsed.
+    const capped = await executeCall(get("/images"), {
+      maxResponseBytes: 1000,
+      maxJsonBytes: 2000,
+    })
+    expect(text(capped)).toMatch(/truncated by PCP/)
+
+    // The largest file PCP keeps bounds it as well.
+    const small = await executeCall(get("/images"), {
+      maxResponseBytes: 1000,
+      maxJsonBytes: 10_000,
+      maxFileBytes: 1500,
+    })
+    expect(text(small)).toMatch(/truncated by PCP/)
   })
 
   it("gives up on an API that never answers", async () => {
