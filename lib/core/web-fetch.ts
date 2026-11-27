@@ -27,6 +27,7 @@ import {
   sealedRuleKey,
   sealRuleRows,
 } from "./fetch-rule-keys"
+import { hardPageHint, noteSiteFetch } from "./fetch/hard-page"
 import { newId } from "./ids"
 import { visible, type ShownText } from "./permission-rules"
 import {
@@ -469,10 +470,38 @@ export async function runFetch(
     ? withNote(noted, await checkHint(ctx, tokenId))
     : answer.refused
       ? withNote(noted, await refusedHint(ctx, tokenId, exit?.name))
-      : noted
+      : await withHardPageHint(ctx, tokenId, host, args, answer, noted)
 
   await recordFetch(ctx, tokenId, host)
   return result
+}
+
+/**
+ * A page that reads as hard to read as text, or a site fetched again and
+ * again in a short while: one line telling an assistant that has PCP's
+ * browser to open the page there (#178). Nothing for a token without it.
+ */
+async function withHardPageHint(
+  ctx: VaultContext,
+  tokenId: string,
+  host: string,
+  args: FetchArgs,
+  answer: FetchAnswer,
+  result: CallToolResult,
+): Promise<CallToolResult> {
+  if (result.isError === true || args.method !== "GET") {
+    return result
+  }
+
+  const repeated = noteSiteFetch(tokenId, host)
+
+  if (!answer.hard && !repeated) {
+    return result
+  }
+
+  const reached = await tokenReachesBrowser(ctx, tokenId)
+
+  return reached ? withNote(result, hardPageHint(reached.slug)) : result
 }
 
 /**
