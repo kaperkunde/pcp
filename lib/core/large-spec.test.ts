@@ -1,5 +1,5 @@
 import { Client, InMemoryTransport } from "@modelcontextprotocol/client"
-import yaml from "js-yaml"
+import * as yaml from "js-yaml"
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
 
 import { createApiToken, resolveApiToken } from "./api-tokens"

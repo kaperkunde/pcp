@@ -12,9 +12,11 @@ import { CHALLENGE_LINE } from "./fetch/challenge"
 import type { FetchAnswer } from "./fetch/fetch"
 import type { FetchArgs } from "./fetch/request"
 import { prepareFetch } from "./fetch/request"
+import { resetSiteFetches } from "./fetch/hard-page"
 import { resolveFetchAccess } from "./fetch/rules"
 import {
   BLOCKED_FETCH_RULE,
+  HARD_PAGE_RULE,
   buildInstructions,
   keyRules,
   SERVICE_RULE,
@@ -172,6 +174,25 @@ describe("the rule for a refused fetch (#168)", () => {
     // The fetch text no longer repeats it.
     expect(buildInstructions([], { webFetch: true })).not.toContain(
       "before you say you cannot",
+    )
+  })
+})
+
+describe("the hint for a page a fetch cannot read (#178)", () => {
+  it("is in the key rules and the instructions only for a token with the browser", () => {
+    const rules = (browser: boolean) =>
+      keyRules({
+        skills: false,
+        memories: false,
+        fetch: true,
+        browser,
+      }).join("\n")
+
+    expect(rules(false)).not.toContain(HARD_PAGE_RULE)
+    expect(rules(true)).toContain(HARD_PAGE_RULE)
+    expect(HARD_PAGE_RULE.split(". ")).toHaveLength(1)
+    expect(buildInstructions([], { webFetch: true })).not.toContain(
+      HARD_PAGE_RULE,
     )
   })
 })
@@ -920,6 +941,53 @@ describe("a site's check of its visitors", () => {
         ),
       ),
     ).not.toContain("The site refuses automated readers")
+  })
+
+  it("tells a token with the browser when a page reads as hard to read, and no other (#178)", async () => {
+    resetSiteFetches()
+    const { ctx, tokenId } = await setup()
+    const hard = (url: string): FetchAnswer => ({
+      ...page(url),
+      hard: "near_empty",
+    })
+    const run = (url: string, plain = hard) =>
+      runFetch(ctx, tokenId, get(url), fakes({ plain }).options)
+
+    // Without the browser: nothing about it.
+    expect(textOf(await run("https://spa.example/"))).not.toContain(
+      "Hard to read this page?",
+    )
+
+    await createBrowserServer(ctx)
+    expect(textOf(await run("https://spa.example/a"))).toContain(
+      "Hard to read this page? Open it with browser/navigate and read its snapshot (links show their /url).",
+    )
+    // A page that read well, once: no hint.
+    expect(textOf(await run("https://fine.example/", page))).not.toContain(
+      "Hard to read this page?",
+    )
+  })
+
+  it("tells a token with the browser when it fetches the same site again and again (#178)", async () => {
+    resetSiteFetches()
+    const { ctx, tokenId } = await setup()
+    await createBrowserServer(ctx)
+    const told = []
+
+    for (const path of ["a", "b", "c"]) {
+      told.push(
+        textOf(
+          await runFetch(
+            ctx,
+            tokenId,
+            get(`https://again.example/${path}`),
+            fakes({ plain: page }).options,
+          ),
+        ).includes("Hard to read this page?"),
+      )
+    }
+
+    expect(told).toEqual([false, false, true])
   })
 
   it("goes to the browser first for a site it passed lately, and falls back to the plain request", async () => {
