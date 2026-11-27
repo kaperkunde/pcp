@@ -194,6 +194,11 @@ import {
 } from "./call-handles"
 import { canRereadTools, type SyncResult } from "./catalogue"
 import {
+  claimRefresh,
+  diffToolNames,
+  refreshBlockedReason,
+} from "./tool-refresh"
+import {
   completeSessionUrl,
   formatMailServer,
   parseImapAddress,
@@ -867,7 +872,7 @@ export function buildInstructions(
   return [
     ...lead,
     `PCP is a gateway to the owner's MCP servers, APIs, mail and calendar accounts. Tool names are not listed here: ${discovery(hasSkills, memories !== null)} For the owner's tools execute_* take no server or tool name, only the call_handle, and check the arguments before anything runs. Refer to tools as server/tool.`,
-    `The owner decides per tool what you may run. A tool they have not allowed yet answers "Not done yet" with a link. ${OWNER_LINK_RULE} ${nextMessageCheck("check_permission with the id it gave")} withdraw_request takes back a request you no longer need. A server that needs them to sign in answers with a link to connect it, handed over the same way; check_server, called on their next message the same way, says whether it is connected. register_server proposes something new, which the owner agrees to in PCP: an MCP server by its address, an API from its OpenAPI document, a mail account (JMAP, or IMAP with SMTP), or a calendar account (CalDAV: calendars and reminders, as iCloud's). A mailbox is always a mail account and a calendar a calendar account, never an API written around their servers. It takes no authentication, a secret in a header, a user name and password, or OAuth, naming secrets by name only: a new secret is typed in by the owner on PCP's page, and PCP finds out itself whether an OAuth provider lets it register. propose_tool_access proposes which tools you may run, many at once; the owner reviews and saves it in PCP. ${SET_UP_RULE} ${SERVICE_RULE}${webFetch || browser ? ` ${BLOCKED_FETCH_RULE}` : ""}`,
+    `The owner decides per tool what you may run. A tool they have not allowed yet answers "Not done yet" with a link. ${OWNER_LINK_RULE} ${nextMessageCheck("check_permission with the id it gave")} withdraw_request takes back a request you no longer need. A server that needs them to sign in answers with a link to connect it, handed over the same way; check_server, called on their next message the same way, says whether it is connected; after a server was updated, check_server with refresh: true reads its tools again now, and new tools show up after that. register_server proposes something new, which the owner agrees to in PCP: an MCP server by its address, an API from its OpenAPI document, a mail account (JMAP, or IMAP with SMTP), or a calendar account (CalDAV: calendars and reminders, as iCloud's). A mailbox is always a mail account and a calendar a calendar account, never an API written around their servers. It takes no authentication, a secret in a header, a user name and password, or OAuth, naming secrets by name only: a new secret is typed in by the owner on PCP's page, and PCP finds out itself whether an OAuth provider lets it register. propose_tool_access proposes which tools you may run, many at once; the owner reviews and saves it in PCP. ${SET_UP_RULE} ${SERVICE_RULE}${webFetch || browser ? ` ${BLOCKED_FETCH_RULE}` : ""}`,
     'An answer too long to pass on whole ends with a result id: read_result reads all of it, a slice at a time. Files and long values in an answer come back as handles, {"$result": "<id>", …}: pass one as it is in any later call\'s arguments, or as a send_email or create_draft attachment, and PCP puts the value there, so it never has to pass through you.',
     "Servers:",
     ...lines,
@@ -4702,24 +4707,39 @@ export function buildGatewayServer(
     name: "check_server",
     title: "Check a server",
     description:
-      "Check a server's connection: whether one of the owner's servers is connected and how many tools it has. For a server that needs the owner to sign in, call it on their next message after the link to connect it, whatever it says, before you send the link again or assume it is still not connected; never in the same reply as the link. If they are still signing in, it waits up to 45 seconds for them.",
+      "Check a server's connection: whether one of the owner's servers is connected and how many tools it has. After a deploy, refresh: true reads its tools again now (at most once a minute) and names the ones that appeared or went away; new tools show up only after a refresh or within hours, and get no levels from it. For a server that needs the owner to sign in, call it on their next message after the link to connect it, whatever it says, before you send the link again or assume it is still not connected; never in the same reply as the link. If they are still signing in, it waits up to 45 seconds for them.",
     input: z.object({
       server: z
         .string()
         .describe("The server's short name, as in the list of servers."),
+      refresh: z
+        .boolean()
+        .optional()
+        .describe(
+          "True to read the server's tools again now, after it was updated: answers with the new count and the tools that appeared or went away (only those you may see). At most once a minute per server; not for a server that waits for the owner. A refresh grants nothing: new tools get the levels a new tool gets.",
+        ),
     }),
     output: z.discriminatedUnion("kind", [
       NEEDS_OWNER,
       z.object({
         kind: z.literal("done"),
         server: SERVER_STATE,
+        /** Set when refresh asked for a new read of the tools. */
+        refresh: z
+          .object({
+            read: z.boolean(),
+            added: z.array(z.string()),
+            removed: z.array(z.string()),
+            retryAfterMs: z.number().optional(),
+          })
+          .optional(),
         /** What the text says: connected, switched off, the owner's note. */
         message: z.string(),
       }),
     ]),
     annotations: READS,
     log: serverNamed("server"),
-    async run(args: { server: string }, ctx) {
+    async run(args: { server: string; refresh?: boolean }, ctx) {
       const find = async () => {
         const found = await db().mcpServer.findFirst({
           where: {
@@ -4780,6 +4800,26 @@ export function buildGatewayServer(
         )
       }
 
+      // refresh: read its tools again now, the same read as the six-hourly
+      // one (syncServerTools), once a minute per server. Only the tools this
+      // token may see are named.
+      let refreshLine = ""
+      let refresh:
+        | {
+            read: boolean
+            added: string[]
+            removed: string[]
+            retryAfterMs?: number
+          }
+        | undefined
+
+      if (args.refresh === true) {
+        const outcome = await refreshTools(scope, row)
+        refreshLine = ` ${outcome.line}`
+        refresh = outcome.refresh
+        state.toolCount = outcome.toolCount ?? state.toolCount
+      }
+
       const note = readServerNote(scope.ctx, row)
       // A service, or a server one serves: its state on the SSH server now.
       const service = await serviceStateLine(scope.ctx, row, scope.publicUrl)
@@ -4803,9 +4843,17 @@ export function buildGatewayServer(
         return passOn(signin.result)
       }
 
-      const said = `${row.name} is connected, with ${state.toolCount} tool${state.toolCount === 1 ? "" : "s"}.${row.enabled ? "" : " The owner has switched it off in PCP."}${coolingLine}${service ? ` ${service}` : (row.status === "error" || row.status === "refused") && row.statusMessage ? ` Last contact failed: ${row.statusMessage}` : ""}${signin ? ` ${signin.line}` : ""}${note ? ` ${ownerNoteLine(note)}` : ""}`
+      const said = `${row.name} is connected, with ${state.toolCount} tool${state.toolCount === 1 ? "" : "s"}.${row.enabled ? "" : " The owner has switched it off in PCP."}${coolingLine}${service ? ` ${service}` : (row.status === "error" || row.status === "refused") && row.statusMessage ? ` Last contact failed: ${row.statusMessage}` : ""}${signin ? ` ${signin.line}` : ""}${refreshLine}${note ? ` ${ownerNoteLine(note)}` : ""}`
 
-      return ok({ kind: "done", server: state, message: said }, { text: said })
+      return ok(
+        {
+          kind: "done",
+          server: state,
+          message: said,
+          ...(refresh ? { refresh } : {}),
+        },
+        { text: said },
+      )
     },
   })
 
@@ -8378,6 +8426,86 @@ function reread(
   }
 
   return running
+}
+
+/**
+ * An assistant's ask to read a server's tools now (check_server `refresh`):
+ * the same read as the background one, at most once a minute per server, and
+ * what changed among the tools this token may see (a blocked tool's name is
+ * never told). Grants nothing: new tools get what a new tool gets.
+ */
+async function refreshTools(
+  scope: GatewayScope,
+  row: Parameters<typeof refreshBlockedReason>[0] & {
+    id: string
+    name: string
+  },
+): Promise<{
+  line: string
+  toolCount?: number
+  refresh: {
+    read: boolean
+    added: string[]
+    removed: string[]
+    retryAfterMs?: number
+  }
+}> {
+  const none = { read: false, added: [], removed: [] }
+  const blocked = refreshBlockedReason(row)
+
+  if (blocked) {
+    return {
+      line: `Its tools were not read again: ${blocked}.`,
+      refresh: none,
+    }
+  }
+
+  const wait = claimRefresh(row.id)
+
+  if (wait > 0) {
+    return {
+      line: `Its tools were read again less than a minute ago; try again in ${Math.ceil(wait / 1000)} s.`,
+      refresh: { ...none, retryAfterMs: wait },
+    }
+  }
+
+  const before = (await loadGatewayServers(scope)).find(
+    (entry) => entry.id === row.id,
+  )
+
+  if (!before) {
+    return { line: "Its tools were not read again.", refresh: none }
+  }
+
+  const result = await reread(scope, before)
+
+  if (result.status !== "ok") {
+    return {
+      line: `Its tools could not be read again${result.message ? `: ${result.message}` : "."}`,
+      refresh: none,
+    }
+  }
+
+  const after = (await loadGatewayServers(scope)).find(
+    (entry) => entry.id === row.id,
+  )
+  const diff = diffToolNames(
+    visibleTools(before).map((tool) => tool.name),
+    visibleTools(after ?? before).map((tool) => tool.name),
+  )
+  const cap = (names: string[]) =>
+    names.slice(0, 20).join(", ") +
+    (names.length > 20 ? ` and ${names.length - 20} more` : "")
+  const changes = [
+    diff.added.length ? `appeared: ${cap(diff.added)}` : "",
+    diff.removed.length ? `went away: ${cap(diff.removed)}` : "",
+  ].filter(Boolean)
+
+  return {
+    line: `Its tools were read again now: ${result.toolCount} tool${result.toolCount === 1 ? "" : "s"}${changes.length ? `; ${changes.join("; ")}` : "; nothing changed for you"}.`,
+    toolCount: result.toolCount,
+    refresh: { read: true, ...diff },
+  }
 }
 
 /**
