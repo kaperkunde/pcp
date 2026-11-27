@@ -301,6 +301,7 @@ entries the app lists; the rest are behind `execute`):
 | `memory`                                   | **keep memories**                                   | Keeps notes under `/memories` that last between conversations and follow you from one assistant to the next.                                                                                                |
 | `read_memory`                              | **keep memories**                                   | Reads those notes (`every`, `view`, `search`) and nothing else; `search` with no arguments gives what `every` does.                                                                                         |
 | `web_fetch`                                | **fetch web pages**                                 | Fetches an address and returns the page as Markdown, a part at a time; with a method, headers and a body, other requests too.                                                                               |
+| `web_search`                               | **Search the web** (built-in tools)                 | Searches the web with the provider you chose on Settings → Web search and returns ranked results: title, address, a snippet and a date where there is one.                                                  |
 | `run_read`, `run_write`, `run_destructive` | **run code that calls its tools**                   | Runs a program that calls the token's tools of that tier and below and works on their answers inside PCP.                                                                                                   |
 | `check_run`                                | **run code that calls its tools**                   | Says how one of its runs went, by the run's id: still running, with its calls so far, or how it ended.                                                                                                      |
 | `share_result`                             | **move files to and from its own computer by link** | A link the assistant's own computer downloads a file PCP keeps for it from with curl (a browser download, a mail attachment).                                                                               |
@@ -492,6 +493,52 @@ on your network; an assistant cannot ask for it), and never PCP's own
 address. It sends none of your secrets or cookies; it never sends an
 Authorization or Cookie header at all. The sites a token reached are on its
 page, not in the request log.
+
+## Web search, and PCP's own tools in programs
+
+`web_search` is a tool of PCP's, for a token you ticked **Search the web**
+for under **Built-in tools** on its page (or when you made it). PCP has no
+search of its own, so it answers with a link to **Settings → Web search**
+until you choose a provider there. You choose one, give it a key from your
+secrets (or, for a search server of your own, its address), and PCP tries one
+search before it saves. The setting is the vault's, not the machine's.
+
+| Provider           | What it is                                                     | Key               |
+| ------------------ | -------------------------------------------------------------- | ----------------- |
+| Brave Search API   | Brave's own index, JSON, built for apps; about $5 per 1,000    | yours, from Brave |
+| Tavily             | A search API made for AI agents, an excerpt per result         | yours             |
+| Exa                | Meaning-based search with highlights                           | yours             |
+| Serper             | Google's results as JSON, cheap per search                     | yours             |
+| SearXNG (your own) | A search server you run; free, no account, nothing leaves home | none, or a bearer |
+
+Brave is the one to start with: its own index (no scraping of another
+engine), JSON made for this, a monthly credit and plain per-search pricing.
+Microsoft retired the Bing Search API in August 2025, Google's Programmable
+Search JSON API is closed to new customers and ends on 1 January 2027, and
+DuckDuckGo has no search API (only an answers one; its result pages are not
+offered for automated use), so none of those is offered. There is no
+provider PCP uses without your key: a search someone else pays for, or a
+page scraped against its terms, is not something PCP can promise stays up.
+
+Results are paced and cooled down like any site, by the provider's host; the
+same search made again within five minutes is answered from memory; and the
+query is never written to the request log. A result's address is only text:
+opening it is `web_fetch`'s job, with its own rules per site.
+
+**Built-in tools in programs.** The same box list is what a program may call
+of PCP's own tools: a wrapper's program and a `run_<tier>` program call one as
+`pcp.call("pcp", "web_search", { query })`, and a wrapper lists it in its
+`calls` as `pcp/web_search`. Only these tools can be ticked (each a checkbox,
+none by default): web_search, web_fetch, read_image, convert_document,
+edit_pdf, generate_image, list_folder, find_files, get_file, save_file,
+make_folder and move. Never one of the tools that propose or administer
+(register_server, the secret tools, memory, update_pcp, permissions). A call
+follows the token's levels and its tier (a program of `run_read` cannot call
+a Write tool), the arguments are checked first, a repeat of a Write call is
+held back, and every call has its line in the request log. A wrapper whose
+token lacks the box is refused, naming the setting. A token that is given
+built-in tools may reach no server at all: one with only **Search the web** is
+a token that only searches.
 
 A token made with **Let an assistant with this token run code that calls its
 tools** gets the `run` tools, one per tier (`run_read`,

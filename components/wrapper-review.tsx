@@ -278,6 +278,13 @@ function ToolReview({ tool }: { tool: WrapperShownTool }) {
 
       <Part label="Calls">
         <Chips names={tool.calls} />
+        {tool.calls.some((call) => call.startsWith("pcp/")) ? (
+          <p className="text-xs leading-relaxed text-muted-foreground">
+            pcp/… are PCP&apos;s own built-in tools. They run only for a token
+            whose page ticks them under Built-in tools, at that token&apos;s
+            levels, and never reach your secrets.
+          </p>
+        ) : null}
       </Part>
 
       {tool.sites && tool.status !== "removed" ? (

@@ -1,3 +1,4 @@
+import { OWN_SERVER_ID } from "./program-tools"
 import {
   DEFAULT_HEADER_NAME,
   DEFAULT_VALUE_TEMPLATE,
@@ -913,6 +914,11 @@ async function requireTextSecret(
   }
 }
 
+/**
+ * A short name no server gets: "pcp" names PCP's own tools (`pcp/<tool>` in a
+ * wrapper's calls, `pcp.call("pcp", …)`, propose_tool_access), so a server
+ * with it would shadow them. One called "PCP" becomes "pcp-2".
+ */
 export async function uniqueSlug(
   ctx: VaultContext,
   base: string,
@@ -921,7 +927,10 @@ export async function uniqueSlug(
   let slug = base
 
   for (let n = 2; ; n++) {
-    if (!(await serverSlugTaken(ctx, slug, exceptId))) {
+    if (
+      slug !== OWN_SERVER_ID &&
+      !(await serverSlugTaken(ctx, slug, exceptId))
+    ) {
       return slug
     }
 
@@ -1305,6 +1314,10 @@ export async function renameServerSlug(
     throw invalid(
       "Use lowercase letters, digits and dashes for the short name.",
     )
+  }
+
+  if (cleaned === OWN_SERVER_ID) {
+    throw invalid("pcp is the short name of PCP's own tools. Pick another one.")
   }
 
   if (await serverSlugTaken(ctx, cleaned, id)) {

@@ -1,5 +1,6 @@
 "use client"
 
+import { BuiltinToolFields } from "@/components/builtin-tool-fields"
 import { useActionState, useEffect, useState, useTransition } from "react"
 import type { FormEvent } from "react"
 
@@ -196,6 +197,7 @@ export function SignInConsent({
                 <RunCodeField id="consent-code" />
                 <TokenOptionField option="shareFiles" id="consent-files" />
                 <ManageWrappersField id="consent-wrappers" />
+                <BuiltinToolFields idPrefix="consent-builtin" />
               </Disclosure>
             </>
           ) : null}

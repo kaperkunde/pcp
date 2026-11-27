@@ -2,6 +2,7 @@ import { chromiumExecutable } from "../browser/executable"
 import type { VaultContext } from "../context"
 import { db } from "../db"
 import { readEmbeddingsConfig } from "../embeddings/config"
+import { readWebSearchConfig } from "../websearch/config"
 import { readServiceDefinition } from "../services/definition"
 import { openServiceSpec, SERVICE_SPEC_SELECT } from "../spec-rows"
 import { CATALOGUE, entriesOfImages, type CatalogueId } from "./catalogue"
@@ -28,9 +29,10 @@ export async function setUpEntries(
 ): Promise<Set<CatalogueId>> {
   const ids = servers.map((server) => server.id)
   const kinds = new Set(servers.map((server) => server.kind))
-  const [images, embeddings] = await Promise.all([
+  const [images, embeddings, webSearch] = await Promise.all([
     serviceImages(ctx, ids),
     readEmbeddingsConfig(ctx),
+    readWebSearchConfig(ctx),
   ])
   const done = new Set<CatalogueId>(
     entriesOfImages(images).map((entry) => entry.id),
@@ -75,6 +77,13 @@ export async function setUpEntries(
 
   if (embeddings) {
     done.add("embeddings")
+  }
+
+  // Web search is the owner's choice of a provider too.
+  done.delete("web_search")
+
+  if (webSearch) {
+    done.add("web_search")
   }
 
   if (done.has("browser") && !(await chromiumExecutable())) {

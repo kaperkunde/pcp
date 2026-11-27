@@ -7,6 +7,7 @@ import { createApiToken, resolveApiToken } from "../api-tokens"
 import { chromiumExecutable } from "../browser/executable"
 import type { VaultContext } from "../context"
 import { db } from "../db"
+import { writeWebSearchConfig } from "../websearch/config"
 import { writeEmbeddingsConfig } from "../embeddings/config"
 import {
   buildGatewayServer,
@@ -59,7 +60,9 @@ describe("the catalogue", () => {
 
       if (entry.kind === "builtin") {
         expect(
-          (entry.serverKinds?.length ?? 0) > 0 || entry.account !== undefined,
+          (entry.serverKinds?.length ?? 0) > 0 ||
+            entry.account !== undefined ||
+            entry.setting !== undefined,
           entry.id,
         ).toBe(true)
       } else {
@@ -406,6 +409,20 @@ describe("what a token has", () => {
       embed: { tools: true, skills: false, memories: false },
     })
     expect((await tokenHas()).has("embeddings")).toBe(true)
+  })
+
+  it("has web search only when the owner chose a provider, and an assistant never proposes it", async () => {
+    expect((await tokenHas()).has("web_search")).toBe(false)
+
+    await writeWebSearchConfig(ctx, { provider: "brave", secretId: "k" })
+    expect((await tokenHas()).has("web_search")).toBe(true)
+
+    const entry = CATALOGUE.find((item) => item.id === "web_search")!
+    expect(entry.ownerOnly).toBe(true)
+    expect(entry.page).toBe("/settings#web-search")
+    expect(
+      catalogueNamed("can you search the web for me").map((item) => item.id),
+    ).toEqual(["web_search"])
   })
 
   it("has Google when a server bound to the owner's Google sign-in is among its tools", async () => {

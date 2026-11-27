@@ -221,6 +221,23 @@ so in the summary; the bump itself waits for the request.
   `tool_tier` rows (per definition, or per server without one) and the
   vault's `toolTiers` setting for PCP's own tools; a wrapper tool's choice
   below what its calls came to since goes to the bell (`tierNotices`).
+- Web search (`lib/core/websearch/`): `web_search` is PCP's own Read tool for
+  a token whose `builtin_tools` has it, over the provider the owner chose
+  (the vault's `webSearch` setting, Settings → Web search; none set answers
+  `needs_owner` setup). Providers are adapters in `providers.ts`; the key is
+  read only in `upstream.ts webSearchProvider`; a result is untrusted text
+  (http(s) addresses, bounded, no hidden characters); pacing and the gate are
+  kept per provider host (`search.ts`); the query is never logged or stored
+  (an in-memory answer under a hash, five minutes). A new provider gets a
+  line in `providers.test.ts` and `request.test.ts`.
+- Built-in tools in programs (#164, `lib/core/program-tools.ts`): a wrapper's
+  program and a `run_<tier>` program call PCP's own tools only from that one
+  list (data tools, never an admin or owner tool) and only those ticked in the
+  token's `builtin_tools` (create form, token page, consent page), through
+  `gateway.ts ownProgramCall` (the validator, the tier gate, the duplicate
+  guard, the request log), as `pcp.call("pcp", tool)` or `pcp/<tool>` in a
+  wrapper's `calls` (`serverId` `pcp`). A tool added to the list gets its tier
+  in it (`gateway-tools.test.ts` checks it against the tool).
 - Pacing (`lib/core/pacing/`) applies only in `upstream.ts callServerTool`
   (the browser by the tab's site, in `browser/call.ts`, as a turn taken on
   the tab's lane and held until the action ends, so actions at a site never

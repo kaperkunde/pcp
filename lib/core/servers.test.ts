@@ -14,6 +14,7 @@ import {
   normalizeBasicAuth,
   normalizeOAuthClient,
   oauthTokensObsolete,
+  renameServerSlug,
   setMcpHeaderCredential,
   updateServer,
   validateUsername,
@@ -254,6 +255,18 @@ describe("with a vault", () => {
         ),
       ).rejects.toThrow(/client ID/)
     })
+  })
+
+  it("never gives a server the short name pcp, which names PCP's own tools", async () => {
+    const { id } = await createServer(ctx, {
+      name: "PCP",
+      url: "https://tools.example.com/mcp",
+      authType: "none",
+    })
+    expect((await getServer(ctx, id)).slug).toBe("pcp-2")
+    await expect(renameServerSlug(ctx, id, "pcp")).rejects.toThrow(
+      /PCP's own tools/,
+    )
   })
 
   it("updateServer still drops tokens that belong to an old configuration", async () => {

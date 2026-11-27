@@ -16,6 +16,7 @@ import { newId } from "./ids"
 import { newTokenInstructions, openInstructions } from "./instructions"
 import { createCredentialGrant, unlockWithCredential } from "./keys"
 import { sealedTokenName, tokenName } from "./token-names"
+import { parseBuiltinTools, storeBuiltinTools } from "./program-tools"
 
 /**
  * API tokens: what an MCP client presents to /mcp as a bearer token. Each
@@ -56,6 +57,8 @@ export type ApiTokenSummary = {
   manageWrappers: boolean
   /** May move files to and from its own computer by link (share_result). */
   shareFiles: boolean
+  /** PCP's own tools its programs may call (program-tools.ts). */
+  builtinTools: string[]
   servers: Array<{ id: string; name: string }>
   expiresAt: Date | null
   revokedAt: Date | null
@@ -93,6 +96,12 @@ export type TokenInput = {
   /** Left alone on an update when undefined. */
   shareFiles?: boolean
   /**
+   * PCP's own tools the token's programs may call (program-tools.ts); a
+   * token that reaches no server needs at least one. Left alone on an
+   * update when undefined.
+   */
+  builtinTools?: string[]
+  /**
    * The client profile the owner chose (clients/profiles.ts); null detects
    * it per request. Left alone on an update when undefined.
    */
@@ -129,6 +138,8 @@ export type ResolvedToken = {
    * check_upload).
    */
   shareFiles: boolean
+  /** PCP's own tools its programs may call, and web_search by itself. */
+  builtinTools: string[]
   /**
    * The owner's instructions for the assistant (lib/core/instructions.ts),
    * decrypted: given at the start of every conversation. Null for none.
@@ -168,6 +179,7 @@ type SummaryRow = {
   runCode: boolean
   manageWrappers: boolean
   shareFiles: boolean
+  builtinTools: string
   expiresAt: Date | null
   revokedAt: Date | null
   createdAt: Date
@@ -196,6 +208,7 @@ function toSummary(ctx: VaultContext, row: SummaryRow): ApiTokenSummary {
     runCode: row.runCode,
     manageWrappers: row.manageWrappers,
     shareFiles: row.shareFiles,
+    builtinTools: parseBuiltinTools(row.builtinTools),
     servers: row.servers.map((link) => ({
       id: link.server.id,
       name: serverName(ctx, link.server),
@@ -293,6 +306,7 @@ async function validateTokenInput(
 ): Promise<{
   name: string
   serverIds: string[]
+  builtinTools: string[] | undefined
 }> {
   const name = input.name.trim()
 
@@ -307,8 +321,14 @@ async function validateTokenInput(
   const serverIds = input.allowAllServers ? [] : [...new Set(input.serverIds)]
 
   if (!input.allowAllServers) {
-    if (serverIds.length === 0) {
-      throw invalid("Pick at least one server, or allow all of them.")
+    // A token may reach no server when it has built-in tools: one that
+    // only searches the web is a token (#164).
+    const builtin = input.builtinTools?.length ?? 0
+
+    if (serverIds.length === 0 && builtin === 0) {
+      throw invalid(
+        "Pick at least one server or built-in tool, or allow all servers.",
+      )
     }
 
     const known = await db().mcpServer.count({
@@ -324,14 +344,21 @@ async function validateTokenInput(
     throw invalid("The expiry must be in the future.")
   }
 
-  return { name, serverIds }
+  return {
+    name,
+    serverIds,
+    builtinTools:
+      input.builtinTools === undefined
+        ? undefined
+        : parseBuiltinTools(input.builtinTools),
+  }
 }
 
 export async function createApiToken(
   ctx: VaultContext,
   input: TokenInput,
 ): Promise<{ id: string; token: string }> {
-  const { name, serverIds } = await validateTokenInput(ctx, input)
+  const { name, serverIds, builtinTools } = await validateTokenInput(ctx, input)
 
   const token = `${TOKEN_PREFIX}${randomSecret()}`
   const grant = await createCredentialGrant(
@@ -356,6 +383,7 @@ export async function createApiToken(
       runCode: input.runCode ?? false,
       manageWrappers: input.manageWrappers ?? false,
       shareFiles: input.shareFiles ?? false,
+      builtinTools: storeBuiltinTools(builtinTools ?? []),
       clientProfile: checkedProfile(input.clientProfile ?? null),
       expiresAt: input.expiresAt ?? null,
       // A copy of PCP's suggested instructions, for the owner to change.
@@ -377,7 +405,7 @@ export async function createOAuthApiToken(
   ctx: VaultContext,
   input: TokenInput & { clientId: string; clientName: string },
 ): Promise<{ id: string }> {
-  const { name, serverIds } = await validateTokenInput(ctx, input)
+  const { name, serverIds, builtinTools } = await validateTokenInput(ctx, input)
   const grantId = newId()
   const id = newId()
 
@@ -406,6 +434,7 @@ export async function createOAuthApiToken(
         runCode: input.runCode ?? false,
         manageWrappers: input.manageWrappers ?? false,
         shareFiles: input.shareFiles ?? false,
+        builtinTools: storeBuiltinTools(builtinTools ?? []),
         expiresAt: input.expiresAt ?? null,
         oauthClientId: input.clientId,
         ...sealedTokenClient(ctx, id, {
@@ -442,7 +471,11 @@ export async function updateApiToken(
     throw new PcpError("forbidden", EXPIRED_TOKEN_NEEDS_OWNER)
   }
 
-  const { name, serverIds } = await validateTokenInput(ctx, input)
+  const { name, serverIds, builtinTools } = await validateTokenInput(ctx, {
+    ...input,
+    // Left alone: the check counts what it has now.
+    builtinTools: input.builtinTools ?? parseBuiltinTools(token.builtinTools),
+  })
 
   await db().$transaction([
     db().apiToken.update({
@@ -466,6 +499,9 @@ export async function updateApiToken(
           : {}),
         ...(input.shareFiles !== undefined
           ? { shareFiles: input.shareFiles }
+          : {}),
+        ...(input.builtinTools !== undefined
+          ? { builtinTools: storeBuiltinTools(builtinTools ?? []) }
           : {}),
         ...(input.clientProfile !== undefined
           ? { clientProfile: checkedProfile(input.clientProfile) }
@@ -601,6 +637,7 @@ function resolved(record: TokenRecord, dek: Buffer): ResolvedToken {
     runCode: record.runCode,
     manageWrappers: record.manageWrappers,
     shareFiles: record.shareFiles,
+    builtinTools: parseBuiltinTools(record.builtinTools),
     instructions: openInstructions(dek, record.id, record.instructions),
     clientProfile: chosenProfile(record.clientProfile),
     oauthClientName: client.oauthClientName,

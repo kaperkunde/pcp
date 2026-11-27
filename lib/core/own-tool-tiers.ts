@@ -1,3 +1,4 @@
+import { PROGRAM_TOOL_NAMES } from "./program-tools"
 import type { ToolTier } from "./constants"
 import type { VaultContext } from "./context"
 import { invalid } from "./errors"
@@ -47,6 +48,7 @@ function builtOwnTools(ctx: VaultContext) {
       runCode: true,
       manageWrappers: true,
       shareFiles: true,
+      builtinTools: [...PROGRAM_TOOL_NAMES],
       instructions: null,
       clientProfile: null,
       oauthClientName: null,

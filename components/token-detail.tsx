@@ -1,5 +1,6 @@
 "use client"
 
+import { BuiltinToolFields } from "@/components/builtin-tool-fields"
 import Link from "next/link"
 import { useRouter } from "next/navigation"
 import { useState, useTransition } from "react"
@@ -282,7 +283,14 @@ export function TokenReachForm({
   return (
     <TokenSettingsForm
       token={token}
-      shows={["scope", "keepMemories", "webFetch", "runCode", "shareFiles"]}
+      shows={[
+        "scope",
+        "builtin",
+        "keepMemories",
+        "webFetch",
+        "runCode",
+        "shareFiles",
+      ]}
       locked={locked}
       className="gap-8"
     >
@@ -293,6 +301,14 @@ export function TokenReachForm({
             servers={servers}
             allowAll={token.allowAllServers}
             selected={token.servers.map((server) => server.id)}
+          />
+        </List>
+      </ListSection>
+      <ListSection title="Built-in tools">
+        <List>
+          <BuiltinToolFields
+            selected={token.builtinTools}
+            idPrefix="token-builtin"
           />
         </List>
       </ListSection>

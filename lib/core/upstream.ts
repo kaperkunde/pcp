@@ -207,6 +207,9 @@ import {
   type GoogleAccount,
 } from "./google/meta"
 import { syncWrapperTools } from "./wrappers/catalogue"
+import type { WebSearchConfig } from "./websearch/config"
+import { authOf, PROVIDER_INFO, searxngSearchUrl } from "./websearch/providers"
+import type { PreparedSearch } from "./websearch/request"
 import {
   findPlaceholders,
   matchGrant,
@@ -1664,6 +1667,81 @@ export async function embeddingProvider(
         return requestEmbeddings(request, texts, input, signal)
       }
     },
+  }
+}
+
+/**
+ * web_search's provider, as the owner set it on Settings → Web search: the
+ * key read from its text secret here and made into the header's value
+ * (never a value the assistant, a log or an error holds), and the
+ * addresses it may reach: a hosted provider at its own public address
+ * only; a search the owner runs at the address they typed, public or on
+ * their own network, never PCP's own. The header goes to requestSearch
+ * and nowhere else.
+ */
+export async function webSearchProvider(
+  ctx: VaultContext,
+  config: WebSearchConfig,
+): Promise<PreparedSearch> {
+  const info = PROVIDER_INFO[config.provider]
+  const notOwn = (address: string, port: number) => !isOwnAddress(address, port)
+  let key: string | null = null
+  const redact: string[] = []
+
+  if (config.secretId) {
+    const row = await db().secret.findFirst({
+      where: { id: config.secretId, vaultId: ctx.vaultId },
+      select: { kind: true },
+    })
+
+    if (row?.kind !== "text") {
+      throw new PcpError(
+        "state",
+        "The web search provider's API key is gone. The owner can choose it again on Settings → Web search.",
+      )
+    }
+
+    const value = await readSecretValue(ctx, config.secretId)
+    const token = value.trim()
+
+    if (!token || /[\u0000-\u001f\u007f\s]/.test(token)) {
+      throw new PcpError(
+        "state",
+        "The web search provider's API key is empty or has a character a header cannot carry.",
+      )
+    }
+
+    key = `${authOf(config.provider).prefix}${token}`
+    redact.push(token, key, value)
+  }
+
+  if (info.ownAddress) {
+    if (!config.url) {
+      throw new PcpError("state", "The web search address is missing.")
+    }
+
+    const url = searxngSearchUrl(config.url)
+
+    return {
+      provider: config.provider,
+      host: url.host,
+      label: url.host,
+      fingerprint: `${config.provider}\n${url.origin}${url.pathname}`,
+      base: config.url,
+      key,
+      redact,
+      sendOptions: { publicOnly: true, addressCheck: notOwn },
+    }
+  }
+
+  return {
+    provider: config.provider,
+    host: info.host!,
+    label: info.title,
+    fingerprint: config.provider,
+    key,
+    redact,
+    sendOptions: { publicOnly: true },
   }
 }
 

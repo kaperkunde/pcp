@@ -481,3 +481,93 @@ export function defaultEmbedded(
 
   return { tools: true, skills: own, memories: own }
 }
+
+/**
+ * PCP's own tools a program may call (#164), with the words of the token's
+ * checkbox; program-tools.ts says what they are for and checks them.
+ */
+export type ProgramTool = {
+  name: string
+  /** The tier the tool runs at, unless the owner chose another one. */
+  tier: ToolTier
+  /** The words of the token's checkbox. */
+  label: string
+  caption: string
+}
+
+export const PROGRAM_TOOLS: readonly ProgramTool[] = [
+  {
+    name: "web_search",
+    tier: "read",
+    label: "Search the web",
+    caption:
+      "web_search, with the search provider you chose on Settings. This is also what lets a token that reaches no server search.",
+  },
+  {
+    name: "web_fetch",
+    tier: "destructive",
+    label: "Fetch web pages",
+    caption:
+      "web_fetch, at the token's site and method levels. Needs Read web pages on too.",
+  },
+  {
+    name: "read_image",
+    tier: "write",
+    label: "Read images and scans",
+    caption: "read_image, through the readers this token has.",
+  },
+  {
+    name: "convert_document",
+    tier: "write",
+    label: "Convert documents",
+    caption: "convert_document, through the converters this token has.",
+  },
+  {
+    name: "edit_pdf",
+    tier: "write",
+    label: "Edit PDFs",
+    caption: "edit_pdf, through the PDF tools this token has.",
+  },
+  {
+    name: "generate_image",
+    tier: "write",
+    label: "Generate images",
+    caption: "generate_image. It spends money at the image provider.",
+  },
+  {
+    name: "list_folder",
+    tier: "read",
+    label: "List files in a store",
+    caption: "list_folder, in the stores this token's levels allow.",
+  },
+  {
+    name: "find_files",
+    tier: "read",
+    label: "Find files in a store",
+    caption: "find_files, in the stores this token's levels allow.",
+  },
+  {
+    name: "get_file",
+    tier: "read",
+    label: "Read files from a store",
+    caption: "get_file, in the stores this token's levels allow.",
+  },
+  {
+    name: "save_file",
+    tier: "write",
+    label: "Save files to a store",
+    caption: "save_file, in the stores this token's levels allow.",
+  },
+  {
+    name: "make_folder",
+    tier: "write",
+    label: "Make folders in a store",
+    caption: "make_folder, in the stores this token's levels allow.",
+  },
+  {
+    name: "move",
+    tier: "write",
+    label: "Move files in a store",
+    caption: "move, in the stores this token's levels allow.",
+  },
+]
