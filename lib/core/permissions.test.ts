@@ -1037,6 +1037,44 @@ describe("kept results in a call", () => {
     )
   })
 
+  it("names a file as the call names it, else as it was kept", async () => {
+    const { ctx, scope, server, tokenId } = await setup()
+    const kept = async (name?: string) =>
+      (
+        await keepBytes(ctx, {
+          tokenId,
+          serverId: server.id,
+          toolName: "run_command",
+          bytes: PNG,
+          mediaType: "image/png",
+          name: name ?? null,
+        })
+      ).id
+    const bare = await kept()
+    const own = await kept("own.png")
+    const both = await kept("own.png")
+    const asked = await withPermission(
+      scope,
+      call(server, "send_postcard", {
+        attachments: [
+          { $result: bare, name: "Permit (front and back).png" },
+          { $result: own },
+          { $result: both, name: "Given.png" },
+        ],
+      }),
+    )
+    const view = await getPermissionView(ctx, await onlyRequestId(), {
+      publicUrl: PUBLIC_URL,
+    })
+
+    expect(view?.files?.map((file) => file.found && file.name)).toEqual([
+      "Permit (front and back).png",
+      "own.png",
+      "Given.png",
+    ])
+    expect(textOf(asked)).toContain(`Kept result ${bare}: Permit (front`)
+  })
+
   it("serves the owner only a file the waiting request names, of its own token, while it waits", async () => {
     const { ctx, scope, server, tokenId } = await setup()
     const named = await keepFile(ctx, server.id, tokenId)

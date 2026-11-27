@@ -81,6 +81,48 @@ export function namedResultIds(args: unknown): string[] {
 }
 
 /**
+ * The names the call's own arguments give kept results: any object with a
+ * `$result` and a text `name` (a mail attachment, say). The first name given
+ * to an id wins. Bounded; arguments too deep or too large are read as far as
+ * the bound.
+ */
+export function givenNames(args: unknown): Map<string, string> {
+  const names = new Map<string, string>()
+  let nodes = 0
+
+  const walk = (value: unknown, depth: number): void => {
+    if (depth > 32 || nodes++ > 10_000 || typeof value !== "object") {
+      return
+    }
+
+    if (value === null) {
+      return
+    }
+
+    if (Array.isArray(value)) {
+      value.forEach((item) => walk(item, depth + 1))
+      return
+    }
+
+    const record = value as Record<string, unknown>
+
+    if (
+      typeof record.$result === "string" &&
+      typeof record.name === "string" &&
+      record.name.trim() !== "" &&
+      !names.has(record.$result)
+    ) {
+      names.set(record.$result, record.name)
+    }
+
+    Object.values(record).forEach((item) => walk(item, depth + 1))
+  }
+
+  walk(args, 0)
+  return names
+}
+
+/**
  * What each kept result a call's arguments name is, so the owner sees what
  * the call carries: its name, type and size, which tool kept it, and until
  * when. An id the token no longer has is listed too, since the call would
@@ -102,6 +144,7 @@ export async function requestFiles(
         select: SERVER_META_SELECT,
       })
     : []
+  const given = givenNames(args)
   const slugs = new Map(
     servers.map((server) => [server.id, serverSlug(ctx, server)]),
   )
@@ -114,7 +157,12 @@ export async function requestFiles(
     return {
       id: info.id,
       found: true,
-      name: info.name === null ? null : visible(info.name, { oneLine: true }),
+      // The name the call gives it, else the one it was kept with.
+      name: (() => {
+        const name = given.get(info.id) ?? info.name
+
+        return name === null ? null : visible(name, { oneLine: true })
+      })(),
       mediaType: visible(info.mediaType, { oneLine: true }),
       kind: info.kind,
       length: info.length,
