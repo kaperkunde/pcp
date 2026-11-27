@@ -34,7 +34,8 @@ import {
 } from "./catalogue"
 import { setUpEntries } from "./catalogue-state"
 import { itemOffers } from "./setup"
-import { CAPABILITIES } from "./list"
+import { CAPABILITIES, OPENAI_IMAGES } from "./list"
+import { createEndpoint } from "../endpoints"
 
 // The catalogue (#163): what PCP can set up when the owner asks for it in a
 // conversation, named by search while the token has not got it.
@@ -475,6 +476,42 @@ describe("an entry's page", () => {
 
     expect((await itemOffers(ctx, [item])).running).toEqual([
       expect.objectContaining({ id: serviceId, signIn: null }),
+    ])
+  })
+})
+
+describe("a capability's page offers", () => {
+  it("open the endpoint you have, however it was added, with no common items linked", async () => {
+    const { id } = await createEndpoint(ctx, {
+      name: "OpenAI Images",
+      description: "OpenAI's Images API.",
+      baseUrl: "https://api.openai.com/v1",
+      specSource: "upload",
+      specText: JSON.stringify({
+        openapi: "3.1.0",
+        info: { title: "OpenAI Images", version: "1" },
+        paths: {
+          "/images/generations": { post: { operationId: "create_image" } },
+        },
+      }),
+      readOnly: false,
+      authType: "none",
+    })
+
+    const { repoId, offers } = await itemOffers(ctx, [OPENAI_IMAGES])
+
+    expect(repoId).toBeNull()
+    expect(offers).toEqual([
+      { item: OPENAI_IMAGES, href: `/servers/${id}`, state: "have" },
+    ])
+  })
+
+  it("leave one you have not to the button that links the common items", async () => {
+    const { repoId, offers } = await itemOffers(ctx, [OPENAI_IMAGES])
+
+    expect(repoId).toBeNull()
+    expect(offers).toEqual([
+      { item: OPENAI_IMAGES, href: null, state: "launch" },
     ])
   })
 })
