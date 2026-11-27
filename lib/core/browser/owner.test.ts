@@ -573,6 +573,24 @@ describe.skipIf(!executable)("the owner's tabs", { timeout: 90_000 }, () => {
     expect(after.profile).toBeNull()
   })
 
+  it("saves the running browser's sign-ins when the owner opens the page, not on its refreshes", async () => {
+    // #190: an assistant's actions save them at most every half minute, so
+    // the page would show what was kept before the last sign-in.
+    vi.stubEnv("PCP_BROWSER_DISPLAY", "headless")
+    await openOwnerTab(ctx, {
+      url: `${api.origin}/login`,
+      publicUrl: PUBLIC_URL,
+    })
+    await runningBrowser(ctx.vaultId)!.context.addCookies([
+      { name: "later", value: "1", url: api.origin },
+    ])
+
+    expect((await browserOverview(ctx)).profile).toMatchObject({ cookies: 1 })
+    expect((await browserOverview(ctx, { fresh: true })).profile).toMatchObject(
+      { cookies: 2 },
+    )
+  })
+
   it("keeps how the browser runs apart from the mode wanted on this machine", async () => {
     vi.stubEnv("PCP_DESKTOP", "")
     vi.stubEnv("PCP_BROWSER_DISPLAY", "headless")

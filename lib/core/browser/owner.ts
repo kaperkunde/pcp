@@ -360,7 +360,18 @@ async function overviewTabs(ctx: VaultContext): Promise<OverviewTab[]> {
 
 export async function browserOverview(
   ctx: VaultContext,
+  { fresh = false }: { fresh?: boolean } = {},
 ): Promise<BrowserOverview> {
+  // An assistant's actions save the sign-ins at most every
+  // PROFILE_ACTION_SAVE_INTERVAL_MS (#190), so the page the owner opens saves
+  // them first, with the key their session holds, to show what is kept now.
+  // Not the page's refreshes, which would hold actions every few seconds.
+  const vault = fresh ? runningBrowser(ctx.vaultId) : null
+
+  if (vault) {
+    await saveVaultProfile(ctx, vault, { force: true }).catch(() => {})
+  }
+
   const [server, path, installed, outdated, profile, tabs] = await Promise.all([
     findBrowserServer(ctx),
     chromiumExecutable(),

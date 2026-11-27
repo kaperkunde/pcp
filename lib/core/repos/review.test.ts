@@ -200,7 +200,7 @@ describe("reviewing an item", () => {
     const paced = {
       ...WRAPPER,
       pace: {
-        actions: { min_ms: 20, max_ms: 60 },
+        actions: { min_ms: 10, max_ms: 30 },
         tools: [{ tool: "click", min_ms: 100, max_ms: 200 }],
       },
     } as WrapperDocument
@@ -209,7 +209,7 @@ describe("reviewing an item", () => {
 
     expect(kinds(review.flags)).toEqual(["pace"])
     expect(review.flags[0]!.message).toBe(
-      "Its browser calls would go at a pace of their own: before actions in a page 0.02 to 0.06 s; before click 0.1 to 0.2 s. Outside what you let assistants set without asking: before actions in a page 0.02 to 0.06 s (assistants may set 0.05 to 5 s).",
+      "Its browser calls would go at a pace of their own: before actions in a page 0.01 to 0.03 s; before click 0.1 to 0.2 s. Outside what you let assistants set without asking: before actions in a page 0.01 to 0.03 s (assistants may set 0.02 to 5 s).",
     )
     expect(review.textOnly).toBe(false)
     expect(review.same).toBe(false)

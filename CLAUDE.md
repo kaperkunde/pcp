@@ -263,7 +263,21 @@ so in the summary; the bump itself waits for the request.
   by `pcp.call`'s `pace` within it); either within the owner's bounds
   (the setting's `assistant`) or as the owner allowed it (a `tab_pace`
   request for that tab alone; the `wrapper_change` page), never below the
-  owner's own pace for the site, and never written into the setting.
+  owner's own pace for the site, and never written into the setting. The
+  defaults are a person's: 30 to 300 ms between actions in a page, a quarter
+  to nine tenths of a second before a page opens, and an assistant may set an
+  action pace down to 20 ms unasked. Nothing else holds a browser action
+  while it keeps its turn: the sign-ins are saved at most every
+  `PROFILE_ACTION_SAVE_INTERVAL_MS` after an action (a save reads the whole
+  storage state, seconds on a site with a big IndexedDB; #190), at once only
+  for a cleared check, a hand-over's end, the owner's Browser page as it
+  opens (`browserOverview`'s `fresh`, never its refreshes) and the browser's
+  close. An action
+  held more than a second (`HELD_NOTE_MS`) starts its answer with one line,
+  `Held 4.2 s: waiting for its turn at <site> under <the setting that decided
+it> 0.3 s, saving the browser's sign-ins 3.9 s.` (`heldLine`); a new wait
+  inside an action adds its `Hold` there. A browser flow's run may take
+  `FLOW_RUN_TIMEOUT_MS` (ten minutes).
 - The call gate (`lib/core/gate/`) is PCP's layer over
   `@kaperkunde/backoff` (kaperkunde/backoff: p-queue's turns and calls a
   minute, cockatiel's circuit breaker as the cool-down, its own slowdown,

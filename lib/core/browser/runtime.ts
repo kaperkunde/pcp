@@ -832,14 +832,17 @@ export async function closeAllBrowsers(): Promise<void> {
 export function saveVaultProfile(
   ctx: VaultContext,
   vault: VaultBrowser,
-  { force = false }: { force?: boolean } = {},
+  {
+    force = false,
+    within = PROFILE_SAVE_INTERVAL_MS,
+  }: { force?: boolean; within?: number } = {},
 ): Promise<void> {
   const save = async () => {
     if (runningBrowser(vault.vaultId) !== vault) {
       return
     }
 
-    if (!force && Date.now() - vault.lastSavedAt < PROFILE_SAVE_INTERVAL_MS) {
+    if (!force && Date.now() - vault.lastSavedAt < within) {
       return
     }
 
@@ -847,6 +850,8 @@ export function saveVaultProfile(
     vault.lastSavedHash = await saveProfile(ctx, vault.context, {
       unless: vault.lastSavedHash,
     })
+    // The interval runs from when a save ended, not from when it began.
+    vault.lastSavedAt = Date.now()
   }
   const saved = vault.saving.then(save, save)
   vault.saving = saved.catch(() => {})

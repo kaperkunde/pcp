@@ -649,8 +649,14 @@ work as for web fetch. Each token sees and drives only its own tabs (the ones
 it opened and the ones you hand it), not another token's or yours, and leaves
 a page alone once its lines no longer let it open the site.
 
+The browser acts at a person's pace by default (a few tenths of a second
+between actions in a page, a little longer before a page opens; **Settings →
+Pacing** moves it, per site too), and an action it was held on for more than a
+second says what held it and for how long. A browser flow may run for up to ten
+minutes.
+
 The browser keeps its cookies, local storage and IndexedDB, encrypted in your
-vault, so a sign-in lasts between conversations; an assistant acts as you
+vault (saved every half minute while it works, and when it closes), so a sign-in lasts between conversations; an assistant acts as you
 where you signed in, but no tool hands back a cookie or local storage. The
 one way an assistant's JavaScript runs in a page is `evaluate`, and it asks you
 per site, showing the whole script: **Run it once**, or **Allow scripts at this

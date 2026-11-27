@@ -29,7 +29,7 @@ export default async function BrowserPage({
   const ctx = await requireContext()
   const { tab } = await searchParams
   const [overview, server, tokens] = await Promise.all([
-    browserOverview(ctx),
+    browserOverview(ctx, { fresh: true }),
     findBrowserServer(ctx),
     browserTokens(ctx),
   ])

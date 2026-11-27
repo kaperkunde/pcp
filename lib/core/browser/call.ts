@@ -27,6 +27,7 @@ import {
   assistantBounds,
   readPacingConfig,
   resolveBrowserPolicy,
+  siteOverride,
   type PacingConfig,
 } from "../pacing/config"
 import {
@@ -98,6 +99,8 @@ import {
   MAX_HELD_DOCUMENT_BYTES,
   MAX_URL_LENGTH,
   WINDOW_SETTLE_MS,
+  HELD_NOTE_MS,
+  PROFILE_ACTION_SAVE_INTERVAL_MS,
   PACED_TAB_DEADLINE_MS,
   PACED_TURN_WAIT_MS,
   PDF_READ_BYTES,
@@ -967,7 +970,9 @@ async function sweepTabs(
   ).catch(() => [] as Closed[])
 
   if (closed.length > 0) {
-    await saveVaultProfile(scope.ctx, vault, { force: true }).catch(() => {})
+    await saveVaultProfile(scope.ctx, vault, {
+      within: PROFILE_ACTION_SAVE_INTERVAL_MS,
+    }).catch(() => {})
   }
 
   return sweptLines(scope, closed)
@@ -1263,14 +1268,89 @@ function addressSite(raw: string): string | null {
 }
 
 /** A turn that holds nothing back: an action with no site to pace. */
-const NO_TURN: SiteTurn = { release: () => {}, ok: true, throttle: null }
+function noTurn(): SiteTurn {
+  return { release: () => {}, ok: true, throttle: null, holds: [] }
+}
+
+/**
+ * Saves the vault's sign-ins after an action, at most every
+ * PROFILE_ACTION_SAVE_INTERVAL_MS (a save reads the whole storage state out
+ * of Chromium, which is seconds on a site with a big local database, and
+ * was every action's wait), and says how long it took.
+ */
+async function savedSignIns(
+  scope: BrowserScope,
+  vault: VaultBrowser,
+  { force = false }: { force?: boolean } = {},
+): Promise<Hold> {
+  const started = Date.now()
+  await saveVaultProfile(scope.ctx, vault, {
+    force,
+    within: PROFILE_ACTION_SAVE_INTERVAL_MS,
+  })
+  return { what: "saving the browser's sign-ins", ms: Date.now() - started }
+}
+
+/** What an action waited on, and for how long. */
+type Hold = { what: string; ms: number }
 
 /**
  * A turn at a site, counted for the call gate when it is released
  * (lib/core/gate/): whether the action went through, and a "slow down" the
  * site's main page answered with.
  */
-type SiteTurn = Turn & { ok: boolean; throttle: Throttle | null }
+type SiteTurn = Turn & {
+  ok: boolean
+  throttle: Throttle | null
+  /** What held the action, for the line at the start of its answer. */
+  holds: Hold[]
+}
+
+/**
+ * One short line for an action held longer than HELD_NOTE_MS in all, naming
+ * each wait and its milliseconds: "Held 4.2 s: waiting for its turn at
+ * shop.test under the tab's own pace (actions 0.02 to 0.1 s) 0.3 s, saving
+ * the browser's sign-ins 3.9 s." Null for one that was not.
+ */
+function heldLine(holds: Hold[]): string | null {
+  const total = holds.reduce((sum, hold) => sum + hold.ms, 0)
+
+  if (total < HELD_NOTE_MS) {
+    return null
+  }
+
+  return `Held ${(total / 1000).toFixed(1)} s: ${holds
+    .filter((hold) => hold.ms >= 50)
+    .map((hold) => `${hold.what} ${(hold.ms / 1000).toFixed(1)} s`)
+    .join(", ")}.`
+}
+
+/** Which pace an action followed, in words: the setting that decided it. */
+function paceSource(
+  config: PacingConfig,
+  pacingClass: BrowserPacingClass,
+  where: { site: string; own: PaceRange | null; tabOwn: boolean },
+): string {
+  const policy = resolveBrowserPolicy(config, pacingClass, {
+    site: where.site,
+    own: where.own,
+  })
+  const words = `${BROWSER_CLASS_WORDS[pacingClass]} ${policyWords(policy)}`
+  const site = siteOverride(config.sites, where.site)
+  const floor = site ? `, the owner's pace for ${where.site} as the floor` : ""
+
+  if (where.own) {
+    return `${where.tabOwn ? "the tab's own pace" : "the wrapper's pace"} (${words}${floor})`
+  }
+
+  if (site) {
+    return `the owner's pace for ${where.site} (${words})`
+  }
+
+  return config.classes[pacingClass]
+    ? `the owner's pace for the browser (${words})`
+    : `PCP's default pace (${words})`
+}
 
 function isTurn(value: SiteTurn | CallToolResult): value is SiteTurn {
   return "release" in value
@@ -1293,7 +1373,7 @@ async function pacedTurn(
   pacingClass: BrowserPacingClass | null,
 ): Promise<SiteTurn | CallToolResult> {
   if (!site || !pacingClass) {
-    return NO_TURN
+    return noTurn()
   }
 
   // A site cooling down (lib/core/gate/: it asked PCP to slow down) is not
@@ -1317,12 +1397,16 @@ async function pacedTurn(
   const signals = [scope.signal, scope.clock?.expired].filter(
     (signal): signal is AbortSignal => signal !== undefined,
   )
+  const tabOwn = tabPaceFor(tab, pacingClass)
+  const own = tabOwn ?? scope.pace ?? null
+  const waitStarted = Date.now()
   const turn = await paceBrowserTurn(scope.ctx, site, pacingClass, {
     serverId: scope.serverId,
-    own: tabPaceFor(tab, pacingClass) ?? scope.pace ?? null,
+    own,
     signal: signals.length > 0 ? AbortSignal.any(signals) : undefined,
     deadline: browserTurnDeadline(scope.deadline),
   })
+  const waited = Date.now() - waitStarted
 
   if (!("release" in turn)) {
     return pacedResult(turn)
@@ -1330,9 +1414,23 @@ async function pacedTurn(
 
   const started = Date.now()
   let released = false
+  const holds: Hold[] = []
+
+  if (waited >= 50) {
+    holds.push({
+      what: `waiting for its turn at ${site} under ${paceSource(
+        await readPacingConfig(scope.ctx),
+        pacingClass,
+        { site, own, tabOwn: tabOwn !== null },
+      )}`,
+      ms: waited,
+    })
+  }
+
   const counted: SiteTurn = {
     ok: true,
     throttle: null,
+    holds,
     release: () => {
       turn.release()
       if (released) return
@@ -1475,7 +1573,11 @@ export async function performNavigate(
       }
 
       try {
-        const opened = await openIn(current)
+        const opened = withLead(
+          await openIn(current, turn),
+          // The page's own load is its time, not a hold.
+          heldLine(turn.holds),
+        )
         turn.ok = opened.isError !== true
         turn.throttle = seen.throttle
         return opened
@@ -1490,7 +1592,7 @@ export async function performNavigate(
 
   return withLead(await answer, note)
 
-  async function openIn(current: Tab): Promise<CallToolResult> {
+  async function openIn(current: Tab, turn: SiteTurn): Promise<CallToolResult> {
     if (allowedByOwner) {
       current.allowedHosts.add(siteKey(url))
     }
@@ -1538,7 +1640,7 @@ export async function performNavigate(
       const failure = navigationFailure(vault, current, url, error, since)
       current.lastBlocked = null
       await settle(current)
-      await saveVaultProfile(scope.ctx, vault, { force: true })
+      turn.holds.push(await savedSignIns(scope, vault))
       return failed(
         await report(scope, current, {
           first,
@@ -1548,8 +1650,10 @@ export async function performNavigate(
       )
     }
 
+    // A site's check passed on its own leaves a clearance, kept at once.
+    const checked = current.documents.challenged()
     await passCheck(current, scope.clock)
-    await saveVaultProfile(scope.ctx, vault, { force: true })
+    turn.holds.push(await savedSignIns(scope, vault, { force: checked }))
     return report(scope, current, { first, signIns: true, unseen: true })
   }
 }
@@ -1681,9 +1785,12 @@ async function tabs(
   // the page.
   if (args.action === "close") {
     await withVault(vault!, () => closeTab(vault!, picked))
-    await saveVaultProfile(scope.ctx, vault!, { force: true })
-    return text(
-      `Closed tab ${picked.id}. ${upper(tabUsage(vault, scope.tokenId))}.`,
+    const saved = await savedSignIns(scope, vault!)
+    return withLead(
+      text(
+        `Closed tab ${picked.id}. ${upper(tabUsage(vault, scope.tokenId))}.`,
+      ),
+      heldLine([saved]),
     )
   }
 
@@ -1961,7 +2068,7 @@ async function onTab(
       }
 
       try {
-        const done = await acting(picked, turn)
+        const done = withLead(await acting(picked, turn), heldLine(turn.holds))
         turn.ok = done.isError !== true
         return done
       } catch (error) {
@@ -1976,7 +2083,7 @@ async function onTab(
   return withLead(answer, note)
 
   /** The tool's own work, its turn taken. */
-  async function acting(tab: Tab, turn: Turn): Promise<CallToolResult> {
+  async function acting(tab: Tab, turn: SiteTurn): Promise<CallToolResult> {
     atStep(
       scope.clock,
       `running ${spec.name} on tab ${tab.id}`,
@@ -2000,7 +2107,7 @@ async function onTab(
     }
 
     if (spec.changes) {
-      await saveVaultProfile(scope.ctx, vault!, { force: true })
+      turn.holds.push(await savedSignIns(scope, vault!))
     }
 
     return result
@@ -2407,7 +2514,7 @@ async function downloadFile(
   tab: Tab,
   args: { ref?: string; url?: string },
   keepBytes: BytesKeeper | undefined,
-  turn: Turn = NO_TURN,
+  turn: Turn = noTurn(),
 ): Promise<CallToolResult> {
   if (!keepBytes) {
     return text(
