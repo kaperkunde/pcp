@@ -923,10 +923,24 @@ readSecretValueFromResult`, #174) and the owner's page open it; every reader (re
   site with the whole script shown (`script_use`, with `noteOwnerAsked`;
   Run it once, or a level for the site kept as a `web_fetch_rule` of kind
   `script`, `browser-scripts.ts`), refused while a field holds a typed
-  secret, and while it runs the tab reaches its own site only (its
-  DevTools session fails every request elsewhere, the gate keeps its main
-  frame and popups there, and the proxies hold new connections elsewhere
-  until it is done, then refuse the ones it reached for); its result is
+  secret, and while it runs the tab reaches its own site's registrable
+  domain (`scriptReaches` in `browser-scripts.ts`: any host of the same
+  eTLD+1 by the public suffix list, never an IP address, localhost, a
+  public suffix or PCP's own address) and the extra hosts the owner allowed
+  for that site, and nothing else (its DevTools session fails every request
+  elsewhere, the gate keeps its main frame and popups at the site itself,
+  and the proxies hold new connections elsewhere until it is done, then
+  refuse the ones it reached for; the address checks of web fetch and the
+  proxy still apply to every host it may reach, and the answer names what
+  was refused by site only). The extra hosts are `web_fetch_rule` rows of
+  kind `script_reach` (one per token, site and host, sealed like a
+  script's), written only by the owner's yes to a `script_use` request: an
+  assistant names hosts in `evaluate`'s `reach` (names only, at most ten,
+  never an IP address), and a host nothing allows yet makes the call ask,
+  even where scripts are allowed, showing the owner each host as a box;
+  Run it once lets that run reach the ticked ones, Allow scripts at this
+  site keeps them, and nothing the answer carries adds a host the request
+  did not show. Add a test for each new way a script can reach a host; its result is
   masked and a long one kept as a result. The logs (`console_log`,
   `network_log`, `browser/devtools.ts`) are DevTools events only, never
   page script; the page's own console calls only from the first

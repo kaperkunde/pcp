@@ -320,6 +320,7 @@ export default async function PermissionPage({
                   : null
               }
               alsoAllows={view.alsoAllows}
+              scriptReach={view.scriptReach}
             />
           </>
         ) : (
@@ -494,9 +495,11 @@ function PendingNote({ view }: { view: PermissionView }) {
     case "script_use":
       return (
         <p className={note}>
-          Run it once runs this script, in this tab. Allow scripts at this site
-          and Block scripts at this site decide this token&apos;s later scripts
-          there without asking you; you can take either back on{" "}
+          Run it once runs this script, in this tab, reaching the other hosts
+          you tick, if it asked for any. Allow scripts at this site and Block
+          scripts at this site decide this token&apos;s later scripts there
+          without asking you (Allow keeps the hosts you ticked for them); you
+          can take either back on{" "}
           <Link href={`/tokens/${view.tokenId}`} className="underline">
             the token&apos;s page
           </Link>

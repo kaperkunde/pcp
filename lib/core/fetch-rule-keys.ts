@@ -4,8 +4,8 @@ import { db } from "./db"
 import { openText, sealText, type Sealed } from "./sealed"
 
 /**
- * A web_fetch_rule that names a site (kind "site", and "script" for the
- * browser's evaluate) is keyed by a keyed hash of the site under the
+ * A web_fetch_rule that names a site (kind "site", and "script" and
+ * "script_reach" for the browser's evaluate) is keyed by a keyed hash of the site under the
  * vault's key, the site itself sealed beside it as
  * "web_fetch_rule:<id>:key" (#96). The other kinds keep their key as it
  * is: a method, "private", an exit's id. A row from before holds the site
@@ -14,7 +14,11 @@ import { openText, sealText, type Sealed } from "./sealed"
  * two rows in one scope.
  */
 
-const SEALED_KINDS: ReadonlySet<string> = new Set(["site", "script"])
+const SEALED_KINDS: ReadonlySet<string> = new Set([
+  "site",
+  "script",
+  "script_reach",
+])
 
 function aad(id: string): string {
   return `web_fetch_rule:${id}:key`

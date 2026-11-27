@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto"
 
 import { requireLiveToken } from "./api-tokens"
+import { registrableDomain } from "./browser-secrets"
 import type { VaultContext } from "./context"
 import { db } from "./db"
 import { invalid } from "./errors"
@@ -27,12 +28,21 @@ import { PERMISSION_TTL_MS } from "./permission-rules"
  * by their answer or on the token's page; nothing an assistant sends does.
  * Without a line evaluate asks.
  *
+ * While a script runs the tab reaches its own site's registrable domain
+ * (scriptReaches: any host of the same eTLD+1 by the public suffix list,
+ * never an IP address, localhost or a public suffix) and the extra hosts the
+ * owner allowed for that site: a web_fetch_rule of kind "script_reach", one
+ * row per site and host (key "<site>\n<host>", sealed as a script's is),
+ * written only by the owner's yes to a `script_use` request that named the
+ * hosts (executeScriptUse, `reach`), never by anything an assistant sends.
+ *
  * "Run it once" is not a level: an allowance for that one script, in that
  * tab at that site, held in memory until the call the answer makes takes
  * it (or the request would have expired), never saved and never exported.
  */
 
 const KIND = "script"
+const REACH_KIND = "script_reach"
 const ALL = "all"
 
 export type ScriptLevel = "allowed" | "blocked"
@@ -100,7 +110,12 @@ export async function writeScriptAccess(
   })
 }
 
-export type ScriptSiteView = { site: string; access: ScriptLevel }
+export type ScriptSiteView = {
+  site: string
+  access: ScriptLevel
+  /** Extra hosts allowed for the site's scripts. */
+  reach: string[]
+}
 
 /** The token's own lines for scripts, for its page. */
 export async function listScriptSites(
@@ -111,10 +126,28 @@ export async function listScriptSites(
     where: { vaultId: ctx.vaultId, kind: KIND, scope: tokenId },
   })
 
+  const reach = (await reachRows(ctx, tokenId)).filter(
+    (row) => row.scope === tokenId,
+  )
+
   return rows
     .flatMap((row) => {
       const access = asLevel(row.access)
-      return access ? [{ site: openRuleKey(ctx, row), access }] : []
+      const site = openRuleKey(ctx, row)
+
+      return access
+        ? [
+            {
+              site,
+              access,
+              reach: reach
+                .map((each) => openRuleKey(ctx, each).split("\n"))
+                .filter(([at]) => at === site)
+                .map(([, host]) => host!)
+                .sort(),
+            },
+          ]
+        : []
     })
     .sort((a, b) => (a.site < b.site ? -1 : a.site > b.site ? 1 : 0))
 }
@@ -139,6 +172,151 @@ export async function removeScriptSite(
       key: { in: ruleKeys(ctx, KIND, site) },
     },
   })
+
+  // The extra hosts allowed for the site go with it.
+  for (const row of await reachRows(ctx, tokenId)) {
+    if (reachSite(openRuleKey(ctx, row)) === site) {
+      await db().webFetchRule.delete({ where: { id: row.id } })
+    }
+  }
+}
+
+const MAX_REACH_HOSTS = 10
+
+/**
+ * A host an owner or an assistant names for a script to reach, as siteKey
+ * writes it (lower case, a port only when given): a name, never an address
+ * with a scheme or path, an IP address or localhost. Null if it is none.
+ */
+export function normalizeReachHost(input: unknown): string | null {
+  if (typeof input !== "string") return null
+
+  const host = input.trim().toLowerCase().replace(/\.$/, "")
+
+  if (
+    host.length > 253 ||
+    !/^[a-z0-9]([a-z0-9.-]*[a-z0-9])?(:\d{1,5})?$/.test(host)
+  ) {
+    return null
+  }
+
+  const name = host.replace(/:\d+$/, "")
+
+  return name.includes(".") && !/^[\d.]+$/.test(name) ? host : null
+}
+
+/** The hosts of a `reach` argument, normalized and once each; null if one is no host. */
+export function reachHosts(input: readonly unknown[]): string[] | null {
+  const hosts = new Set<string>()
+
+  for (const each of input) {
+    const host = normalizeReachHost(each)
+    if (!host) return null
+    hosts.add(host)
+  }
+
+  return hosts.size <= MAX_REACH_HOSTS ? [...hosts] : null
+}
+
+/** The host part of a siteKey (the port taken off). */
+function hostnameOf(site: string): string {
+  return site.replace(/:\d+$/, "")
+}
+
+/**
+ * Whether a script at `site` may reach `host` (both as siteKey writes
+ * them): the same registrable domain by the public suffix list, or one of
+ * the extra hosts the owner allowed. Never for an IP address, localhost or
+ * a public suffix (github.io hosts are each their own site), whatever the
+ * extras say about them; the same site itself always.
+ */
+export function scriptReaches(
+  site: string,
+  host: string,
+  extras: ReadonlySet<string> = new Set(),
+): boolean {
+  if (host === site) return true
+
+  const name = hostnameOf(host)
+  const own = registrableDomain(hostnameOf(site))
+
+  if (own !== null && registrableDomain(name) === own) return true
+
+  return (
+    registrableDomain(name) !== null && (extras.has(host) || extras.has(name))
+  )
+}
+
+function reachRows(ctx: VaultContext, tokenId: string) {
+  return db().webFetchRule.findMany({
+    where: {
+      vaultId: ctx.vaultId,
+      kind: REACH_KIND,
+      scope: { in: [tokenId, ALL] },
+    },
+  })
+}
+
+function reachSite(key: string): string {
+  return key.split("\n")[0]!
+}
+
+/** The extra hosts the owner allowed scripts at `site` to reach for this token. */
+export async function allowedReach(
+  ctx: VaultContext,
+  tokenId: string,
+  site: string,
+): Promise<Set<string>> {
+  const hosts = new Set<string>()
+
+  for (const row of await reachRows(ctx, tokenId)) {
+    const [at, host] = openRuleKey(ctx, row).split("\n")
+
+    if (at === site && host && row.access === "allowed") hosts.add(host)
+  }
+
+  return hosts
+}
+
+/**
+ * Keeps hosts as ones the token's scripts at a site may reach. The owner's
+ * alone: their yes to a `script_use` request, for the hosts they ticked.
+ */
+export async function writeScriptReach(
+  ctx: VaultContext,
+  tokenId: string,
+  site: string,
+  hosts: readonly string[],
+): Promise<void> {
+  const vaultId = ctx.vaultId
+
+  for (const host of hosts) {
+    const name = `${site}\n${host}`
+    const id = newId()
+
+    await sealRuleRows(ctx, REACH_KIND, name)
+    await db().webFetchRule.upsert({
+      where: {
+        vaultId_scope_kind_key: {
+          vaultId,
+          scope: tokenId,
+          kind: REACH_KIND,
+          key: ruleKey(ctx, REACH_KIND, name),
+        },
+      },
+      create: {
+        id,
+        vaultId,
+        tokenId,
+        scope: tokenId,
+        kind: REACH_KIND,
+        ...sealedRuleKey(ctx, id, REACH_KIND, name),
+        access: "allowed",
+        addedBy: "owner",
+      },
+      update: { access: "allowed" },
+    })
+  }
 }
 
 /** The site an address is at, for scripts; null for one that is no site. */
@@ -158,7 +336,14 @@ export function scriptDigest(script: string): string {
   return createHash("sha256").update(script).digest("base64url")
 }
 
-type Once = { tokenId: string; tabId: string; site: string; script: string }
+type Once = {
+  tokenId: string
+  tabId: string
+  site: string
+  script: string
+  /** The extra hosts the owner let this run reach: part of what was allowed. */
+  reach?: readonly string[]
+}
 
 const ONCE = Symbol.for("pcp.browser-scripts.once")
 
@@ -168,8 +353,14 @@ function onceMap(): Map<string, number> {
   return holder[ONCE]
 }
 
-function onceKey({ tokenId, tabId, site, script }: Once): string {
-  return [tokenId, tabId, site, scriptDigest(script)].join("\n")
+function onceKey({ tokenId, tabId, site, script, reach }: Once): string {
+  return [
+    tokenId,
+    tabId,
+    site,
+    scriptDigest(script),
+    [...(reach ?? [])].sort().join(","),
+  ].join("\n")
 }
 
 /** The owner's "Run it once": this script, in this tab, at this site. */

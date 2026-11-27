@@ -1,4 +1,4 @@
-import type { SecretSitesShown } from "../browser-secrets"
+import { registrableDomain, type SecretSitesShown } from "../browser-secrets"
 import { siteKey } from "../fetch/rules"
 import { describeRecipe } from "../generate-password"
 import { visible, type ShownText } from "../permission-rules"
@@ -199,6 +199,11 @@ export function describeSecretSitesChangeAsk(
  * An assistant's script to run in a tab: the site, the page, and the whole
  * script, shown open (`full`) for the owner to read before it runs.
  */
+function registrableOf(site: string): string {
+  const name = site.replace(/:\d+$/, "")
+  return registrableDomain(name) ?? name
+}
+
 export function describeScriptUseAsk(ask: ScriptUseAsk): {
   title: string
   lines: string[]
@@ -215,7 +220,12 @@ export function describeScriptUseAsk(ask: ScriptUseAsk): {
       `Address: ${ask.url}`,
       `In tab ${ask.tabId}`,
       `The script: ${ask.script.length.toLocaleString("en")} characters, ${lines} line${lines === 1 ? "" : "s"}, shown in full below`,
-      `While it runs the tab reaches this site only, and it stops after ${EVALUATE_TIMEOUT_MS / 1000} seconds.`,
+      `While it runs the tab reaches only the hosts under ${registrableOf(ask.site)}${(ask.reach ?? []).length > 0 ? " and the ones you tick below" : ""}, and it stops after ${EVALUATE_TIMEOUT_MS / 1000} seconds.`,
+      ...((ask.reach ?? []).length > 0
+        ? [
+            `It asks to reach: ${ask.reach!.join(", ")}. Run it once lets it reach the ones you tick for this run; Allow scripts at this site keeps them for this site's scripts.`,
+          ]
+        : []),
     ],
     warning:
       "A script runs as the page's own do: signed in as you where you signed in to this site in the browser, it can read what the page and its scripts see (its storage, cookies a script may read) and act on the site as you. Read it whole before you let it run.",

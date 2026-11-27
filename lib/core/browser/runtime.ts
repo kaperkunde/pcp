@@ -116,7 +116,8 @@ import type { TabControl, TabView } from "./types"
  * While a tab runs an assistant's script (evaluate.ts, `script`), the gate
  * lets its main frame and its popups open its own site only, a popup it
  * opens is closed as it comes, and the proxies hold every new connection
- * to another site until the script is done (admitConnection).
+ * to a site it may not reach (its own registrable domain and what the owner
+ * allowed, `reaches`) until the script is done (admitConnection).
  */
 
 /**
@@ -150,6 +151,13 @@ export type PopupNote = {
 export type ScriptRun = {
   /** siteKey of the tab's page; refused holds sites in the same form. */
   site: string
+  /**
+   * Whether the script may reach a host (siteKey): its own site's
+   * registrable domain and what the owner allowed (browser-scripts.ts
+   * scriptReaches), never PCP's own address. The main frame and popups
+   * stay at `site` itself.
+   */
+  reaches: (host: string) => boolean
   refused: Set<string>
   /** Told when a site joins `refused`: a held connection there is refused at once. */
   listeners: Set<() => void>
@@ -1010,7 +1018,7 @@ export function admitConnection(
     tab.script ? [tab.script] : [],
   )
 
-  if (running.every((run) => run.site === site)) {
+  if (running.every((run) => run.reaches(site))) {
     return true
   }
 

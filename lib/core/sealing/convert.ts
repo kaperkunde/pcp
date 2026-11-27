@@ -921,7 +921,7 @@ export const SEAL_CONVERTERS: Converter[] = [
       db().webFetchRule.findMany({
         where: {
           vaultId: ctx.vaultId,
-          kind: { in: ["site", "script"] },
+          kind: { in: ["site", "script", "script_reach"] },
           sealed: null,
         },
         select: { id: true, kind: true, key: true, updatedAt: true },

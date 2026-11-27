@@ -18,6 +18,7 @@ import { setupVault } from "../vault"
 import { resolveFetchAccess } from "../fetch/rules"
 import { listFetchRules, loadFetchRules } from "../web-fetch"
 import {
+  allowedReach,
   decideScript,
   listScriptSites,
   removeScriptSite,
@@ -565,7 +566,7 @@ describe("an assistant's script the owner has not allowed at a site", () => {
     await decidePermission(ctx, id, "always", { publicUrl: PUBLIC_URL }, run)
     expect(run.ran).toEqual([ask.script])
     expect(await listScriptSites(ctx, tokenId)).toEqual([
-      { site: "shop.example", access: "allowed" },
+      { site: "shop.example", access: "allowed", reach: [] },
     ])
     // The tool's own level is untouched.
     expect(
@@ -604,5 +605,162 @@ describe("an assistant's script the owner has not allowed at a site", () => {
     expect(
       await db().apiTokenToolAccess.count({ where: { toolName: "evaluate" } }),
     ).toBe(0)
+  })
+})
+
+describe("an assistant's script that asks to reach other hosts", () => {
+  const ask = {
+    serverId: "",
+    tabId: "t1",
+    site: "shop.example",
+    url: "https://shop.example/cart",
+    title: "Cart",
+    script: "fetch('https://cdn.example.net/x')",
+  }
+  const wanted = ["cdn.example.net", "api.other.test"]
+
+  /** The browser, replaced: asks as evaluateInTab does for what nothing allows. */
+  function scripts(): PermissionExecutor & { ran: Array<string[]> } {
+    const ran: Array<string[]> = []
+
+    return {
+      ran,
+      callTool: async (_ctx, _server, _tool, args) => {
+        const reach = (args.reach as string[] | undefined) ?? []
+        const kept = await allowedReach(ctx, tokenId, ask.site)
+        const unasked = reach.filter((host) => !kept.has(host))
+        const level = await decideScript(ctx, tokenId, ask.site)
+        const once = takeScriptOnce({
+          tokenId,
+          tabId: ask.tabId,
+          site: ask.site,
+          script: String(args.script),
+          reach,
+        })
+
+        if ((level !== "allowed" || unasked.length > 0) && !once) {
+          throw new OwnerNeeded({
+            kind: "script_use",
+            input: { ...ask, serverId: server.id, reach: unasked },
+          })
+        }
+
+        ran.push([...new Set([...kept, ...reach])].sort())
+        return { content: [{ type: "text", text: "ran" }] }
+      },
+      syncTools: async () => ({ status: "ok", message: "", toolCount: 22 }),
+    }
+  }
+
+  async function asked(run: PermissionExecutor): Promise<string> {
+    return idOf(
+      await runCall(
+        ctx,
+        server,
+        "evaluate",
+        { tab: ask.tabId, script: ask.script, reach: wanted },
+        { publicUrl: PUBLIC_URL, tokenId, executor: run },
+      ),
+    )
+  }
+
+  it("shows the hosts on the page, and writes nothing until the owner answers", async () => {
+    const run = scripts()
+    const id = await asked(run)
+    const view = await getPermissionView(ctx, id, { publicUrl: PUBLIC_URL })
+
+    expect(view?.scriptReach).toEqual(wanted)
+    expect(view?.lines.join("\n")).toContain(
+      "It asks to reach: cdn.example.net, api.other.test",
+    )
+    expect(run.ran).toEqual([])
+    expect(await allowedReach(ctx, tokenId, ask.site)).toEqual(new Set())
+    expect(await listScriptSites(ctx, tokenId)).toEqual([])
+  })
+
+  it("Run it once lets this run reach the ticked hosts only, and keeps none", async () => {
+    const run = scripts()
+    const id = await asked(run)
+
+    await decidePermission(
+      ctx,
+      id,
+      "allow_once",
+      // A host the request never named is ignored, as the unticked one is.
+      {
+        publicUrl: PUBLIC_URL,
+        sites: { keep: ["cdn.example.net", "evil.test"] },
+      },
+      run,
+    )
+    expect(run.ran).toEqual([["cdn.example.net"]])
+    expect(await allowedReach(ctx, tokenId, ask.site)).toEqual(new Set())
+    expect(await decideScript(ctx, tokenId, ask.site)).toBeNull()
+  })
+
+  it("Allow scripts at this site keeps the ticked hosts for that site, and for no other", async () => {
+    const run = scripts()
+    const id = await asked(run)
+
+    await decidePermission(
+      ctx,
+      id,
+      "always",
+      { publicUrl: PUBLIC_URL, sites: { keep: ["api.other.test"] } },
+      run,
+    )
+    expect(run.ran).toEqual([["api.other.test"]])
+    expect(await allowedReach(ctx, tokenId, ask.site)).toEqual(
+      new Set(["api.other.test"]),
+    )
+    expect(await allowedReach(ctx, tokenId, "elsewhere.example")).toEqual(
+      new Set(),
+    )
+    expect(await listScriptSites(ctx, tokenId)).toEqual([
+      { site: ask.site, access: "allowed", reach: ["api.other.test"] },
+    ])
+
+    // The kept host needs no asking again; the other one still does.
+    await runCall(
+      ctx,
+      server,
+      "evaluate",
+      { tab: "t1", script: "1", reach: ["api.other.test"] },
+      { publicUrl: PUBLIC_URL, tokenId, executor: run },
+    )
+    expect(run.ran).toHaveLength(2)
+    const again = await runCall(
+      ctx,
+      server,
+      "evaluate",
+      { tab: "t1", script: "1", reach: wanted },
+      { publicUrl: PUBLIC_URL, tokenId, executor: run },
+    )
+    expect(idOf(again)).toBeTruthy()
+
+    // Taking the site back takes its hosts with it.
+    await removeScriptSite(ctx, tokenId, ask.site)
+    expect(await allowedReach(ctx, tokenId, ask.site)).toEqual(new Set())
+  })
+
+  it("Block and Not now write no host", async () => {
+    const run = scripts()
+
+    await decidePermission(
+      ctx,
+      await asked(run),
+      "block",
+      { publicUrl: PUBLIC_URL, sites: { keep: wanted } },
+      run,
+    )
+    await decidePermission(
+      ctx,
+      await asked(run),
+      "decline",
+      { publicUrl: PUBLIC_URL, sites: { keep: wanted } },
+      run,
+    )
+    expect(run.ran).toEqual([])
+    expect(await allowedReach(ctx, tokenId, ask.site)).toEqual(new Set())
   })
 })

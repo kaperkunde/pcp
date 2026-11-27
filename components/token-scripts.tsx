@@ -17,7 +17,11 @@ export function TokenScriptSites({
   sites,
 }: {
   tokenId: string
-  sites: Array<{ site: string; access: "allowed" | "blocked" }>
+  sites: Array<{
+    site: string
+    access: "allowed" | "blocked"
+    reach: string[]
+  }>
 }) {
   const [pending, startTransition] = useTransition()
   const [result, setResult] = useState<ActionState>({ status: "idle" })
@@ -29,13 +33,15 @@ export function TokenScriptSites({
       footer={result.status === "error" ? result.error : undefined}
     >
       <List as="ul">
-        {sites.map(({ site, access }) => (
+        {sites.map(({ site, access, reach }) => (
           <ListRow
             as="li"
             key={site}
             title={<span className="break-words">{site}</span>}
             description={
-              access === "allowed" ? "Scripts allowed" : "Scripts blocked"
+              access === "allowed"
+                ? `Scripts allowed${reach.length > 0 ? `; may also reach ${reach.join(", ")}` : ""}`
+                : "Scripts blocked"
             }
             trailing={
               <Button
