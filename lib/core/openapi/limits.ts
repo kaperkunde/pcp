@@ -67,6 +67,14 @@ export const MAX_UPLOAD_BODY_BYTES = 25 * 1024 * 1024
 export const MAX_UPLOAD_FILES = 20
 export const MAX_RESPONSE_BYTES = 1024 * 1024
 /**
+ * A JSON answer, which can carry files as base64 (an images API's
+ * `b64_json`): read up to this, bounded again by the largest file PCP keeps,
+ * so a picture is never cut into JSON that no longer parses. What answers
+ * the assistant keeps those files as results (answers.ts), so this much
+ * never reaches it as text.
+ */
+export const MAX_JSON_RESPONSE_BYTES = 32 * 1024 * 1024
+/**
  * A file an API answers (a PDF, an image), kept whole as the token's result.
  * Bounded again by the largest file PCP keeps (resourceLimits().fileBytes):
  * the smaller of the two applies, and a larger file is refused, not cut.

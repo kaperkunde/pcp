@@ -175,6 +175,7 @@ describe("the checked transport itself", () => {
     const capped = await executeCall(request("/x"), {
       ...allowAll,
       maxResponseBytes: 200,
+      maxJsonBytes: 200,
     })
     expect(text(capped)).toMatch(/truncated by PCP/)
 

@@ -968,6 +968,35 @@ describe("generate_image with no provider", () => {
 })
 
 describe("generate_image with an images API", () => {
+  it("keeps a full-size picture as a file, however long its base64", async () => {
+    await server("images", IMAGES_API)
+    // About what a 1536x1024 picture comes back as: over 1 MB of base64,
+    // past what a program is handed.
+    const big = (
+      await sharp(randomBytes(520 * 520 * 3), {
+        raw: { width: 520, height: 520, channels: 3 },
+      })
+        .png()
+        .toBuffer()
+    ).toString("base64")
+    answers["images/create_image"] = json({
+      created: 1,
+      data: [{ b64_json: big }],
+      usage: { total_tokens: 10 },
+    })
+
+    const answer = await call("generate_image", { prompt: "A red kite" })
+
+    expect(answer.isError, answer.text).toBe(false)
+    const images = answer.structured.images as Array<{ $result: string }>
+    expect(images).toHaveLength(1)
+    const kept = await openResult(scope.ctx, {
+      tokenId: scope.tokenId,
+      id: images[0]!.$result,
+    })
+    expect(kept!.mediaType).toBe("image/png")
+  })
+
   it("makes pictures, keeps each as a handle, and sends only what the API takes", async () => {
     await server("images", IMAGES_API)
     const b64 = await smallPng()
