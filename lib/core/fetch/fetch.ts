@@ -19,6 +19,7 @@ import { describeFetchError, discard, readCapped } from "../openapi/http"
 import { send, type SendOptions } from "../openapi/transport"
 import { PCP_VERSION } from "../version"
 import { CHALLENGE_LINE, isChallenge } from "./challenge"
+import { hardPageReason, type HardPageReason } from "./hard-page"
 import {
   decodeBody,
   htmlToMarkdown,
@@ -70,6 +71,8 @@ export type FetchAnswer = {
   bytes?: number
   /** The site refused a GET (403 or 451, not JSON) with no check to pass. */
   refused?: boolean
+  /** The page reads as hard to read as text (fetch/hard-page.ts). */
+  hard?: HardPageReason
 }
 
 export type FetchOptions = Pick<SendOptions, "addressCheck"> & {
@@ -337,6 +340,24 @@ async function readAnswer(
   const textual = html || isJson(type) || isText(type)
   const unlabelledText = type === "" && !html && decodeUtf8(bytes) !== null
 
+  const presented = presentPageWith(
+    {
+      url: url.toString(),
+      status: statusLine(response),
+      ok: response.status >= 200 && response.status < 300,
+      notes: challenged ? [CHALLENGE_LINE] : [],
+      type,
+      html,
+      text:
+        bytes.length > 0 && (textual || unlabelledText)
+          ? decodeBody(bytes, contentType, html)
+          : null,
+      bytes: bytes.length,
+      truncated,
+    },
+    args,
+  )
+
   return {
     challenged,
     // A GET refused outright; a JSON answer asks for a key, not a bot's exit.
@@ -347,23 +368,8 @@ async function readAnswer(
       (response.status === 403 || response.status === 451),
     throttle: httpSignal(response.status, response.headers, url.host),
     bytes: bytes.length,
-    result: presentPage(
-      {
-        url: url.toString(),
-        status: statusLine(response),
-        ok: response.status >= 200 && response.status < 300,
-        notes: challenged ? [CHALLENGE_LINE] : [],
-        type,
-        html,
-        text:
-          bytes.length > 0 && (textual || unlabelledText)
-            ? decodeBody(bytes, contentType, html)
-            : null,
-        bytes: bytes.length,
-        truncated,
-      },
-      args,
-    ),
+    ...(presented.hard ? { hard: presented.hard } : {}),
+    result: presented.result,
   }
 }
 
@@ -396,6 +402,25 @@ export function presentPage(
   page: PageRead,
   args: Pick<FetchArgs, "raw" | "startIndex" | "maxLength">,
 ): CallToolResult {
+  return presentPageWith(page, args).result
+}
+
+/** presentPage, and why the page reads as hard, when it does. */
+export function presentPageWith(
+  page: PageRead,
+  args: Pick<FetchArgs, "raw" | "startIndex" | "maxLength">,
+): { result: CallToolResult; hard: HardPageReason | null } {
+  const hard: { reason: HardPageReason | null } = { reason: null }
+  const result = presentOne(page, args, hard)
+
+  return { result, hard: hard.reason }
+}
+
+function presentOne(
+  page: PageRead,
+  args: Pick<FetchArgs, "raw" | "startIndex" | "maxLength">,
+  hard: { reason: HardPageReason | null },
+): CallToolResult {
   const { ok, type, html, truncated } = page
   const lead = [
     `URL: ${page.url}`,
@@ -427,6 +452,7 @@ export function presentPage(
         lead.push(`Title: ${converted.title}`)
       }
 
+      hard.reason = hardPageReason(text, converted.markdown)
       text = converted.markdown
       kind = `${kind}, as Markdown`
     } catch {
