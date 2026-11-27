@@ -2,7 +2,7 @@ import { existsSync } from "node:fs"
 import path from "node:path"
 import { Worker } from "node:worker_threads"
 
-import yaml from "js-yaml"
+import * as yaml from "js-yaml"
 
 import { MB, SPEC_MEMORY_FACTOR } from "../resources/limits"
 import { countNodes } from "./nodes"
