@@ -3,7 +3,7 @@
 ## Setup
 
 Node 24 (`nvm use` reads `.nvmrc`) and pnpm 10. The desktop app runs the
-server on the Node inside Electron (24 in Electron 42), so `.nvmrc`, the
+server on the Node inside Electron (24 in Electron 45), so `.nvmrc`, the
 Docker image and `engines` follow Electron's Node major: what CI tests is
 what both ship. `.npmrc` has `engine-strict`, so an older Node stops the
 install rather than half-working.
