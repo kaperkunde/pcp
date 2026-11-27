@@ -1,3 +1,9 @@
+import {
+  isProgramTool,
+  OWN_SERVER_ID,
+  OWN_SERVER_SLUG,
+  PROGRAM_TOOL_NAMES,
+} from "../program-tools"
 import { z } from "zod"
 
 import { checkSyntax } from "../code/quickjs"
@@ -509,6 +515,38 @@ export async function resolveDefinition(
     const split = splitRef(ref)!
     const server = bySlug.get(split.slug)
 
+    // pcp/<tool>: one of PCP's own tools a program may call (#164), when
+    // no server of the vault is called pcp. Which token may reach it is the
+    // token's own setting (builtin_tools), checked when the call is made.
+    if (!server && split.slug === OWN_SERVER_SLUG) {
+      if (!isProgramTool(split.tool)) {
+        throw invalid(
+          `${what}: ${ref} is not one of PCP's own tools a program may call. They are: ${PROGRAM_TOOL_NAMES.map((name) => `pcp/${name}`).join(", ")}.`,
+        )
+      }
+
+      const refused = reach?.(
+        { id: OWN_SERVER_ID, slug: OWN_SERVER_SLUG },
+        split.tool,
+      )
+
+      if (refused) {
+        throw invalid(`${what}: ${refused}`)
+      }
+
+      return {
+        serverId: OWN_SERVER_ID,
+        tool: split.tool,
+        server: {
+          id: OWN_SERVER_ID,
+          slug: OWN_SERVER_SLUG,
+          name: "PCP",
+          kind: "pcp",
+          url: "",
+        },
+      }
+    }
+
     if (!server) {
       throw invalid(`${what}: there is no server called ${split.slug}.`)
     }
@@ -741,6 +779,12 @@ export async function resolveDefinition(
       String(binding.tool),
       `The secret "${secretName}"`,
     )
+
+    if (server.id === OWN_SERVER_ID) {
+      throw invalid(
+        `A secret never goes to one of PCP's own tools (${binding.tool}).`,
+      )
+    }
 
     // The browser takes a secret only as type's text, typed as it is, and
     // only where the owner allows it at the moment of typing

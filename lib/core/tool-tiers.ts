@@ -1,3 +1,4 @@
+import { OWN_SERVER_ID, programTool } from "./program-tools"
 import { TOOL_TIERS, type ToolTier } from "./constants"
 import type { VaultContext } from "./context"
 import { db } from "./db"
@@ -290,6 +291,20 @@ function tierResolver(ctx: VaultContext, overrides: OverrideRow[]) {
     name: string,
     seen: Set<string> = new Set(),
   ): Promise<TierInfo> {
+    // One of PCP's own tools a wrapper calls (pcp/<tool>): the owner's
+    // choice in Settings → PCP's own tools, else the tool's own tier.
+    if (serverId === OWN_SERVER_ID) {
+      const chosen = (await readOwnToolTiers(ctx))[name] ?? null
+      const own = programTool(name)?.tier ?? "destructive"
+
+      return {
+        tier: chosen ?? own,
+        derived: own,
+        override: chosen,
+        seen: null,
+      }
+    }
+
     await load([serverId])
 
     const place = places.get(serverId)

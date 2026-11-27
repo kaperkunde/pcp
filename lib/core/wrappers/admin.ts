@@ -1,3 +1,4 @@
+import { OWN_SERVER_ID, OWN_SERVER_SLUG } from "../program-tools"
 import type { ToolTier } from "../constants"
 import type { VaultContext } from "../context"
 import { db } from "../db"
@@ -262,7 +263,7 @@ async function toInput(
     ...definition.secrets.map((binding) => binding.serverId),
   ])
   const ref = (serverId: string, tool: string) =>
-    `${servers.get(serverId)?.slug ?? "(removed server)"}/${tool}`
+    `${serverId === OWN_SERVER_ID ? OWN_SERVER_SLUG : (servers.get(serverId)?.slug ?? "(removed server)")}/${tool}`
 
   return {
     tools: definition.tools.map((tool) => ({
@@ -353,8 +354,19 @@ export async function getWrapper(
 }
 
 /** For an assistant: a tool it may name is one it sees and is not blocked from. */
-export function reachOf(servers: GatewayServer[]): Reach {
+export function reachOf(
+  servers: GatewayServer[],
+  builtinTools: readonly string[] = [],
+): Reach {
   return (server, tool) => {
+    // PCP's own tools a program may call: only those the owner ticked for
+    // the token (its Built-in tools), as a server's tool is only one it has.
+    if (server.id === OWN_SERVER_ID) {
+      return builtinTools.includes(tool)
+        ? null
+        : `pcp/${tool} is not a built-in tool this token's programs may call: the owner ticks it under Built-in tools on the token's page.`
+    }
+
     const own = servers.find((entry) => entry.id === server.id)
     const found = own?.tools.find((entry) => entry.name === tool)
 
@@ -615,10 +627,11 @@ export async function proposeWrapper(
   ctx: VaultContext,
   input: WrapperInput,
   servers: GatewayServer[],
+  builtinTools: readonly string[] = [],
 ): Promise<WrapperChangeAsk> {
   await assertRoomForWrapper(ctx)
   const resolved = await resolveDefinition(ctx, input, {
-    reach: reachOf(servers),
+    reach: reachOf(servers, builtinTools),
     allowNewSecret: true,
   })
 
@@ -823,6 +836,7 @@ export async function proposeWrapperChange(
   slug: string,
   changes: WrapperChanges,
   servers: GatewayServer[],
+  builtinTools: readonly string[] = [],
 ): Promise<WrapperChangeAsk> {
   const { server, spec, definition } = await loadWrapper(ctx, { slug })
   const current = await toInput(ctx, definition)
@@ -856,7 +870,7 @@ export async function proposeWrapperChange(
       pace: changes.pace === undefined ? (current.pace ?? null) : changes.pace,
     },
     {
-      reach: reachOf(servers),
+      reach: reachOf(servers, builtinTools),
       allowNewSecret: true,
       exceptServerId: server.id,
     },

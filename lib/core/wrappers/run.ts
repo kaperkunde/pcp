@@ -2,7 +2,9 @@ import type { CallToolResult } from "@modelcontextprotocol/server"
 
 import { isConnectResult } from "../connect"
 import type { VaultContext } from "../context"
-import { runProgram } from "../code/run"
+import { runProgram, type CallRun } from "../code/run"
+import type { AnswerShape } from "../answers"
+import { OWN_SERVER_ID, OWN_SERVER_SLUG } from "../program-tools"
 import type { Executor } from "../code/types"
 import { db } from "../db"
 import { openWrapperSpec } from "../spec-rows"
@@ -116,6 +118,22 @@ export type WrapperEnv = {
   signal?: AbortSignal
   /** What runs the programs; replaced in tests. */
   codeExecutor?: Executor
+  /**
+   * One call of PCP's own tool (pcp/<tool>, program-tools.ts) a program
+   * makes, run as the token's own call of it (gateway.ts ownProgramCall).
+   * Absent where there is no token's request: a wrapper's call the owner
+   * allowed on PCP's page.
+   */
+  ownCall?: (
+    name: string,
+    args: Record<string, unknown>,
+    options: {
+      rerun: boolean
+      run?: CallRun
+      lookedUp?: (readOnly: boolean) => void
+      shape: AnswerShape
+    },
+  ) => Promise<CodeCallOutcome>
 }
 
 /**
@@ -470,6 +488,31 @@ async function innerCall(
   definition: Pick<WrapperDefinition, "secrets" | "callLevels" | "pace">,
   { wrapper, notes }: { wrapper: string; notes: string[] },
 ): Promise<CodeCallOutcome> {
+  // pcp/<tool>: one of PCP's own tools, declared in the wrapper's calls and
+  // allowed for the calling token on its page (never by the wrapper's
+  // approval alone: the token's setting is the owner's choice for it).
+  if (
+    slug === OWN_SERVER_SLUG &&
+    tool.calls.some(
+      (call) => call.serverId === OWN_SERVER_ID && call.tool === name,
+    )
+  ) {
+    if (!env.ownCall) {
+      return {
+        ok: false,
+        refused: true,
+        error: `${tool.name} calls pcp/${name}, which runs only in a call the assistant makes: this one was allowed on PCP's page, so call the wrapper's tool again from the assistant.`,
+      }
+    }
+
+    return env.ownCall(name, args, {
+      rerun: rerun === true,
+      ...(run ? { run } : {}),
+      ...(lookedUp ? { lookedUp } : {}),
+      shape,
+    })
+  }
+
   // On the owner's approval the calls are the wrapper's own: any enabled
   // server of the vault, whether or not this token reaches it.
   const onApproval = definition.callLevels === "approved"
