@@ -281,7 +281,7 @@ export const CATALOGUE: readonly CatalogueEntry[] = [
     title: "Web search",
     does: "Lets an assistant search the web through PCP (web_search): ranked results with a snippet each, which web_fetch can then open.",
     takes:
-      "A search provider chosen on Settings → Web search, with your own API key for it (Brave Search, Tavily, Exa or Serper) or the address of a search server you run (SearXNG); and the token ticked for Search the web on its page.",
+      "A search provider chosen on Settings → Web search, with your own API key for it (Brave Search, Tavily, Exa or Serper) or a search server you run (SearXNG), at its address or as one of your services; and the token ticked for Search the web on its page.",
     queryWords: [
       "web search",
       "search the web",

@@ -70,6 +70,7 @@ import { browserExits } from "./exits/use"
 import { callSshTool, sshTarget, syncSshTools } from "./ssh/hosts"
 import {
   EXIT_PUBLISH_ADDRESS,
+  serviceOrigin,
   type ServiceDefinition,
 } from "./services/definition"
 import type {
@@ -1682,6 +1683,7 @@ export async function embeddingProvider(
 export async function webSearchProvider(
   ctx: VaultContext,
   config: WebSearchConfig,
+  publicUrl = "",
 ): Promise<PreparedSearch> {
   const info = PROVIDER_INFO[config.provider]
   const notOwn = (address: string, port: number) => !isOwnAddress(address, port)
@@ -1715,6 +1717,10 @@ export async function webSearchProvider(
     redact.push(token, key, value)
   }
 
+  if (info.ownAddress && config.service !== undefined) {
+    return searchService(ctx, config, config.service, publicUrl, key, redact)
+  }
+
   if (info.ownAddress) {
     if (!config.url) {
       throw new PcpError("state", "The web search address is missing.")
@@ -1742,6 +1748,74 @@ export async function webSearchProvider(
     key,
     redact,
     sendOptions: { publicOnly: true },
+  }
+}
+
+/**
+ * web_search at a search server run as one of the owner's services (a
+ * SearXNG container on an SSH server PCP holds): reached only through the
+ * SSH connection (a channel to the port it publishes there, on a pinned
+ * host, with the key a request handed in), never from PCP's machine, so
+ * its address needs no public-only exception. The port is the one the
+ * definition's health check names, else its first. The place pacing and the
+ * gate keep is the service. Started again once when a request finds its
+ * container stopped and the owner left it running (wake).
+ */
+async function searchService(
+  ctx: VaultContext,
+  config: WebSearchConfig,
+  id: string,
+  publicUrl: string,
+  key: string | null,
+  redact: string[],
+): Promise<PreparedSearch> {
+  const loaded = await loadService(ctx, id).catch(() => null)
+
+  if (!loaded || !loaded.server.enabled) {
+    throw new PcpError(
+      "state",
+      "The web search service is gone or turned off. The owner can choose it again on Settings → Web search.",
+    )
+  }
+
+  if (loaded.reach !== "tunnel") {
+    throw new PcpError(
+      "state",
+      `${loaded.server.name} was launched before PCP reached services through SSH. The owner updates it on its page, and web_search can use it.`,
+    )
+  }
+
+  const { health, ports } = loaded.definition
+  const port = health.kind === "http" ? health.port : ports[0]?.container
+  const { dial, sshHost } = await tunnelToService(
+    ctx,
+    loaded,
+    loaded.server.name,
+    publicUrl,
+  )
+  const origin =
+    port === undefined
+      ? null
+      : serviceOrigin(loaded.publish, sshHost, port, "tunnel")
+
+  if (!origin) {
+    throw new PcpError(
+      "state",
+      `${loaded.server.name} publishes no port PCP can search at. The owner can check its page.`,
+    )
+  }
+
+  return {
+    provider: config.provider,
+    host: `service.${loaded.server.id}`,
+    label: loaded.server.name,
+    fingerprint: `${config.provider}\nservice:${loaded.server.id}\n${origin}`,
+    base: origin,
+    key,
+    redact,
+    sendOptions: { dial },
+    wake: async () =>
+      (await wakeLoaded(ctx, loaded, publicUrl))?.started === true,
   }
 }
 
@@ -3765,11 +3839,29 @@ async function serviceTunnel(
   }
 
   const loaded = await loadService(ctx, spec.serverId)
+  const { dial } = await tunnelToService(ctx, loaded, server.name, publicUrl)
 
+  return { dial }
+}
+
+/**
+ * The SSH channel to a loaded service's published ports (services.ts
+ * serviceDial), with PCP's key decrypted here and a pinned host only, and
+ * the host the SSH server is addressed as (for the origin of a URL).
+ */
+async function tunnelToService(
+  ctx: VaultContext,
+  loaded: LoadedService,
+  name: string,
+  publicUrl: string,
+): Promise<{
+  dial: NonNullable<SendOptions["dial"]>
+  sshHost: string
+}> {
   if (!loaded.host) {
     throw new PcpError(
       "upstream",
-      `${server.name} runs as the service ${loaded.server.name}, whose SSH server is no longer in PCP, so PCP cannot reach it.`,
+      `${name} runs as the service ${loaded.server.name}, whose SSH server is no longer in PCP, so PCP cannot reach it.`,
     )
   }
 
@@ -3781,6 +3873,7 @@ async function serviceTunnel(
       connection.host.address,
       connection.forward,
     ),
+    sshHost: connection.host.address,
   }
 }
 
@@ -4268,8 +4361,20 @@ async function wakeService(
 ): Promise<Awaited<ReturnType<typeof startOnDemand>> | null> {
   try {
     const loaded = await serviceBehind(ctx, server.id)
+    return loaded ? await wakeLoaded(ctx, loaded, publicUrl) : null
+  } catch {
+    return null
+  }
+}
 
-    if (!loaded || loaded.intent === "stopped") {
+/** The same for a service itself (web_search's own search server). */
+async function wakeLoaded(
+  ctx: VaultContext,
+  loaded: LoadedService,
+  publicUrl: string,
+): Promise<Awaited<ReturnType<typeof startOnDemand>> | null> {
+  try {
+    if (loaded.intent === "stopped") {
       return null
     }
 

@@ -16,6 +16,7 @@ import {
 import { forgetSearches } from "@/lib/core/websearch/search"
 import { requestSearch } from "@/lib/core/websearch/request"
 import { type ActionState, field, guarded } from "@/lib/server/action-state"
+import { publicUrlFor } from "@/lib/server/public-url"
 import { requireContext } from "@/lib/server/session"
 
 /**
@@ -46,9 +47,17 @@ export async function saveWebSearchAction(
     const config: WebSearchConfig = await checkWebSearchConfig(ctx, {
       provider,
       secretId: field(formData, "secretId") || null,
-      ...(info.ownAddress ? { url: field(formData, "url") } : {}),
+      ...(info.ownAddress
+        ? field(formData, "where") === "service"
+          ? { service: field(formData, "service") }
+          : { url: field(formData, "url") }
+        : {}),
     })
-    const prepared = await webSearchProvider(ctx, config)
+    const prepared = await webSearchProvider(
+      ctx,
+      config,
+      await publicUrlFor(ctx),
+    )
     const answer = await requestSearch(
       prepared,
       { query: "PCP", limit: 1 },

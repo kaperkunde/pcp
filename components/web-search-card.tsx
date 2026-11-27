@@ -86,6 +86,14 @@ function ProviderForm({
   )
   const info = PROVIDER_INFO[provider]
   const secretId = config?.provider === provider ? (config.secretId ?? "") : ""
+  // A search server run as one of your services, or one at an address.
+  const [where, setWhere] = useState<"address" | "service">(
+    config?.service !== undefined ||
+      (!config?.url && overview.services.some((entry) => entry.likely))
+      ? "service"
+      : "address",
+  )
+  const services = overview.services
 
   return (
     <form
@@ -115,21 +123,63 @@ function ProviderForm({
       </p>
 
       {info.ownAddress ? (
-        <Field
-          label="Address"
-          htmlFor="web-search-url"
-          hint="Your search server's address, like https://search.example.com or http://192.168.1.20:8080."
-        >
-          <Input
-            id="web-search-url"
-            name="url"
-            defaultValue={
-              config?.provider === provider ? (config.url ?? "") : ""
-            }
-            placeholder="https://search.example.com"
-            autoComplete="off"
+        <>
+          <SegmentedControl
+            name="where"
+            legend="Where it runs"
+            options={[
+              { value: "address", label: "At an address" },
+              { value: "service", label: "As a service" },
+            ]}
+            value={where}
+            onValueChange={setWhere}
           />
-        </Field>
+          {where === "service" ? (
+            <Field
+              label="Service"
+              htmlFor="web-search-service"
+              hint="One of your services, reached through its SSH server. Launch SearXNG from PCP's common items under Servers, then choose it here. It must answer JSON (format=json switched on)."
+            >
+              {services.length === 0 ? (
+                <p className="text-sm text-muted-foreground">
+                  You have no services yet.
+                </p>
+              ) : (
+                <Select
+                  id="web-search-service"
+                  name="service"
+                  defaultValue={
+                    config?.provider === provider ? (config.service ?? "") : ""
+                  }
+                >
+                  <option value="">Choose a service</option>
+                  {services.map((entry) => (
+                    <option key={entry.id} value={entry.id}>
+                      {entry.name}
+                      {entry.likely ? " (SearXNG)" : ""}
+                    </option>
+                  ))}
+                </Select>
+              )}
+            </Field>
+          ) : (
+            <Field
+              label="Address"
+              htmlFor="web-search-url"
+              hint="Your search server's address, like https://search.example.com or http://192.168.1.20:8080."
+            >
+              <Input
+                id="web-search-url"
+                name="url"
+                defaultValue={
+                  config?.provider === provider ? (config.url ?? "") : ""
+                }
+                placeholder="https://search.example.com"
+                autoComplete="off"
+              />
+            </Field>
+          )}
+        </>
       ) : null}
 
       <Field

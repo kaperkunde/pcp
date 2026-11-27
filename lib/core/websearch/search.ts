@@ -118,14 +118,18 @@ export async function runWebSearch(
     prepare,
     signal = new AbortController().signal,
     config,
+    publicUrl = "",
   }: {
     /** upstream.ts webSearchProvider; the key's header is made there. */
     prepare: (
       ctx: VaultContext,
       config: WebSearchConfig,
+      publicUrl?: string,
     ) => Promise<PreparedSearch>
     signal?: AbortSignal
     config?: WebSearchConfig | null
+    /** PCP's public address, for the link a service's SSH server needs. */
+    publicUrl?: string
   },
 ): Promise<WebSearchOutcome> {
   const chosen = config === undefined ? await readWebSearchConfig(ctx) : config
@@ -135,7 +139,7 @@ export async function runWebSearch(
   }
 
   const params = searchParams(input)
-  const prepared = await prepare(ctx, chosen)
+  const prepared = await prepare(ctx, chosen, publicUrl)
   const key = cacheKey(ctx, prepared, params)
   const kept = remembered(key, Date.now())
 

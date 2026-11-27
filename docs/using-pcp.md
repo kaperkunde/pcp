@@ -503,6 +503,13 @@ until you choose a provider there. You choose one, give it a key from your
 secrets (or, for a search server of your own, its address), and PCP tries one
 search before it saves. The setting is the vault's, not the machine's.
 
+For SearXNG you can type the address of a server you run, or choose **As a
+service** and pick one of your services (launch SearXNG from PCP's common
+items on one of your SSH servers first). PCP then reaches it through that SSH
+server, at the port its health check names (else its first), and starts it
+again for a search if it stopped while you had left it running. SearXNG needs
+`format=json` switched on in its settings.
+
 | Provider           | What it is                                                     | Key               |
 | ------------------ | -------------------------------------------------------------- | ----------------- |
 | Brave Search API   | Brave's own index, JSON, built for apps; about $5 per 1,000    | yours, from Brave |
