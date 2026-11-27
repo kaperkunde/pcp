@@ -727,7 +727,7 @@ describe("a wrapper's pace", () => {
 
     const paced = {
       ...FLOW,
-      pace: { actions: { min_ms: 20, max_ms: 60 } },
+      pace: { actions: { min_ms: 10, max_ms: 30 } },
     }
     const files = serializeItem(paced)
     expect(files["flows/open-shop/wrapper.yaml"]).toContain("pcp_format: 5\n")
@@ -740,12 +740,12 @@ describe("a wrapper's pace", () => {
     expect(change.review.textOnly).toBe(false)
     expect(change.review.flags.map((flag) => flag.kind)).toEqual(["pace"])
     expect(change.review.flags[0]!.message).toContain(
-      "Outside what you let assistants set without asking: before actions in a page 0.02 to 0.06 s",
+      "Outside what you let assistants set without asking: before actions in a page 0.01 to 0.03 s",
     )
 
     await approveChange(ctx, item!.id, change.pending)
     expect((await getWrapper(ctx, { id: wrapperId })).pace).toEqual({
-      actions: { min_ms: 20, max_ms: 60 },
+      actions: { min_ms: 10, max_ms: 30 },
     })
   })
 })
