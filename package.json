@@ -79,7 +79,7 @@
     "@types/react-dom": "~19.3.0",
     "@types/ssh2": "^1.15.6",
     "@types/turndown": "^5.0.6",
-    "eslint": "^9.39.5",
+    "eslint": "^10.15.0",
     "eslint-config-next": "16.4.6",
     "eslint-config-prettier": "^10.1.8",
     "husky": "^9.1.7",
