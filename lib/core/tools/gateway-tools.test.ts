@@ -1,3 +1,4 @@
+import { PROGRAM_TOOL_NAMES, PROGRAM_TOOLS } from "../program-tools"
 import { Client, InMemoryTransport } from "@modelcontextprotocol/client"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
@@ -81,6 +82,7 @@ const OWN_TOOLS = [
   "read_memory",
   "memory",
   "web_fetch",
+  "web_search",
   "check_run",
   "read_image",
   "view_image",
@@ -165,6 +167,7 @@ beforeEach(async () => {
     runCode: true,
     manageWrappers: true,
     shareFiles: true,
+    builtinTools: [...PROGRAM_TOOL_NAMES],
   })
   const scope: GatewayScope = {
     ...(await resolveApiToken(token))!,
@@ -301,6 +304,7 @@ describe("PCP's own tools", () => {
         "update_endpoint",
         "update_pcp",
         "update_wrapper",
+        "web_search",
       ].sort(),
     )
 
@@ -366,6 +370,20 @@ describe("PCP's own tools", () => {
     ).toContain("before you say you cannot")
   })
 
+  it("has every tool a program may call (program-tools.ts) as one of its own, at the tier the list says", async () => {
+    const { tierFromAnnotations } = await import("../tool-tiers")
+
+    for (const entry of PROGRAM_TOOLS) {
+      const tool = everyTool.find((each) => each.name === entry.name)
+
+      expect(tool, entry.name).toBeDefined()
+      expect(
+        tierFromAnnotations(tool!.annotations),
+        `${entry.name}'s tier`,
+      ).toBe(entry.tier)
+    }
+  })
+
   it("open each description with a verb and what it acts on, in the words a deferred list shows", async () => {
     // Claude's apps show some 25 characters of a deferred tool's
     // description after the connector's name (observed 2026-11-02).
@@ -424,6 +442,7 @@ describe("PCP's own tools", () => {
       propose_tool_access: /tool/,
       list_tools: /tool/,
       web_fetch: /web/,
+      web_search: /^Search the web for pa/,
       read_image: /image/,
       view_image: /^View an image/,
       convert_document: /document/,
@@ -986,6 +1005,7 @@ describe("execute_<tier> by name, and the names kept for one release (#113)", ()
         runCode: true,
         manageWrappers: true,
         shareFiles: true,
+        builtinTools: [...PROGRAM_TOOL_NAMES],
         instructions: null,
         clientProfile: null,
         oauthClientName: null,

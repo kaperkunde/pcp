@@ -29,6 +29,7 @@ export const CATALOGUE_IDS = [
   "images",
   "claude_sessions",
   "embeddings",
+  "web_search",
   "vpn_exit",
   "bunq",
   "mail",
@@ -83,7 +84,7 @@ export type CatalogueEntry = {
    * Set up only by the owner's choice on a settings page, never by a
    * service that merely runs (search by meaning: Settings → Search).
    */
-  setting?: "embeddings"
+  setting?: "embeddings" | "web_search"
   /** Only the owner sets it up: an assistant never proposes it. */
   ownerOnly?: boolean
   /** The capability it provides, whose own search line says it first. */
@@ -274,6 +275,28 @@ export const CATALOGUE: readonly CatalogueEntry[] = [
     setting: "embeddings",
     item: VOYAGE_NANO,
     alternatives: [EMBEDDINGS],
+  },
+  {
+    id: "web_search",
+    title: "Web search",
+    does: "Lets an assistant search the web through PCP (web_search): ranked results with a snippet each, which web_fetch can then open.",
+    takes:
+      "A search provider chosen on Settings → Web search, with your own API key for it (Brave Search, Tavily, Exa or Serper) or the address of a search server you run (SearXNG); and the token ticked for Search the web on its page.",
+    queryWords: [
+      "web search",
+      "search the web",
+      "search the internet",
+      "search online",
+      "look up online",
+      "internet search",
+      "search engine",
+    ],
+    kind: "builtin",
+    page: "/settings#web-search",
+    label: "Set up web search in PCP",
+    how: "Hand the owner the link to Settings → Web search, where they choose the provider and its key; then the owner ticks Search the web on the token's page (an assistant never turns a token's options on).",
+    setting: "web_search",
+    ownerOnly: true,
   },
   {
     id: "vpn_exit",

@@ -6,6 +6,8 @@ import { CleanupCard } from "@/components/cleanup-card"
 import { CopyableValue } from "@kaperkunde/ui/copy-button"
 import { DeleteVaultCard } from "@/components/delete-vault-card"
 import { EmbeddingsCard } from "@/components/embeddings-card"
+import { WebSearchCard } from "@/components/web-search-card"
+import { webSearchOverview } from "@/lib/core/websearch/config"
 import { FormNote } from "@kaperkunde/ui/form-status"
 import { PageColumn } from "@kaperkunde/ui/page"
 import { PacingCard } from "@/components/pacing-card"
@@ -66,6 +68,7 @@ export default async function SettingsPage({
     resources,
     pacing,
     embeddings,
+    webSearch,
     repeatedCalls,
   ] = await Promise.all([
     getSetting(ctx, SETTING_PUBLIC_URL),
@@ -80,6 +83,7 @@ export default async function SettingsPage({
     resourcesOverview(),
     pacingOverview(ctx),
     embeddingsOverview(ctx),
+    webSearchOverview(ctx),
     duplicateCallsOverview(ctx),
   ])
 
@@ -122,6 +126,7 @@ export default async function SettingsPage({
             description="Read, Write or Destructive for memory, web fetch, files and the rest: what assistants' apps are told each one can do"
           />
           <EmbeddingsCard overview={embeddings} />
+          <WebSearchCard overview={webSearch} />
         </List>
       </ListSection>
 
